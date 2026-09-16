@@ -417,12 +417,26 @@ pub const Volume = struct {
     /// **A LONG NAME NEEDS A RUN, NOT A SLOT.** Its parts must sit immediately
     /// before the short entry with nothing between them, so a directory with
     /// plenty of scattered free entries can still have nowhere to put one.
-    const Run = struct { lba: u32, at: u32 };
+    /// Where one directory entry sits: a sector the WALK reached, and an offset
+    /// in it.
+    const Slot = struct { lba: u32, at: u32 };
+
+    /// **A RUN IS THE SLOTS THEMSELVES, NOT A START AND A LENGTH.** It used to be
+    /// a start, and writeEntry stepped `lba += 1` to reach the next sector. That
+    /// holds inside a cluster and nowhere else: a subdirectory grows by taking
+    /// the first free cluster, which is rarely the one after its last, so "the
+    /// next sector" past a cluster edge is usually some other file's data. A long
+    /// name whose parts straddled the edge wrote its tail there. findRun already
+    /// walked the directory properly; now it hands over what it walked.
+    const Run = struct {
+        slots: [max_long_parts + 1]Slot = undefined,
+        len: u32 = 0,
+    };
 
     fn findRun(self: *Volume, dir_cluster: u16, needed: u32) Error!Run {
+        if (needed == 0 or needed > max_long_parts + 1) return Error.BadName;
         var walk = Walk.start(self, dir_cluster);
-        var start: ?Run = null;
-        var have: u32 = 0;
+        var run = Run{};
 
         while (true) {
             try self.readSector(walk.lba, self.scratch);
@@ -430,19 +444,16 @@ pub const Volume = struct {
             while (at + dirent_size <= sector_size) : (at += dirent_size) {
                 const first = self.scratch[at];
                 if (first == 0x00 or first == 0xE5) {
-                    if (have == 0) start = .{ .lba = walk.lba, .at = at };
-                    have += 1;
-                    if (have == needed) return start.?;
+                    run.slots[run.len] = .{ .lba = walk.lba, .at = at };
+                    run.len += 1;
+                    if (run.len == needed) return run;
                 } else {
-                    have = 0;
-                    start = null;
+                    run.len = 0;
                 }
             }
+            // A run MAY straddle sectors and clusters: the walk says where the
+            // next entry is, and each slot records the sector it was found in.
             if (!(try walk.next())) break;
-            // A run may not straddle sectors unless they are contiguous, and
-            // within a cluster they are. Crossing a cluster boundary is safe
-            // for the same reason the walk is: the next sector is the next
-            // entry either way.
         }
 
         // **THE ROOT DIRECTORY CANNOT GROW.** On FAT16 it is a fixed run of
@@ -467,10 +478,40 @@ pub const Volume = struct {
         try self.fatSet(last, fresh);
     }
 
+    /// The most parts a VFAT long name can have: 255 characters, 13 per part.
+    const max_long_parts = 20;
+
     /// Removes an entry and its long-name run, and frees its chain.
+    ///
+    /// **THE ORDER IS THE WHOLE FUNCTION.**
+    ///
+    ///   1. Tombstone the short entry — `self.scratch` holds its sector right now.
+    ///   2. Tombstone each long-name part, at the sector the WALK found it in.
+    ///   3. Only then free the cluster chain.
+    ///
+    /// It used to free the chain first. freeChain reads and writes FAT sectors
+    /// through the same one-sector scratch buffer, so the "directory sector"
+    /// written back next was a FAT sector with one byte changed: removing any
+    /// file that had data destroyed its directory. Every `writeFile` that
+    /// REPLACES a file goes through here, and the application replaces files
+    /// constantly — each id counter rewrites its file on every bump. fsck.vfat
+    /// and the Linux driver caught it; this machine's own reader did not.
+    ///
+    /// Freeing last is also the crash-safe order. A machine that stops between
+    /// the steps has leaked some clusters, which fsck reclaims; the other order
+    /// leaves an entry pointing at clusters already given away.
+    ///
+    /// **THE LONG-NAME PARTS ARE LOCATED BY THE WALK**, not by stepping sector
+    /// numbers. A subdirectory's next cluster need not be adjacent to its last,
+    /// so "the sector after this one" can be another file's data. A run that
+    /// straddles a cluster edge needs a directory of sixty-odd entries, and a
+    /// player's session folder can have that.
     fn removeEntry(self: *Volume, dir_cluster: u16, name: []const u8) Error!void {
+        const Pos = struct { lba: u32, at: u32 };
         var walk = Walk.start(self, dir_cluster);
-        var long_start: ?Run = null;
+        var parts: [max_long_parts]Pos = undefined;
+        var part_count: usize = 0;
+        var parts_overflowed = false;
         var long_sum: u8 = 0;
         var long_ok = false;
         var long_buf: [max_name]u8 = undefined;
@@ -481,58 +522,74 @@ pub const Volume = struct {
             var at: u32 = 0;
             while (at + dirent_size <= sector_size) : (at += dirent_size) {
                 const e = self.scratch[at..][0..dirent_size];
-                if (e[0] == 0x00) return;
+                if (e[0] == 0x00) return; // nothing further in this directory
                 if (e[0] == 0xE5) {
                     long_ok = false;
-                    long_start = null;
+                    long_len = 0;
+                    part_count = 0;
+                    parts_overflowed = false;
                     continue;
                 }
                 if (e[11] == attr_long_name) {
-                    if (e[0] & 0x40 != 0) long_start = .{ .lba = walk.lba, .at = at };
+                    // The part flagged 0x40 opens a run (it is the last part
+                    // logically, and comes first on disk).
+                    if (e[0] & 0x40 != 0) {
+                        part_count = 0;
+                        parts_overflowed = false;
+                    }
+                    if (part_count < parts.len) {
+                        parts[part_count] = .{ .lba = walk.lba, .at = at };
+                        part_count += 1;
+                    } else parts_overflowed = true;
                     takeLongPart(e, &long_buf, &long_len, &long_sum, &long_ok);
                     continue;
                 }
+                if (e[11] & attr_volume_label != 0) {
+                    long_ok = false;
+                    long_len = 0;
+                    part_count = 0;
+                    continue;
+                }
+
                 var entry = decode(e);
-                if (long_ok and long_len > 0 and long_sum == shortChecksum(e[0..11].*)) {
+                const has_long = long_ok and long_len > 0 and long_sum == shortChecksum(e[0..11].*);
+                if (has_long) {
                     entry.long_len = @intCast(@min(long_len, entry.long.len));
                     @memcpy(entry.long[0..entry.long_len], long_buf[0..entry.long_len]);
                 }
+
                 if (eqlFold(entry.text(), name)) {
-                    if (entry.first_cluster >= 2) try self.freeChain(entry.first_cluster);
-                    // Tombstone the short entry, and the run in front of it.
+                    const chain = entry.first_cluster;
+                    const short_lba = walk.lba;
+                    const run = parts[0..part_count];
+                    if (has_long and parts_overflowed) return Error.BadName; // cannot remove what cannot be found whole
+
+                    // 1. the short entry, while its sector is in scratch
                     self.scratch[at] = 0xE5;
-                    try self.writeSector(walk.lba, self.scratch);
-                    if (entry.long_len > 0) {
-                        if (long_start) |ls| try self.tombstoneRun(ls, walk.lba, at);
+                    try self.writeSector(short_lba, self.scratch);
+
+                    // 2. the long-name parts, each where the walk found it
+                    if (has_long) {
+                        for (run) |pos| {
+                            try self.readSector(pos.lba, self.scratch);
+                            self.scratch[pos.at] = 0xE5;
+                            try self.writeSector(pos.lba, self.scratch);
+                        }
                     }
+
+                    // 3. and only now, the data
+                    if (chain >= 2) try self.freeChain(chain);
                     return;
                 }
                 long_ok = false;
                 long_len = 0;
-                long_start = null;
+                part_count = 0;
+                parts_overflowed = false;
             }
             if (!(try walk.next())) return;
         }
     }
 
-    /// Marks every long-name entry from `from` up to (not including) the short
-    /// entry as deleted. A run left behind would be adopted by whatever is
-    /// written there next, which is exactly what the checksum exists to stop --
-    /// but tidying up is cheaper than relying on it.
-    fn tombstoneRun(self: *Volume, from: Run, short_lba: u32, short_at: u32) Error!void {
-        var lba = from.lba;
-        var at = from.at;
-        while (lba < short_lba or (lba == short_lba and at < short_at)) {
-            try self.readSector(lba, self.scratch);
-            self.scratch[at] = 0xE5;
-            try self.writeSector(lba, self.scratch);
-            at += dirent_size;
-            if (at + dirent_size > sector_size) {
-                at = 0;
-                lba += 1;
-            }
-        }
-    }
 
     /// Writes the long-name run and the short entry that closes it.
     fn writeEntry(
@@ -546,13 +603,15 @@ pub const Volume = struct {
     ) Error!void {
         const parts = longParts(name);
         const sum = shortChecksum(short);
+        if (run.len != parts + 1) return Error.BadName; // the run was sized for another name
 
-        var lba = run.lba;
-        var at = run.at;
+        var next: u32 = 0;
         var part: u32 = parts;
         while (part > 0) : (part -= 1) {
-            try self.readSector(lba, self.scratch);
-            const e = self.scratch[at..][0..dirent_size];
+            const slot = run.slots[next];
+            next += 1;
+            try self.readSector(slot.lba, self.scratch);
+            const e = self.scratch[slot.at..][0..dirent_size];
             @memset(e, 0);
             e[0] = @intCast(part | (if (part == parts) @as(u32, 0x40) else 0));
             e[11] = attr_long_name;
@@ -569,16 +628,12 @@ pub const Volume = struct {
                 e[off] = @truncate(c);
                 e[off + 1] = @truncate(c >> 8);
             }
-            try self.writeSector(lba, self.scratch);
-            at += dirent_size;
-            if (at + dirent_size > sector_size) {
-                at = 0;
-                lba += 1;
-            }
+            try self.writeSector(slot.lba, self.scratch);
         }
 
-        try self.readSector(lba, self.scratch);
-        const e = self.scratch[at..][0..dirent_size];
+        const slot = run.slots[next];
+        try self.readSector(slot.lba, self.scratch);
+        const e = self.scratch[slot.at..][0..dirent_size];
         @memset(e, 0);
         @memcpy(e[0..11], &short);
         e[11] = attr;
@@ -588,7 +643,7 @@ pub const Volume = struct {
         e[29] = @truncate(size >> 8);
         e[30] = @truncate(size >> 16);
         e[31] = @truncate(size >> 24);
-        try self.writeSector(lba, self.scratch);
+        try self.writeSector(slot.lba, self.scratch);
     }
 
     /// An 8.3 alias for a name. A name that already fits is its own alias; one
@@ -960,27 +1015,59 @@ pub const Volume = struct {
         return Error.DirectoryFull; // more entries than this is a broken volume
     }
 
+    /// A whole file into `out`, which must be large enough to hold it.
+    ///
+    /// It is readAt from zero, so that every probe that reads a whole file —
+    /// fat16, vfat, restore, stdio, append — also exercises the positional
+    /// read the application uses for Range requests.
     pub fn readFile(self: *Volume, entry: Entry, out: []u8) Error!usize {
         if (entry.isDirectory()) return Error.NotFound;
         if (entry.size > out.len) return Error.TooBig;
+        const n = try self.readAt(entry, 0, out[0..entry.size]);
+        if (n != entry.size) return Error.BadChain; // the chain ended before the size did
+        return n;
+    }
 
-        var left: usize = entry.size;
-        var written: usize = 0;
+    /// Up to `out.len` bytes starting at byte `offset`, stopping at the end of
+    /// the file. Answers how many were read: fewer than asked means the end was
+    /// reached, and an offset at or past the end reads nothing.
+    ///
+    /// The shape is `std.Io.File.readPositionalAll`, which chat_upload uses to
+    /// answer an HTTP Range request — a browser seeking in an image, or resuming
+    /// one. It walks the chain to the cluster `offset` falls in rather than
+    /// reading the file from the start and discarding.
+    pub fn readAt(self: *Volume, entry: Entry, offset: u32, out: []u8) Error!usize {
+        if (entry.isDirectory()) return Error.NotFound;
+        if (offset >= entry.size or out.len == 0) return 0;
+        const want: usize = @min(out.len, entry.size - offset);
+
+        const cluster_bytes: u32 = self.sectors_per_cluster * sector_size;
         var cluster = entry.first_cluster;
-        while (left > 0) {
-            if (cluster < 2) return Error.BadChain;
-            var s: u32 = 0;
-            while (s < self.sectors_per_cluster and left > 0) : (s += 1) {
-                try self.readSector(self.clusterSector(cluster) + s, self.scratch);
-                const n = @min(left, sector_size);
-                @memcpy(out[written..][0..n], self.scratch[0..n]);
-                written += n;
-                left -= n;
-            }
-            if (left == 0) break;
+        if (cluster < 2) return Error.BadChain; // a non-empty file has a chain
+        var skip = offset / cluster_bytes;
+        while (skip > 0) : (skip -= 1) {
             cluster = (try self.nextCluster(cluster)) orelse return Error.BadChain;
+            if (cluster < 2) return Error.BadChain;
         }
-        return written;
+
+        var within = offset % cluster_bytes;
+        var got: usize = 0;
+        while (got < want) {
+            var s: u32 = within / sector_size;
+            var in_sector: u32 = within % sector_size;
+            while (s < self.sectors_per_cluster and got < want) : (s += 1) {
+                try self.readSector(self.clusterSector(cluster) + s, self.scratch);
+                const n = @min(want - got, @as(usize, sector_size - in_sector));
+                @memcpy(out[got..][0..n], self.scratch[in_sector..][0..n]);
+                got += n;
+                in_sector = 0;
+            }
+            if (got >= want) break;
+            within = 0;
+            cluster = (try self.nextCluster(cluster)) orelse return Error.BadChain;
+            if (cluster < 2) return Error.BadChain;
+        }
+        return got;
     }
 };
 

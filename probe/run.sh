@@ -214,9 +214,11 @@ if [ "$want" = all ] || [ "$want" = append ]; then
                 mkdir -p "$mnt"
                 sudo mount -o loop,ro,noexec,nosuid,nodev "$img" "$mnt"
                 # The expectation, generated HERE -- not read back through ours.
-                seq -f 'line %04g aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa' 1 600 > "$WORK/append.want"
+                { seq -f 'line %04g aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa' 1 600
+                  echo 'one more'; } > "$WORK/append.want"   # the late append, through an open handle
                 cp "$mnt/log.txt" "$WORK/append.got" 2>/dev/null || true
                 small="$(cat "$mnt/small.txt" 2>/dev/null || true)"
+                trunc_size="$(stat -c %s "$mnt/trunc.txt" 2>/dev/null || echo missing)"
                 over="$(cat "$mnt/over.txt" 2>/dev/null || true)"
                 nested="$(cat "$mnt/data/lynrummy/p1/lynrummy-elm/sessions/1/actions.dsl" 2>/dev/null || true)"
                 sudo umount "$mnt"
@@ -228,6 +230,9 @@ if [ "$want" = all ] || [ "$want" = append ]; then
                 elif [ "$small" != "abbccc" ]; then
                     echo "FAIL append | Linux reads [$small] where we appended [abbccc]"
                     failed=1
+                elif [ "$trunc_size" != "0" ]; then
+                    echo "FAIL append | Linux sees trunc.txt as [$trunc_size] bytes, want 0"
+                    failed=1
                 elif [ "$over" != "012XYZ6789" ]; then
                     echo "FAIL append | Linux reads [$over] where we overwrote [012XYZ6789]"
                     failed=1
@@ -235,9 +240,82 @@ if [ "$want" = all ] || [ "$want" = append ]; then
                     echo "FAIL append | Linux reads [$nested] in the created tree"
                     failed=1
                 else
-                    echo "     append | the Linux VFAT driver reads all 600 lines, byte for byte"
+                    echo "     append | the Linux VFAT driver reads all 600 lines and the late append, byte for byte"
                 fi
             fi
+        fi
+    fi
+fi
+
+# **THE WRITES THAT TAKE THINGS AWAY.** Replace, delete and delete-tree, in a
+# directory built to be fragmented with long names straddling its cluster
+# edges — the shapes two FAT16 bugs needed. Judged by fsck.vfat (which must find
+# nothing AND reclaim nothing: a leaked cluster is a failure here) and by
+# probe/judge_replace.py, which reads the files through the Linux driver and
+# checks from the raw image that the dangerous shapes were really produced.
+if [ "$want" = all ] || [ "$want" = replace ]; then
+    img="$WORK/replace.img"
+    rm -f "$img"
+    if ! command -v mkfs.vfat > /dev/null; then
+        echo "FAIL replace | mkfs.vfat is not installed, and the check needs it"
+        failed=1
+    else
+        mkfs.vfat -F 16 -S 512 -n GOPHER -C "$img" 32768 > /dev/null 2>&1
+        boot replace \
+            -drive id=d,file="$img",format=raw,if=none \
+            -device virtio-blk-device,drive=d
+        if [ -f "$WORK/replace.out" ] && grep -aq PASS "$WORK/replace.out"; then
+            if fsck.vfat -n -v "$img" > "$WORK/replace.fsck" 2>&1 \
+                && ! grep -qiE "reclaim|orphan|bad |wrong|truncat|lost" "$WORK/replace.fsck"; then
+                echo "     replace | fsck.vfat finds nothing, and reclaims nothing"
+            else
+                echo "FAIL replace | fsck.vfat rejects the volume:"
+                grep -aiE "reclaim|orphan|bad |wrong|truncat|lost|error" "$WORK/replace.fsck" | head -8
+                failed=1
+            fi
+
+            if ! sudo -n true 2>/dev/null; then
+                echo "     replace | SKIPPED the Linux read-back: it needs root"
+            else
+                mnt="$WORK/rmnt"
+                mkdir -p "$mnt"
+                sudo mount -o loop,ro,noexec,nosuid,nodev,uid="$(id -u)" "$img" "$mnt"
+                if verdict="$(python3 "$HERE/judge_replace.py" "$img" "$mnt")"; then
+                    echo "     replace | $verdict"
+                else
+                    echo "FAIL replace | $(echo "$verdict" | head -1)"
+                    echo "$verdict" | tail -n +2 | sed 's/^/             /'
+                    failed=1
+                fi
+                sudo umount "$mnt"
+            fi
+        fi
+    fi
+fi
+
+# The clocks. clock.elf checks .awake and the arithmetic of .real once told;
+# realunset.elf asks for .real WITHOUT being told, and must stop the machine
+# with the message that names the fix. For that one a clean exit is the
+# failure, so it has its own verdict.
+if [ "$want" = all ] || [ "$want" = clock ]; then
+    boot clock
+    name=realunset
+    if [ ! -f "$HERE/$name.elf" ]; then
+        echo "FAIL $name | no $name.elf; run: zig build kernels"
+        failed=1
+    else
+        timeout 60 qemu-system-x86_64 -M microvm -kernel "$HERE/$name.elf" \
+            -nographic -no-reboot -m 512 \
+            -device isa-debug-exit,iobase=0xf4,iosize=0x04 > "$WORK/$name.out" 2>&1
+        code=$?
+        if [ $code -eq 3 ] && grep -aq "PANIC: Io.Clock.now(.real) before setRealTime()" "$WORK/$name.out"; then
+            echo "PASS $name | refused: .real before setRealTime() stops the machine"
+        elif [ $code -eq 1 ]; then
+            echo "FAIL $name | .real answered without being told: $(grep -a 'answered' "$WORK/$name.out")"
+            failed=1
+        else
+            echo "FAIL $name | exited $code without the expected refusal; see $WORK/$name.out"
+            failed=1
         fi
     fi
 fi

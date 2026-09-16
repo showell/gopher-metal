@@ -178,7 +178,108 @@ pub fn kmain() noreturn {
         serial.fail("the second write into a fresh tree failed");
     serial.put("  createDirPath: five levels, then two appends into it\n");
 
+    readWindows(io);
+    createDefaults(io, alloc);
+
     serial.pass();
+}
+
+/// **POSITIONAL READS, AGAINST THE BYTES WE KNOW WERE WRITTEN.** The application
+/// answers an HTTP Range request with `readPositionalAll`, so a browser seeking
+/// in an image lands in the middle of a chain. Each window below is compared
+/// with `expect` — the buffer built from the format string, not from a read —
+/// and each is chosen for the path it takes through fat16.readAt.
+fn readWindows(io: anytype) void {
+    const Window = struct { offset: u64, len: usize, why: []const u8 };
+    const cluster: u64 = 2048;
+    const windows = [_]Window{
+        .{ .offset = 0, .len = 10, .why = "the first bytes" },
+        .{ .offset = 505, .len = 20, .why = "across a sector boundary" },
+        .{ .offset = cluster - 7, .len = 30, .why = "across a cluster boundary" },
+        .{ .offset = cluster * 6 + 1, .len = 3000, .why = "deep, spanning two clusters" },
+        .{ .offset = 512 * 3, .len = 512, .why = "exactly one sector" },
+        .{ .offset = cluster * 2, .len = cluster, .why = "exactly one cluster" },
+    };
+
+    var file = Io.Dir.cwd().openFile(io, "log.txt", .{}) catch
+        serial.fail("log.txt would not open for reading");
+    defer file.close(io);
+    const size = (file.stat(io) catch serial.fail("log.txt would not stat")).size;
+
+    var buf: [4096]u8 = undefined;
+    for (windows) |w| {
+        const n = file.readPositionalAll(io, buf[0..w.len], w.offset) catch
+            serial.fail("a positional read failed");
+        if (n != w.len or !eql(buf[0..n], expect[w.offset..][0..w.len])) {
+            serial.put("  read at ");
+            serial.putDec(w.offset);
+            serial.put(" (");
+            serial.put(w.why);
+            serial.put(") got ");
+            serial.putDec(n);
+            serial.put(" bytes\n");
+            serial.fail("a positional read returned the wrong bytes");
+        }
+    }
+
+    // The tail: asking past the end reads what is there, and says how much.
+    const tail = file.readPositionalAll(io, buf[0..100], size - 10) catch
+        serial.fail("the tail read failed");
+    if (tail != 10 or !eql(buf[0..10], expect[size - 10 ..][0..10]))
+        serial.fail("a read across the end did not stop at the end");
+
+    // At the end, and past it, there is nothing — and that is not an error.
+    const at_end = file.readPositionalAll(io, buf[0..10], size) catch
+        serial.fail("a read at the end failed instead of answering zero");
+    const past = file.readPositionalAll(io, buf[0..10], size + 5000) catch
+        serial.fail("a read past the end failed instead of answering zero");
+    if (at_end != 0 or past != 0) serial.fail("a read at or past the end returned bytes");
+
+    // Reassembled in odd-sized pieces, the whole file is the whole file.
+    var at: u64 = 0;
+    while (at < size) {
+        const n = file.readPositionalAll(io, buf[0..777], at) catch
+            serial.fail("a chunked read failed");
+        if (n == 0) serial.fail("a chunked read stopped before the end");
+        if (!eql(buf[0..n], expect[at..][0..n])) serial.fail("a chunk had the wrong bytes");
+        at += n;
+    }
+
+    // A handle opened BEFORE an append must see the new size: the application
+    // opens, then something appends, then it reads.
+    append(io, "log.txt", "one more\n") catch serial.fail("the late append failed");
+    const late = file.readPositionalAll(io, buf[0..32], size) catch
+        serial.fail("reading the late append failed");
+    if (!eql(buf[0..late], "one more\n"))
+        serial.fail("a handle opened before an append did not see it");
+
+    serial.put("  readPositionalAll: 6 windows, the tail, past the end, 777-byte chunks, a late append\n");
+}
+
+/// createFile's defaults are std's: without `.truncate = false` it EMPTIES the
+/// file. This machine once defaulted the other way, which no caller happened to
+/// hit; this pins it.
+fn createDefaults(io: anytype, alloc: std.mem.Allocator) void {
+    append(io, "trunc.txt", "keep me") catch serial.fail("trunc.txt would not be written");
+    {
+        var f = Io.Dir.cwd().createFile(io, "trunc.txt", .{ .truncate = false }) catch
+            serial.fail("createFile(.truncate = false) failed");
+        f.close(io);
+    }
+    const kept = Io.Dir.cwd().readFileAlloc(io, "trunc.txt", alloc, .limited(64)) catch
+        serial.fail("trunc.txt would not read");
+    if (!eql(kept, "keep me")) serial.fail("createFile(.truncate = false) did not keep the file");
+
+    {
+        var f = Io.Dir.cwd().createFile(io, "trunc.txt", .{}) catch
+            serial.fail("createFile(.{}) failed");
+        f.close(io);
+    }
+    const emptied = Io.Dir.cwd().readFileAlloc(io, "trunc.txt", alloc, .limited(64)) catch
+        serial.fail("trunc.txt would not read after truncation");
+    if (emptied.len != 0) serial.fail("createFile(.{}) kept the file; std's default is to truncate");
+
+    serial.put("  createFile: .truncate = false keeps, the default empties\n");
 }
 
 fn eql(a: []const u8, b: []const u8) bool {

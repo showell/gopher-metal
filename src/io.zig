@@ -78,7 +78,23 @@ pub const Limit = enum(u64) {
     }
 };
 
-pub const Kind = enum { file, directory };
+/// Kind is std's `File.Kind`, ALL of it, though this machine only ever answers
+/// `.file` or `.directory`. The application switches over it with an
+/// `else => {}` prong — correct against std's eleven members — and against a
+/// two-member enum that prong is unreachable, which zig refuses to compile.
+pub const Kind = enum {
+    block_device,
+    character_device,
+    directory,
+    named_pipe,
+    sym_link,
+    file,
+    unix_domain_socket,
+    whiteout,
+    door,
+    event_port,
+    unknown,
+};
 
 pub const Stat = struct {
     size: u64,
@@ -94,8 +110,6 @@ pub const Stat = struct {
     /// while it serves, this is the field that has to start telling the truth.
     mtime: Timestamp = .{ .nanoseconds = 0 },
 };
-
-pub const Timestamp = struct { nanoseconds: i96 };
 
 pub const Error = error{
     FileNotFound,
@@ -125,6 +139,16 @@ pub const File = struct {
     path: [max_path]u8 = undefined,
     path_len: usize = 0,
 
+    /// at is the ONLY way a File is made, so none can exist without its path.
+    /// openFile once built one without it, and every positional read through
+    /// that handle would have looked up the empty path.
+    fn at(entry: fat16.Entry, path: []const u8) Error!File {
+        if (path.len > max_path) return Error.NameTooLong;
+        var f = File{ .entry = entry, .path_len = path.len };
+        @memcpy(f.path[0..path.len], path);
+        return f;
+    }
+
     pub fn close(_: File, _: Self) void {}
 
     pub fn stat(self: File, _: Self) Error!Stat {
@@ -132,6 +156,20 @@ pub const File = struct {
             .size = self.entry.size,
             .kind = if (self.entry.isDirectory()) .directory else .file,
         };
+    }
+
+    /// Reads until `buffer` is full or the file ends, starting at `offset`, and
+    /// answers how many bytes that was — std's `File.readPositionalAll`, which
+    /// chat_upload calls to serve an HTTP Range request.
+    ///
+    /// It re-opens by PATH rather than trusting the entry captured at open: an
+    /// append since then has moved the size, and a read must see it.
+    pub fn readPositionalAll(self: File, _: Self, buffer: []u8, offset: u64) Error!usize {
+        const v = try Dir.vol();
+        const e = v.open(self.path[0..self.path_len]) catch return Error.FileNotFound;
+        if (e.isDirectory()) return Error.IsDir;
+        if (offset >= e.size) return 0;
+        return v.readAt(e, @intCast(offset), buffer) catch return Error.ReadFailed;
     }
 
     /// **THE APPEND.** Every write the application makes that is not a whole
@@ -188,6 +226,52 @@ pub const Iterator = struct {
     }
 };
 
+/// **THE OPTION STRUCTS ARE std's, FIELD FOR FIELD, FOR THE FIELDS THE
+/// APPLICATION WRITES** — with std's defaults. They were `anytype` until the
+/// route table was compiled against them, and `anytype` fails twice over:
+///
+///   - a literal with no result type cannot hold `@enumFromInt(0o600)` or a
+///     decl literal, so `users.zig`'s api-key write did not compile; and
+///   - a default has to be CHOSEN, and this file chose wrong: createFile
+///     treated a missing `.truncate` as false, where std's default is true. No
+///     call in the application omits it today, so nothing was corrupted — but
+///     `createFile(io, p, .{})` would have kept old bytes here and emptied the
+///     file on Linux.
+///
+/// A field the application does not use is left out on purpose: writing one is
+/// then a compile error here, rather than an option quietly ignored.
+pub const OpenOptions = struct {
+    iterate: bool = false,
+};
+
+pub const Mode = enum { read_only, write_only, read_write };
+
+pub const OpenFileOptions = struct {
+    mode: Mode = .read_only,
+};
+
+/// FAT16 has no permission bits. The value is accepted so the application's
+/// `@enumFromInt(0o600)` on the password and api-key files compiles, and it is
+/// IGNORED — there is no other process here to read those files.
+pub const Permissions = enum(u32) {
+    default_file = 0o666,
+    _,
+};
+
+pub const CreateFileOptions = struct {
+    truncate: bool = true,
+    permissions: Permissions = .default_file,
+};
+
+pub const WriteFileOptions = struct {
+    sub_path: []const u8,
+    data: []const u8,
+    flags: CreateFileOptions = .{},
+};
+
+pub const StatFileOptions = struct {};
+pub const AccessOptions = struct {};
+
 pub const Dir = struct {
     /// The cluster this directory starts at; zero is the root.
     cluster: u16 = 0,
@@ -202,7 +286,7 @@ pub const Dir = struct {
         return &(volume orelse return Error.FileNotFound);
     }
 
-    pub fn openDir(self: Dir, _: Self, sub_path: []const u8, _: anytype) Error!Dir {
+    pub fn openDir(self: Dir, _: Self, sub_path: []const u8, _: OpenOptions) Error!Dir {
         _ = self;
         const v = try vol();
         const e = v.open(sub_path) catch return Error.FileNotFound;
@@ -210,23 +294,23 @@ pub const Dir = struct {
         return .{ .cluster = e.first_cluster };
     }
 
-    pub fn openFile(self: Dir, _: Self, sub_path: []const u8, _: anytype) Error!File {
+    pub fn openFile(self: Dir, _: Self, sub_path: []const u8, _: OpenFileOptions) Error!File {
         _ = self;
         const v = try vol();
         const e = v.open(sub_path) catch return Error.FileNotFound;
         if (e.isDirectory()) return Error.IsDir;
-        return .{ .entry = e };
+        return File.at(e, sub_path);
     }
 
-    pub fn statFile(self: Dir, _: Self, sub_path: []const u8, _: anytype) Error!Stat {
+    pub fn statFile(self: Dir, _: Self, sub_path: []const u8, _: StatFileOptions) Error!Stat {
         _ = self;
         const v = try vol();
         const e = v.open(sub_path) catch return Error.FileNotFound;
         return .{ .size = e.size, .kind = if (e.isDirectory()) .directory else .file };
     }
 
-    pub fn access(self: Dir, ignored: Self, sub_path: []const u8, opts: anytype) Error!void {
-        _ = try self.statFile(ignored, sub_path, opts);
+    pub fn access(self: Dir, ignored: Self, sub_path: []const u8, _: AccessOptions) Error!void {
+        _ = try self.statFile(ignored, sub_path, .{});
     }
 
     /// The call the application makes 42 times. The bytes are allocated from
@@ -261,8 +345,12 @@ pub const Dir = struct {
     /// bits at all, so a 0o600 on the password file cannot be honoured here —
     /// and the caller must not be told it was. What protects that file on this
     /// machine is that there is no other process to read it.
-    pub fn writeFile(self: Dir, _: Self, options: anytype) Error!void {
+    pub fn writeFile(self: Dir, _: Self, options: WriteFileOptions) Error!void {
         _ = self;
+        // A whole-file write that keeps the old tail is a different operation,
+        // and nothing in the application asks for it. Refuse rather than
+        // quietly replacing the file anyway.
+        if (!options.flags.truncate) @panic("writeFile with .flags.truncate = false is not implemented on this machine");
         const v = try vol();
         v.writeFile(options.sub_path, options.data) catch |e| switch (e) {
             error.BadName => return Error.NameTooLong,
@@ -291,10 +379,12 @@ pub const Dir = struct {
     /// first.
     ///
     /// The returned File carries the PATH, not a descriptor — see File.
-    pub fn createFile(self: Dir, ignored: Self, sub_path: []const u8, opts: anytype) Error!File {
+    pub fn createFile(self: Dir, ignored: Self, sub_path: []const u8, opts: CreateFileOptions) Error!File {
+        // Checked HERE as well as in File.at: this call has a side effect, and a
+        // path too long for a handle must be refused before the file is made.
         if (sub_path.len > max_path) return Error.NameTooLong;
         const v = try vol();
-        const truncate = if (@hasField(@TypeOf(opts), "truncate")) opts.truncate else false;
+        const truncate = opts.truncate;
 
         const existing: ?fat16.Entry = v.open(sub_path) catch null;
         if (existing) |e| {
@@ -307,9 +397,7 @@ pub const Dir = struct {
         }
 
         const e = v.open(sub_path) catch return Error.FileNotFound;
-        var f = File{ .entry = e, .path_len = sub_path.len };
-        @memcpy(f.path[0..sub_path.len], sub_path);
-        return f;
+        return File.at(e, sub_path);
     }
 
     /// deleteFile removes one file. The application spells every call
@@ -370,8 +458,7 @@ fn rdtsc() u64 {
 /// **THIS CLOCK IS MONOTONIC AND ITS UNIT IS A GUESS.** The timestamp counter
 /// moves forward and never goes back, which is what a timeout needs, but its
 /// rate is not known without measuring it against something that is. Two
-/// gigahertz is assumed. A wall clock, which needs the CMOS or a time server,
-/// is a different problem and this is not it.
+/// gigahertz is assumed.
 const assumed_hz: u64 = 2_000_000_000;
 var tsc_base: u64 = 0;
 
@@ -379,21 +466,85 @@ pub fn startClock() void {
     tsc_base = rdtsc();
 }
 
-/// Instant is what `Clock.now` answers, and it is a STRUCT rather than a plain
-/// integer because that is what the application reads:
-///
-///     Io.Clock.now(.real, io).nanoseconds
-///
-/// Returning the number directly compiled here and failed there, which is the
-/// same lesson as `Self` above — this machine's shapes are only right when the
-/// application's own call sites are the thing type-checking them.
-pub const Instant = struct { nanoseconds: i128 };
+/// sinceBoot is nanoseconds since startClock(), at the assumed rate.
+fn sinceBoot() i96 {
+    const ticks = rdtsc() -% tsc_base;
+    return @intCast(@divTrunc(@as(i128, ticks) * 1_000_000_000, @as(i128, assumed_hz)));
+}
 
-pub const Clock = struct {
-    pub fn now(_: anytype, _: Self) Instant {
-        const ticks = rdtsc() -% tsc_base;
-        return .{ .nanoseconds = @divTrunc(@as(i128, ticks) * 1_000_000_000, @as(i128, assumed_hz)) };
+/// **THE WALL CLOCK IS NOT SINCE-BOOT, AND IT REFUSES TO PRETEND.**
+///
+/// Nine places in the application ask for `Clock.now(.real, io)` — creation
+/// times, last-seen, presence, and `users.zig`'s SESSION EXPIRY, which checks
+/// `now - issued > max_age`. This clock used to answer every clock with time
+/// since boot. With `now` a few seconds and `issued` a Unix time near 1.8e9,
+/// that difference is enormously negative, so every session cookie — however
+/// old — would have been accepted forever.
+///
+/// So `.real` needs to be TOLD: a host calls `setRealTime` once, with Unix
+/// seconds from somewhere that knows them, and `.real` is that plus the time
+/// since. Asking before anyone has told it panics, naming the fix, for the same
+/// reason mem_meter does: a wrong answer here is silent and a panic is not.
+var real_base_ns: ?i96 = null;
+var real_set_at: i96 = 0;
+
+const real_unset_msg = "Io.Clock.now(.real) before setRealTime(): this machine does not know the wall-clock time, and answering with time-since-boot would silently disable session expiry";
+
+pub fn setRealTime(unix_seconds: i64) void {
+    real_set_at = sinceBoot();
+    real_base_ns = @as(i96, unix_seconds) * 1_000_000_000;
+}
+
+pub fn realTimeIsSet() bool {
+    return real_base_ns != null;
+}
+
+/// Timestamp is std's `Io.Timestamp`: what `Clock.now` answers and what
+/// `Stat.mtime` holds. A struct, because the application reads
+/// `.now(.real, io).nanoseconds`.
+pub const Timestamp = struct { nanoseconds: i96 };
+
+/// Duration is std's `Io.Duration`, with the one constructor the application
+/// uses (chat's bus: a keepalive in seconds).
+pub const Duration = struct {
+    nanoseconds: i96,
+
+    pub fn fromSeconds(s: i64) Duration {
+        return .{ .nanoseconds = @as(i96, s) * 1_000_000_000 };
     }
+};
+
+/// Clock is std's `Io.Clock`: an ENUM, so `Io.Clock.now(.real, io)` passes the
+/// clock as a value. It was a struct with a `now(anytype, …)` until the route
+/// table was compiled against it, and a struct cannot give `.fromSeconds(…)`
+/// inside a timeout literal a type to resolve against.
+///
+/// One core and one process: `.awake`, `.boot`, `.cpu_process` and
+/// `.cpu_thread` are all time since startClock(). Only `.real` differs.
+pub const Clock = enum {
+    real,
+    awake,
+    boot,
+    cpu_process,
+    cpu_thread,
+
+    pub fn now(clock: Clock, _: Self) Self.Timestamp {
+        return switch (clock) {
+            .real => .{ .nanoseconds = (real_base_ns orelse @panic(real_unset_msg)) + (sinceBoot() - real_set_at) },
+            .awake, .boot, .cpu_process, .cpu_thread => .{ .nanoseconds = sinceBoot() },
+        };
+    }
+
+    pub const Duration = struct { raw: Self.Duration, clock: Clock };
+    pub const Timestamp = struct { raw: Self.Timestamp, clock: Clock };
+};
+
+/// Timeout is std's `Io.Timeout`, so the application's literal
+/// `.{ .duration = .{ .raw = .fromSeconds(n), .clock = .awake } }` has a type.
+pub const Timeout = union(enum) {
+    none,
+    duration: Clock.Duration,
+    deadline: Clock.Timestamp,
 };
 
 /// **THIS MACHINE HAS NO THREADS, AND DOES NOT WANT ANY.**
@@ -441,14 +592,17 @@ pub const Group = struct {
 ///
 /// When SSE arrives this is the first thing that has to change, and it changes
 /// into an event loop rather than a thread.
-pub fn futexWake(_: Self, comptime T: type, ptr: *const T, max_waiters: usize) void {
+pub fn futexWake(_: Self, comptime T: type, ptr: *align(@alignOf(u32)) const T, max_waiters: u32) void {
     _ = ptr;
     _ = max_waiters;
 }
 
-pub fn futexWaitTimeout(_: Self, comptime T: type, ptr: *const T, expected: T, _: anytype) void {
+/// Answers at once, with std's error set so the caller's `catch {}` compiles.
+/// It never reports Canceled: nothing here cancels.
+pub fn futexWaitTimeout(_: Self, comptime T: type, ptr: *align(@alignOf(u32)) const T, expected: T, timeout: Timeout) error{Canceled}!void {
     _ = ptr;
     _ = expected;
+    _ = timeout;
 }
 
 /// **A MUTEX HERE IS FREE, AND IT CHECKS THAT IT IS ENTITLED TO BE.**
