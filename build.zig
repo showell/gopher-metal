@@ -32,6 +32,7 @@ pub fn build(b: *std.Build) void {
 
     const kernels = [_]struct { name: []const u8, root: []const u8, step: []const u8, help: []const u8 }{
         .{ .name = "block.elf", .root = "probe/block.zig", .step = "block", .help = "the virtio-blk probe kernel" },
+        .{ .name = "fat16.elf", .root = "probe/fat16.zig", .step = "fat16", .help = "the FAT16 probe kernel" },
         .{ .name = "net.elf", .root = "probe/net.zig", .step = "net", .help = "the virtio-net and DHCP probe kernel" },
         .{ .name = "http.elf", .root = "probe/http.zig", .step = "http", .help = "the one-request web server probe kernel" },
         .{ .name = "stdhttp.elf", .root = "probe/stdhttp.zig", .step = "stdhttp", .help = "the same, but with zig's own std.http.Server" },

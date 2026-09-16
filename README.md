@@ -31,7 +31,8 @@ and its two load-bearing findings are worth repeating here:
 | TCP | **works** — one connection, in-order, no retransmit |
 | HTTP, ours | **works** — `curl` gets a 200 from it |
 | **`std.http.Server`, unmodified** | **works** — see below |
-| `Io.Dir` over a filesystem | next |
+| GPT and FAT16, read side | **works** — against Cobblestone's own fixtures |
+| FAT16 write, `Io.Dir` | next |
 | the real `zig-server` binary | the stage that proves the thesis |
 
     zig build kernels      # every kernel into probe/
@@ -40,6 +41,7 @@ and its two load-bearing findings are worth repeating here:
 
 ```
 PASS block |   wrote and read back sector 32767: 512 bytes match
+PASS fat16 |   read 355840 bytes; first two: 4d5a
 PASS net |   server : 10.0.2.2
 PASS http | curl got "hello from no Linux"
 PASS stdhttp | curl got "hello from std.http.Server, with no Linux under it"
@@ -113,6 +115,8 @@ gopher-metal http probe
 | `src/net.zig` | virtio-net: frames out, frames in |
 | `src/proto.zig` | ethernet, IPv4 and UDP — enough to carry a datagram |
 | `src/dhcp.zig` | DISCOVER, OFFER, REQUEST, ACK |
+| `src/gpt.zig` | where the partition starts, because sector 0 is not the filesystem |
+| `src/fat16.zig` | mount a volume, walk a directory, read a file |
 | `src/arp.zig` | answering "who has this address?", which is what makes one reachable |
 | `src/tcp.zig` | one connection at a time: accept, read, answer, close |
 | `src/stream.zig` | that connection as a `std.Io.Reader` and a `std.Io.Writer` |
@@ -137,6 +141,37 @@ speaks virtio 1.2 correctly refuses to talk to it.
 present but empty — which is indistinguishable from "no device at all" if you
 only scan eight of them. `info qtree` answers this in one command; guessing does
 not.
+
+## Why we wrote our own FAT16
+
+Checked first, and the ecosystem is thinner than expected. The nearest thing is
+[**zfat**](https://github.com/ZigEmbeddedGroup/zfat) — *bindings* to ChaN's
+FatFs, a C library, not a native Zig implementation.
+[**zig-osdev/disk-image-step**](https://github.com/zig-osdev/disk-image-step)
+does FAT12/16/32 but at *build* time, to make images, not to read them at
+runtime. `pluto`'s `mkfat32.zig` is likewise an image writer. The mature runtime
+implementations — [fat_io_lib](https://github.com/ultraembedded/fat_io_lib),
+gristle, SEGGER emFile — are all C.
+
+So: our own, and crib tests from wherever they exist. The reasons hold up:
+
+- The application above asks for **eleven whole-file operations**, no seeks and
+  no partial writes, which is a small fraction of what FatFs does.
+- A C dependency inside a freestanding kernel is a real cost, and FatFs brings
+  a large configuration surface with it.
+- There is already a FAT16 next door in `roc-apps/floor`, in Roc, green against
+  these same fixtures — so we get an **oracle**, which a third-party library
+  would not give us.
+
+Revisit zfat if FAT32, long names, or robust crash-safe writing become
+necessary. `disk-image-step` is worth remembering regardless: making fixtures
+without mtools or loop mounts is a real convenience.
+
+**What the fixtures taught us immediately:** sector 0 is not the filesystem.
+Cobblestone's images are GPT disks with a protective MBR and one "EFI System"
+partition at LBA 2048, which is why its `Fat16` cites a `Gpt` chapter — and why
+a reader that mounts sector 0 finds a boot sector of zeros and concludes,
+correctly and uselessly, that the volume is not FAT16.
 
 ## What the TCP does not do
 

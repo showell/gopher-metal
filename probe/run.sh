@@ -75,6 +75,15 @@ fi
 
 # QEMU's user-mode networking answers DHCP at 10.0.2.2 with nothing
 # configured, so the lease is a result that needs no second machine.
+# The FAT16 probe reads Cobblestone's fat16-list.disk, whose contents are
+# pinned by that test's own verdict.
+if [ "$want" = all ] || [ "$want" = fat16 ]; then
+    cp "${FAT16_IMAGE:-$CHECKOUT/codex/test/fat16-list.disk}" "$WORK/fat16.img"
+    boot fat16 \
+        -drive id=d,file="$WORK/fat16.img",format=raw,if=none \
+        -device virtio-blk-device,drive=d
+fi
+
 if [ "$want" = all ] || [ "$want" = net ]; then
     boot net \
         -netdev user,id=n0 \
