@@ -2,3 +2,4 @@
 probe/*.elf
 .zig-cache/
 zig-out/
+__pycache__/

@@ -99,7 +99,7 @@ pub fn build(b: *std.Build) void {
     build_opts.addOption(bool, "fake_leak", false);
 
     const app = b.createModule(.{
-        .root_source_file = .{ .cwd_relative = b.fmt("{s}/driving.zig", .{gopher_port}) },
+        .root_source_file = .{ .cwd_relative = b.fmt("{s}/router.zig", .{gopher_port}) },
         .imports = &.{
             .{ .name = "metal", .module = metal },
             .{ .name = "build_options", .module = build_opts.createModule() },
@@ -124,7 +124,7 @@ pub fn build(b: *std.Build) void {
             .code_model = .kernel,
             .imports = &.{
                 .{ .name = "metal", .module = metal },
-                .{ .name = "driving.zig", .module = app },
+                .{ .name = "router.zig", .module = app },
             },
         }),
     });

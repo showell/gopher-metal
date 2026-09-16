@@ -401,8 +401,32 @@ fi
 
 # **THE REAL SERVER.** angry-gopher's own driving.zig, from its own source,
 # with one line changed per file by port.sh. Needs `zig build gopher`.
+#
+# Judged by probe/judge_gopher.py against the SAME application built for Linux,
+# over the same files: every request below must be answered identically. The
+# Linux build is made here from the checkout port.sh copied, so the two cannot
+# be different versions of the code.
 if [ "$want" = gopher ]; then
-    serve gopher ""
+    GOPHER_ROOT="${GOPHER_ROOT:-$HOME/showell_repos/angry-gopher}"
+    if [ ! -f "$HERE/gopher.elf" ]; then
+        echo "FAIL gopher | no gopher.elf; run: ./port.sh && zig build gopher"
+        failed=1
+    elif ! ( cd "$GOPHER_ROOT/zig-server" && zig build ) > "$WORK/gopher.linux-build" 2>&1; then
+        echo "FAIL gopher | the Linux build of the same source failed; see $WORK/gopher.linux-build"
+        failed=1
+    else
+        python3 "$HERE/judge_gopher.py" "$HERE/gopher.elf" \
+            "$GOPHER_ROOT/zig-server/zig-out/bin/zig-server" "$GOPHER_ROOT" "$WORK/gopher" \
+            > "$WORK/gopher.verdict" 2>&1
+        code=$?
+        case $code in
+            0) echo "PASS gopher | $(tail -1 "$WORK/gopher.verdict")" ;;
+            77) echo "     gopher | $(tail -1 "$WORK/gopher.verdict")" ;;
+            *) echo "FAIL gopher | $(tail -1 "$WORK/gopher.verdict")"
+               grep -A3 "^FAIL" "$WORK/gopher.verdict" | head -20 | sed 's/^/             /'
+               failed=1 ;;
+        esac
+    fi
 fi
 
 exit $failed

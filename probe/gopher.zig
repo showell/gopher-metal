@@ -1,13 +1,30 @@
 //! **THE REAL SERVER.** Not a probe that imitates it — `angry-gopher`'s own
-//! `driving.zig`, compiled from its own source, answering a real request on a
-//! machine with no operating system.
+//! ROUTE TABLE, compiled from its own source, answering one real request on a
+//! machine with no operating system, with its data on a FAT16 volume.
 //!
-//! The only thing done to it is `port.sh`: one line changed in each of the 37
-//! files that has `const Io = std.Io;`. Not one call site moves, and
+//! The only thing done to the application is `port.sh`: one line changed in
+//! each file that opens with `const Io = std.Io;`. Not one call site moves, and
 //! `std.http.Server` is the one the application already constructs.
 //!
-//! `/driving` is the right page to start with: it only reads, so it proves the
-//! path end to end without needing the volume to be writable first.
+//! **THIS FILE IS A HOST**, and does what router.zig's host contract says any
+//! host must, with what this machine has instead of Linux:
+//!
+//!   1. mem_meter.init(base)   base is a bump allocator over a static block
+//!   2. roots.point(base, …)   data/ and auth/, on the volume
+//!   3. a Bus over base        nothing subscribes yet
+//!
+//! and then gives each request an arena over base, as server.zig does.
+//!
+//! **WHAT IT DOES NOT DO YET.** It serves one request and stops. And it never
+//! calls `Io.setRealTime`, because nothing on this machine knows the wall clock
+//! — so a route that stamps a time stops the machine with a message saying so,
+//! rather than stamping a wrong one. probe/judge_gopher.py only asks for routes
+//! that do not.
+//!
+//! **IT IS JUDGED AGAINST LINUX.** judge_gopher.py sends each request to this
+//! kernel and to the same application running as an ordinary Linux process over
+//! the same files, and requires the same answer. "The port changes nothing" is
+//! the claim, so the Linux build is the oracle.
 
 const std = @import("std");
 const metal = @import("metal");
@@ -23,11 +40,16 @@ const fat16 = metal.fat16;
 const Io = metal.io;
 
 /// The application, as it is.
-const driving = @import("driving.zig");
+const router = @import("router.zig");
+const Bus = router.Bus;
 
 comptime {
     _ = metal.boot;
 }
+
+/// std.heap asks a freestanding target for its page size rather than assuming
+/// one. Nothing here maps pages, but the allocators want the number.
+pub const std_options: std.Options = .{ .page_size_max = 4096, .page_size_min = 4096 };
 
 var blk_mem: virtio.BlockMemory align(4096) = .{};
 var nic_mem: net.Memory align(4096) = .{};
@@ -40,26 +62,39 @@ var tcp_received: [16384]u8 align(16) = undefined;
 var read_buf: [16 * 1024]u8 align(16) = undefined;
 var write_buf: [64 * 1024]u8 align(16) = undefined;
 
+/// The process-lifetime heap. On Linux the host names page_allocator; here it
+/// is this block and a bump pointer. One request per boot, so nothing needs to
+/// be given back — but the per-request arena still frees into it, as it would
+/// on a host that serves more than one.
+var base_heap: [16 * 1024 * 1024]u8 align(16) = undefined;
+
 pub fn kmain() noreturn {
     serial.init();
-    serial.put("gopher-metal: angry-gopher, with no Linux under it\n");
+    serial.put("gopher-metal: angry-gopher's route table, with no Linux under it\n");
 
-    // Storage, if there is any. /driving serves from its own source, so a
-    // missing disk is not fatal -- but Io wants a volume before anything else
-    // asks it for a file.
-    if (virtio.find(virtio.device_id_block)) |blk_base| {
-        var blk = blk_mem.bring(blk_base) catch serial.fail("the block device would not come up");
-        if (gpt.firstPartition(&blk, &sector) catch null) |part| {
-            if (fat16.Volume.mount(&blk, &sector, part.first_lba) catch null) |vol| {
-                Io.mount(vol);
-                serial.put("  volume mounted at LBA ");
-                serial.putDec(part.first_lba);
-                serial.put("\n");
-            }
-        }
-    }
+    // ── the volume. This host serves from it, so no disk is a failure. ──────
+    const blk_base = virtio.find(virtio.device_id_block) orelse
+        serial.fail("no disk: this kernel serves the site from a FAT16 volume");
+    var blk = blk_mem.bring(blk_base) catch serial.fail("the block device would not come up");
+    const part = gpt.firstPartition(&blk, &sector) catch
+        serial.fail("the disk has no GPT partition to serve from");
+    const vol = fat16.Volume.mount(&blk, &sector, part.first_lba) catch
+        serial.fail("the first partition is not FAT16");
+    Io.mount(vol);
+    serial.put("  volume mounted at LBA ");
+    serial.putDec(part.first_lba);
+    serial.put("\n");
     Io.startClock();
+    const io = Io.io();
 
+    // ── the host contract ───────────────────────────────────────────────────
+    var fba = std.heap.FixedBufferAllocator.init(&base_heap);
+    const base = router.mem_meter.init(fba.allocator());
+    router.roots.point(base, .{ .data_dir = "data", .auth_dir = "auth" }) catch
+        serial.fail("roots.point could not allocate the store paths");
+    var bus = Bus.init(io, base);
+
+    // ── the network ─────────────────────────────────────────────────────────
     rng.attach(&rng_mem);
     const nic_base = virtio.find(virtio.device_id_net) orelse
         serial.fail("no virtio-net device in any mmio slot");
@@ -80,8 +115,7 @@ pub fn kmain() noreturn {
     }
     if (conn.state != .established) serial.fail("nothing connected before the spin budget ran out");
 
-    // From here down it is the application's own shape: std.http.Server over a
-    // reader and a writer, receiveHead, and a handler from its own source.
+    // ── one request, the application's own way ─────────────────────────────
     var server = std.http.Server.init(s.reader(), s.writer());
     var req = server.receiveHead() catch serial.fail("std.http.Server could not read the request");
     serial.put("  ");
@@ -91,15 +125,22 @@ pub fn kmain() noreturn {
     serial.put("\n");
     req.head.keep_alive = false;
 
-    driving.handle(&req, "/") catch |e| {
-        serial.put("  driving.handle: ");
+    var arena = std.heap.ArenaAllocator.init(base);
+    router.route(&req, io, arena.allocator(), &bus) catch |e| {
+        serial.put("  router.route: ");
         serial.put(@errorName(e));
         serial.put("\n");
-        serial.fail("the application's own handler failed");
+        serial.fail("the application's own route table failed");
     };
-
     s.writer().flush() catch serial.fail("the response would not flush");
-    serial.put("  served /driving from angry-gopher's own source\n");
+    arena.deinit();
+
+    const mem = router.mem_meter.snapshot();
+    serial.put("  served; base heap holds ");
+    serial.putDec(mem.live_bytes);
+    serial.put(" live bytes in ");
+    serial.putDec(mem.live_allocs);
+    serial.put(" allocations\n");
     s.finish();
     serial.pass();
 }
