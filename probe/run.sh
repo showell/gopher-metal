@@ -104,6 +104,15 @@ if [ "$want" = all ] || [ "$want" = fat16write ]; then
     fi
 fi
 
+# std.Io's own surface -- our Dir, the one the application's 121 filesystem
+# calls are spelled against.
+if [ "$want" = all ] || [ "$want" = stdio ]; then
+    cp "${WRITE_IMAGE:-$CHECKOUT/codex/test/fat16-write.disk}" "$WORK/stdio.img"
+    boot stdio \
+        -drive id=d,file="$WORK/stdio.img",format=raw,if=none \
+        -device virtio-blk-device,drive=d
+fi
+
 if [ "$want" = all ] || [ "$want" = net ]; then
     boot net \
         -netdev user,id=n0 \

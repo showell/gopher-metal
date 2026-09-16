@@ -33,7 +33,8 @@ and its two load-bearing findings are worth repeating here:
 | **`std.http.Server`, unmodified** | **works** — see below |
 | GPT and FAT16, read side | **works** — against Cobblestone's own fixtures |
 | FAT16 write | **works** — reproduces the ladder verdict byte for byte |
-| `Io.Dir` and a clock | next |
+| `Io.Dir` and a clock | **works** — see "the seam we first got wrong" |
+| the real `zig-server` binary | 37 one-line edits away |
 | the real `zig-server` binary | the stage that proves the thesis |
 
     zig build kernels      # every kernel into probe/
@@ -45,6 +46,7 @@ PASS block |   wrote and read back sector 32767: 512 bytes match
 PASS fat16 |   read 355840 bytes; first two: 4d5a
 PASS fat16write | bin 1 2 3 254
      fat16write | console matches the ladder verdict for fat16-write
+PASS stdio | mutex: locked and unlocked twice, no contention possible
 PASS net |   server : 10.0.2.2
 PASS http | curl got "hello from no Linux"
 PASS stdhttp | curl got "hello from std.http.Server, with no Linux under it"
@@ -123,6 +125,7 @@ gopher-metal http probe
 | `src/arp.zig` | answering "who has this address?", which is what makes one reachable |
 | `src/tcp.zig` | one connection at a time: accept, read, answer, close |
 | `src/stream.zig` | that connection as a `std.Io.Reader` and a `std.Io.Writer` |
+| `src/io.zig` | `Io.Dir`, `Io.Clock`, `Io.Mutex`, `Io.Group` — the surface the application calls |
 | `probe/*.zig` | one kernel each; a root file with a `kmain` |
 | `probe/link.ld` | the layout — the note first, and `.bss` treated as unwritten |
 | `probe/run.sh` | boots each under `-M microvm`, maps QEMU's exit code back to the guest's |
@@ -169,6 +172,65 @@ The image they leave behind was also read back from outside, with neither
 implementation involved: both copies of the FAT are identical, HELLO.TXT is at
 cluster 4891 holding `Hello, disk!`, and BIN.DAT is at 4892 holding
 `01 02 03 fe`. Agreeing with our own reader would have proved much less.
+
+## The seam we first got wrong
+
+`std.Io` looks like an interface. It is not one.
+
+It has **117 function pointers and no defaults**. Its handles are literally
+`std.posix.fd_t`. And `std.Io.Dir.cwd()` reaches for `std.posix.AT.FDCWD`,
+which does not exist on a freestanding target — so it does not merely fail to
+work there, **it fails to compile**, whatever vtable you supply. `std.Io` is a
+portable spelling of the POSIX syscalls, not an abstraction over storage. The
+one implementation zig ships, `Io.Threaded`, is 18,902 lines.
+
+The real seam is one line higher, and the application hands it over. All 121 of
+its filesystem calls are spelled `Io.Dir.cwd().something(io, ...)`, and 37 files
+open with the same line:
+
+```zig
+const Io = std.Io;      //  ->  const Io = metal.io;
+```
+
+Point that at `src/io.zig` and **not one call site changes**. That is the port:
+37 single-line edits, zero touched call sites, and a `Dir` answering the eleven
+operations the application actually asks for.
+
+```
+gopher-metal std.Io probe
+  readFileAlloc("HELLO.TXT") -> 12 bytes: Hello, disk!
+  statFile -> 12 bytes, kind file
+  clock advanced 547220635 ns over a spin
+  iterate -> EFI/ CODEX.CDX HELLO.TXT
+  mutex: locked and unlocked twice, no contention possible
+```
+
+**Note what this does not change.** `std.http.Server` still runs unmodified,
+because `std.Io.Reader` and `std.Io.Writer` are genuine interfaces — one
+required method each, defaults for the rest, no POSIX anywhere in their types.
+Two designs in one standard library, and only one of them is a seam.
+
+## No threads, and no wish for any
+
+A large share of those 117 entries are the concurrency family: async,
+concurrent, await, cancel, four more for groups, three futex operations,
+batching, and cancellation plumbing through everything else. None of it applies.
+One core, no preemption, one connection at a time — so "run this concurrently"
+becomes "run this now", which loses no overlap a single core ever had. The
+application is already built for it: its accept loop is single-threaded by its
+own comment, and it already serves inline when its task pool is exhausted.
+
+**The ten mutexes are free — and they say so out loud.** The temptation is to
+delete the calls; that is worse than keeping them. Each lock marks a critical
+section somebody identified, and when SSE arrives concurrency comes back — not
+as threads, but as several connections interleaved in one event loop, which is
+exactly when those sections matter again. Deleting the calls throws away the
+map and keeps the territory.
+
+So the lock is free but not silent: it records that it is held, and a second
+lock without an unlock is real re-entrancy that would deadlock on a threaded
+host. It cannot happen here — so if it does, the assumption this design rests
+on is wrong, and the machine says so rather than carrying on.
 
 ## Why we wrote our own FAT16
 
