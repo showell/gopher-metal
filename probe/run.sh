@@ -180,6 +180,68 @@ if [ "$want" = all ] || [ "$want" = vfat ]; then
     fi
 fi
 
+# **THE APPEND, JUDGED FROM OUTSIDE.** The application never writes a whole
+# file except the first time; after that every write is an append at the current
+# end. This writes through the application's own three lines (createFile,
+# stat, writePositionalAll) and then hands the volume to two judges that have
+# never seen our code: fsck.vfat for the structure, and the Linux VFAT driver
+# for the bytes -- with the expected 200 lines regenerated here in shell, so
+# the comparison does not run through anything of ours.
+if [ "$want" = all ] || [ "$want" = append ]; then
+    img="$WORK/append.img"
+    rm -f "$img"
+    if ! command -v mkfs.vfat > /dev/null; then
+        echo "FAIL append | mkfs.vfat is not installed, and the check needs it"
+        failed=1
+    else
+        mkfs.vfat -F 16 -S 512 -n GOPHER -C "$img" 32768 > /dev/null 2>&1
+        boot append \
+            -drive id=d,file="$img",format=raw,if=none \
+            -device virtio-blk-device,drive=d
+        if [ -f "$WORK/append.out" ] && grep -aq PASS "$WORK/append.out"; then
+            if fsck.vfat -n "$img" > "$WORK/append.fsck" 2>&1; then
+                echo "     append | fsck.vfat finds no error after 600 appends"
+            else
+                echo "FAIL append | fsck.vfat rejects the appended volume:"
+                grep -av "^fsck.fat\|^$" "$WORK/append.fsck" | head -8
+                failed=1
+            fi
+
+            if ! sudo -n true 2>/dev/null; then
+                echo "     append | SKIPPED the loop-mount check: it needs root"
+            else
+                mnt="$WORK/amnt"
+                mkdir -p "$mnt"
+                sudo mount -o loop,ro,noexec,nosuid,nodev "$img" "$mnt"
+                # The expectation, generated HERE -- not read back through ours.
+                seq -f 'line %04g aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa' 1 600 > "$WORK/append.want"
+                cp "$mnt/log.txt" "$WORK/append.got" 2>/dev/null || true
+                small="$(cat "$mnt/small.txt" 2>/dev/null || true)"
+                over="$(cat "$mnt/over.txt" 2>/dev/null || true)"
+                nested="$(cat "$mnt/data/lynrummy/p1/lynrummy-elm/sessions/1/actions.dsl" 2>/dev/null || true)"
+                sudo umount "$mnt"
+
+                if ! cmp -s "$WORK/append.want" "$WORK/append.got"; then
+                    echo "FAIL append | Linux reads a different log.txt than we appended:"
+                    diff "$WORK/append.want" "$WORK/append.got" 2>&1 | head -6
+                    failed=1
+                elif [ "$small" != "abbccc" ]; then
+                    echo "FAIL append | Linux reads [$small] where we appended [abbccc]"
+                    failed=1
+                elif [ "$over" != "012XYZ6789" ]; then
+                    echo "FAIL append | Linux reads [$over] where we overwrote [012XYZ6789]"
+                    failed=1
+                elif [ "$nested" != "$(printf '1) draw\n2) meld')" ]; then
+                    echo "FAIL append | Linux reads [$nested] in the created tree"
+                    failed=1
+                else
+                    echo "     append | the Linux VFAT driver reads all 600 lines, byte for byte"
+                fi
+            fi
+        fi
+    fi
+fi
+
 # Entropy: the host's device and the CPU's instruction. -cpu max is what
 # advertises RDRAND to the guest; microvm's default model does not.
 if [ "$want" = all ] || [ "$want" = rng ]; then

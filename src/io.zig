@@ -97,8 +97,21 @@ pub const Error = error{
     NoSpaceLeft,
 };
 
+/// max_path bounds the path a File remembers. The application's deepest is a
+/// game session's action log — `{data_root}/{id}/lynrummy-elm/sessions/{n}/
+/// actions.dsl` — and a data root is an absolute path on the host it came from,
+/// so this is generous rather than tight. There is no allocator here to make it
+/// dynamic.
+pub const max_path: usize = 256;
+
 pub const File = struct {
     entry: fat16.Entry,
+
+    /// **A FILE REMEMBERS ITS PATH**, because a write here names a path rather
+    /// than holding a descriptor: there are no open files on this machine, only
+    /// a volume and a directory walk.
+    path: [max_path]u8 = undefined,
+    path_len: usize = 0,
 
     pub fn close(_: File, _: Self) void {}
 
@@ -106,6 +119,28 @@ pub const File = struct {
         return .{
             .size = self.entry.size,
             .kind = if (self.entry.isDirectory()) .directory else .file,
+        };
+    }
+
+    /// **THE APPEND.** Every write the application makes that is not a whole
+    /// file is this, and always at the end:
+    ///
+    ///     var file = try Io.Dir.cwd().createFile(io, path, .{ .truncate = false });
+    ///     const st = try file.stat(io);
+    ///     try file.writePositionalAll(io, bytes, st.size);
+    ///
+    /// — a chat message, a game action, an uploaded chunk. `offset` may also be
+    /// inside the file (an overwrite); it may not be past the end, because FAT
+    /// has no sparse files and the hole would be whatever those clusters last
+    /// held. See fat16.writeInto.
+    pub fn writePositionalAll(self: File, _: Self, bytes: []const u8, offset: u64) Error!void {
+        if (offset > 0xFFFF_FFFF) return Error.NoSpaceLeft;
+        const v = try Dir.vol();
+        v.writeInto(self.path[0..self.path_len], @intCast(offset), bytes) catch |e| switch (e) {
+            error.NotFound => return Error.FileNotFound,
+            error.BadName => return Error.NameTooLong,
+            error.Full, error.DirectoryFull, error.TooBig => return Error.NoSpaceLeft,
+            else => return Error.WriteFailed,
         };
     }
 };
@@ -208,6 +243,47 @@ pub const Dir = struct {
             error.Full, error.DirectoryFull => return Error.NoSpaceLeft,
             else => return Error.WriteFailed,
         };
+    }
+
+    /// mkdir -p. The application calls it before nearly every write, because
+    /// its stores are directory trees keyed by id and the parent usually does
+    /// not exist yet. fat16.makePath already walks and creates, so this is a
+    /// rename with error translation.
+    pub fn createDirPath(self: Dir, _: Self, sub_path: []const u8) Error!void {
+        _ = self;
+        const v = try vol();
+        _ = v.makePath(sub_path) catch |e| switch (e) {
+            error.BadName => return Error.NameTooLong,
+            error.Full, error.DirectoryFull => return Error.NoSpaceLeft,
+            else => return Error.WriteFailed,
+        };
+    }
+
+    /// Open-or-create, for the append pattern documented on
+    /// `File.writePositionalAll`. `.truncate` is honoured: false keeps what is
+    /// there (the only way the application calls it), true empties the file
+    /// first.
+    ///
+    /// The returned File carries the PATH, not a descriptor — see File.
+    pub fn createFile(self: Dir, ignored: Self, sub_path: []const u8, opts: anytype) Error!File {
+        if (sub_path.len > max_path) return Error.NameTooLong;
+        const v = try vol();
+        const truncate = if (@hasField(@TypeOf(opts), "truncate")) opts.truncate else false;
+
+        const existing: ?fat16.Entry = v.open(sub_path) catch null;
+        if (existing) |e| {
+            if (e.isDirectory()) return Error.IsDir;
+        }
+        // Create it, or empty it, when there is nothing to keep. An empty file
+        // holds no chain at all; the first append is also its allocation.
+        if (existing == null or truncate) {
+            try self.writeFile(ignored, sub_path, "");
+        }
+
+        const e = v.open(sub_path) catch return Error.FileNotFound;
+        var f = File{ .entry = e, .path_len = sub_path.len };
+        @memcpy(f.path[0..sub_path.len], sub_path);
+        return f;
     }
 
     /// Everything in this directory, read in one pass. The application lists

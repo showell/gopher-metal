@@ -76,6 +76,14 @@ pub const Entry = struct {
     first_cluster: u16,
     size: u32,
 
+    /// **WHERE THIS ENTRY SITS.** A file's length lives in its directory entry,
+    /// so anything that changes the length has to write that entry back — and
+    /// finding it again means re-walking the directory and re-matching the long
+    /// name. `list` knows the location at the moment it decodes, so it records
+    /// it here and appendTo can write one sector instead.
+    lba: u32 = 0,
+    slot: u32 = 0,
+
     /// The name to show and to match on: the long one when there is one.
     pub fn text(self: *const Entry) []const u8 {
         return if (self.long_len > 0) self.long[0..self.long_len] else self.name[0..self.name_len];
@@ -261,6 +269,8 @@ pub const Volume = struct {
                     continue;
                 }
                 var entry = decode(e);
+                entry.lba = walk.lba;
+                entry.slot = @intCast(at);
                 // **THE CHECKSUM IS WHAT TIES A LONG NAME TO ITS ENTRY.** A run
                 // whose checksum does not match the short name it precedes
                 // belongs to a file that was deleted and partly overwritten, and
@@ -740,6 +750,124 @@ pub const Volume = struct {
 
     /// A whole file into `out`. Answers how many bytes it was.
     /// A whole file into `out`. Answers how many bytes it was.
+    /// **THE ONE WRITE `writeFile` CANNOT EXPRESS.** The application appends:
+    /// every chat message, every game action, every uploaded chunk is
+    /// `createFile(truncate=false)` then a positional write at the current end.
+    /// Whole-file rewriting would answer it — read it all back, concatenate,
+    /// write it all out — and would make a conversation of N messages cost
+    /// N-squared bytes written, on a machine whose disk is a virtqueue. So this
+    /// walks to the end, fills the partial cluster that is already there, and
+    /// links on only what it still needs.
+    ///
+    /// `offset` is where the write lands. It may be the end (an append, which is
+    /// every call the application makes) or inside the file (an overwrite). It
+    /// may NOT be past the end: FAT has no sparse files, so a hole would be
+    /// whatever those clusters last held, and answering with stale bytes is
+    /// worse than refusing.
+    ///
+    /// The file must exist; `Dir.createFile` is what creates an empty one.
+    pub fn writeInto(self: *Volume, path: []const u8, offset: u32, bytes: []const u8) Error!void {
+        if (bytes.len == 0) return;
+        const entry = try self.open(path);
+        if (entry.isDirectory()) return Error.BadName;
+        if (offset > entry.size) return Error.BadChain; // would leave a hole
+
+        const cluster_bytes: u32 = self.sectors_per_cluster * sector_size;
+        const old_size: u32 = entry.size;
+        const reach: u64 = @as(u64, offset) + bytes.len;
+        if (reach > 0xFFFF_FFFF) return Error.TooBig;
+        const new_size: u32 = @max(old_size, @as(u32, @intCast(reach)));
+
+        const have: u32 = (old_size + cluster_bytes - 1) / cluster_bytes;
+        const need: u32 = (new_size + cluster_bytes - 1) / cluster_bytes;
+
+        // An empty file has no chain at all (first_cluster 0), so the first
+        // append is also the allocation.
+        var first = entry.first_cluster;
+        if (have == 0) {
+            first = try self.allocChain(need);
+        } else if (need > have) {
+            const extra = try self.allocChain(need - have);
+            try self.fatSet(try self.lastCluster(first), extra);
+        }
+
+        try self.writeAt(first, offset, bytes);
+        try self.setEntry(entry, first, new_size);
+    }
+
+    /// The last cluster of a chain — where an extension links on.
+    fn lastCluster(self: *Volume, first: u16) Error!u16 {
+        if (first < 2) return Error.BadChain;
+        var cluster = first;
+        while (try self.nextCluster(cluster)) |next| {
+            if (next < 2) return Error.BadChain;
+            cluster = next;
+        }
+        return cluster;
+    }
+
+    /// Writes `bytes` into a chain at byte `offset`, which the chain must
+    /// already be long enough to hold.
+    ///
+    /// **THE FIRST SECTOR IS READ BEFORE IT IS WRITTEN**, because an append
+    /// almost never lands on a sector boundary: the bytes already in that
+    /// sector are the end of the file, and writing a fresh sector over them
+    /// would erase back to the last boundary.
+    fn writeAt(self: *Volume, first: u16, offset: u32, bytes: []const u8) Error!void {
+        const cluster_bytes: u32 = self.sectors_per_cluster * sector_size;
+
+        // Walk to the cluster the offset falls in.
+        var cluster = first;
+        var skip = offset / cluster_bytes;
+        while (skip > 0) : (skip -= 1) {
+            cluster = (try self.nextCluster(cluster)) orelse return Error.BadChain;
+            if (cluster < 2) return Error.BadChain;
+        }
+
+        var within = offset % cluster_bytes; // byte offset inside this cluster
+        var at: usize = 0;
+        while (at < bytes.len) {
+            if (cluster < 2) return Error.BadChain;
+            var s: u32 = within / sector_size;
+            var in_sector: u32 = within % sector_size;
+            while (s < self.sectors_per_cluster and at < bytes.len) : (s += 1) {
+                const lba = self.clusterSector(cluster) + s;
+                const room = sector_size - in_sector;
+                const n = @min(bytes.len - at, @as(usize, room));
+
+                if (in_sector != 0 or n < sector_size) {
+                    // A partial sector: keep what is already there.
+                    try self.readSector(lba, self.scratch);
+                } else {
+                    @memset(self.scratch, 0);
+                }
+                @memcpy(self.scratch[in_sector..][0..n], bytes[at..][0..n]);
+                try self.writeSector(lba, self.scratch);
+
+                at += n;
+                in_sector = 0;
+            }
+            if (at >= bytes.len) break;
+            within = 0;
+            cluster = (try self.nextCluster(cluster)) orelse return Error.BadChain;
+        }
+    }
+
+    /// Writes a file's length and first cluster back into its directory entry,
+    /// in place. `entry.lba`/`entry.slot` are where `list` found it.
+    fn setEntry(self: *Volume, entry: Entry, first_cluster: u16, size: u32) Error!void {
+        if (entry.lba == 0) return Error.NotFound; // never located; refuse to guess
+        try self.readSector(entry.lba, self.scratch);
+        const e = self.scratch[entry.slot..][0..dirent_size];
+        e[26] = @truncate(first_cluster);
+        e[27] = @truncate(first_cluster >> 8);
+        e[28] = @truncate(size);
+        e[29] = @truncate(size >> 8);
+        e[30] = @truncate(size >> 16);
+        e[31] = @truncate(size >> 24);
+        try self.writeSector(entry.lba, self.scratch);
+    }
+
     pub fn readFile(self: *Volume, entry: Entry, out: []u8) Error!usize {
         if (entry.isDirectory()) return Error.NotFound;
         if (entry.size > out.len) return Error.TooBig;
