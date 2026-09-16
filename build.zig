@@ -40,6 +40,12 @@ pub fn build(b: *std.Build) void {
         .{ .name = "stdhttp.elf", .root = "probe/stdhttp.zig", .step = "stdhttp", .help = "the same, but with zig's own std.http.Server" },
     };
 
+    // **THE REAL SERVER**, built only when port.sh has prepared it: this repo
+    // holds the change, not the code it is applied to.
+    // port.sh writes here by default; -Dgopher=<dir> points elsewhere.
+    const gopher_port = b.option([]const u8, "gopher", "angry-gopher's ported sources") orelse
+        b.pathFromRoot("../../build/gopher-metal/port");
+
     const all = b.step("kernels", "every kernel");
     for (kernels) |k| {
         const exe = b.addExecutable(.{
@@ -62,6 +68,60 @@ pub fn build(b: *std.Build) void {
         all.dependOn(&one.step);
         copy.addCopyFileToSource(exe.getEmittedBin(), b.fmt("probe/{s}", .{k.name}));
     }
+
+    // The application's own modules, each importing `metal` for its Io.
+    //
+    // **NOT part of `kernels`**, and not depended on by the install step: this
+    // needs `port.sh` to have prepared the sources, and a checkout without
+    // angry-gopher beside it should still build everything else. `zig build
+    // gopher` says plainly what is missing when it is missing.
+    // What the application's own build.zig supplies and this one must too: a
+    // `build_options` module, and the front-end artifacts each page embeds by
+    // name. That table lives in angry-gopher/zig-server/build.zig; only the
+    // two /driving needs are mirrored here, because only /driving is served.
+    //
+    // **THIS IS THE PART OF THE PORT THAT IS NOT ABOUT THE MACHINE.** The 61
+    // modules compile freestanding with one line changed each; what is left is
+    // build-graph plumbing, and it is the same plumbing on Linux.
+    const gopher_root = b.option([]const u8, "gopher-root", "the angry-gopher checkout") orelse
+        b.pathFromRoot("../angry-gopher");
+
+    const build_opts = b.addOptions();
+    build_opts.addOption([]const u8, "commit", "bare-metal");
+    build_opts.addOption(bool, "fake_leak", false);
+
+    const app = b.createModule(.{
+        .root_source_file = .{ .cwd_relative = b.fmt("{s}/driving.zig", .{gopher_port}) },
+        .imports = &.{
+            .{ .name = "metal", .module = metal },
+            .{ .name = "build_options", .module = build_opts.createModule() },
+        },
+    });
+    app.addAnonymousImport("safari_wasm", .{
+        .root_source_file = .{ .cwd_relative = b.fmt("{s}/games/driving/safari.wasm", .{gopher_root}) },
+    });
+    app.addAnonymousImport("safari_blitter_js", .{
+        .root_source_file = .{ .cwd_relative = b.fmt("{s}/games/driving/wasm/blitter.js", .{gopher_root}) },
+    });
+    const gopher = b.addExecutable(.{
+        .name = "gopher.elf",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("probe/gopher.zig"),
+            .target = bareTarget(b),
+            .optimize = optimize,
+            .pic = false,
+            .code_model = .kernel,
+            .imports = &.{
+                .{ .name = "metal", .module = metal },
+                .{ .name = "driving.zig", .module = app },
+            },
+        }),
+    });
+    gopher.setLinkerScript(b.path("probe/link.ld"));
+    gopher.entry = .{ .symbol_name = "_start" };
+    const gopher_copy = b.addUpdateSourceFiles();
+    gopher_copy.addCopyFileToSource(gopher.getEmittedBin(), "probe/gopher.elf");
+    b.step("gopher", "the real server, once port.sh has prepared it").dependOn(&gopher_copy.step);
 
     b.getInstallStep().dependOn(&copy.step);
 }

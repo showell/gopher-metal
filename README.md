@@ -34,7 +34,8 @@ and its two load-bearing findings are worth repeating here:
 | GPT and FAT16, read side | **works** — against Cobblestone's own fixtures |
 | FAT16 write | **works** — reproduces the ladder verdict byte for byte |
 | `Io.Dir` and a clock | **works** — see "the seam we first got wrong" |
-| the real `zig-server` binary | 37 one-line edits away |
+| **the real `zig-server`, serving a real page** | **works** — see below |
+| other pages, writes, SSE | asset plumbing, then a scheduler |
 | the real `zig-server` binary | the stage that proves the thesis |
 
     zig build kernels      # every kernel into probe/
@@ -172,6 +173,53 @@ The image they leave behind was also read back from outside, with neither
 implementation involved: both copies of the FAT are identical, HELLO.TXT is at
 cluster 4891 holding `Hello, disk!`, and BIN.DAT is at 4892 holding
 `01 02 03 fe`. Agreeing with our own reader would have proved much less.
+
+## The real server
+
+`port.sh` copies angry-gopher's 61 source files and changes one line in each of
+the 37 that has it. Nothing else is touched.
+
+```
+61 files copied, 37 had the alias, 37 now point at this machine
+```
+
+Then **all 61 compile for `x86_64-freestanding`** — checked with
+`std.testing.refAllDecls` on every module, because zig only analyses what is
+reached and a plain build would have proved much less. Zero errors. That
+includes `markdown.zig` (773 lines), `users.zig` (942, crypto and all),
+`chat_store.zig`, `storage.zig`.
+
+And `probe/gopher.zig` boots it:
+
+```
+gopher-metal: angry-gopher, with no Linux under it
+  address: 10.0.2.15
+  listening on port 80
+  GET /
+  served /driving from angry-gopher's own source
+```
+
+`curl` on the other side gets 200 and 231 bytes of the real page:
+
+```html
+<!DOCTYPE html>
+<html lang="en"><head>…<title>Safari Screensaver</title></head>
+<body><script src="/driving/blitter.js"></script></body></html>
+```
+
+`std.http.Server` parsed the request. `driving.handle` — angry-gopher's own
+function, from its own file — wrote the response. No operating system was
+involved at any point.
+
+**What is left is not about the machine.** Each page embeds its front-end
+assets by name (`@embedFile("safari_wasm")`), wired by a table in the
+application's own `build.zig`. Serving more pages means mirroring more of that
+table — the same plumbing it needs on Linux, and none of it interesting. The
+two `/driving` needs are mirrored in `build.zig`; the rest are not yet.
+
+    ./port.sh              # the one-line change, 37 times
+    zig build gopher       # the real server as a kernel
+    probe/run.sh gopher    # boot it and fetch from it
 
 ## The seam we first got wrong
 

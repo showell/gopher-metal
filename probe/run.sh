@@ -185,4 +185,10 @@ if [ "$want" = all ] || [ "$want" = stdhttp ]; then
     serve stdhttp "hello from std.http.Server, with no Linux under it"
 fi
 
+# **THE REAL SERVER.** angry-gopher's own driving.zig, from its own source,
+# with one line changed per file by port.sh. Needs `zig build gopher`.
+if [ "$want" = gopher ]; then
+    serve gopher ""
+fi
+
 exit $failed
