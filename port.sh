@@ -27,5 +27,9 @@ before="$(grep -l '^const Io = std\.Io;' "$OUT"/*.zig | wc -l)"
 sed -i 's|^const Io = std\.Io;|const Io = @import("metal").io;|' "$OUT"/*.zig
 after="$(grep -l 'const Io = @import("metal")\.io;' "$OUT"/*.zig | wc -l)"
 
+# The asset table, read from the application's own build.zig rather than
+# copied, so that the two cannot drift. See tools/extract_assets.py.
+python3 "$HERE/tools/extract_assets.py" "$SRC/../build.zig" "$HERE/gen/assets.zig"
+
 echo "$(ls "$OUT"/*.zig | wc -l) files copied, $before had the alias, $after now point at this machine"
 [ "$before" = "$after" ] || { echo "the edit did not take on every file"; exit 1; }

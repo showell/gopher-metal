@@ -4,6 +4,7 @@
 //
 //   zig build probe     the virtio probe kernel  ->  probe/probe.elf
 const std = @import("std");
+const assets = @import("gen/assets.zig");
 
 /// The one target: a 64-bit machine with no operating system, and no SSE,
 /// because a kernel that has not enabled it faults on the first xmm register
@@ -100,12 +101,15 @@ pub fn build(b: *std.Build) void {
             .{ .name = "build_options", .module = build_opts.createModule() },
         },
     });
-    app.addAnonymousImport("safari_wasm", .{
-        .root_source_file = .{ .cwd_relative = b.fmt("{s}/games/driving/safari.wasm", .{gopher_root}) },
-    });
-    app.addAnonymousImport("safari_blitter_js", .{
-        .root_source_file = .{ .cwd_relative = b.fmt("{s}/games/driving/wasm/blitter.js", .{gopher_root}) },
-    });
+    // Every asset the application's own build.zig declares, read out of it by
+    // port.sh rather than copied here. A page embeds these by name, and a name
+    // that no build graph declared is a compile error with a confusing message.
+    for (assets.assets) |a| {
+        // Their paths are relative to zig-server/, which is one level in.
+        app.addAnonymousImport(a.name, .{
+            .root_source_file = .{ .cwd_relative = b.fmt("{s}/zig-server/{s}", .{ gopher_root, a.path }) },
+        });
+    }
     const gopher = b.addExecutable(.{
         .name = "gopher.elf",
         .root_module = b.createModule(.{
