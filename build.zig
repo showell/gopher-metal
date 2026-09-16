@@ -35,6 +35,7 @@ pub fn build(b: *std.Build) void {
         .{ .name = "fat16.elf", .root = "probe/fat16.zig", .step = "fat16", .help = "the FAT16 probe kernel" },
         .{ .name = "fat16write.elf", .root = "probe/fat16write.zig", .step = "fat16write", .help = "fat16-write, reproducing the ladder verdict" },
         .{ .name = "stdio.elf", .root = "probe/stdio.zig", .step = "stdio", .help = "std.Io.Dir over FAT16" },
+        .{ .name = "rng.elf", .root = "probe/rng.zig", .step = "rng", .help = "entropy from virtio-rng and RDRAND" },
         .{ .name = "net.elf", .root = "probe/net.zig", .step = "net", .help = "the virtio-net and DHCP probe kernel" },
         .{ .name = "http.elf", .root = "probe/http.zig", .step = "http", .help = "the one-request web server probe kernel" },
         .{ .name = "stdhttp.elf", .root = "probe/stdhttp.zig", .step = "stdhttp", .help = "the same, but with zig's own std.http.Server" },

@@ -22,6 +22,7 @@
 
 const proto = @import("proto.zig");
 const net = @import("net.zig");
+const rng = @import("rng.zig");
 
 pub const header_len: usize = 20;
 const payload_at: usize = proto.eth_header_len + proto.ip_header_len + header_len;
@@ -170,9 +171,11 @@ pub const Listener = struct {
             self.peer_mac = pkt.src_mac;
             self.peer_port = src_port;
             self.rcv_nxt = seq +% 1; // their SYN takes one
-            // An initial sequence number only has to be unlike the last
-            // connection's on this pair, and nothing here has a clock.
-            self.snd_nxt = 0x4D45_5441;
+            // **A RANDOM INITIAL SEQUENCE NUMBER.** A predictable one lets an
+            // off-path attacker inject into the connection, and it used to be a
+            // constant in this file. It is drawn from the entropy pool, which
+            // stops the machine rather than inventing bytes.
+            self.snd_nxt = rng.int(u32);
             self.state = .syn_received;
             self.emit(nic, flag_syn | flag_ack, 0);
             return .nothing;

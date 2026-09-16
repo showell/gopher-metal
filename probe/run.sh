@@ -113,8 +113,14 @@ if [ "$want" = all ] || [ "$want" = stdio ]; then
         -device virtio-blk-device,drive=d
 fi
 
+# Entropy: the host's device and the CPU's instruction. -cpu max is what
+# advertises RDRAND to the guest; microvm's default model does not.
+if [ "$want" = all ] || [ "$want" = rng ]; then
+    boot rng -cpu max -device virtio-rng-device
+fi
+
 if [ "$want" = all ] || [ "$want" = net ]; then
-    boot net \
+    boot net -cpu max -device virtio-rng-device \
         -netdev user,id=n0 \
         -device virtio-net-device,netdev=n0
 fi
@@ -144,6 +150,7 @@ serve() {
         -nographic -no-reboot -m 512 \
         -global virtio-mmio.force-legacy=false \
         -device isa-debug-exit,iobase=0xf4,iosize=0x04 \
+        -cpu max -device virtio-rng-device \
         -netdev "user,id=n0,hostfwd=tcp:127.0.0.1:$port-:80" \
         -device virtio-net-device,netdev=n0 > "$out" 2>&1 &
     local qemu_pid=$!

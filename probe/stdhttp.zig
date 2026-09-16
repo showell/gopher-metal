@@ -18,6 +18,7 @@ const serial = metal.serial;
 const virtio = metal.virtio;
 const net = metal.net;
 const dhcp = metal.dhcp;
+const rng = metal.rng;
 const tcp = metal.tcp;
 const stream = metal.stream;
 
@@ -26,6 +27,7 @@ comptime {
 }
 
 var nic_mem: net.Memory align(4096) = .{};
+var rng_mem: rng.Memory align(4096) = .{};
 var dhcp_frame: [net.buffer_size]u8 align(16) = undefined;
 var dhcp_reply: [1024]u8 align(16) = undefined;
 var tcp_out: [net.buffer_size]u8 align(16) = undefined;
@@ -39,11 +41,12 @@ pub fn kmain() noreturn {
     serial.init();
     serial.put("gopher-metal std.http probe\n");
 
+    rng.attach(&rng_mem);
     const base = virtio.find(virtio.device_id_net) orelse
         serial.fail("no virtio-net device in any mmio slot");
     var nic = net.Net.init(base, &nic_mem) catch serial.fail("the NIC would not come up");
 
-    const lease = dhcp.acquire(&nic, 0x6D65_7461, &dhcp_frame, &dhcp_reply) catch
+    const lease = dhcp.acquire(&nic, &dhcp_frame, &dhcp_reply) catch
         serial.fail("no DHCP lease, so there is no address to listen on");
     serial.put("  address: ");
     serial.putIp(lease.address);

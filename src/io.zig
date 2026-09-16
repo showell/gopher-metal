@@ -28,6 +28,7 @@
 const std = @import("std");
 const serial = @import("serial.zig");
 const fat16 = @import("fat16.zig");
+const rng = @import("rng.zig");
 
 /// The value threaded through every call. On Linux this carries an event loop;
 /// here there is one machine and one disk, so it carries nothing — but it is a
@@ -36,6 +37,16 @@ pub const Io = struct {};
 
 pub fn io() Io {
     return .{};
+}
+
+/// **THE ONE FUNCTION THE PASSWORD SYSTEM NEEDS FROM THIS MACHINE.**
+/// `angry-gopher/zig-server` calls it in exactly two places -- a session token
+/// in `users.zig` and an upload id in `chat_upload.zig` -- and spells it the
+/// same way Linux does. Everything else its identity layer uses is pure: bcrypt
+/// from `std.crypto.pwhash`, HMAC-SHA256 for the cookie, and a constant-time
+/// compare. Those already compile freestanding untouched.
+pub fn random(_: Io, buf: []u8) void {
+    rng.fill(buf);
 }
 
 /// The volume every path is resolved against. One machine, one disk.

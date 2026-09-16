@@ -15,6 +15,7 @@ const serial = metal.serial;
 const virtio = metal.virtio;
 const net = metal.net;
 const dhcp = metal.dhcp;
+const rng = metal.rng;
 const tcp = metal.tcp;
 const stream = metal.stream;
 const gpt = metal.gpt;
@@ -30,6 +31,7 @@ comptime {
 
 var blk_mem: virtio.BlockMemory align(4096) = .{};
 var nic_mem: net.Memory align(4096) = .{};
+var rng_mem: rng.Memory align(4096) = .{};
 var sector: [fat16.sector_size]u8 align(4096) = undefined;
 var dhcp_frame: [net.buffer_size]u8 align(16) = undefined;
 var dhcp_reply: [1024]u8 align(16) = undefined;
@@ -58,10 +60,11 @@ pub fn kmain() noreturn {
     }
     Io.startClock();
 
+    rng.attach(&rng_mem);
     const nic_base = virtio.find(virtio.device_id_net) orelse
         serial.fail("no virtio-net device in any mmio slot");
     var nic = net.Net.init(nic_base, &nic_mem) catch serial.fail("the NIC would not come up");
-    const lease = dhcp.acquire(&nic, 0x676F_7068, &dhcp_frame, &dhcp_reply) catch
+    const lease = dhcp.acquire(&nic, &dhcp_frame, &dhcp_reply) catch
         serial.fail("no DHCP lease, so there is no address to listen on");
     serial.put("  address: ");
     serial.putIp(lease.address);

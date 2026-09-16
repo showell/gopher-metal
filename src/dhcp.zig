@@ -15,6 +15,7 @@
 
 const proto = @import("proto.zig");
 const net = @import("net.zig");
+const rng = @import("rng.zig");
 
 const port_server: u16 = 67;
 const port_client: u16 = 68;
@@ -163,8 +164,12 @@ fn exchange(
 
 /// The whole exchange. `frame` and `reply` are scratch the caller owns;
 /// `frame` must be at least a frame long and `reply` at least 576 bytes.
-pub fn acquire(nic: *net.Net, xid: u32, frame: []u8, reply: []u8) Error!Lease {
+pub fn acquire(nic: *net.Net, frame: []u8, reply: []u8) Error!Lease {
     const spins: usize = 20_000_000;
+
+    // **THE TRANSACTION ID IS DRAWN, NOT WRITTEN DOWN.** It has to be unlike
+    // the last one on this wire, and it used to be a constant in the caller.
+    const xid = rng.int(u32);
 
     // DISCOVER
     var at = writeBootp(frame[proto.udp_payload_at..], xid, nic.mac, true);

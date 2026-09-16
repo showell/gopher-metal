@@ -13,4 +13,5 @@ pub const tcp = @import("tcp.zig");
 pub const stream = @import("stream.zig");
 pub const gpt = @import("gpt.zig");
 pub const fat16 = @import("fat16.zig");
+pub const rng = @import("rng.zig");
 pub const io = @import("io.zig");
