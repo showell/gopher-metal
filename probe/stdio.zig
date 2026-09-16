@@ -97,7 +97,7 @@ pub fn kmain() noreturn {
     while (spin < 2_000_000) : (spin += 1) asm volatile ("pause");
     const t1 = Io.Clock.now(.awake, io);
     serial.put("  clock advanced ");
-    serial.putDec(@intCast(t1 - t0));
+    serial.putDec(@intCast(t1.nanoseconds - t0.nanoseconds));
     serial.put(" ns over a spin\n");
 
     // And the directory listing, which it walks 32 times.

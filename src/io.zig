@@ -30,12 +30,20 @@ const serial = @import("serial.zig");
 const fat16 = @import("fat16.zig");
 const rng = @import("rng.zig");
 
-/// The value threaded through every call. On Linux this carries an event loop;
-/// here there is one machine and one disk, so it carries nothing — but it is a
-/// value rather than nothing at all, so the call sites keep their shape.
-pub const Io = struct {};
+/// **THE VALUE THREADED THROUGH EVERY CALL IS THIS MODULE ITSELF.** On Linux it
+/// carries an event loop; here there is one machine and one disk, so it carries
+/// nothing — but it is still a value, so the call sites keep their shape.
+///
+/// It has to be the module and not a struct inside it, and that cost a build.
+/// The ported application opens with `const Io = @import("metal").io;` and then
+/// spells its parameters `io: Io` — so the type it threads IS the module. A
+/// separate `pub const Io = struct {}` type-checked for this machine's own
+/// probes, which pass what they are given, and failed the moment the real
+/// application threaded its own `io` into `Io.Dir` — which is to say, the
+/// moment anything ported actually touched the filesystem.
+const Self = @This();
 
-pub fn io() Io {
+pub fn io() Self {
     return .{};
 }
 
@@ -45,7 +53,7 @@ pub fn io() Io {
 /// same way Linux does. Everything else its identity layer uses is pure: bcrypt
 /// from `std.crypto.pwhash`, HMAC-SHA256 for the cookie, and a constant-time
 /// compare. Those already compile freestanding untouched.
-pub fn random(_: Io, buf: []u8) void {
+pub fn random(_: Self, buf: []u8) void {
     rng.fill(buf);
 }
 
@@ -59,8 +67,14 @@ pub fn mount(v: fat16.Volume) void {
 pub const Limit = enum(u64) {
     unlimited = std.math.maxInt(u64),
     _,
-    pub fn of(n: u64) Limit {
+    /// `limited` is std's spelling, and the application uses it at every capped
+    /// read — `.limited(4096)` for a name, `.limited(64)` for a counter. `of` is
+    /// this machine's own older name for it, kept because the probes call it.
+    pub fn limited(n: u64) Limit {
         return @enumFromInt(n);
+    }
+    pub fn of(n: u64) Limit {
+        return limited(n);
     }
 };
 
@@ -86,9 +100,9 @@ pub const Error = error{
 pub const File = struct {
     entry: fat16.Entry,
 
-    pub fn close(_: File, _: Io) void {}
+    pub fn close(_: File, _: Self) void {}
 
-    pub fn stat(self: File, _: Io) Error!Stat {
+    pub fn stat(self: File, _: Self) Error!Stat {
         return .{
             .size = self.entry.size,
             .kind = if (self.entry.isDirectory()) .directory else .file,
@@ -111,7 +125,7 @@ pub const Iterator = struct {
     count: usize = 0,
     at: usize = 0,
 
-    pub fn next(self: *Iterator, _: Io) Error!?Entry {
+    pub fn next(self: *Iterator, _: Self) Error!?Entry {
         if (self.at >= self.count) return null;
         const i = self.at;
         self.at += 1;
@@ -135,13 +149,13 @@ pub const Dir = struct {
         return .{ .cluster = 0 };
     }
 
-    pub fn close(_: Dir, _: Io) void {}
+    pub fn close(_: Dir, _: Self) void {}
 
     fn vol() Error!*fat16.Volume {
         return &(volume orelse return Error.FileNotFound);
     }
 
-    pub fn openDir(self: Dir, _: Io, sub_path: []const u8, _: anytype) Error!Dir {
+    pub fn openDir(self: Dir, _: Self, sub_path: []const u8, _: anytype) Error!Dir {
         _ = self;
         const v = try vol();
         const e = v.open(sub_path) catch return Error.FileNotFound;
@@ -149,7 +163,7 @@ pub const Dir = struct {
         return .{ .cluster = e.first_cluster };
     }
 
-    pub fn openFile(self: Dir, _: Io, sub_path: []const u8, _: anytype) Error!File {
+    pub fn openFile(self: Dir, _: Self, sub_path: []const u8, _: anytype) Error!File {
         _ = self;
         const v = try vol();
         const e = v.open(sub_path) catch return Error.FileNotFound;
@@ -157,20 +171,20 @@ pub const Dir = struct {
         return .{ .entry = e };
     }
 
-    pub fn statFile(self: Dir, _: Io, sub_path: []const u8, _: anytype) Error!Stat {
+    pub fn statFile(self: Dir, _: Self, sub_path: []const u8, _: anytype) Error!Stat {
         _ = self;
         const v = try vol();
         const e = v.open(sub_path) catch return Error.FileNotFound;
         return .{ .size = e.size, .kind = if (e.isDirectory()) .directory else .file };
     }
 
-    pub fn access(self: Dir, ignored: Io, sub_path: []const u8, opts: anytype) Error!void {
+    pub fn access(self: Dir, ignored: Self, sub_path: []const u8, opts: anytype) Error!void {
         _ = try self.statFile(ignored, sub_path, opts);
     }
 
     /// The call the application makes 42 times. The bytes are allocated from
     /// `gpa` and the caller owns them.
-    pub fn readFileAlloc(self: Dir, ignored: Io, sub_path: []const u8, gpa: std.mem.Allocator, limit: Limit) Error![]u8 {
+    pub fn readFileAlloc(self: Dir, ignored: Self, sub_path: []const u8, gpa: std.mem.Allocator, limit: Limit) Error![]u8 {
         _ = self;
         const v = try vol();
         const e = v.open(sub_path) catch return Error.FileNotFound;
@@ -186,7 +200,7 @@ pub const Dir = struct {
     /// The other half: a whole file, written at once. FAT16 has no journal, so
     /// the directory entry is written after the data -- a machine that stops
     /// mid-write has lost a file rather than corrupted one.
-    pub fn writeFile(self: Dir, _: Io, sub_path: []const u8, bytes: []const u8) Error!void {
+    pub fn writeFile(self: Dir, _: Self, sub_path: []const u8, bytes: []const u8) Error!void {
         _ = self;
         const v = try vol();
         v.writeFile(sub_path, bytes) catch |e| switch (e) {
@@ -199,7 +213,7 @@ pub const Dir = struct {
     /// Everything in this directory, read in one pass. The application lists
     /// small directories and keeps nothing open across requests, so reading
     /// them whole is simpler than a cursor and costs the same.
-    pub fn iterate(self: Dir, _: Io) Error!Iterator {
+    pub fn iterate(self: Dir, _: Self) Error!Iterator {
         const v = try vol();
         var it = Iterator{};
         v.list(self.cluster, &it, Iterator.take) catch return Error.ReadFailed;
@@ -231,10 +245,20 @@ pub fn startClock() void {
     tsc_base = rdtsc();
 }
 
+/// Instant is what `Clock.now` answers, and it is a STRUCT rather than a plain
+/// integer because that is what the application reads:
+///
+///     Io.Clock.now(.real, io).nanoseconds
+///
+/// Returning the number directly compiled here and failed there, which is the
+/// same lesson as `Self` above — this machine's shapes are only right when the
+/// application's own call sites are the thing type-checking them.
+pub const Instant = struct { nanoseconds: i128 };
+
 pub const Clock = struct {
-    pub fn now(_: anytype, _: Io) i128 {
+    pub fn now(_: anytype, _: Self) Instant {
         const ticks = rdtsc() -% tsc_base;
-        return @divTrunc(@as(i128, ticks) * 1_000_000_000, @as(i128, assumed_hz));
+        return .{ .nanoseconds = @divTrunc(@as(i128, ticks) * 1_000_000_000, @as(i128, assumed_hz)) };
     }
 };
 
@@ -258,18 +282,18 @@ pub const Clock = struct {
 pub const Group = struct {
     pub const init = Group{};
 
-    pub fn concurrent(_: *Group, ignored: Io, comptime f: anytype, args: anytype) error{}!void {
+    pub fn concurrent(_: *Group, ignored: Self, comptime f: anytype, args: anytype) error{}!void {
         _ = ignored;
         @call(.auto, f, args);
     }
 
-    pub fn async(_: *Group, ignored: Io, comptime f: anytype, args: anytype) error{}!void {
+    pub fn async(_: *Group, ignored: Self, comptime f: anytype, args: anytype) error{}!void {
         _ = ignored;
         @call(.auto, f, args);
     }
 
-    pub fn wait(_: *Group, _: Io) void {}
-    pub fn cancel(_: *Group, _: Io) void {}
+    pub fn wait(_: *Group, _: Self) void {}
+    pub fn cancel(_: *Group, _: Self) void {}
 };
 
 /// **A MUTEX HERE IS FREE, AND IT CHECKS THAT IT IS ENTITLED TO BE.**
@@ -297,14 +321,22 @@ pub const Mutex = struct {
 
     pub const init = Mutex{};
 
-    pub fn lock(self: *Mutex, _: Io) void {
+    /// lockUncancelable is std's name for "take it, and do not let a cancelled
+    /// task abandon it half-held". With no threads and no cancellation there is
+    /// nothing to distinguish, so it is `lock` — but the application calls it by
+    /// this name at every read-add-write counter, so the name has to be here.
+    pub fn lockUncancelable(self: *Mutex, io_: Self) void {
+        self.lock(io_);
+    }
+
+    pub fn lock(self: *Mutex, _: Self) void {
         if (self.held) {
             serial.fail("a mutex was locked twice without being unlocked: this machine has no preemption, so that is re-entrancy, and on a threaded host it would be a deadlock");
         }
         self.held = true;
     }
 
-    pub fn unlock(self: *Mutex, _: Io) void {
+    pub fn unlock(self: *Mutex, _: Self) void {
         self.held = false;
     }
 };
