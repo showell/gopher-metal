@@ -113,6 +113,35 @@ if [ "$want" = all ] || [ "$want" = stdio ]; then
         -device virtio-blk-device,drive=d
 fi
 
+# **JUDGED BY fsck.vfat.** A fresh FAT16 volume from mkfs.vfat, written by our
+# code, then handed to dosfstools -- which has been reading VFAT for decades and
+# knows every way a long-name run can be wrong. Agreeing with our own reader
+# would prove very little.
+if [ "$want" = all ] || [ "$want" = vfat ]; then
+    img="$WORK/vfat.img"
+    rm -f "$img"
+    if ! command -v mkfs.vfat > /dev/null; then
+        echo "FAIL vfat | mkfs.vfat is not installed, and the check needs it"
+        failed=1
+    else
+        # 32 MB, FAT16, 512-byte sectors, no partition table: fsck reads the
+        # volume directly rather than having to find it.
+        mkfs.vfat -F 16 -S 512 -n GOPHER -C "$img" 32768 > /dev/null 2>&1
+        boot vfat \
+            -drive id=d,file="$img",format=raw,if=none \
+            -device virtio-blk-device,drive=d
+        if [ -f "$WORK/vfat.out" ] && grep -aq PASS "$WORK/vfat.out"; then
+            if fsck.vfat -n "$img" > "$WORK/vfat.fsck" 2>&1; then
+                echo "     vfat | fsck.vfat finds no error in what we wrote"
+            else
+                echo "FAIL vfat | fsck.vfat rejects the volume:"
+                grep -av "^fsck.fat\|^$" "$WORK/vfat.fsck" | head -8
+                failed=1
+            fi
+        fi
+    fi
+fi
+
 # Entropy: the host's device and the CPU's instruction. -cpu max is what
 # advertises RDRAND to the guest; microvm's default model does not.
 if [ "$want" = all ] || [ "$want" = rng ]; then

@@ -33,6 +33,8 @@ and its two load-bearing findings are worth repeating here:
 | **`std.http.Server`, unmodified** | **works** — see below |
 | GPT and FAT16, read side | **works** — against Cobblestone's own fixtures |
 | FAT16 write | **works** — reproduces the ladder verdict byte for byte |
+| long names and subdirectories | **works** — `fsck.vfat` finds no error |
+| entropy | **works** — virtio-rng and RDRAND, mixed |
 | `Io.Dir` and a clock | **works** — see "the seam we first got wrong" |
 | **the real `zig-server`, serving a real page** | **works** — see below |
 | other pages, writes, SSE | asset plumbing, then a scheduler |
@@ -48,6 +50,9 @@ PASS fat16 |   read 355840 bytes; first two: 4d5a
 PASS fat16write | bin 1 2 3 254
      fat16write | console matches the ladder verdict for fat16-write
 PASS stdio | mutex: locked and unlocked twice, no contention possible
+PASS vfat  |   auth/damian: . .. api-key _session_secret
+     vfat  | fsck.vfat finds no error in what we wrote
+PASS rng   |   over 4 KB: 16422 of 32768 bits set
 PASS net |   server : 10.0.2.2
 PASS http | curl got "hello from no Linux"
 PASS stdhttp | curl got "hello from std.http.Server, with no Linux under it"
@@ -279,6 +284,40 @@ So the lock is free but not silent: it records that it is held, and a second
 lock without an unlock is real re-entrancy that would deadlock on a threaded
 host. It cannot happen here — so if it does, the assumption this design rests
 on is wrong, and the machine says so rather than carrying on.
+
+## Long names, and the judge
+
+The application stores `auth/<id>/api-key` and `_session_secret` and
+`upload-bytes` and `last-seen`. Every one of those is refused by 8.3, and two
+are two directories deep — so a volume that cannot hold them cannot hold the
+data we already have, and nobody would have to re-register only because the
+filesystem was too small for their filenames.
+
+So `src/fat16.zig` grew VFAT long names, subdirectory writes, directory growth
+and `mkdir`. **The verdict is `fsck.vfat`'s**, not ours: dosfstools has been
+reading VFAT for decades and knows every way a long-name run can be wrong — the
+checksum, the reverse ordering, the sequence numbers, orphaned entries, `.` and
+`..`. `probe/run.sh` writes a volume with our code and hands it over.
+
+```
+PASS vfat |   auth/damian: . .. api-key _session_secret
+     vfat | fsck.vfat finds no error in what we wrote
+```
+
+The checksum is the classic place to get this wrong, so it is written out where
+it is used:
+
+```zig
+sum = (((sum & 1) << 7) | ((sum & 0xFE) >> 1)) +% short[i]
+```
+
+**And the first version passed fsck while being wrong.** The listing came back
+`API-KEY`, because `api-key` *fits* in 8.3 and so no long name was written — and
+8.3 is uppercase. Fitting is not enough; the name has to survive the round trip.
+`needsLongName` now asks whether a name reads back as itself, which makes every
+name with a lowercase letter a long one. That is the same bug Cobblestone's own
+`Fat16` carries a paragraph about having had, found here by looking at the
+output rather than at the checker.
 
 ## Why we wrote our own FAT16
 
