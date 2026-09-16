@@ -868,6 +868,98 @@ pub const Volume = struct {
         try self.writeSector(entry.lba, self.scratch);
     }
 
+    /// The cluster of a path's PARENT directory, plus the final component.
+    /// "a/b/c" -> (cluster of a/b, "c"). A path with no slash is in the root.
+    const Parent = struct { cluster: u16, name: []const u8 };
+
+    fn parentOf(self: *Volume, path: []const u8) Error!Parent {
+        // This file imports nothing, not even std: it is the driver, and the
+        // two loops below are cheaper than the dependency.
+        var end = path.len;
+        while (end > 0 and path[end - 1] == '/') end -= 1;
+        const trimmed = path[0..end];
+        if (trimmed.len == 0) return Error.BadName;
+
+        var cut: ?usize = null;
+        var i: usize = 0;
+        while (i < trimmed.len) : (i += 1) {
+            if (trimmed[i] == '/') cut = i;
+        }
+        if (cut == null) return .{ .cluster = 0, .name = trimmed };
+        const at = cut.?;
+        const dir = try self.open(trimmed[0..at]);
+        if (!dir.isDirectory()) return Error.NotFat16;
+        return .{ .cluster = dir.first_cluster, .name = trimmed[at + 1 ..] };
+    }
+
+    /// Deletes one file, or one directory that is already empty. removeEntry
+    /// does the real work: it frees the cluster chain and tombstones both the
+    /// short entry and the long-name run in front of it.
+    pub fn remove(self: *Volume, path: []const u8) Error!void {
+        const p = try self.parentOf(path);
+        _ = (try self.find(p.cluster, p.name)) orelse return Error.NotFound;
+        try self.removeEntry(p.cluster, p.name);
+    }
+
+    /// max_tree_depth bounds removeTree's recursion. The application's deepest
+    /// tree is a player's game data, five levels down; this is generous, and it
+    /// is a CAP rather than a guess because the recursion runs on a kernel
+    /// stack with no guard page under it.
+    const max_tree_depth: u32 = 16;
+
+    /// Deletes a directory and everything under it. A missing path is not an
+    /// error: every caller in the application spells this `catch {}`, because
+    /// deleting what is not there is what it wanted.
+    ///
+    /// **ONE ENTRY AT A TIME, RE-LISTING EACH ROUND.** The obvious shape — list
+    /// the directory, then delete what the list held — cannot work here: `list`
+    /// hands entries to a callback *while* a sector sits in `self.scratch`, and
+    /// there is one scratch buffer for the whole machine, so deleting from
+    /// inside that callback would pull the sector out from under the walk. And
+    /// there is no allocator to copy the listing into. So each round takes the
+    /// FIRST removable entry and starts over. Quadratic in the number of
+    /// entries, on an operation the application performs when a person deletes
+    /// their account.
+    pub fn removeTree(self: *Volume, path: []const u8) Error!void {
+        const entry = self.open(path) catch return; // absent is fine
+        if (!entry.isDirectory()) return self.remove(path);
+        try self.removeTreeAt(entry.first_cluster, 0);
+        self.remove(path) catch {};
+    }
+
+    fn removeTreeAt(self: *Volume, dir_cluster: u16, depth: u32) Error!void {
+        if (depth >= max_tree_depth) return Error.BadChain;
+
+        const First = struct {
+            name: [max_name]u8 = undefined,
+            len: usize = 0,
+            is_dir: bool = false,
+            cluster: u16 = 0,
+            found: bool = false,
+            fn each(s: *@This(), e: Entry) void {
+                if (s.found) return;
+                const text = e.text();
+                // "." and ".." are this directory and its parent.
+                if (eqlBytes(text, ".") or eqlBytes(text, "..")) return;
+                s.len = @min(text.len, max_name);
+                @memcpy(s.name[0..s.len], text[0..s.len]);
+                s.is_dir = e.isDirectory();
+                s.cluster = e.first_cluster;
+                s.found = true;
+            }
+        };
+
+        var rounds: u32 = 0;
+        while (rounds < 4096) : (rounds += 1) {
+            var first = First{};
+            try self.list(dir_cluster, &first, First.each);
+            if (!first.found) return; // empty
+            if (first.is_dir) try self.removeTreeAt(first.cluster, depth + 1);
+            try self.removeEntry(dir_cluster, first.name[0..first.len]);
+        }
+        return Error.DirectoryFull; // more entries than this is a broken volume
+    }
+
     pub fn readFile(self: *Volume, entry: Entry, out: []u8) Error!usize {
         if (entry.isDirectory()) return Error.NotFound;
         if (entry.size > out.len) return Error.TooBig;

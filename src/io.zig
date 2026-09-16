@@ -83,7 +83,19 @@ pub const Kind = enum { file, directory };
 pub const Stat = struct {
     size: u64,
     kind: Kind,
+
+    /// **FAT16 HAS NO NANOSECONDS, AND NO CLOCK WROTE THESE.** A directory
+    /// entry carries a two-second-resolution DOS timestamp and nothing else,
+    /// and this machine does not set it. So `mtime` is always zero, and the one
+    /// thing that reads it — reading_list's cache, which re-parses a document
+    /// when its mtime has ADVANCED — therefore parses once and then trusts its
+    /// cache forever. On a machine where the documents arrive with the disk
+    /// image that is correct behaviour; when this machine can be written to
+    /// while it serves, this is the field that has to start telling the truth.
+    mtime: Timestamp = .{ .nanoseconds = 0 },
 };
+
+pub const Timestamp = struct { nanoseconds: i96 };
 
 pub const Error = error{
     FileNotFound,
@@ -235,10 +247,24 @@ pub const Dir = struct {
     /// The other half: a whole file, written at once. FAT16 has no journal, so
     /// the directory entry is written after the data -- a machine that stops
     /// mid-write has lost a file rather than corrupted one.
-    pub fn writeFile(self: Dir, _: Self, sub_path: []const u8, bytes: []const u8) Error!void {
+    ///
+    /// **THE OPTIONS STRUCT IS THE APPLICATION'S SPELLING**, and std's:
+    /// `writeFile(io, .{ .sub_path = p, .data = b })`. This took
+    /// `(io, sub_path, bytes)` until the route table was compiled against it,
+    /// because the only callers until then were this machine's own probes,
+    /// which pass whatever the declaration asks for. That is the same way the
+    /// `Io` value, `Limit.limited`, `Clock.now` and `Mutex.lockUncancelable`
+    /// were all wrong: self-consistent, and answering a question the
+    /// application does not ask.
+    ///
+    /// `.flags.permissions` is accepted and IGNORED. FAT16 has no permission
+    /// bits at all, so a 0o600 on the password file cannot be honoured here —
+    /// and the caller must not be told it was. What protects that file on this
+    /// machine is that there is no other process to read it.
+    pub fn writeFile(self: Dir, _: Self, options: anytype) Error!void {
         _ = self;
         const v = try vol();
-        v.writeFile(sub_path, bytes) catch |e| switch (e) {
+        v.writeFile(options.sub_path, options.data) catch |e| switch (e) {
             error.BadName => return Error.NameTooLong,
             error.Full, error.DirectoryFull => return Error.NoSpaceLeft,
             else => return Error.WriteFailed,
@@ -277,7 +303,7 @@ pub const Dir = struct {
         // Create it, or empty it, when there is nothing to keep. An empty file
         // holds no chain at all; the first append is also its allocation.
         if (existing == null or truncate) {
-            try self.writeFile(ignored, sub_path, "");
+            try self.writeFile(ignored, .{ .sub_path = sub_path, .data = "" });
         }
 
         const e = v.open(sub_path) catch return Error.FileNotFound;
@@ -286,13 +312,45 @@ pub const Dir = struct {
         return f;
     }
 
+    /// deleteFile removes one file. The application spells every call
+    /// `catch {}` — it is clearing a bookmark or an api-key, and a file that is
+    /// already gone is the outcome it wanted.
+    pub fn deleteFile(self: Dir, _: Self, sub_path: []const u8) Error!void {
+        _ = self;
+        const v = try vol();
+        v.remove(sub_path) catch |e| switch (e) {
+            error.NotFound => return Error.FileNotFound,
+            else => return Error.WriteFailed,
+        };
+    }
+
+    /// deleteTree removes a directory and everything under it — a released
+    /// account's game data, a deleted player. See fat16.removeTree for why it
+    /// re-lists each round instead of walking a snapshot.
+    pub fn deleteTree(self: Dir, _: Self, sub_path: []const u8) Error!void {
+        _ = self;
+        const v = try vol();
+        v.removeTree(sub_path) catch return Error.WriteFailed;
+    }
+
     /// Everything in this directory, read in one pass. The application lists
     /// small directories and keeps nothing open across requests, so reading
     /// them whole is simpler than a cursor and costs the same.
-    pub fn iterate(self: Dir, _: Self) Error!Iterator {
-        const v = try vol();
+    ///
+    /// **NO `io` HERE**, because std's `Dir.iterate()` takes none and the
+    /// application calls it bare: `var it = dir.iterate();`. The io arrives one
+    /// level down, at `it.next(io)`. This took one until the route table was
+    /// compiled against it — the same way `writeFile`'s options struct and the
+    /// four shapes in a1c2492 were all wrong, and for the same reason: the only
+    /// callers were this machine's own probes.
+    ///
+    /// It also cannot fail here, since the whole listing is read eagerly; a
+    /// directory that will not read answers empty, which is what `list` already
+    /// does for a cluster it cannot follow.
+    pub fn iterate(self: Dir) Iterator {
+        const v = vol() catch return .{};
         var it = Iterator{};
-        v.list(self.cluster, &it, Iterator.take) catch return Error.ReadFailed;
+        v.list(self.cluster, &it, Iterator.take) catch return .{};
         return it;
     }
 };
@@ -371,6 +429,27 @@ pub const Group = struct {
     pub fn wait(_: *Group, _: Self) void {}
     pub fn cancel(_: *Group, _: Self) void {}
 };
+
+/// **THE FUTEX IS THE WAKEUP EDGE, AND THERE IS NOTHING TO WAKE.**
+///
+/// chat's bus (bus.zig) publishes to subscribers and wakes them through a futex
+/// on a sequence counter. One core with no preemption has no other task blocked
+/// on that counter: whatever would have been woken is the very code that called
+/// wake, further down its own stack. So the wake is a no-op and the wait returns
+/// at once — which is the honest answer, not a shortcut. A wait that actually
+/// blocked here would block the machine.
+///
+/// When SSE arrives this is the first thing that has to change, and it changes
+/// into an event loop rather than a thread.
+pub fn futexWake(_: Self, comptime T: type, ptr: *const T, max_waiters: usize) void {
+    _ = ptr;
+    _ = max_waiters;
+}
+
+pub fn futexWaitTimeout(_: Self, comptime T: type, ptr: *const T, expected: T, _: anytype) void {
+    _ = ptr;
+    _ = expected;
+}
 
 /// **A MUTEX HERE IS FREE, AND IT CHECKS THAT IT IS ENTITLED TO BE.**
 ///

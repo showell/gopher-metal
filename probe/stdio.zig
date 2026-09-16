@@ -66,7 +66,7 @@ pub fn kmain() noreturn {
 
     // Written through our own Dir, so the probe does not depend on another
     // one having run first -- and so both halves are exercised.
-    Io.Dir.cwd().writeFile(io, "HELLO.TXT", "Hello, disk!") catch
+    Io.Dir.cwd().writeFile(io, .{ .sub_path = "HELLO.TXT", .data = "Hello, disk!" }) catch
         serial.fail("writeFile failed");
 
     // The line zig-server writes 42 times.
@@ -101,7 +101,7 @@ pub fn kmain() noreturn {
     serial.put(" ns over a spin\n");
 
     // And the directory listing, which it walks 32 times.
-    var it = Io.Dir.cwd().iterate(io) catch serial.fail("iterate failed");
+    var it = Io.Dir.cwd().iterate();
     serial.put("  iterate ->");
     var seen: usize = 0;
     while (it.next(io) catch null) |e| {
