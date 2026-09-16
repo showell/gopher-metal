@@ -56,6 +56,29 @@ pub const ip_header_len: usize = 20;
 pub const udp_header_len: usize = 8;
 pub const udp_payload_at: usize = eth_header_len + ip_header_len + udp_header_len;
 
+/// The pseudo-header checksum TCP (and optionally UDP) is defined over: the
+/// addresses and protocol from the IP header, the segment length, and then the
+/// segment itself. **TCP's checksum is not optional**, unlike UDP's over IPv4,
+/// and a wrong one is dropped silently by the other end -- which looks exactly
+/// like the segment never arriving.
+pub fn pseudoChecksum(src_ip: [4]u8, dst_ip: [4]u8, protocol: u8, segment: []const u8) u16 {
+    var sum: u32 = 0;
+    sum += (@as(u32, src_ip[0]) << 8) | src_ip[1];
+    sum += (@as(u32, src_ip[2]) << 8) | src_ip[3];
+    sum += (@as(u32, dst_ip[0]) << 8) | dst_ip[1];
+    sum += (@as(u32, dst_ip[2]) << 8) | dst_ip[3];
+    sum += protocol;
+    sum += @as(u32, @intCast(segment.len));
+
+    var i: usize = 0;
+    while (i + 1 < segment.len) : (i += 2) {
+        sum += (@as(u32, segment[i]) << 8) | segment[i + 1];
+    }
+    if (i < segment.len) sum += @as(u32, segment[i]) << 8;
+    while (sum >> 16 != 0) sum = (sum & 0xFFFF) + (sum >> 16);
+    return ~@as(u16, @truncate(sum));
+}
+
 /// Writes an ethernet header at the front of `out`.
 pub fn writeEth(out: []u8, dst: [6]u8, src: [6]u8, ethertype: u16) void {
     @memcpy(out[0..6], &dst);
@@ -63,11 +86,45 @@ pub fn writeEth(out: []u8, dst: [6]u8, src: [6]u8, ethertype: u16) void {
     @memcpy(out[12..14], &be16(ethertype));
 }
 
+/// An ethernet header and an IPv4 header into `out`, for a payload of
+/// `payload_len` already in place at `eth_header_len + ip_header_len`.
+/// Answers the total frame length.
+///
+/// The IPv4 header checksum is not optional and is computed here; what the
+/// payload's own checksum should be is the caller's business.
+pub fn writeIpv4(
+    out: []u8,
+    src_mac: [6]u8,
+    dst_mac: [6]u8,
+    src_ip: [4]u8,
+    dst_ip: [4]u8,
+    protocol: u8,
+    payload_len: usize,
+) usize {
+    writeEth(out, dst_mac, src_mac, ethertype_ipv4);
+
+    const ip = out[eth_header_len..][0..ip_header_len];
+    const total = ip_header_len + payload_len;
+    ip[0] = 0x45; // IPv4, a 20-byte header
+    ip[1] = 0; // no differentiated services
+    @memcpy(ip[2..4], &be16(@intCast(total)));
+    @memcpy(ip[4..6], &be16(0)); // identification
+    @memcpy(ip[6..8], &be16(0x4000)); // don't fragment
+    ip[8] = 64; // time to live
+    ip[9] = protocol;
+    @memcpy(ip[10..12], &be16(0)); // the checksum, over a zeroed checksum
+    @memcpy(ip[12..16], &src_ip);
+    @memcpy(ip[16..20], &dst_ip);
+    @memcpy(ip[10..12], &be16(checksum(ip)));
+
+    return eth_header_len + total;
+}
+
 /// A whole UDP-over-IPv4 datagram into `out`, payload already in place at
 /// `udp_payload_at`. Answers the total frame length.
 ///
 /// The UDP checksum is left at zero, which IPv4 permits and every stack
-/// accepts. The IPv4 header checksum is not optional and is computed here.
+/// accepts.
 pub fn writeUdp(
     out: []u8,
     src_mac: [6]u8,
@@ -78,21 +135,7 @@ pub fn writeUdp(
     dst_port: u16,
     payload_len: usize,
 ) usize {
-    writeEth(out, dst_mac, src_mac, ethertype_ipv4);
-
-    const ip = out[eth_header_len..][0..ip_header_len];
-    const total = ip_header_len + udp_header_len + payload_len;
-    ip[0] = 0x45; // IPv4, a 20-byte header
-    ip[1] = 0; // no differentiated services
-    @memcpy(ip[2..4], &be16(@intCast(total)));
-    @memcpy(ip[4..6], &be16(0)); // identification
-    @memcpy(ip[6..8], &be16(0)); // no flags, no fragment offset
-    ip[8] = 64; // time to live
-    ip[9] = proto_udp;
-    @memcpy(ip[10..12], &be16(0)); // the checksum, over a zeroed checksum
-    @memcpy(ip[12..16], &src_ip);
-    @memcpy(ip[16..20], &dst_ip);
-    @memcpy(ip[10..12], &be16(checksum(ip)));
+    const frame_len = writeIpv4(out, src_mac, dst_mac, src_ip, dst_ip, proto_udp, udp_header_len + payload_len);
 
     const udp = out[eth_header_len + ip_header_len ..][0..udp_header_len];
     @memcpy(udp[0..2], &be16(src_port));
@@ -100,7 +143,7 @@ pub fn writeUdp(
     @memcpy(udp[4..6], &be16(@intCast(udp_header_len + payload_len)));
     @memcpy(udp[6..8], &be16(0)); // no checksum, which IPv4 allows
 
-    return eth_header_len + total;
+    return frame_len;
 }
 
 /// What a received frame turned out to be, when it is a UDP datagram we could
@@ -113,34 +156,61 @@ pub const Datagram = struct {
     payload: []const u8,
 };
 
-/// Picks a UDP datagram out of an ethernet frame, or answers null for anything
-/// else -- a different ethertype, a fragment, options in the IP header, a
+/// An IPv4 packet we could make sense of.
+pub const Packet = struct {
+    src_mac: [6]u8,
+    src_ip: [4]u8,
+    dst_ip: [4]u8,
+    protocol: u8,
+    payload: []const u8,
+};
+
+/// Picks an IPv4 packet out of an ethernet frame, or answers null for anything
+/// else -- a different ethertype, a fragment, options in the header, a
 /// truncated frame. **Every one of those is a silent null**, because on a real
 /// wire most frames are not for us and a driver that complains about each one
 /// is unusable.
-pub fn parseUdp(frame: []const u8) ?Datagram {
-    if (frame.len < udp_payload_at) return null;
+pub fn parseIpv4(frame: []const u8) ?Packet {
+    if (frame.len < eth_header_len + ip_header_len) return null;
     if (readBe16(frame[12..14]) != ethertype_ipv4) return null;
 
     const ip = frame[eth_header_len..];
     if (ip[0] >> 4 != 4) return null;
     const ihl = @as(usize, ip[0] & 0x0F) * 4;
     if (ihl != ip_header_len) return null; // no options here
-    if (ip[9] != proto_udp) return null;
-    // A fragment is not a datagram; the more-fragments bit or a nonzero offset.
-    if (readBe16(ip[6..8]) & 0x3FFF != 0) return null;
+    // A fragment is not a packet: the more-fragments bit, or a nonzero offset.
+    if (readBe16(ip[6..8]) & 0x1FFF != 0 or ip[6] & 0x20 != 0) return null;
 
     const total = readBe16(ip[2..4]);
-    if (total < ihl + udp_header_len) return null;
+    if (total < ihl) return null;
     if (eth_header_len + total > frame.len) return null;
 
-    const udp = ip[ihl..];
-    const udp_len = readBe16(udp[4..6]);
-    if (udp_len < udp_header_len or udp_len > total - ihl) return null;
-
     return .{
+        .src_mac = frame[6..12].*,
         .src_ip = ip[12..16].*,
         .dst_ip = ip[16..20].*,
+        .protocol = ip[9],
+        .payload = ip[ihl..total],
+    };
+}
+
+/// Picks a UDP datagram out of an ethernet frame, or answers null for anything
+/// else -- a different ethertype, a fragment, options in the IP header, a
+/// truncated frame. **Every one of those is a silent null**, because on a real
+/// wire most frames are not for us and a driver that complains about each one
+/// is unusable.
+pub fn parseUdp(frame: []const u8) ?Datagram {
+    const pkt = parseIpv4(frame) orelse return null;
+    if (pkt.protocol != proto_udp) return null;
+    if (pkt.payload.len < udp_header_len) return null;
+
+    const udp = pkt.payload;
+    const udp_len = readBe16(udp[4..6]);
+    if (udp_len < udp_header_len or udp_len > udp.len) return null;
+
+    return .{
+        .src_ip = pkt.src_ip,
+        .dst_ip = pkt.dst_ip,
         .src_port = readBe16(udp[0..2]),
         .dst_port = readBe16(udp[2..4]),
         .payload = udp[udp_header_len..udp_len],

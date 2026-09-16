@@ -8,3 +8,5 @@ pub const virtio = @import("virtio.zig");
 pub const net = @import("net.zig");
 pub const proto = @import("proto.zig");
 pub const dhcp = @import("dhcp.zig");
+pub const arp = @import("arp.zig");
+pub const tcp = @import("tcp.zig");

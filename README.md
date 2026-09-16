@@ -27,7 +27,9 @@ and its two load-bearing findings are worth repeating here:
 | virtio-blk over MMIO | **works** — reads, writes, and reads back |
 | virtio-net over MMIO | **works** |
 | DHCP | **works** — leases 10.0.2.15 from QEMU's server |
-| ARP, TCP | next |
+| ARP | **works** — answers, which is what makes the address reachable |
+| TCP | **works** — one connection, in-order, no retransmit |
+| HTTP | **works** — `curl` gets a 200 from it |
 | `Io` over the floor | the stage that proves the thesis |
 
     zig build kernels      # every kernel into probe/
@@ -37,6 +39,7 @@ and its two load-bearing findings are worth repeating here:
 ```
 PASS block |   wrote and read back sector 32767: 512 bytes match
 PASS net |   server : 10.0.2.2
+PASS http | curl got "hello from no Linux" over TCP from a machine with no OS
 ```
 
 A probe is a kernel that is only a driver and a serial port. They exist so a
@@ -53,6 +56,19 @@ machine — and it is the same exchange Cobblestone's `dhcp-acquire` performs
 through the Roc machine and an emulated NE2000. Two paths, one protocol, one
 answer to compare.
 
+**`http`** takes a lease, listens on port 80 and answers one request.
+**Its verdict is not its own output** — QEMU forwards a host port to the
+guest's 80, `run.sh` fetches from it, and what curl got back is what is
+checked. The guest's console only says what it thought happened.
+
+```
+gopher-metal http probe
+  address: 10.0.2.15
+  listening on port 80
+  request: GET / HTTP/1.1
+  answered and closed
+```
+
 | where | what |
 |---|---|
 | `src/boot.zig` | the PVH note, the long-mode stub, and the page tables |
@@ -61,6 +77,8 @@ answer to compare.
 | `src/net.zig` | virtio-net: frames out, frames in |
 | `src/proto.zig` | ethernet, IPv4 and UDP — enough to carry a datagram |
 | `src/dhcp.zig` | DISCOVER, OFFER, REQUEST, ACK |
+| `src/arp.zig` | answering "who has this address?", which is what makes one reachable |
+| `src/tcp.zig` | one connection at a time: accept, read, answer, close |
 | `probe/*.zig` | one kernel each; a root file with a `kmain` |
 | `probe/link.ld` | the layout — the note first, and `.bss` treated as unwritten |
 | `probe/run.sh` | boots each under `-M microvm`, maps QEMU's exit code back to the guest's |
@@ -82,6 +100,23 @@ speaks virtio 1.2 correctly refuses to talk to it.
 present but empty — which is indistinguishable from "no device at all" if you
 only scan eight of them. `info qtree` answers this in one command; guessing does
 not.
+
+## What the TCP does not do
+
+No congestion control, no retransmission, no out-of-order reassembly, no
+keep-alive, one connection at a time. That is not laziness about the general
+case — it is the shape the thing above it already has. `zig-server`'s own
+comment says keep-alive is deliberately off and its accept loop is
+single-threaded.
+
+Two of those are real assumptions about the wire, and both are only allowed
+because this box sits behind Caddy on a private network:
+
+- **In-order only.** A segment whose sequence is not exactly what we expect is
+  dropped and re-acknowledged, which asks the peer to send it again.
+- **No retransmit timer.** If something we send is lost the connection stalls
+  rather than recovering. The day that stops being acceptable is the day this
+  file grows a clock.
 
 ## What lives elsewhere
 
