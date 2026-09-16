@@ -1,0 +1,4 @@
+# Kernels the build writes.
+probe/probe.elf
+.zig-cache/
+zig-out/
