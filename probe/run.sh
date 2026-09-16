@@ -293,31 +293,71 @@ if [ "$want" = all ] || [ "$want" = replace ]; then
     fi
 fi
 
-# The clocks. clock.elf checks .awake and the arithmetic of .real once told;
-# realunset.elf asks for .real WITHOUT being told, and must stop the machine
-# with the message that names the fix. For that one a clean exit is the
-# failure, so it has its own verdict.
-if [ "$want" = all ] || [ "$want" = clock ]; then
-    boot clock
-    name=realunset
+# **A KERNEL THAT MUST FAIL**, and must fail for the stated reason. For these a
+# clean exit is the failure: must_fail <kernel> <message> [qemu args…]
+must_fail() {
+    local name="$1" want="$2"; shift 2
     if [ ! -f "$HERE/$name.elf" ]; then
         echo "FAIL $name | no $name.elf; run: zig build kernels"
         failed=1
+        return
+    fi
+    local out="$WORK/$name.mustfail.out"
+    timeout 60 qemu-system-x86_64 -M microvm -kernel "$HERE/$name.elf" \
+        -nographic -no-reboot -m 512 \
+        -device isa-debug-exit,iobase=0xf4,iosize=0x04 "$@" > "$out" 2>&1
+    local code=$?
+    if [ $code -eq 3 ] && grep -aqF "$want" "$out"; then
+        echo "PASS $name | refused as it must: $want"
+    elif [ $code -eq 1 ]; then
+        echo "FAIL $name | ran clean where it had to refuse ($want)"
+        failed=1
     else
-        timeout 60 qemu-system-x86_64 -M microvm -kernel "$HERE/$name.elf" \
-            -nographic -no-reboot -m 512 \
-            -device isa-debug-exit,iobase=0xf4,iosize=0x04 > "$WORK/$name.out" 2>&1
-        code=$?
-        if [ $code -eq 3 ] && grep -aq "PANIC: Io.Clock.now(.real) before setRealTime()" "$WORK/$name.out"; then
-            echo "PASS $name | refused: .real before setRealTime() stops the machine"
-        elif [ $code -eq 1 ]; then
-            echo "FAIL $name | .real answered without being told: $(grep -a 'answered' "$WORK/$name.out")"
-            failed=1
+        echo "FAIL $name | exited $code without \"$want\"; see $out"
+        failed=1
+    fi
+}
+
+# **THE CLOCKS, judged against the host.** clock.elf prints the TSC rate it
+# measured and the RTC time it read at an edge; judge_clock.py compares them
+# with the host kernel's own TSC calibration and the host's clock around the
+# boot. Then the same kernel with the chip PINNED by `-rtc base=` just before
+# midnight, noon and 4 PM, so the probe's four-format check always exercises
+# 12 AM, 12 PM and a PM hour on the chip model — not only whatever hour it is.
+# Then two kernels that must refuse: a clock with no PIT to measure it by, and
+# .real asked for before anyone set it.
+if [ "$want" = all ] || [ "$want" = clock ]; then
+    before=$(date -u +%s)
+    boot clock
+    after=$(date -u +%s)
+    if [ -f "$WORK/clock.out" ] && grep -aq PASS "$WORK/clock.out"; then
+        cp "$WORK/clock.out" "$WORK/clock.now.out"
+        if verdict="$(python3 "$HERE/judge_clock.py" "$WORK/clock.out" "$before" "$after")"; then
+            echo "$verdict" | sed 's/^/     clock | /'
         else
-            echo "FAIL $name | exited $code without the expected refusal; see $WORK/$name.out"
+            echo "$verdict" | grep -v '^ok' | sed 's/^/FAIL clock | /'
             failed=1
         fi
     fi
+
+    for pinned in "2020-02-29T23:59:59 midnight, across a leap day" \
+                  "2020-03-01T11:59:59 noon" \
+                  "2020-03-01T15:59:59 4 PM"; do
+        set -- $pinned
+        base="$1"; shift; what="$*"
+        boot clock -rtc base="$base"
+        if [ -f "$WORK/clock.out" ] && grep -aq PASS "$WORK/clock.out"; then
+            if verdict="$(python3 "$HERE/judge_clock.py" "$WORK/clock.out" 0 0 "$base")"; then
+                echo "     clock | pinned to $what: $(grep -a '^civil' "$WORK/clock.out"), four formats agree"
+            else
+                echo "$verdict" | grep -v -e '^ok' -e tsc_hz | sed "s/^/FAIL clock | pinned to $what: /"
+                failed=1
+            fi
+        fi
+    done
+
+    must_fail clock "the PIT would not calibrate the TSC" -M microvm,pit=off
+    must_fail realunset "PANIC: Io.Clock.now(.real) before setRealTime()"
 fi
 
 # Entropy: the host's device and the CPU's instruction. -cpu max is what

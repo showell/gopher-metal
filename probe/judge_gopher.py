@@ -12,21 +12,33 @@ below goes to two servers built from the same source:
   - the ordinary Linux build, run over a copy of the same files.
 
 and the answers must agree: status, Location, Set-Cookie, Content-Type, and the
-body byte for byte (the one exception, /version, is compared field by field,
-because it reports the build's name and live memory by design).
+body byte for byte. /version is compared field by field, since it names the
+build and reports live memory by design.
 
-A write is judged a second way too: after the kernel handles it, the disk image
-is mounted read-only through the Linux VFAT driver and the files it wrote are
-compared with the ones the Linux server wrote.
+**EVERY CASE STARTS FROM THE SAME STATE ON BOTH SIDES** — a fresh copy of the
+disk for the kernel, and a fresh copy of the files and a fresh server for
+Linux — because several requests write, and a write on one side must not leak
+into the next case's comparison.
+
+**A WRITE IS JUDGED TWICE.** After it, the files it touched are read back —
+through the Linux VFAT driver on the kernel's disk, and straight off the Linux
+server's directory — and must match, and the kernel's disk must pass fsck.
+
+**TIME.** Routes that stamp the wall clock write a different second on each
+side. A Unix time is replaced with <NOW> only if it lies inside the window in
+which THAT side handled the request; a kernel whose clock was wrong would leave
+a bare number, and the comparison would fail. Times staged into the fixture
+(1758000000) are nowhere near either window, so pages that render them are
+compared exactly — including the Eastern-time formatting.
 
 Populating and reading the disk needs a loop mount, so this needs `sudo -n`.
-Without it the whole check is SKIPPED — exit 77 — and says so; it never passes
-by default.
+Without it the whole check is SKIPPED — exit 77 — and says so.
 
 Exit 0 when every case agrees, 1 when any does not, 77 when it could not run.
 """
 import json
 import os
+import re
 import shutil
 import socket
 import subprocess
@@ -36,67 +48,105 @@ import time
 
 SECTOR = 512
 PART_FIRST = 2048
+STAGED_TIME = 1758000000
+P1 = "gopher_uid=1"
+GAME1 = "data/lynrummy/1"
 
 
-# ── the cases ────────────────────────────────────────────────────────────────
-#
-# (name, method, path, cookie, form body). None of these stamps the wall clock:
-# the kernel does not know it yet, and refuses rather than guessing.
+def case(name, method, path, cookie=None, body=None, files=()):
+    return {"name": name, "method": method, "path": path, "cookie": cookie, "body": body,
+            "files": list(files)}
 
-READS = [
-    ("index", "GET", "/", None, None),
-    ("index as a player", "GET", "/", "gopher_uid=1", None),
-    ("driving (embedded)", "GET", "/driving", None, None),
-    ("tutorial (embedded)", "GET", "/tutorial", None, None),
-    ("chess index", "GET", "/chess", None, None),
-    ("resume (markdown from the volume)", "GET", "/steve-resume", None, None),
-    ("resume pdf (27 KB from the volume)", "GET", "/steve-resume.pdf", None, None),
-    ("safari download page", "GET", "/safari_download", None, None),
-    ("unknown path", "GET", "/nope", None, None),
-    ("prefix boundary", "GET", "/drivingX", None, None),
-    ("old login door", "GET", "/login", None, None),
-    ("password gate", "GET", "/login/full", None, None),
-    ("admin, anonymous", "GET", "/admin", None, None),
-    ("game admin, anonymous", "GET", "/admin/lynrummy", None, None),
-    ("admin, a bare uid is not a member", "GET", "/admin", "gopher_uid=1", None),
-    ("name page", "GET", "/play", None, None),
-    ("name page remembers next", "GET", "/play?next=/puzzles", None, None),
-    ("puzzles, nameless", "GET", "/puzzles", None, None),
-    ("game, nameless", "GET", "/game", None, None),
-    ("game as player 1 (the player store)", "GET", "/game", "gopher_uid=1", None),
-    ("game as a player with no row", "GET", "/game", "gopher_uid=99", None),
-    ("game, a traversal in the cookie", "GET", "/game", "gopher_uid=..", None),
-    ("version", "GET", "/version", None, None),
+
+CASES = [
+    # ── pages, identity and gates ──────────────────────────────────────────
+    case("index", "GET", "/"),
+    case("index as a player", "GET", "/", P1),
+    case("driving (embedded)", "GET", "/driving"),
+    case("tutorial (embedded)", "GET", "/tutorial"),
+    case("chess index", "GET", "/chess"),
+    case("resume (markdown from the volume)", "GET", "/steve-resume"),
+    case("resume pdf (27 KB from the volume)", "GET", "/steve-resume.pdf"),
+    case("safari download page", "GET", "/safari_download"),
+    case("unknown path", "GET", "/nope"),
+    case("prefix boundary", "GET", "/drivingX"),
+    case("old login door", "GET", "/login"),
+    case("password gate", "GET", "/login/full"),
+    case("admin, anonymous", "GET", "/admin"),
+    case("game admin, anonymous", "GET", "/admin/lynrummy"),
+    case("admin, a bare uid is not a member", "GET", "/admin", P1),
+    case("name page", "GET", "/play"),
+    case("name page remembers next", "GET", "/play?next=/puzzles"),
+    case("puzzles, nameless", "GET", "/puzzles"),
+    case("game, nameless", "GET", "/game"),
+    case("game as player 1 (the player store)", "GET", "/game", P1),
+    case("game as a player with no row", "GET", "/game", "gopher_uid=99"),
+    case("game, a traversal in the cookie", "GET", "/game", "gopher_uid=.."),
+    case("version", "GET", "/version"),
+
+    # ── a staged session, read back (times rendered in Eastern) ────────────
+    case("session list (HTML, Eastern time)", "GET", "/game/sessions", P1),
+    case("session list (JSON)", "GET", "/game/api/sessions", P1),
+    case("session detail", "GET", "/game/sessions/1", P1),
+    case("session bootstrap", "GET", "/game/sessions/1/actions", P1),
+    case("a session that does not exist", "GET", "/game/sessions/9", P1),
+    case("resume a session", "GET", "/game/1", P1),
+    case("resume nonsense", "GET", "/game/abc", P1),
+
+    # ── writes ─────────────────────────────────────────────────────────────
+    case("a name that fails validation", "POST", "/play", None, "name=a%3Cb&next=%2Fgame",
+         files=["data/players/next-id.txt"]),
+    case("a new player", "POST", "/play", None, "name=Zed&next=%2Fgame",
+         files=["data/players/p1/name", "data/players/next-id.txt"]),
+    case("a new game session (stamps the time)", "POST", "/game/new-session", P1, "board: staged-by-the-judge",
+         files=[f"{GAME1}/lynrummy-elm/sessions/2/meta", f"{GAME1}/next-session-id.txt"]),
+    case("a move (an append, and last-seen)", "POST", "/game/sessions/1/actions", P1, "3) pass",
+         files=[f"{GAME1}/lynrummy-elm/sessions/1/actions.dsl", "data/players/1/last-seen"]),
+    case("an annotation (a new file by append)", "POST", "/game/sessions/1/annotations", P1, '{"note":"judged"}',
+         files=[f"{GAME1}/lynrummy-elm/sessions/1/annotations.jsonl"]),
+    case("a move into a missing session", "POST", "/game/sessions/9/actions", P1, "1) nope",
+         files=[f"{GAME1}/lynrummy-elm/sessions/9/actions.dsl"]),
+    case("the puzzle page (allocates a session, stamps the time)", "GET", "/puzzles", P1,
+         files=[f"{GAME1}/puzzle/sessions/2/meta", f"{GAME1}/next-puzzle-id.txt"]),
+    case("a puzzle move (creates its directory)", "POST", "/puzzles/sessions/1/puzzles/3/actions", P1, "1) solved",
+         files=[f"{GAME1}/puzzle/sessions/1/puzzle_3/actions.dsl"]),
 ]
-
-WRITES = [
-    # Rejected before anything is written.
-    ("a name that fails validation", "POST", "/play", None, "name=a%3Cb&next=%2Fgame"),
-    # The one allocating write: a counter bump and a new player row.
-    ("a new player", "POST", "/play", None, "name=Zed&next=%2Fgame"),
-]
-
-# What the allocating write must leave on disk, read back on both sides.
-WRITTEN_FILES = ["data/players/p1/name", "data/players/next-id.txt"]
 
 
 # ── the site, staged once ────────────────────────────────────────────────────
+
+def write(root, rel, text):
+    path = os.path.join(root, rel)
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "w") as f:
+        f.write(text)
+
 
 def stage(root: str, gopher_root: str) -> None:
     pages = os.path.join(gopher_root, "pages")
     os.makedirs(os.path.join(root, "pages"))
     for name in ("home.txt", "steve-resume.md", "steve-resume.pdf", "safari-download.md"):
         shutil.copy(os.path.join(pages, name), os.path.join(root, "pages", name))
-    for d in ("data/players/1", "data/lynrummy", "data/chat", "data/users", "auth"):
+    for d in ("data/lynrummy", "data/chat", "data/users", "auth"):
         os.makedirs(os.path.join(root, d), exist_ok=True)
-    with open(os.path.join(root, "data/players/1/name"), "w") as f:
-        f.write("Steve")
-    with open(os.path.join(root, "data/players/next-id.txt"), "w") as f:
-        f.write("1\n")
+    write(root, "data/players/1/name", "Steve")
+    write(root, "data/players/next-id.txt", "1\n")
+    # One finished game and one puzzle session for player 1, at a fixed time.
+    write(root, f"{GAME1}/lynrummy-elm/sessions/1/meta",
+          f"created_at: {STAGED_TIME}\nlabel: staged\n\nboard: the judge's fixture\n")
+    write(root, f"{GAME1}/lynrummy-elm/sessions/1/actions.dsl", "1) draw\n2) meld\n")
+    write(root, f"{GAME1}/next-session-id.txt", "2\n")
+    write(root, f"{GAME1}/puzzle/sessions/1/meta", f"created_at: {STAGED_TIME}\n\ncatalog:\n  staged\n")
+    write(root, f"{GAME1}/next-puzzle-id.txt", "2\n")
 
 
 def run(cmd, **kw):
     return subprocess.run(cmd, check=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, **kw)
+
+
+def partition_last(image: str) -> int:
+    info = run(["sgdisk", "-i", "1", image]).stdout
+    return int(next(l for l in info.splitlines() if l.startswith("Last sector")).split()[2])
 
 
 def build_disk(image: str, content: str, mnt: str) -> None:
@@ -104,16 +154,13 @@ def build_disk(image: str, content: str, mnt: str) -> None:
     with open(image, "wb") as f:
         f.truncate(64 * 1024 * 1024)
     run(["sgdisk", "-o", "-n", f"1:{PART_FIRST}:0", "-t", "1:0700", "-c", "1:gopher", image])
-    info = run(["sgdisk", "-i", "1", image]).stdout
-    last = int(next(l for l in info.splitlines() if l.startswith("Last sector")).split()[2])
-    blocks = (last - PART_FIRST + 1) // 2
+    blocks = (partition_last(image) - PART_FIRST + 1) // 2
     run(["mkfs.vfat", "-F", "16", "-S", "512", "-n", "GOPHER",
          "--offset", str(PART_FIRST), image, str(blocks)])
     mount(image, mnt, writable=True)
     try:
         for entry in os.listdir(content):
-            src = os.path.join(content, entry)
-            dst = os.path.join(mnt, entry)
+            src, dst = os.path.join(content, entry), os.path.join(mnt, entry)
             if os.path.isdir(src):
                 shutil.copytree(src, dst)
             else:
@@ -144,18 +191,19 @@ def free_port() -> int:
     return port
 
 
-def ask(port: int, method: str, path: str, cookie, body, scratch: str) -> dict:
+def ask(port: int, c: dict, scratch: str) -> dict:
     """One request by curl, which does the waiting while a guest boots. It never
     follows a redirect: the redirect IS the answer being compared."""
+    os.makedirs(scratch, exist_ok=True)
     hdr, out = os.path.join(scratch, "hdr"), os.path.join(scratch, "body")
     cmd = ["curl", "-sS", "--max-time", "30", "--retry", "40", "--retry-delay", "1",
            "--retry-connrefused", "--retry-all-errors", "-D", hdr, "-o", out,
-           "-w", "%{http_code}", "-X", method]
-    if cookie:
-        cmd += ["-b", cookie]
-    if body is not None:
-        cmd += ["--data-raw", body]
-    cmd.append(f"http://127.0.0.1:{port}{path}")
+           "-w", "%{http_code}", "-X", c["method"]]
+    if c["cookie"]:
+        cmd += ["-b", c["cookie"]]
+    if c["body"] is not None:
+        cmd += ["--data-raw", c["body"]]
+    cmd.append(f"http://127.0.0.1:{port}{c['path']}")
     p = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
     if p.returncode != 0:
         return {"error": f"curl exited {p.returncode}: {p.stderr.strip()}"}
@@ -170,10 +218,10 @@ def ask(port: int, method: str, path: str, cookie, body, scratch: str) -> dict:
     return {"status": int(p.stdout), "headers": headers, "body": payload}
 
 
-def boot_and_ask(elf: str, image: str, case, scratch: str) -> dict:
-    _, method, path, cookie, body = case
+def ask_kernel(elf: str, image: str, c: dict, scratch: str) -> dict:
     port = free_port()
     serial = os.path.join(scratch, "serial")
+    before = time.time()
     with open(serial, "wb") as log:
         qemu = subprocess.Popen([
             "qemu-system-x86_64", "-M", "microvm", "-kernel", elf,
@@ -186,13 +234,25 @@ def boot_and_ask(elf: str, image: str, case, scratch: str) -> dict:
             "-netdev", f"user,id=n0,hostfwd=tcp:127.0.0.1:{port}-:80",
             "-device", "virtio-net-device,netdev=n0",
         ], stdout=log, stderr=subprocess.STDOUT)
-        answer = ask(port, method, path, cookie, body, scratch)
+        # **WAIT FOR THE GUEST TO SAY IT IS LISTENING.** QEMU's user-mode
+        # network accepts a host connection at once and forwards the SYN to the
+        # guest; if the guest is still bringing its clocks up, no NIC driver is
+        # running, the SYN is dropped, and QEMU's TCP retries it only ~6 s later.
+        # That was 4.5 minutes of a 38-case run.
+        deadline = time.time() + 30
+        while time.time() < deadline and qemu.poll() is None:
+            with open(serial, "rb") as seen:
+                if b"listening on port 80" in seen.read():
+                    break
+            time.sleep(0.02)
+        answer = ask(port, c, os.path.join(scratch, "kernel"))
         try:
             code = qemu.wait(timeout=60)
         except subprocess.TimeoutExpired:
             qemu.kill()
             qemu.wait()
             code = "timeout"
+    answer["window"] = (int(before) - 1, int(time.time()) + 1)
     text = open(serial, "rb").read().decode("latin-1", "replace")
     answer["guest_exit"] = code
     answer["serial"] = "\n".join(l for l in text.splitlines()
@@ -220,7 +280,7 @@ class LinuxServer:
             except OSError:
                 if self.proc.poll() is not None:
                     raise RuntimeError(f"the Linux server exited {self.proc.returncode}")
-                time.sleep(0.1)
+                time.sleep(0.05)
         raise RuntimeError("the Linux server never listened")
 
     def stop(self):
@@ -233,12 +293,38 @@ class LinuxServer:
         self.log.close()
 
 
+def ask_linux(binary: str, content: str, c: dict, scratch: str) -> dict:
+    root = os.path.join(scratch, "linux")
+    shutil.copytree(content, root)
+    before = time.time()
+    server = LinuxServer(binary, root, os.path.join(scratch, "linux.log"))
+    try:
+        answer = ask(server.port, c, os.path.join(scratch, "linux-http"))
+    finally:
+        server.stop()
+    answer["window"] = (int(before) - 1, int(time.time()) + 1)
+    answer["root"] = root
+    return answer
+
+
 # ── the comparison ───────────────────────────────────────────────────────────
 
 COMPARED_HEADERS = ("location", "set-cookie", "content-type")
+UNIX_TIME = re.compile(rb"\b1[5-9]\d{8}\b")
 
 
-def differences(path: str, metal: dict, linux: dict) -> list:
+def normalize(data: bytes, window) -> bytes:
+    """Replace a Unix time with <NOW> — but only one inside `window`, the span in
+    which this side handled the request. A time outside it is left as it is."""
+    lo, hi = window
+
+    def sub(m):
+        return b"<NOW>" if lo <= int(m.group(0)) <= hi else m.group(0)
+
+    return UNIX_TIME.sub(sub, data)
+
+
+def differences(c: dict, metal: dict, linux: dict) -> list:
     if "error" in linux:
         return [f"the LINUX server did not answer: {linux['error']}"]
     if "error" in metal:
@@ -253,11 +339,14 @@ def differences(path: str, metal: dict, linux: dict) -> list:
         m, l = metal["headers"].get(h), linux["headers"].get(h)
         if m != l:
             out.append(f"{h}: metal {m!r}, Linux {l!r}")
-    if path == "/version":
+    if c["path"] == "/version":
         out += version_differences(metal["body"], linux["body"])
-    elif metal["body"] != linux["body"]:
-        out.append(f"body differs: {len(metal['body'])} bytes on metal, {len(linux['body'])} on Linux"
-                   f"{first_difference(metal['body'], linux['body'])}")
+    else:
+        mb = normalize(metal["body"], metal["window"])
+        lb = normalize(linux["body"], linux["window"])
+        if mb != lb:
+            out.append(f"body differs: {len(mb)} bytes on metal, {len(lb)} on Linux"
+                       f"{first_difference(mb, lb)}")
     return out
 
 
@@ -284,6 +373,52 @@ def first_difference(a: bytes, b: bytes) -> str:
     return f"; first difference at byte {n}: {a[n:n + 40]!r} vs {b[n:n + 40]!r}"
 
 
+def file_differences(c: dict, image: str, metal: dict, linux: dict, mnt: str) -> list:
+    """The files a case touched, read through the Linux VFAT driver on the
+    kernel's disk and straight off the Linux server's directory. A file absent
+    on both sides agrees; that is how "a move into a missing session wrote
+    nothing" is checked."""
+    if not c["files"]:
+        return []
+    out = []
+    mount(image, mnt, writable=False)
+    try:
+        for rel in c["files"]:
+            m = read_or_none(os.path.join(mnt, rel))
+            l = read_or_none(os.path.join(linux["root"], rel))
+            nm = None if m is None else normalize(m, metal["window"])
+            nl = None if l is None else normalize(l, linux["window"])
+            if nm != nl:
+                out.append(f"{rel}: metal wrote {abbrev(nm)}, Linux wrote {abbrev(nl)}")
+    finally:
+        umount(mnt)
+
+    # fsck.vfat has no offset option, so it checks a copy of the partition.
+    part = image + ".part"
+    run(["dd", f"if={image}", f"of={part}", f"bs={SECTOR}", f"skip={PART_FIRST}",
+         f"count={partition_last(image) - PART_FIRST + 1}", "status=none"])
+    check = subprocess.run(["fsck.vfat", "-n", part], capture_output=True, text=True)
+    if check.returncode != 0:
+        out.append("fsck.vfat rejects the kernel's disk: "
+                   + " | ".join(check.stdout.strip().splitlines()[1:4]))
+    os.remove(part)
+    return out
+
+
+def abbrev(b):
+    if b is None:
+        return "nothing"
+    return repr(b if len(b) <= 60 else b[:57] + b"...")
+
+
+def read_or_none(path: str):
+    try:
+        with open(path, "rb") as f:
+            return f.read()
+    except OSError:
+        return None
+
+
 def main() -> int:
     if len(sys.argv) != 5:
         print(__doc__.strip())
@@ -292,7 +427,7 @@ def main() -> int:
     if subprocess.run(["sudo", "-n", "true"], capture_output=True).returncode != 0:
         print("SKIPPED: populating and reading the disk needs `sudo -n` for a loop mount")
         return 77
-    for tool in ("sgdisk", "mkfs.vfat", "qemu-system-x86_64", "curl"):
+    for tool in ("sgdisk", "mkfs.vfat", "fsck.vfat", "qemu-system-x86_64", "curl"):
         if shutil.which(tool) is None:
             print(f"SKIPPED: {tool} is not installed")
             return 77
@@ -302,73 +437,32 @@ def main() -> int:
     content = os.path.join(work, "content")
     stage(content, gopher_root)
     pristine = os.path.join(work, "pristine.img")
-    build_disk(pristine, content, os.path.join(work, "mnt"))
+    mnt = os.path.join(work, "mnt")
+    build_disk(pristine, content, mnt)
 
-    linux_root = os.path.join(work, "linux")
-    shutil.copytree(content, linux_root)
-    server = LinuxServer(linux_bin, linux_root, os.path.join(work, "linux.log"))
     failures = 0
-    try:
-        for case in READS + WRITES:
-            name, method, path = case[0], case[1], case[2]
-            scratch = tempfile.mkdtemp(dir=work)
-            image = os.path.join(scratch, "disk.img")
-            shutil.copy(pristine, image)
-            metal = boot_and_ask(elf, image, case, scratch)
-            linux_scratch = scratch + "-linux"
-            os.makedirs(linux_scratch)
-            linux = ask(server.port, method, path, case[3], case[4], linux_scratch)
-            diffs = differences(path, metal, linux)
-            if case[0] == "a new player" and not diffs:
-                diffs += written_differences(image, linux_root, os.path.join(work, "mnt"))
-            if diffs:
-                failures += 1
-                print(f"FAIL  {name}  ({method} {path})")
-                for d in diffs:
-                    print(f"        {d}")
-            else:
-                size = len(metal["body"])
-                print(f"ok    {name}  ({method} {path}) -> {metal['status']}, {size} bytes")
-    finally:
-        server.stop()
+    for c in CASES:
+        scratch = tempfile.mkdtemp(dir=work)
+        image = os.path.join(scratch, "disk.img")
+        shutil.copy(pristine, image)
+        metal = ask_kernel(elf, image, c, scratch)
+        linux = ask_linux(linux_bin, content, c, scratch)
+        diffs = differences(c, metal, linux)
+        if "error" not in metal and "error" not in linux:
+            diffs += file_differences(c, image, metal, linux, mnt)
+        label = f"{c['name']}  ({c['method']} {c['path']})"
+        if diffs:
+            failures += 1
+            print(f"FAIL  {label}")
+            for d in diffs:
+                print(f"        {d}")
+        else:
+            extra = f", {len(c['files'])} file(s) agree" if c["files"] else ""
+            print(f"ok    {label} -> {metal['status']}, {len(metal['body'])} bytes{extra}")
+        shutil.rmtree(scratch, ignore_errors=True)
 
-    total = len(READS) + len(WRITES)
-    print(f"{total - failures} of {total} requests answered the same on bare metal as on Linux")
+    print(f"{len(CASES) - failures} of {len(CASES)} requests answered the same on bare metal as on Linux")
     return 1 if failures else 0
-
-
-def written_differences(image: str, linux_root: str, mnt: str) -> list:
-    """The files the write left behind, read through the Linux VFAT driver on
-    the kernel's disk and straight off the Linux server's directory."""
-    out = []
-    mount(image, mnt, writable=False)
-    try:
-        for rel in WRITTEN_FILES:
-            m = read_or_none(os.path.join(mnt, rel))
-            l = read_or_none(os.path.join(linux_root, rel))
-            if m != l:
-                out.append(f"{rel}: metal wrote {m!r}, Linux wrote {l!r}")
-    finally:
-        umount(mnt)
-    # fsck.vfat has no offset option, so it checks a copy of the partition.
-    part = image + ".part"
-    info = run(["sgdisk", "-i", "1", image]).stdout
-    last = int(next(l for l in info.splitlines() if l.startswith("Last sector")).split()[2])
-    run(["dd", f"if={image}", f"of={part}", f"bs={SECTOR}", f"skip={PART_FIRST}",
-         f"count={last - PART_FIRST + 1}", "status=none"])
-    check = subprocess.run(["fsck.vfat", "-n", part], capture_output=True, text=True)
-    if check.returncode != 0:
-        out.append("fsck.vfat rejects the kernel's disk after the write: "
-                   + " | ".join(check.stdout.strip().splitlines()[1:4]))
-    return out
-
-
-def read_or_none(path: str):
-    try:
-        with open(path, "rb") as f:
-            return f.read()
-    except OSError:
-        return None
 
 
 if __name__ == "__main__":

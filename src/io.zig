@@ -29,6 +29,7 @@ const std = @import("std");
 const serial = @import("serial.zig");
 const fat16 = @import("fat16.zig");
 const rng = @import("rng.zig");
+const tsc = @import("tsc.zig");
 
 /// **THE VALUE THREADED THROUGH EVERY CALL IS THIS MODULE ITSELF.** On Linux it
 /// carries an event loop; here there is one machine and one disk, so it carries
@@ -445,31 +446,35 @@ pub const Dir = struct {
 
 // ---- time ----------------------------------------------------------------
 
-fn rdtsc() u64 {
-    var hi: u32 = undefined;
-    var lo: u32 = undefined;
-    asm volatile ("rdtsc"
-        : [lo] "={eax}" (lo),
-          [hi] "={edx}" (hi),
-    );
-    return (@as(u64, hi) << 32) | lo;
-}
-
-/// **THIS CLOCK IS MONOTONIC AND ITS UNIT IS A GUESS.** The timestamp counter
-/// moves forward and never goes back, which is what a timeout needs, but its
-/// rate is not known without measuring it against something that is. Two
-/// gigahertz is assumed.
-const assumed_hz: u64 = 2_000_000_000;
+/// **THE RATE IS MEASURED, AND THERE IS NO DEFAULT.** The timestamp counter
+/// moves forward and never goes back, which is what a timeout needs; its rate
+/// is the CPU's and has to be measured against something whose rate is known
+/// (pit.zig). This used to ASSUME two gigahertz. On this box the TSC runs at
+/// 2,494 MHz, so every duration ran 25% fast. A host now passes the measured
+/// rate, and asking for any clock before it has panics.
+var tsc_hz: u64 = 0;
 var tsc_base: u64 = 0;
 
-pub fn startClock() void {
-    tsc_base = rdtsc();
+const clock_unset_msg = "Io.Clock.now before startClock(tsc_hz): this machine does not know how fast its timestamp counter runs";
+
+pub fn startClock(measured_tsc_hz: u64) void {
+    tsc_hz = measured_tsc_hz;
+    tsc_base = tsc.read();
 }
 
-/// sinceBoot is nanoseconds since startClock(), at the assumed rate.
+pub fn clockIsStarted() bool {
+    return tsc_hz != 0;
+}
+
+/// Nanoseconds between two TSC readings, at the measured rate.
+fn ticksToNs(ticks: u64) i96 {
+    if (tsc_hz == 0) @panic(clock_unset_msg);
+    return @intCast(@divTrunc(@as(i128, ticks) * 1_000_000_000, @as(i128, tsc_hz)));
+}
+
+/// sinceBoot is nanoseconds since startClock().
 fn sinceBoot() i96 {
-    const ticks = rdtsc() -% tsc_base;
-    return @intCast(@divTrunc(@as(i128, ticks) * 1_000_000_000, @as(i128, assumed_hz)));
+    return ticksToNs(tsc.read() -% tsc_base);
 }
 
 /// **THE WALL CLOCK IS NOT SINCE-BOOT, AND IT REFUSES TO PRETEND.**
@@ -491,7 +496,15 @@ var real_set_at: i96 = 0;
 const real_unset_msg = "Io.Clock.now(.real) before setRealTime(): this machine does not know the wall-clock time, and answering with time-since-boot would silently disable session expiry";
 
 pub fn setRealTime(unix_seconds: i64) void {
-    real_set_at = sinceBoot();
+    setRealTimeAt(unix_seconds, tsc.read());
+}
+
+/// setRealTimeAt says the wall clock read `unix_seconds` at the moment the TSC
+/// read `at_tsc`. A host that waited for the RTC's seconds to tick over passes
+/// the TSC it captured AT that edge, so the anchor is as exact as the polling
+/// rather than up to a second late.
+pub fn setRealTimeAt(unix_seconds: i64, at_tsc: u64) void {
+    real_set_at = ticksToNs(at_tsc -% tsc_base);
     real_base_ns = @as(i96, unix_seconds) * 1_000_000_000;
 }
 

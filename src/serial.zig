@@ -2,20 +2,9 @@
 
 const com1: u16 = 0x3F8;
 
-pub fn outb(port: u16, value: u8) void {
-    asm volatile ("outb %[v], %[p]"
-        :
-        : [v] "{al}" (value),
-          [p] "N{dx}" (port),
-    );
-}
-
-pub fn inb(port: u16) u8 {
-    return asm volatile ("inb %[p], %[r]"
-        : [r] "={al}" (-> u8),
-        : [p] "N{dx}" (port),
-    );
-}
+const port = @import("port.zig");
+pub const outb = port.outb;
+pub const inb = port.inb;
 
 pub fn init() void {
     outb(com1 + 1, 0x00);

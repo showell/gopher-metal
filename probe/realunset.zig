@@ -19,7 +19,7 @@ comptime {
 pub fn kmain() noreturn {
     serial.init();
     serial.put("gopher-metal realunset probe: asking for .real without being told\n");
-    Io.startClock();
+    Io.startClock(metal.pit.calibrate() catch serial.fail("the PIT would not calibrate the TSC"));
     const t = Io.Clock.now(.real, Io.io());
     serial.put("  .real answered ");
     serial.putDec(@intCast(@divTrunc(t.nanoseconds, std.time.ns_per_s)));

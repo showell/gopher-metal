@@ -15,11 +15,11 @@
 //!
 //! and then gives each request an arena over base, as server.zig does.
 //!
-//! **WHAT IT DOES NOT DO YET.** It serves one request and stops. And it never
-//! calls `Io.setRealTime`, because nothing on this machine knows the wall clock
-//! — so a route that stamps a time stops the machine with a message saying so,
-//! rather than stamping a wrong one. probe/judge_gopher.py only asks for routes
-//! that do not.
+//! **WHAT IT DOES NOT DO YET.** It serves one request and stops.
+//!
+//! Its clocks come from its own hardware (wallclock.zig): the TSC's rate from
+//! the PIT, the wall clock from the CMOS RTC. That is what lets routes that
+//! stamp a time — new sessions, last-seen — be served at all.
 //!
 //! **IT IS JUDGED AGAINST LINUX.** judge_gopher.py sends each request to this
 //! kernel and to the same application running as an ordinary Linux process over
@@ -84,7 +84,17 @@ pub fn kmain() noreturn {
     serial.put("  volume mounted at LBA ");
     serial.putDec(part.first_lba);
     serial.put("\n");
-    Io.startClock();
+    const clock = metal.wallclock.start() catch |e| {
+        serial.put("  wallclock: ");
+        serial.put(@errorName(e));
+        serial.put("\n");
+        serial.fail("the clocks would not come up");
+    };
+    serial.put("  clock: TSC at ");
+    serial.putDec(clock.tsc_hz);
+    serial.put(" Hz, wall clock ");
+    serial.putDec(@intCast(clock.unix));
+    serial.put("\n");
     const io = Io.io();
 
     // ── the host contract ───────────────────────────────────────────────────

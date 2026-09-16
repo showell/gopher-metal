@@ -135,4 +135,17 @@ pub fn build(b: *std.Build) void {
     b.step("gopher", "the real server, once port.sh has prepared it").dependOn(&gopher_copy.step);
 
     b.getInstallStep().dependOn(&copy.step);
+
+    // **HOST TESTS** for the parts of src/ that are pure — no ports, no
+    // virtqueues — and so can run here rather than in a guest. Every mode a
+    // device can report in is a way to be silently wrong, and those modes are
+    // cheaper to enumerate on the host than to provoke in QEMU.
+    const test_step = b.step("test", "host unit tests for the pure parts of src/");
+    for ([_][]const u8{"src/rtc.zig"}) |path| {
+        const unit = b.addTest(.{ .root_module = b.createModule(.{
+            .root_source_file = b.path(path),
+            .target = b.graph.host,
+        }) });
+        test_step.dependOn(&b.addRunArtifact(unit).step);
+    }
 }

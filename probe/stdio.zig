@@ -61,7 +61,7 @@ pub fn kmain() noreturn {
     const vol = fat16.Volume.mount(&blk, &scratch, part.first_lba) catch serial.fail("the volume would not mount");
 
     Io.mount(vol);
-    Io.startClock();
+    Io.startClock(metal.pit.calibrate() catch serial.fail("the PIT would not calibrate the TSC"));
     const io = Io.io();
 
     // Written through our own Dir, so the probe does not depend on another

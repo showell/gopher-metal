@@ -36,26 +36,44 @@ and its two load-bearing findings are worth repeating here:
 | long names and subdirectories | **works** — `fsck.vfat` finds no error |
 | the backup story, both ways | **works** — Linux mounts it; we read what Linux wrote |
 | entropy | **works** — virtio-rng and RDRAND, mixed |
-| `Io.Dir` and a clock | **works** — see "the seam we first got wrong" |
-| **the real `zig-server`, serving a real page** | **works** — see below |
-| other pages, writes, SSE | asset plumbing, then a scheduler |
-| the real `zig-server` binary | the stage that proves the thesis |
+| FAT16 append, replace, delete, delete-tree | **works** — `fsck.vfat` and Linux judge; fragmented directories forced on purpose |
+| `Io.Dir` | **works** — see "the seam we first got wrong" |
+| the TSC's rate | **works** — measured against the PIT, 0.001% from the host kernel's own figure |
+| the wall clock | **works** — the CMOS RTC, anchored at a seconds edge; pinned leap-day, noon and 4 PM boots |
+| **angry-gopher's whole route table** | **works** — 38 requests, each answered the same as the Linux build over the same files |
+| more than one request per boot, SSE | next: a loop, then a scheduler |
 
+    zig build test         # host unit tests for the pure parts of src/
     zig build kernels      # every kernel into probe/
-    probe/run.sh           # boot each one under microvm
-    probe/run.sh net       # just one
+    probe/run.sh           # boot each one under microvm (~45 s)
+    probe/run.sh clock     # just one
+    ./port.sh && zig build gopher && probe/run.sh gopher   # the real server, judged against Linux
 
 ```
 PASS block |   wrote and read back sector 32767: 512 bytes match
 PASS fat16 |   read 355840 bytes; first two: 4d5a
 PASS fat16write | bin 1 2 3 254
      fat16write | console matches the ladder verdict for fat16-write
-PASS stdio | mutex: locked and unlocked twice, no contention possible
-PASS vfat  |   auth/damian: . .. api-key _session_secret
-     vfat  | fsck.vfat finds no error in what we wrote
-     vfat  | the Linux VFAT driver reads every name and byte we wrote
-PASS restore | auth/damian/_session_secret still reads: sixteen bytes!!!
-PASS rng   |   over 4 KB: 16422 of 32768 bits set
+PASS stdio |   mutex: locked and unlocked twice, no contention possible
+PASS vfat |   auth/damian: . .. api-key _session_secret
+     vfat | fsck.vfat finds no error in what we wrote
+     vfat | the Linux VFAT driver reads every name and byte we wrote
+PASS restore |   auth/damian/_session_secret still reads: sixteen bytes!!!
+PASS append |   createFile: .truncate = false keeps, the default empties
+     append | fsck.vfat finds no error after 600 appends
+     append | the Linux VFAT driver reads all 600 lines and the late append, byte for byte
+PASS replace |   tree/: four levels with data, deleted whole
+     replace | fsck.vfat finds nothing, and reclaims nothing
+     replace | sessions/ is 7 clusters with 6 gap(s) and 2 straddling run(s); all 100 files read back byte for byte
+PASS clock |   .real: the time it was told, advancing with .awake, re-anchored when told again
+     clock | ok   unix 1789600584 is within the host's clock [1789600582, 1789600591]
+     clock | ok   tsc_hz 2494162684 vs the host's 2494134000 (0.001%)
+     clock | pinned to midnight, across a leap day: civil 2020-3-1 0:0:1, four formats agree
+     clock | pinned to noon: civil 2020-3-1 12:0:1, four formats agree
+     clock | pinned to 4 PM: civil 2020-3-1 16:0:1, four formats agree
+PASS clock | refused as it must: the PIT would not calibrate the TSC
+PASS realunset | refused as it must: PANIC: Io.Clock.now(.real) before setRealTime()
+PASS rng |   over 4 KB: 16347 of 32768 bits set, commonest byte appears 25 times
 PASS net |   server : 10.0.2.2
 PASS http | curl got "hello from no Linux"
 PASS stdhttp | curl got "hello from std.http.Server, with no Linux under it"
@@ -135,9 +153,14 @@ gopher-metal http probe
 | `src/tcp.zig` | one connection at a time: accept, read, answer, close |
 | `src/stream.zig` | that connection as a `std.Io.Reader` and a `std.Io.Writer` |
 | `src/io.zig` | `Io.Dir`, `Io.Clock`, `Io.Mutex`, `Io.Group` — the surface the application calls |
+| `src/port.zig`, `src/tsc.zig` | x86 port I/O, and the timestamp counter |
+| `src/pit.zig` | the interval timer, used once: to measure the TSC's rate |
+| `src/rtc.zig` | the CMOS clock — the device half, and a pure half with host tests |
+| `src/wallclock.zig` | both of those, in the order a host needs them |
 | `probe/*.zig` | one kernel each; a root file with a `kmain` |
 | `probe/link.ld` | the layout — the note first, and `.bss` treated as unwritten |
 | `probe/run.sh` | boots each under `-M microvm`, maps QEMU's exit code back to the guest's |
+| `probe/judge_*.py` | the outside verdicts: the host's clock, a raw FAT16 parse, and the Linux build of angry-gopher |
 
 ## Three things that cost time
 
@@ -156,6 +179,25 @@ speaks virtio 1.2 correctly refuses to talk to it.
 present but empty — which is indistinguishable from "no device at all" if you
 only scan eight of them. `info qtree` answers this in one command; guessing does
 not.
+
+**There is no port 0x61.** The textbook TSC calibration gates PIT channel 2
+through the PC speaker's port and reads its output there; `microvm` has no
+speaker, and the port reads 0xFF. Channel 0's count, latched and read back,
+needs neither.
+
+**A request sent while the guest is still starting takes six seconds.** QEMU's
+user-mode network accepts the host connection at once and forwards the SYN; a
+guest with no NIC driver running yet drops it, and QEMU's own TCP retries only
+about six seconds later. `judge_gopher.py` waits for the guest to print
+"listening" first — that was 4½ of the first run's 5 minutes.
+
+**Two FAT16 bugs that only a replace, and only a big directory, could show.**
+Removing an entry freed its chain before tombstoning it, and the chain walk
+reuses the machine's one scratch sector — so a FAT sector was written over the
+directory. And a long name's parts were located by `lba += 1`, which past a
+subdirectory's cluster edge is someone else's data. Our own reader agreed with
+both; `fsck.vfat` and Linux did not. `probe/replace.zig` forces both shapes and
+its judge checks, from the raw image, that it did.
 
 ## The oracle row
 
@@ -184,50 +226,39 @@ cluster 4891 holding `Hello, disk!`, and BIN.DAT is at 4892 holding
 
 ## The real server
 
-`port.sh` copies angry-gopher's 61 source files and changes one line in each of
-the 37 that has it. Nothing else is touched.
+`port.sh` copies angry-gopher's sources and changes one line in each file that
+opens with `const Io = std.Io;`. Nothing else is touched.
+
+`probe/gopher.zig` is a HOST in the sense angry-gopher's `router.zig` defines —
+the contract any host meets before calling the route table:
+
+    mem_meter.init(base)        base: a bump allocator over a 16 MB static block
+    roots.point(base, …)        data/ and auth/, on the volume
+    a Bus over base
+    an arena per request
+
+— with the site on a GPT disk whose first partition is FAT16, and clocks from
+its own hardware. Then it calls `router.route`: the application's real
+dispatch, every page.
+
+**It is judged against Linux.** `probe/judge_gopher.py` sends each request to
+this kernel (one boot each, since it serves one and stops) and to the ordinary
+Linux build of the same source over the same files, each case starting from the
+same state on both sides. Status, Location, Set-Cookie, Content-Type and body
+must match; files a request writes are read back through the Linux VFAT driver
+and must match too; and a Unix time is only forgiven if it falls inside the
+window in which that side handled the request.
 
 ```
-61 files copied, 37 had the alias, 37 now point at this machine
+38 of 38 requests answered the same on bare metal as on Linux
 ```
 
-Then **all 61 compile for `x86_64-freestanding`** — checked with
-`std.testing.refAllDecls` on every module, because zig only analyses what is
-reached and a plain build would have proved much less. Zero errors. That
-includes `markdown.zig` (773 lines), `users.zig` (942, crypto and all),
-`chat_store.zig`, `storage.zig`.
+The index read off the volume, the résumé and its 27 KB PDF, both admin
+screens refusing a stranger, the name page, the player store, a staged game
+session rendered in Eastern time, new game and puzzle sessions stamped with the
+wall clock, a move appended to an action log, a new player's counter and row.
 
-And `probe/gopher.zig` boots it:
-
-```
-gopher-metal: angry-gopher, with no Linux under it
-  address: 10.0.2.15
-  listening on port 80
-  GET /
-  served /driving from angry-gopher's own source
-```
-
-`curl` on the other side gets 200 and 231 bytes of the real page:
-
-```html
-<!DOCTYPE html>
-<html lang="en"><head>…<title>Safari Screensaver</title></head>
-<body><script src="/driving/blitter.js"></script></body></html>
-```
-
-`std.http.Server` parsed the request. `driving.handle` — angry-gopher's own
-function, from its own file — wrote the response. No operating system was
-involved at any point.
-
-**What is left is not about the machine.** Each page embeds its front-end
-assets by name (`@embedFile("safari_wasm")`), wired by a table in the
-application's own `build.zig`. Serving more pages means mirroring more of that
-table — the same plumbing it needs on Linux, and none of it interesting. The
-two `/driving` needs are mirrored in `build.zig`; the rest are not yet.
-
-    ./port.sh              # the one-line change, 37 times
-    zig build gopher       # the real server as a kernel
-    probe/run.sh gopher    # boot it and fetch from it
+What it does not do yet is serve a second request. That, then SSE.
 
 ## The seam we first got wrong
 
