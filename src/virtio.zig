@@ -78,6 +78,11 @@ fn mmioWrite(base: usize, reg: Reg, value: u32) void {
     p.* = value;
 }
 
+pub fn configRead8(base: usize, off: u32) u8 {
+    const p: *volatile u8 = @ptrFromInt(base + @intFromEnum(Reg.config) + off);
+    return p.*;
+}
+
 fn configRead64(base: usize, off: u32) u64 {
     const lo: *volatile u32 = @ptrFromInt(base + @intFromEnum(Reg.config) + off);
     const hi: *volatile u32 = @ptrFromInt(base + @intFromEnum(Reg.config) + off + 4);
@@ -132,9 +137,9 @@ const Desc = extern struct {
     next: u16,
 };
 
-const desc_flag_next: u16 = 1;
+pub const desc_flag_next: u16 = 1;
 /// The DEVICE writes this buffer; without it the device reads.
-const desc_flag_write: u16 = 2;
+pub const desc_flag_write: u16 = 2;
 
 /// A virtqueue's three rings, laid out as one block of memory the caller owns.
 /// The device is told where each ring is and then reads and writes them

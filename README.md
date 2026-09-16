@@ -23,27 +23,47 @@ and its two load-bearing findings are worth repeating here:
 
 | | |
 |---|---|
-| virtio-blk over MMIO | **works** — reads, writes, and reads back |
 | the boot | **works** — PVH, long mode, identity-mapped low 4 GB |
-| virtio-net | next |
-| TCP/IP | after that |
+| virtio-blk over MMIO | **works** — reads, writes, and reads back |
+| virtio-net over MMIO | **works** |
+| DHCP | **works** — leases 10.0.2.15 from QEMU's server |
+| ARP, TCP | next |
 | `Io` over the floor | the stage that proves the thesis |
 
-    zig build probe        # the kernel into probe/probe.elf
-    probe/run.sh           # boot it under microvm against a disk image
+    zig build kernels      # every kernel into probe/
+    probe/run.sh           # boot each one under microvm
+    probe/run.sh net       # just one
 
-`probe/` is a kernel that is only the driver and a serial port. It exists so a
+```
+PASS block |   wrote and read back sector 32767: 512 bytes match
+PASS net |   server : 10.0.2.2
+```
+
+A probe is a kernel that is only a driver and a serial port. They exist so a
 driver can be put on virtual hardware and checked before anything is built on
-top of it: it brings the device up, reads sector 0 and checks its boot
-signature, then writes the last sector and reads all 512 bytes back. Reading
-proves bytes moved; writing and comparing proves they moved **where we said**.
+top of it.
+
+**`block`** brings the device up, reads sector 0 and checks its boot signature,
+then writes the last sector and reads all 512 bytes back. Reading proves bytes
+moved; writing and comparing proves they moved **where we said**.
+
+**`net`** brings the NIC up and takes a DHCP lease. QEMU's user-mode networking
+answers DHCP at 10.0.2.2 with nothing configured, so the result needs no second
+machine — and it is the same exchange Cobblestone's `dhcp-acquire` performs
+through the Roc machine and an emulated NE2000. Two paths, one protocol, one
+answer to compare.
 
 | where | what |
 |---|---|
-| `src/virtio.zig` | the MMIO transport, the virtqueue, and the block device on it |
-| `probe/kernel.zig` | the probe: the PVH note, the long-mode stub, a serial port, and the checks |
+| `src/boot.zig` | the PVH note, the long-mode stub, and the page tables |
+| `src/serial.zig` | COM1 and QEMU's exit door: the whole console |
+| `src/virtio.zig` | the MMIO transport, the virtqueue, and the block device |
+| `src/net.zig` | virtio-net: frames out, frames in |
+| `src/proto.zig` | ethernet, IPv4 and UDP — enough to carry a datagram |
+| `src/dhcp.zig` | DISCOVER, OFFER, REQUEST, ACK |
+| `probe/*.zig` | one kernel each; a root file with a `kmain` |
 | `probe/link.ld` | the layout — the note first, and `.bss` treated as unwritten |
-| `probe/run.sh` | boots it under `-M microvm` and maps QEMU's exit code back to the guest's |
+| `probe/run.sh` | boots each under `-M microvm`, maps QEMU's exit code back to the guest's |
 
 ## Three things that cost time
 

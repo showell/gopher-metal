@@ -1,0 +1,123 @@
+//! Getting from where QEMU drops us to where zig can run.
+//!
+//! **PVH, NOT MULTIBOOT.** QEMU's multiboot loader refuses a 64-bit ELF
+//! outright ("Cannot load x86-64 image, give a 32bit one"), and these kernels
+//! are 64-bit. PVH is the other door into the same machine and takes an ELF of
+//! either width: an ELF note names a 32-bit entry point, and QEMU enters there
+//! in 32-bit protected mode with paging off. It is also what Firecracker and
+//! every modern microVM boot, so it is the more useful door anyway.
+//!
+//! The root file supplies `kmain`. Import this from it for the side effect:
+//!
+//!     comptime { _ = @import("boot"); }
+
+const root = @import("root");
+
+// The note is assembly because it must be a real SHT_NOTE section for QEMU to
+// find it in a PT_NOTE segment, and `linksection` makes PROGBITS.
+comptime {
+    asm (
+        \\.section .note.Xen, "a", @note
+        \\.align 4
+        \\.long 4                // namesz: "Xen" and its NUL
+        \\.long 4                // descsz: a 32-bit entry address
+        \\.long 18               // XEN_ELFNOTE_PHYS32_ENTRY
+        \\.asciz "Xen"
+        \\.align 4
+        \\.long _start
+        \\.align 4
+    );
+}
+
+/// Identity paging for the low 4 GB in 2 MB pages. 4 GB because the virtio
+/// window is at 0xFEB00000, well above the first gigabyte -- and because a
+/// device is handed PHYSICAL addresses, so identity mapping is what makes a
+/// pointer mean the same thing to this code and to the device.
+const pde_present_write_2mb: u64 = 0x83;
+
+export var page_directories align(4096) linksection(".data") = blk: {
+    @setEvalBranchQuota(10000);
+    var t: [4][512]u64 = undefined;
+    for (0..4) |i| {
+        for (0..512) |j| {
+            t[i][j] = @as(u64, (i * 512 + j) * 0x200000) | pde_present_write_2mb;
+        }
+    }
+    break :blk t;
+};
+
+/// In `.data`, not `.bss`: the loader does not write `.bss`, so nothing there
+/// may be assumed zero, and a page table full of whatever was in RAM is a
+/// triple fault.
+export var pml4 align(4096) linksection(".data") = [_]u64{0} ** 512;
+export var pdpt align(4096) linksection(".data") = [_]u64{0} ** 512;
+export var stack align(16) linksection(".data") = [_]u8{0} ** (64 * 1024);
+
+/// A flat GDT: a 64-bit code segment and a data segment, which is all long
+/// mode looks at.
+export var gdt align(8) linksection(".data") = [_]u64{
+    0,
+    0x00AF9A000000FFFF, // code: present, ring 0, executable, long
+    0x00CF92000000FFFF, // data: present, ring 0, writable
+};
+
+const GdtPointer = extern struct { limit: u16, base: u32 };
+/// Filled by the stub, because the base is an address only the linker knows.
+/// Three entries of eight bytes, so the limit is 23.
+export var gdt_pointer linksection(".data") = GdtPointer{ .limit = 0, .base = 0 };
+
+export fn kmain_trampoline() callconv(.c) noreturn {
+    root.kmain();
+}
+
+export fn _start() callconv(.naked) noreturn {
+    asm volatile (
+        \\.code32
+        \\  cli
+        \\  movl $pdpt, %eax
+        \\  orl $3, %eax
+        \\  movl %eax, pml4
+        \\  movl $0, pml4 + 4
+        \\  movl $page_directories, %eax
+        \\  orl $3, %eax
+        \\  movl %eax, pdpt + 0
+        \\  movl $0, pdpt + 4
+        \\  addl $4096, %eax
+        \\  movl %eax, pdpt + 8
+        \\  movl $0, pdpt + 12
+        \\  addl $4096, %eax
+        \\  movl %eax, pdpt + 16
+        \\  movl $0, pdpt + 20
+        \\  addl $4096, %eax
+        \\  movl %eax, pdpt + 24
+        \\  movl $0, pdpt + 28
+        \\  movl %cr4, %eax
+        \\  orl $0x20, %eax          // PAE
+        \\  movl %eax, %cr4
+        \\  movl $pml4, %eax
+        \\  movl %eax, %cr3
+        \\  movl $0xC0000080, %ecx   // EFER
+        \\  rdmsr
+        \\  orl $0x100, %eax         // LME
+        \\  wrmsr
+        \\  movl %cr0, %eax
+        \\  orl $0x80000001, %eax    // paging + protection: long mode arms here
+        \\  movl %eax, %cr0
+        \\  movw $23, gdt_pointer
+        \\  movl $gdt, %eax
+        \\  movl %eax, gdt_pointer + 2
+        \\  lgdt gdt_pointer
+        \\  ljmp $0x08, $.Llong
+        \\.code64
+        \\.Llong:
+        \\  movw $0x10, %ax
+        \\  movw %ax, %ds
+        \\  movw %ax, %es
+        \\  movw %ax, %ss
+        \\  movw %ax, %fs
+        \\  movw %ax, %gs
+        \\  leaq stack + 65520, %rsp
+        \\  call kmain_trampoline
+        \\  hlt
+    );
+}
