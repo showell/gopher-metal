@@ -32,7 +32,8 @@ and its two load-bearing findings are worth repeating here:
 | HTTP, ours | **works** — `curl` gets a 200 from it |
 | **`std.http.Server`, unmodified** | **works** — see below |
 | GPT and FAT16, read side | **works** — against Cobblestone's own fixtures |
-| FAT16 write, `Io.Dir` | next |
+| FAT16 write | **works** — reproduces the ladder verdict byte for byte |
+| `Io.Dir` and a clock | next |
 | the real `zig-server` binary | the stage that proves the thesis |
 
     zig build kernels      # every kernel into probe/
@@ -42,6 +43,8 @@ and its two load-bearing findings are worth repeating here:
 ```
 PASS block |   wrote and read back sector 32767: 512 bytes match
 PASS fat16 |   read 355840 bytes; first two: 4d5a
+PASS fat16write | bin 1 2 3 254
+     fat16write | console matches the ladder verdict for fat16-write
 PASS net |   server : 10.0.2.2
 PASS http | curl got "hello from no Linux"
 PASS stdhttp | curl got "hello from std.http.Server, with no Linux under it"
@@ -116,7 +119,7 @@ gopher-metal http probe
 | `src/proto.zig` | ethernet, IPv4 and UDP — enough to carry a datagram |
 | `src/dhcp.zig` | DISCOVER, OFFER, REQUEST, ACK |
 | `src/gpt.zig` | where the partition starts, because sector 0 is not the filesystem |
-| `src/fat16.zig` | mount a volume, walk a directory, read a file |
+| `src/fat16.zig` | mount a volume, walk a directory, read a file, write one |
 | `src/arp.zig` | answering "who has this address?", which is what makes one reachable |
 | `src/tcp.zig` | one connection at a time: accept, read, answer, close |
 | `src/stream.zig` | that connection as a `std.Io.Reader` and a `std.Io.Writer` |
@@ -141,6 +144,31 @@ speaks virtio 1.2 correctly refuses to talk to it.
 present but empty — which is indistinguishable from "no device at all" if you
 only scan eight of them. `info qtree` answers this in one command; guessing does
 not.
+
+## The oracle row
+
+`probe/fat16write.zig` does not judge itself. It writes HELLO.TXT and BIN.DAT
+to a FAT16 volume and prints the seven lines Cobblestone's `fat16-write` test
+prints, and `run.sh` compares that console with **the test's own verdict** —
+`probe/expect/fat16write.txt`, copied from the ladder, the same file
+`roc-apps/floor`'s verify.sh uses to check the Roc implementation.
+
+```
+wrote True
+exists True
+readback Hello, disk!
+size 12
+wrote-bin True
+bin 1 2 3 254
+absent False
+```
+
+Two filesystems, in two languages, on one disk image, agreeing line for line.
+
+The image they leave behind was also read back from outside, with neither
+implementation involved: both copies of the FAT are identical, HELLO.TXT is at
+cluster 4891 holding `Hello, disk!`, and BIN.DAT is at 4892 holding
+`01 02 03 fe`. Agreeing with our own reader would have proved much less.
 
 ## Why we wrote our own FAT16
 

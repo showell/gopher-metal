@@ -84,6 +84,26 @@ if [ "$want" = all ] || [ "$want" = fat16 ]; then
         -device virtio-blk-device,drive=d
 fi
 
+# **THE ORACLE ROW.** This one does not judge itself: it prints what
+# Cobblestone's fat16-write test prints, and its console is compared with that
+# test's own verdict -- the same file roc-apps/floor's verify.sh uses for the
+# Roc implementation. Two filesystems, two languages, one disk image.
+if [ "$want" = all ] || [ "$want" = fat16write ]; then
+    cp "${WRITE_IMAGE:-$CHECKOUT/codex/test/fat16-write.disk}" "$WORK/fat16write.img"
+    boot fat16write \
+        -drive id=d,file="$WORK/fat16write.img",format=raw,if=none \
+        -device virtio-blk-device,drive=d
+    if [ -f "$WORK/fat16write.out" ]; then
+        if diff -q "$WORK/fat16write.out" "$HERE/expect/fat16write.txt" > /dev/null 2>&1; then
+            echo "     fat16write | console matches the ladder verdict for fat16-write"
+        else
+            echo "FAIL fat16write | console differs from the ladder verdict:"
+            diff "$HERE/expect/fat16write.txt" "$WORK/fat16write.out" | head -12
+            failed=1
+        fi
+    fi
+fi
+
 if [ "$want" = all ] || [ "$want" = net ]; then
     boot net \
         -netdev user,id=n0 \
