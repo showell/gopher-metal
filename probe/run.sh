@@ -138,6 +138,44 @@ if [ "$want" = all ] || [ "$want" = vfat ]; then
                 grep -av "^fsck.fat\|^$" "$WORK/vfat.fsck" | head -8
                 failed=1
             fi
+
+            # **THE BACKUP STORY, BOTH WAYS.** Structure passing fsck is not the
+            # same as the data being reachable. This mounts the volume with the
+            # Linux kernel's own VFAT driver, checks it reads what we wrote, has
+            # Linux write a long-named file into a directory it creates, and
+            # then boots the machine again to read that back.
+            #
+            # Needs root, so it is skipped rather than failed where there is
+            # none: a check that cannot run must not look like one that passed.
+            if ! sudo -n true 2>/dev/null; then
+                echo "     vfat | SKIPPED the loop-mount check: it needs root"
+            else
+                mnt="$WORK/mnt"
+                mkdir -p "$mnt"
+                sudo mount -o loop,ro,noexec,nosuid,nodev "$img" "$mnt"
+                got="$(cat "$mnt/auth/damian/_session_secret" 2>/dev/null || true)"
+                names="$(find "$mnt" -type f -printf '%f\n' 2>/dev/null | sort | tr '\n' ' ')"
+                sudo umount "$mnt"
+                if [ "$got" != "sixteen bytes!!!" ]; then
+                    echo "FAIL vfat | Linux read [$got] where we wrote [sixteen bytes!!!]"
+                    failed=1
+                elif [ "$names" != "_session_secret api-key blog-comments last-seen upload-bytes " ]; then
+                    echo "FAIL vfat | Linux sees different names: $names"
+                    failed=1
+                else
+                    echo "     vfat | the Linux VFAT driver reads every name and byte we wrote"
+                fi
+
+                # Now the other direction: Linux writes, we read.
+                sudo mount -o loop,noexec,nosuid,nodev "$img" "$mnt"
+                sudo mkdir -p "$mnt/restored"
+                printf 'linux wrote this, with a name 8.3 cannot hold\n' \
+                    | sudo tee "$mnt/restored/written-by-linux.txt" > /dev/null
+                sudo umount "$mnt"
+                boot restore \
+                    -drive id=d,file="$img",format=raw,if=none \
+                    -device virtio-blk-device,drive=d
+            fi
         fi
     fi
 fi

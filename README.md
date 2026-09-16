@@ -34,6 +34,7 @@ and its two load-bearing findings are worth repeating here:
 | GPT and FAT16, read side | **works** — against Cobblestone's own fixtures |
 | FAT16 write | **works** — reproduces the ladder verdict byte for byte |
 | long names and subdirectories | **works** — `fsck.vfat` finds no error |
+| the backup story, both ways | **works** — Linux mounts it; we read what Linux wrote |
 | entropy | **works** — virtio-rng and RDRAND, mixed |
 | `Io.Dir` and a clock | **works** — see "the seam we first got wrong" |
 | **the real `zig-server`, serving a real page** | **works** — see below |
@@ -52,6 +53,8 @@ PASS fat16write | bin 1 2 3 254
 PASS stdio | mutex: locked and unlocked twice, no contention possible
 PASS vfat  |   auth/damian: . .. api-key _session_secret
      vfat  | fsck.vfat finds no error in what we wrote
+     vfat  | the Linux VFAT driver reads every name and byte we wrote
+PASS restore | auth/damian/_session_secret still reads: sixteen bytes!!!
 PASS rng   |   over 4 KB: 16422 of 32768 bits set
 PASS net |   server : 10.0.2.2
 PASS http | curl got "hello from no Linux"
@@ -318,6 +321,41 @@ sum = (((sum & 1) << 7) | ((sum & 0xFE) >> 1)) +% short[i]
 name with a lowercase letter a long one. That is the same bug Cobblestone's own
 `Fat16` carries a paragraph about having had, found here by looking at the
 output rather than at the checker.
+
+## The backup story, both ways
+
+Structure passing `fsck` is not the same as the data being reachable, so the
+check does not stop there. It loop-mounts the volume with **the Linux kernel's
+own VFAT driver** and compares what Linux sees with what we wrote:
+
+```
+./auth/damian/_session_secret      sixteen bytes!!!
+./auth/damian/api-key              3-notarealkey
+./users/damian/last-seen           1758038400
+./users/damian/upload-bytes        4096
+./blog-comments                    none yet
+```
+
+Every name exact — lowercase preserved, hyphens, the leading underscore — and
+every byte. So `cp -r` off a mount gets the data out, which is the half of the
+backup story people usually check.
+
+Then the other half, which is the one that matters when something has gone
+wrong: **Linux writes and we read**. The check has the kernel create a directory
+and a long-named file, unmounts, and boots the machine again:
+
+```
+gopher-metal restore probe
+  restored/written-by-linux.txt: 46 bytes
+  contents: linux wrote this, with a name 8.3 cannot hold
+  auth/damian/_session_secret still reads: sixteen bytes!!!
+```
+
+A backup taken on Linux restores here. And our own files survived Linux writing
+to the volume, which a one-way check would not have noticed.
+
+The mount needs root, so it is **skipped rather than failed** where there is
+none — a check that cannot run must not look like one that passed.
 
 ## Why we wrote our own FAT16
 
