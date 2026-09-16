@@ -81,59 +81,70 @@ if [ "$want" = all ] || [ "$want" = net ]; then
         -device virtio-net-device,netdev=n0
 fi
 
-# The http probe is the only one whose verdict is not its own output: it is
-# what curl on this side gets back. QEMU forwards a host port to the guest's
+# The http probes are the only ones whose verdict is not their own output: it
+# is what curl on this side gets back. QEMU forwards a host port to the guest's
 # port 80, so nothing here needs a second machine or root.
 #
 # curl does the waiting. --retry-connrefused is the flag that matters: the
 # guest is still bringing up a NIC and taking a DHCP lease while curl is
 # already trying, and without it the first refused connection is fatal.
-if [ "$want" = all ] || [ "$want" = http ]; then
-    if [ ! -f "$HERE/http.elf" ]; then
-        echo "FAIL http | no http.elf; run: zig build kernels"
+serve() {
+    local name="$1" want_body="$2"
+    if [ ! -f "$HERE/$name.elf" ]; then
+        echo "FAIL $name | no $name.elf; run: zig build kernels"
+        failed=1
+        return
+    fi
+    local port out body
+    port="$(python3 -c 'import socket; s=socket.socket(); s.bind(("127.0.0.1",0)); print(s.getsockname()[1]); s.close()')"
+    out="$WORK/$name.out"
+    body="$WORK/$name.body"
+
+    timeout 60 qemu-system-x86_64 \
+        -M microvm \
+        -kernel "$HERE/$name.elf" \
+        -nographic -no-reboot -m 512 \
+        -global virtio-mmio.force-legacy=false \
+        -device isa-debug-exit,iobase=0xf4,iosize=0x04 \
+        -netdev "user,id=n0,hostfwd=tcp:127.0.0.1:$port-:80" \
+        -device virtio-net-device,netdev=n0 > "$out" 2>&1 &
+    local qemu_pid=$!
+
+    curl -sS --max-time 30 --retry 40 --retry-delay 1 --retry-connrefused \
+        -o "$body" -w '%{http_code}' "http://127.0.0.1:$port/probe" > "$WORK/$name.code" 2>"$WORK/$name.err"
+    local curl_code=$?
+    wait $qemu_pid
+    local qemu_exit=$?
+
+    tr -cd '\11\12\15\40-\176' < "$out" \
+        | sed 's/\x1b\[[0-9;?]*[a-zA-Z]//g; /SeaBIOS/d; s/^.*Booting from ROM\.\.//' \
+        | grep -v '^[[:space:]]*$' > "$out.txt"
+    mv "$out.txt" "$out"
+
+    if [ $curl_code -ne 0 ]; then
+        echo "FAIL $name | curl failed: $(head -1 "$WORK/$name.err")"
+        failed=1
+    elif [ "$(cat "$WORK/$name.code")" != "200" ]; then
+        echo "FAIL $name | status $(cat "$WORK/$name.code"), want 200; see $out"
+        failed=1
+    elif [ "$(cat "$body")" != "$want_body" ]; then
+        echo "FAIL $name | body was [$(cat "$body")], want [$want_body]"
+        failed=1
+    elif [ $qemu_exit -ne 1 ]; then
+        echo "FAIL $name | served, but the guest exited $qemu_exit; see $out"
         failed=1
     else
-        port="$(python3 -c 'import socket; s=socket.socket(); s.bind(("127.0.0.1",0)); print(s.getsockname()[1]); s.close()')"
-        out="$WORK/http.out"
-        timeout 60 qemu-system-x86_64 \
-            -M microvm \
-            -kernel "$HERE/http.elf" \
-            -nographic -no-reboot -m 512 \
-            -global virtio-mmio.force-legacy=false \
-            -device isa-debug-exit,iobase=0xf4,iosize=0x04 \
-            -netdev "user,id=n0,hostfwd=tcp:127.0.0.1:$port-:80" \
-            -device virtio-net-device,netdev=n0 > "$out" 2>&1 &
-        qemu_pid=$!
-
-        body="$WORK/http.body"
-        curl -sS --max-time 30 --retry 40 --retry-delay 1 --retry-connrefused \
-            -o "$body" -w '%{http_code}' "http://127.0.0.1:$port/" > "$WORK/http.code" 2>"$WORK/http.err"
-        curl_code=$?
-        wait $qemu_pid
-        qemu_exit=$?
-
-        tr -cd '\11\12\15\40-\176' < "$out" \
-            | sed 's/\x1b\[[0-9;?]*[a-zA-Z]//g; /SeaBIOS/d; s/^.*Booting from ROM\.\.//' \
-            | grep -v '^[[:space:]]*$' > "$out.txt"
-        mv "$out.txt" "$out"
-
-        want_body="hello from no Linux"
-        if [ $curl_code -ne 0 ]; then
-            echo "FAIL http | curl failed: $(head -1 "$WORK/http.err")"
-            failed=1
-        elif [ "$(cat "$WORK/http.code")" != "200" ]; then
-            echo "FAIL http | status $(cat "$WORK/http.code"), want 200"
-            failed=1
-        elif [ "$(cat "$body")" != "$want_body" ]; then
-            echo "FAIL http | body was $(cat "$body"), want $want_body"
-            failed=1
-        elif [ $qemu_exit -ne 1 ]; then
-            echo "FAIL http | served, but the guest exited $qemu_exit; see $out"
-            failed=1
-        else
-            echo "PASS http | curl got \"$(cat "$body")\" over TCP from a machine with no OS"
-        fi
+        echo "PASS $name | curl got \"$(cat "$body")\""
     fi
+}
+
+if [ "$want" = all ] || [ "$want" = http ]; then
+    serve http "hello from no Linux"
+fi
+
+# The one that matters: the HTTP is zig's own std.http.Server, unmodified.
+if [ "$want" = all ] || [ "$want" = stdhttp ]; then
+    serve stdhttp "hello from std.http.Server, with no Linux under it"
 fi
 
 exit $failed

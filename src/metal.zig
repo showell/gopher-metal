@@ -10,3 +10,4 @@ pub const proto = @import("proto.zig");
 pub const dhcp = @import("dhcp.zig");
 pub const arp = @import("arp.zig");
 pub const tcp = @import("tcp.zig");
+pub const stream = @import("stream.zig");

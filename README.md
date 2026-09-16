@@ -29,8 +29,10 @@ and its two load-bearing findings are worth repeating here:
 | DHCP | **works** — leases 10.0.2.15 from QEMU's server |
 | ARP | **works** — answers, which is what makes the address reachable |
 | TCP | **works** — one connection, in-order, no retransmit |
-| HTTP | **works** — `curl` gets a 200 from it |
-| `Io` over the floor | the stage that proves the thesis |
+| HTTP, ours | **works** — `curl` gets a 200 from it |
+| **`std.http.Server`, unmodified** | **works** — see below |
+| `Io.Dir` over a filesystem | next |
+| the real `zig-server` binary | the stage that proves the thesis |
 
     zig build kernels      # every kernel into probe/
     probe/run.sh           # boot each one under microvm
@@ -39,8 +41,42 @@ and its two load-bearing findings are worth repeating here:
 ```
 PASS block |   wrote and read back sector 32767: 512 bytes match
 PASS net |   server : 10.0.2.2
-PASS http | curl got "hello from no Linux" over TCP from a machine with no OS
+PASS http | curl got "hello from no Linux"
+PASS stdhttp | curl got "hello from std.http.Server, with no Linux under it"
 ```
+
+## The one that matters
+
+`zig-server` builds its HTTP server like this, and so does `probe/stdhttp.zig`:
+
+```zig
+var server = std.http.Server.init(s.reader(), s.writer());
+const req = try server.receiveHead();
+try req.respond(body, .{});
+```
+
+A reader and a writer, and nothing else. So a TCP connection that can present
+those two interfaces gets zig's entire HTTP/1.1 implementation for free — not
+ported, not vendored, not adapted, the same code from the same standard
+library, on a machine with no operating system:
+
+```
+gopher-metal std.http probe
+  address: 10.0.2.15
+  listening on port 80, with zig's own HTTP
+  connected
+  method: GET  target: /probe
+  responded
+```
+
+`src/stream.zig` is what makes that true, and it is about a hundred lines,
+because each interface needs exactly one function: a reader needs `stream`, a
+writer needs `drain`, and everything else in both vtables has a default.
+
+**A read there runs the event loop.** With one core and no preemption there is
+nobody else to move the connection forward, so a read with no bytes yet polls
+the NIC, answers ARP, feeds TCP and tries again. That is what "blocking" means
+when there are no threads to block.
 
 A probe is a kernel that is only a driver and a serial port. They exist so a
 driver can be put on virtual hardware and checked before anything is built on
@@ -79,6 +115,7 @@ gopher-metal http probe
 | `src/dhcp.zig` | DISCOVER, OFFER, REQUEST, ACK |
 | `src/arp.zig` | answering "who has this address?", which is what makes one reachable |
 | `src/tcp.zig` | one connection at a time: accept, read, answer, close |
+| `src/stream.zig` | that connection as a `std.Io.Reader` and a `std.Io.Writer` |
 | `probe/*.zig` | one kernel each; a root file with a `kmain` |
 | `probe/link.ld` | the layout — the note first, and `.bss` treated as unwritten |
 | `probe/run.sh` | boots each under `-M microvm`, maps QEMU's exit code back to the guest's |
