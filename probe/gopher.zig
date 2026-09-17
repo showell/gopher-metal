@@ -11,7 +11,8 @@
 //!
 //!   1. mem_meter.init(base)   base is a bump allocator over a static block
 //!   2. roots.point(base, …)   data/ and auth/, on the volume
-//!   3. a Bus over base        nothing subscribes yet
+//!   3. a Hub over base        each request gets a Bus handle on it
+//!   4. serve what was kept    not yet: a kept stream is logged and dropped
 //!
 //! Its clocks come from its own hardware (wallclock.zig).
 //!
@@ -51,6 +52,8 @@ const ready = metal.ready;
 /// The application, as it is.
 const router = @import("router.zig");
 const Bus = router.Bus;
+const Hub = router.Hub;
+const streams = router.streams;
 
 comptime {
     _ = metal.boot;
@@ -218,7 +221,7 @@ pub fn kmain() noreturn {
     const base = router.mem_meter.init(gpa.allocator());
     router.roots.point(base, .{ .data_dir = "data", .auth_dir = "auth" }) catch
         serial.fail("roots.point could not allocate the store paths");
-    var bus = Bus.init(io, base);
+    var hub = Hub.init(io, base);
 
     const conf = readConfig(io, base);
     const limit = conf.requests;
@@ -270,7 +273,7 @@ pub fn kmain() noreturn {
         const now = Io.awakeNs() orelse 0;
         if (nextReady(&table)) |pick| {
             served += 1;
-            serveOne(io, &nic, &table, pick, lease.address, request_fba.allocator(), &bus, served, conf.read_ns);
+            serveOne(io, &nic, &table, pick, lease.address, request_fba.allocator(), &hub, served, conf.read_ns);
         } else if (quiet(&table, now, conf.read_ns)) |pick| {
             served += 1;
             letGo(&nic, &table, pick, lease.address, served);
@@ -358,7 +361,7 @@ fn serveOne(
     i: usize,
     address: [4]u8,
     request_alloc: std.mem.Allocator,
-    bus: *Bus,
+    hub: *Hub,
     number: u64,
     read_ns: u64,
 ) void {
@@ -397,9 +400,18 @@ fn serveOne(
     const disk_ticks = if (disk) |d| d.busy_ticks else 0;
 
     var outcome: []const u8 = "ok";
-    router.route(&req, io, request_alloc, bus) catch |e| {
+    var bus = Bus.of(hub);
+    router.route(&req, io, request_alloc, &bus) catch |e| {
         outcome = @errorName(e);
     };
+    if (bus.kept) |kept| {
+        // **NOT YET SERVED HERE.** The handler has written the stream's head
+        // and backlog and handed the live part over; this machine has no
+        // stream table yet, so it ends the stream and closes the connection.
+        // The browser reconnects and resumes from its last event.
+        streams.drop(hub, kept);
+        outcome = "a stream, ended after its backlog (streams are not kept on this machine yet)";
+    }
     s.writer().flush() catch {
         outcome = "the response would not flush";
     };

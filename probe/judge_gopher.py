@@ -1011,6 +1011,104 @@ def concurrent_failures(elf, linux_bin, content, pristine, work, mnt, report) ->
     return failures
 
 
+# ── a live stream ────────────────────────────────────────────────────────────
+
+LOGIN_BODY = "name=Steve&password=correct+horse+battery+staple&action=login&next=%2Fchat"
+
+
+def read_until(sock, wanted: bytes, deadline: float, got: bytes = b"") -> bytes:
+    """Reads a held-open stream until `wanted` has arrived or the deadline
+    passes. Answers everything read so far either way."""
+    while wanted not in got and time.time() < deadline:
+        sock.settimeout(max(0.05, deadline - time.time()))
+        try:
+            chunk = sock.recv(65536)
+        except OSError:
+            break
+        if not chunk:
+            break
+        got += chunk
+    return got
+
+
+def sse_story(port: int, scratch: str, report, label: str) -> int:
+    """**A MESSAGE SENT ON ONE CONNECTION ARRIVES ON A STREAM HELD OPEN ON
+    ANOTHER.** Nothing checked that before: curl runs no JavaScript and the
+    stress test only opens streams to break them. Four requests:
+
+      1. log in
+      2. send a first message, which becomes the topic's backlog
+      3. open the topic's stream (held open) — the backlog must come first
+      4. send a second message — it must arrive on the stream, numbered 1
+
+    The stream's body is delimited by the connection closing, not chunked:
+    the host writes live frames long after the handler returned."""
+    failures = 0
+    login = ask(port, step("log in", "POST", "/login/full", None, LOGIN_BODY), scratch, patience=60)
+    jar = update_jar(login, {})
+    cookie = "; ".join(f"{k}={v}" for k, v in jar.items())
+    first = ask(port, step("a first message", "POST", "/chat/c/1_2/live/send", cookie,
+                           "markdown=backlog-mark&cid=b1", headers=["X-Chat-Async: 1"]),
+                scratch, patience=60)
+    if first.get("status") not in (200, 204):
+        report(f"FAIL  {label}: the first message was answered {first.get('status', first.get('error'))}")
+        return 1
+
+    sock = socket.create_connection(("127.0.0.1", port), timeout=30)
+    try:
+        sock.sendall((f"GET /chat/c/1_2/live/stream?since=0 HTTP/1.1\r\nHost: judge\r\n"
+                      f"Cookie: {cookie}\r\nAccept: text/event-stream\r\n\r\n").encode())
+        got = read_until(sock, b"backlog-mark", time.time() + 30)
+        head = got.partition(b"\r\n\r\n")[0].decode("latin-1").lower()
+        if not got.startswith(b"HTTP/1.1 200"):
+            failures += 1
+            report(f"FAIL  {label}: the stream answered {got[:40]!r}")
+        if "content-type: text/event-stream" not in head:
+            failures += 1
+            report(f"FAIL  {label}: the stream is not an event stream: {head!r}")
+        if "transfer-encoding: chunked" in head:
+            failures += 1
+            report(f"FAIL  {label}: the stream is chunked; a host-kept stream must be close-delimited")
+        if b"event: backlog-size\ndata: 1" not in got or b"backlog-mark" not in got:
+            failures += 1
+            report(f"FAIL  {label}: the backlog did not arrive first: {got[-200:]!r}")
+
+        second = ask(port, step("a live message", "POST", "/chat/c/1_2/live/send", cookie,
+                                "markdown=live-mark&cid=l1", headers=["X-Chat-Async: 1"]),
+                     scratch, patience=60)
+        if second.get("status") not in (200, 204):
+            failures += 1
+            report(f"FAIL  {label}: the live message was answered {second.get('status', second.get('error'))}")
+        before = len(got)
+        got = read_until(sock, b"live-mark", time.time() + 15, got)
+        live = got[before:]
+        if b"live-mark" not in live:
+            failures += 1
+            report(f"FAIL  {label}: the live message never arrived on the open stream "
+                   f"({len(live)} bytes after the backlog: {live[:120]!r})")
+        elif b"id: 1\n" not in live:
+            failures += 1
+            report(f"FAIL  {label}: the live frame is not numbered 1: {live[:120]!r}")
+    finally:
+        sock.close()
+    if not failures:
+        report(f"ok    {label}: a stream held open got its backlog first, then the message sent on "
+               f"another connection, numbered 1")
+    return failures
+
+
+def linux_sse_failures(linux_bin, content, work, report) -> int:
+    scratch = tempfile.mkdtemp(dir=work)
+    root = os.path.join(scratch, "linux")
+    shutil.copytree(content, root)
+    server = LinuxServer(linux_bin, root, os.path.join(scratch, "linux.log"))
+    try:
+        return sse_story(server.port, scratch, report, "live stream on Linux")
+    finally:
+        server.stop()
+        shutil.rmtree(scratch, ignore_errors=True)
+
+
 def base_heap_trace(log: str) -> list:
     """What the base heap holds after each request: LIVE bytes."""
     return [int(m.group(1)) for m in BASE_HEAP.finditer(log)]
@@ -1137,6 +1235,9 @@ def main() -> int:
               f"reactions, admin, logout — each answered as Linux answered, all {files} files agree; "
               f"a fresh minted session honored, a stale and a forged one refused, "
               f"and the kernel's own session honored by Linux")
+
+    # ── a live stream (Linux; the machine's stream table is the next step) ───
+    failures += linux_sse_failures(linux_bin, content, work, print)
 
     # ── many clients at once ─────────────────────────────────────────────────
     failures += concurrent_failures(elf, linux_bin, content, pristine, work, mnt, print)
