@@ -186,7 +186,7 @@ pub fn build(b: *std.Build) void {
     // device can report in is a way to be silently wrong, and those modes are
     // cheaper to enumerate on the host than to provoke in QEMU.
     const test_step = b.step("test", "host unit tests for the pure parts of src/");
-    for ([_][]const u8{ "src/rtc.zig", "src/stack.zig", "src/civil.zig", "src/fat16.zig", "src/pvh.zig", "src/pages.zig", "src/tcp.zig", "src/tcp_test.zig", "src/ready.zig" }) |path| {
+    for ([_][]const u8{ "src/rtc.zig", "src/stack.zig", "src/civil.zig", "src/fat16.zig", "src/pvh.zig", "src/pages.zig", "src/tcp.zig", "src/tcp_test.zig", "src/ready.zig", "src/request_heap.zig" }) |path| {
         const unit = b.addTest(.{ .root_module = b.createModule(.{
             .root_source_file = b.path(path),
             .target = b.graph.host,

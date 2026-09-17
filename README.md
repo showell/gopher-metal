@@ -42,9 +42,9 @@ and its two load-bearing findings are worth repeating here:
 | the wall clock | **works** — the CMOS RTC, anchored at a seconds edge; pinned leap-day, noon and 4 PM boots |
 | **angry-gopher's whole route table** | **works** — 38 requests, each answered the same as the Linux build over the same files |
 | many requests per boot | **works** — a 22-step story and 300 requests to one boot, judged against Linux; heaps steady |
-| many connections, one loop | **works** — a request is served once its head has arrived |
+| many connections, one loop | **works** — a request is served once the whole of it has arrived |
 | chat's live streams | **works** — held by the loop, pinged, budgeted, and ended when their tab leaves or stops reading |
-| whole requests, uploads | next |
+| uploads | **works** — a picture stored on the volume and read back byte for byte, judged against Linux; the request heap grows past what it keeps |
 
     zig build test         # host unit tests for the pure parts of src/
     zig build kernels      # every kernel into probe/
@@ -724,13 +724,20 @@ acknowledging more than was taken, never compacting, throwing away what arrived
 with a FIN, accepting out-of-order data, a repeated SYN as a new connection, not
 counting a full table) each fail one.
 
-**The host serves a connection only once its request head has arrived**
+**The host serves a connection only once the whole request has arrived**
 (`src/ready.zig`, which asks `std.http.HeadParser` — the parser `receiveHead`
-itself runs — so "ready" and "a whole head" cannot disagree). The oldest ready
-connection is served start to finish; one that has been quiet for
-`idle_timeout_ms` is let go; otherwise the network is polled, which moves every
-connection at once. The next step makes "ready" mean the whole request, body
-included, so a handler only ever reads memory.
+itself runs — so "ready" and "a whole head" cannot disagree, and then reads the
+head for how long the body is). The oldest ready connection is served start to
+finish; one that has been quiet for `idle_timeout_ms` is let go; otherwise the
+network is polled, which moves every connection at once.
+
+**Three kinds of body cannot be waited for**, and are started at the head with
+the handler reading the rest as it comes: one whose client sent
+`Expect: 100-continue` (it is waiting to be told to send, and `std.http.Server`
+tells it from inside the handler — waiting here would be both sides waiting);
+a chunked one, whose length nobody knows until it ends; and one too big for the
+connection's receive buffer, since nothing drains that buffer until the handler
+runs.
 
 ```
 ok    8 clients connected at once, each answered as Linux answered; the kernel

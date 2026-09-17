@@ -48,6 +48,7 @@ const pages = metal.pages;
 const pvh = metal.pvh;
 const Io = metal.io;
 const ready = metal.ready;
+const RequestHeap = metal.request_heap.RequestHeap;
 
 /// The application, as it is.
 const router = @import("router.zig");
@@ -295,9 +296,9 @@ pub fn kmain() noreturn {
     serial.putDec(max_connections);
     serial.put(" connections at once\n");
 
-    const request_heap = pages.allocator.alloc(u8, request_heap_bytes) catch
+    var request_heap = RequestHeap.init(pages.allocator, request_heap_bytes);
+    if (!request_heap.preheat())
         serial.fail("the machine has not enough memory for a request heap");
-    var request_fba = std.heap.FixedBufferAllocator.init(request_heap);
     const scratch_heap = pages.allocator.alloc(u8, stream_scratch_bytes) catch
         serial.fail("the machine has not enough memory for its streams' scratch");
     stream_scratch = std.heap.FixedBufferAllocator.init(scratch_heap);
@@ -321,7 +322,7 @@ pub fn kmain() noreturn {
         const now = Io.awakeNs() orelse 0;
         if (nextReady(&table)) |pick| {
             served += 1;
-            serveOne(io, &wire, &table, pick, lease.address, request_fba.allocator(), &hub, served, conf.idle_ns, conf.streams);
+            serveOne(io, &wire, &table, pick, lease.address, request_heap.allocator(), &hub, served, conf.idle_ns, conf.streams);
         } else if (quiet(&table, now, conf.idle_ns)) |pick| {
             served += 1;
             letGo(&wire, &table, pick, lease.address, served, conf.idle_ns);
@@ -333,9 +334,9 @@ pub fn kmain() noreturn {
         // request must use the same amount every time, and a heap that was not
         // reset would show up as a number that only grows.
         serial.put("    request heap: ");
-        serial.putDec(request_fba.end_index);
+        serial.putDec(request_heap.used);
         serial.put(" bytes\n");
-        request_fba.reset();
+        request_heap.reset();
         deepest = reportStack(deepest);
     }
 
@@ -405,7 +406,7 @@ fn nextReady(table: *tcp.Table) ?usize {
     var best: ?usize = null;
     for (table.conns, 0..) |*c, i| {
         if (c.claimed or c.state != .established) continue;
-        if (ready.check(c.pending(), c.peer_done) == .waiting) continue;
+        if (ready.check(c.pending(), c.peer_done, c.rx.len) == .waiting) continue;
         if (best == null or c.serial < table.conns[best.?].serial) best = i;
     }
     return best;

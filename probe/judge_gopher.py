@@ -1263,6 +1263,142 @@ def tab_story(port: int, scratch: str, report, label: str, keepalive: float = 25
     return failures
 
 
+# ── uploads ──────────────────────────────────────────────────────────────────
+#
+# **A PICTURE GOES ON THE VOLUME AND COMES BACK BYTE FOR BYTE**, and an upload
+# too big for the machine is refused the way Linux refuses it — which is a
+# statement about the request heap, not about the route. The heap this machine
+# gives a request grows past what it keeps: a fixed one failed while the body
+# was still being read, and answered "400, could not read the body" where Linux
+# answers "413, the limit is 10 MB" — and for a big enough upload it closed the
+# connection while the client was still sending, so the client saw no answer at
+# all.
+
+UPLOAD_BOUNDARY = "----gophermetaljudge"
+# Bigger than the heap the machine keeps between requests (32 MB), and bigger
+# than chat's own image limit, so the answer has to come from a body that was
+# read whole and then refused.
+OVERSIZED_UPLOAD = 40 << 20
+
+
+def picture(n: int) -> bytes:
+    """`n` bytes that sniff as a PNG."""
+    return b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR" + bytes((k * 7 + 3) & 0xFF for k in range(n - 16))
+
+
+def multipart(filename: str, data: bytes) -> bytes:
+    head = (f"--{UPLOAD_BOUNDARY}\r\nContent-Disposition: form-data; name=\"file\"; "
+            f"filename=\"{filename}\"\r\nContent-Type: application/octet-stream\r\n\r\n").encode()
+    return head + data + f"\r\n--{UPLOAD_BOUNDARY}--\r\n".encode()
+
+
+# The stored file is named at random, by each side's own generator, so that is
+# the one thing about an upload's answer that cannot be compared. Everything
+# else in it — the conversation it landed in, the kind, the name the client
+# sent — is compared exactly.
+STORED_NAME = re.compile(rb"[0-9a-f]{32}")
+
+
+def named(answer: dict) -> dict:
+    return dict(answer, body=STORED_NAME.sub(b"<NAME>", answer["body"]))
+
+
+def upload_story(port: int, session: str) -> dict:
+    """Posts pictures to chat and reads one back. Answers what each step got,
+    with the stored file's random name left out — it is random on both sides."""
+
+    def send(method, path, body=None, ctype=None, expect_continue=False, timeout=120):
+        conn = http.client.HTTPConnection("127.0.0.1", port, timeout=timeout)
+        headers = {"Host": f"127.0.0.1:{port}", "Accept": "*/*", "Cookie": session}
+        if ctype:
+            headers["Content-Type"] = ctype
+        if expect_continue:
+            headers["Expect"] = "100-continue"
+        try:
+            conn.request(method, path, body=body, headers=headers)
+            r = conn.getresponse()
+            out = {"status": r.status, "body": r.read(), "type": r.getheader("content-type")}
+        except OSError as e:
+            out = {"status": 0, "body": f"{type(e).__name__}: {e}".encode(), "type": None}
+        finally:
+            conn.close()
+        return out
+
+    def post(name, data, **kw):
+        return send("POST", "/chat/c/1_2/general/upload", multipart(name, data),
+                    f"multipart/form-data; boundary={UPLOAD_BOUNDARY}", **kw)
+
+    small = picture(64 << 10)
+    out = {}
+    # **THE URL IS READ BEFORE THE NAME IS NORMALIZED.** Asking for
+    # `<NAME>.png` is a 404 on both sides, and two 404s agree.
+    stored = post("shot.png", small)
+    out["a picture"] = named(stored)
+    out["it comes back"] = {"status": 0, "body": b"the upload was refused", "type": None}
+    if stored["status"] == 200:
+        try:
+            url = json.loads(stored["body"])["url"]
+        except (ValueError, KeyError) as e:
+            url = None
+            out["it comes back"] = {"status": 0, "body": f"the answer was not JSON: {e}".encode(), "type": None}
+        if url:
+            got = send("GET", url)
+            same = got["body"] == small
+            out["it comes back"] = {"status": got["status"], "type": got["type"],
+                                    "body": b"the same bytes" if same else b"DIFFERENT bytes"}
+    out["one that waits to be told to send"] = named(post("two.png", small, expect_continue=True))
+    out["not a picture"] = post("notes.txt", b"just words, not a picture at all")
+    if not QUICK:
+        out["bigger than the heap it keeps"] = post("huge.png", picture(OVERSIZED_UPLOAD))
+    return out
+
+
+def upload_failures(elf, linux_bin, content, pristine, work, mnt, report) -> int:
+    """The same uploads to the machine and to Linux, and their answers compared.
+    The stored file's name is random on both sides, so what is compared is the
+    status, the content type, and the bytes that came back."""
+    session = mint_session("1", int(time.time()))
+    scratch = tempfile.mkdtemp(dir=work)
+    image = os.path.join(scratch, "disk.img")
+    shutil.copy(pristine, image)
+    set_request_limit(image, 30, mnt)
+    qemu, port, serial = start_kernel(elf, image, scratch)
+    try:
+        metal = upload_story(port, session)
+    finally:
+        code, log = finish_kernel(qemu, serial)
+
+    root = os.path.join(scratch, "linux")
+    shutil.copytree(content, root)
+    server = LinuxServer(linux_bin, root, os.path.join(scratch, "linux.log"))
+    try:
+        linux = upload_story(server.port, session)
+    finally:
+        server.stop()
+
+    failures = 0
+    for name, want in linux.items():
+        got = metal.get(name, {})
+        if got != want:
+            failures += 1
+            report(f"FAIL  uploads: {name}: the machine said {abbrev(got.get('body', b''))} "
+                   f"({got.get('status')}, {got.get('type')}), Linux said "
+                   f"{abbrev(want.get('body', b''))} ({want['status']}, {want.get('type')})")
+    # **AGREEING ON A FAILURE IS NOT PASSING.** Two servers that both refused
+    # the upload, or both answered 404 for the stored file, agree perfectly.
+    for side, answers in (("the machine", metal), ("Linux", linux)):
+        got = answers.get("it comes back", {})
+        if got.get("status") != 200 or got.get("body") != b"the same bytes":
+            failures += 1
+            report(f"FAIL  uploads: {side} did not give the picture back: "
+                   f"{got.get('status')} {abbrev(got.get('body', b''))}")
+    if not failures:
+        sizes = "a 64 KB picture" + ("" if QUICK else f" and one of {OVERSIZED_UPLOAD >> 20} MB")
+        report(f"ok    uploads: {sizes}, stored, read back byte for byte, and refused as Linux refuses them")
+    shutil.rmtree(scratch, ignore_errors=True)
+    return failures
+
+
 def linux_sse_failures(linux_bin, content, work, report) -> int:
     scratch = tempfile.mkdtemp(dir=work)
     root = os.path.join(scratch, "linux")
@@ -1956,6 +2092,8 @@ def main() -> int:
     # ── the send side ────────────────────────────────────────────────────────
     failures += bulk_failures(elf, linux_bin, content, pristine, work, mnt, print)
     lap("bulk")
+    failures += upload_failures(elf, linux_bin, content, pristine, work, mnt, print)
+    lap("uploads")
     failures += slow_reader_failures(elf, linux_bin, content, work, mnt, print)
     lap("slow readers")
     failures += lagging_stream_failures(elf, pristine, work, mnt, print)

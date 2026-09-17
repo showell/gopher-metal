@@ -18,6 +18,7 @@ import sys
 import tempfile
 import threading
 import time
+import inspect
 import unittest
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -727,6 +728,37 @@ class Resolution(unittest.TestCase):
         # something is being papered over with sleep.
         total = sum(s["settle"] for s in G.MEMBER_STORY)
         self.assertLessEqual(total, 6.0)
+
+
+class Uploads(unittest.TestCase):
+    """The upload gate's own pieces: what it posts, and how big."""
+
+    def test_a_picture_is_exactly_the_size_asked_for(self):
+        for n in (16, 1024, 64 << 10):
+            self.assertEqual(n, len(G.picture(n)))
+
+    def test_a_picture_sniffs_as_a_png(self):
+        # The handler decides the kind from the magic bytes, never the name —
+        # so a body that does not start this way is a 415, not an upload.
+        self.assertTrue(G.picture(4096).startswith(b"\x89PNG\r\n\x1a\n"))
+
+    def test_the_oversized_upload_is_bigger_than_the_heap_the_machine_keeps(self):
+        # The point of that step is to make the request heap grow. If the heap
+        # the machine keeps ever passes this, the step stops testing anything.
+        keeps = 32 << 20
+        self.assertGreater(G.OVERSIZED_UPLOAD, keeps)
+
+    def test_the_multipart_body_carries_the_bytes_between_its_boundaries(self):
+        body = G.multipart("shot.png", b"BYTES")
+        self.assertIn(b"BYTES", body)
+        self.assertTrue(body.startswith(f"--{G.UPLOAD_BOUNDARY}".encode()))
+        self.assertTrue(body.endswith(f"--{G.UPLOAD_BOUNDARY}--\r\n".encode()))
+        self.assertIn(b'filename="shot.png"', body)
+
+    def test_the_quick_tier_leaves_out_the_big_one(self):
+        # Reading 40 MB through the machine is the slowest thing in the gate.
+        self.assertIn("if not QUICK", inspect.getsource(G.upload_story))
+
 
 
 if __name__ == "__main__":
