@@ -677,10 +677,56 @@ ok    a silent client is let go after the time the volume says: the caller behin
       waited 6.1s at 2000 ms and 18.1s at 6000 ms, and the machine served it either way
 ```
 
+## Many connections, one request at a time
+
+Chat holds connections open: every conversation tab keeps three streams for as
+long as it is open. The machine used to hold exactly one connection — a SYN that
+arrived while one was open was ignored — so it could not serve even one person
+using chat. The design decision (Steve, after
+[the SSE essay](http://143.244.172.148:9100/notes/chat-over-http-and-sse.md)) is
+**state machines, and one loop over them**: talk to the devices, move every
+connection along, and serve whatever is ready. No threads, no fibers.
+
+`src/tcp.zig` is now a **table of connections**, each with its own state and
+its own receive buffer. A SYN takes a free slot; a full table drops it, as Linux
+does when its accept queue is full, and counts it. The buffer is consumed as the
+request is read, and the window advertises the room actually left, so a body
+bigger than the buffer arrives in pieces instead of being cut short. A slot the
+host is serving is never handed to a new connection until the host lets it go —
+otherwise a reader part-way through a request could find a stranger's bytes.
+
+The state machine is **pure**: frames go out through whatever "wire" the caller
+supplies, and the initial sequence number and the time are passed in. So it is
+tested on the host — sixteen tests with a recording wire and a fake peer that
+checks sequence numbers as a real client would — and nine mutations of it
+(finding a connection by port alone, handing out a held slot, a constant window,
+acknowledging more than was taken, never compacting, throwing away what arrived
+with a FIN, accepting out-of-order data, a repeated SYN as a new connection, not
+counting a full table) each fail one.
+
+**The host serves a connection only once its request head has arrived**
+(`src/ready.zig`, which asks `std.http.HeadParser` — the parser `receiveHead`
+itself runs — so "ready" and "a whole head" cannot disagree). The oldest ready
+connection is served start to finish; one that has been quiet for
+`read_timeout_ms` is let go; otherwise the network is polled, which moves every
+connection at once. The next step makes "ready" mean the whole request, body
+included, so a handler only ever reads memory.
+
+```
+ok    8 clients connected at once, each answered as Linux answered; the kernel
+      held 8 at once and turned none away
+ok    a silent client holds nobody up and is still let go when the volume says:
+      closed after 2.1s at 2000 ms and 6.1s at 6000 ms, with the caller beside
+      it answered first both times
+```
+
+That second gate used to prove the opposite: the caller queued behind a silent
+client waited 6.1 s and 18.1 s.
+
 ## What the TCP does not do
 
 No congestion control, no retransmission, no out-of-order reassembly, no
-keep-alive, one connection at a time. That is not laziness about the general
+keep-alive. That is not laziness about the general
 case — it is the shape the thing above it already has. `zig-server`'s own
 comment says keep-alive is deliberately off and its accept loop is
 single-threaded.

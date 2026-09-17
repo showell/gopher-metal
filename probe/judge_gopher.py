@@ -841,7 +841,10 @@ def missing_marks(steps, answers, report, label) -> int:
 
 def held_open(elf, pristine, work, mnt, ms: int):
     """One boot, one client that connects and then says nothing, and one caller
-    behind it. Returns (how long the caller waited, its answer, the serial log)."""
+    beside it. Returns (how long the caller waited for its answer, when the
+    kernel closed the silent socket, the caller's answer, what the silent socket
+    read at the end, the serial log) — times in seconds from the moment the
+    silent client connected."""
     scratch = tempfile.mkdtemp(dir=work)
     image = os.path.join(scratch, "disk.img")
     shutil.copy(pristine, image)
@@ -849,52 +852,162 @@ def held_open(elf, pristine, work, mnt, ms: int):
     qemu, port, serial = start_kernel(elf, image, scratch)
     held = silent_client(port, b"GET / HTTP/1.1\r\n")  # half a request, then silence
     began = time.time()
-    # 60 seconds: this kernel said it was listening before the silent client
-    # connected, so the only thing the caller is waiting for is the silent one
-    # to be let go. Three times the longest timeout under test is 18s.
-    answer = ask(port, step("the caller behind the silent one", "GET", "/"),
+    answer = ask(port, step("the caller beside the silent one", "GET", "/"),
                  os.path.join(scratch, "after"), patience=60)
-    waited = time.time() - began
+    answered = time.time() - began
+    # The kernel closes the silent connection when it lets it go; the socket
+    # then reads end-of-stream.
+    held.settimeout(ms / 1000 + 30)
+    try:
+        rest = held.recv(64)
+    except OSError:
+        rest = None
+    let_go = time.time() - began
     held.close()
     _, log = finish_kernel(qemu, serial)
     shutil.rmtree(scratch, ignore_errors=True)
-    return waited, answer, log
+    return answered, let_go, answer, rest, log
 
 
 def timeout_failures(elf, pristine, work, mnt, report) -> int:
-    """**THE ONE-AT-A-TIME SERVER'S WORST CLIENT.** It connects, sends half a
-    request line, and waits. Until this machine had a clock, the wait was bounded
-    by a spin count — some unknown number of seconds — and ended in a silent
-    end-of-stream as though the client had hung up politely.
+    """**A CLIENT THAT SAYS NOTHING NO LONGER HOLDS ANYONE UP — AND IS STILL LET
+    GO.** When the machine held one connection at a time, this gate proved that
+    a caller queued behind a silent client waited out the timeout (6 s at a
+    2-second setting, 18 s at 6). With a table of connections the caller must
+    NOT wait: it is answered while the silent one sits in the table. The silent
+    one is still closed by the kernel once it has been quiet for the setting.
 
-    Two boots with two different `read_timeout_ms`, because "it recovered" is
-    not the claim. The claim is that the configured number is what governs, and
-    the only way to show that is to change it and watch the answer move."""
+    Two boots with two `read_timeout_ms`, because "it was let go" is not the
+    claim: the claim is that the setting decides WHEN, and the only way to show
+    that is to change it and watch the close move."""
     failures = 0
-    times = {}
+    let_go_at = {}
     for ms in (2000, 6000):
-        waited, answer, log = held_open(elf, pristine, work, mnt, ms)
-        times[ms] = waited
+        answered, let_go, answer, rest, log = held_open(elf, pristine, work, mnt, ms)
+        let_go_at[ms] = let_go
         if answer.get("status") != 200:
             failures += 1
-            report(f"FAIL  timeout: with read_timeout_ms={ms} the caller behind a silent client "
+            report(f"FAIL  timeout: with read_timeout_ms={ms} the caller beside a silent client "
                    f"got {answer.get('status', answer.get('error'))}, not 200")
+        if answered >= ms / 1000:
+            failures += 1
+            report(f"FAIL  timeout: with read_timeout_ms={ms} the caller waited {answered:.1f}s — "
+                   f"as long as the silent client was allowed; it was held up behind it")
+        if rest != b"":
+            failures += 1
+            report(f"FAIL  timeout: with read_timeout_ms={ms} the silent client was never closed "
+                   f"by the kernel (its socket read {rest!r})")
+        elif not (0.8 * ms / 1000 <= let_go <= ms / 1000 + 5):
+            failures += 1
+            report(f"FAIL  timeout: with read_timeout_ms={ms} the silent client was let go after "
+                   f"{let_go:.1f}s")
         if "the client stopped sending" not in log:
             failures += 1
             report(f"FAIL  timeout: with read_timeout_ms={ms} the kernel never said it let the "
                    f"silent client go: {' | '.join(log.splitlines()[-3:])}")
-    # Three times the configured wait is what both cost, end to end — the
-    # caller's own connect is retried while the kernel is busy. What matters is
-    # that four more seconds of patience cost at least four more seconds.
-    moved = times[6000] - times[2000]
-    if moved < 4.0:
+    moved = let_go_at[6000] - let_go_at[2000]
+    if moved < 3.2:
         failures += 1
-        report(f"FAIL  timeout: tripling the timeout moved the wait by only {moved:.1f}s "
-               f"({times[2000]:.1f}s then {times[6000]:.1f}s) — the setting does not govern")
+        report(f"FAIL  timeout: raising the setting by 4s moved the close by only {moved:.1f}s — "
+               f"the setting does not govern it")
     if not failures:
-        report(f"ok    a silent client is let go after the time the volume says: the caller "
-               f"behind it waited {times[2000]:.1f}s at 2000 ms and {times[6000]:.1f}s at 6000 ms, "
-               f"and the machine served it either way")
+        report(f"ok    a silent client holds nobody up and is still let go when the volume says: "
+               f"closed after {let_go_at[2000]:.1f}s at 2000 ms and {let_go_at[6000]:.1f}s at 6000 ms, "
+               f"with the caller beside it answered first both times")
+    return failures
+
+
+def parse_raw_response(raw: bytes) -> dict:
+    """An HTTP response read off a bare socket, in the shape `ask` answers."""
+    head, sep, body = raw.partition(b"\r\n\r\n")
+    if not sep:
+        return {"error": f"no complete response head in {len(raw)} bytes"}
+    lines = head.decode("latin-1").split("\r\n")
+    parts = lines[0].split(" ", 2)
+    if len(parts) < 2 or not parts[1].isdigit():
+        return {"error": f"not a status line: {lines[0]!r}"}
+    headers = {}
+    for line in lines[1:]:
+        if ":" in line:
+            k, v = line.split(":", 1)
+            k, v = k.strip().lower(), v.strip()
+            headers[k] = headers[k] + "\n" + v if k == "set-cookie" and k in headers else v
+    return {"status": int(parts[1]), "headers": headers, "body": body}
+
+
+# **MANY CLIENTS AT ONCE.** The paths are ones the single-request cases already
+# prove equal to Linux, so a difference here is about holding connections, not
+# about the page.
+CONCURRENT_PATHS = ["/", "/steve-resume.pdf", "/nope", "/login", "/chat",
+                    "/tutorial", "/driving", "/admin"]
+CONNECTIONS_LINE = re.compile(r"connections: at most (\d+) at once, (\d+) turned away")
+
+
+def concurrent_failures(elf, linux_bin, content, pristine, work, mnt, report) -> int:
+    """Every client connects FIRST, then each sends its request — the last one
+    connected sending first — and only then are the answers read. A machine that
+    held one connection at a time could not get past the second connect; this
+    one must hold all of them, answer each correctly, and say so in its log."""
+    scratch = tempfile.mkdtemp(dir=work)
+    image = os.path.join(scratch, "disk.img")
+    shutil.copy(pristine, image)
+    set_request_limit(image, len(CONCURRENT_PATHS), mnt)
+    before = time.time()
+    qemu, port, serial = start_kernel(elf, image, scratch)
+    failures = 0
+    socks = []
+    try:
+        for _ in CONCURRENT_PATHS:
+            socks.append(socket.create_connection(("127.0.0.1", port), timeout=60))
+        # Let every handshake reach the guest before anyone asks for anything.
+        time.sleep(1.0)
+        for sock, path in reversed(list(zip(socks, CONCURRENT_PATHS))):
+            sock.sendall(f"GET {path} HTTP/1.1\r\nHost: judge\r\nConnection: close\r\n\r\n".encode())
+        answers = []
+        for sock in socks:
+            got = b""
+            try:
+                while True:
+                    chunk = sock.recv(65536)
+                    if not chunk:
+                        break
+                    got += chunk
+            except OSError as e:
+                answers.append({"error": f"socket: {e}"})
+                continue
+            answers.append(parse_raw_response(got))
+    finally:
+        for sock in socks:
+            sock.close()
+    code, log = finish_kernel(qemu, serial)
+    window = (int(before) - 1, int(time.time()) + 1)
+
+    for path, metal in zip(CONCURRENT_PATHS, answers):
+        c = case(f"concurrently: {path}", "GET", path)
+        linux = ask_linux(linux_bin, content, c, tempfile.mkdtemp(dir=work))
+        m = dict(metal, guest_exit=code, window=window, serial=log)
+        diffs = differences(c, m, linux)
+        if diffs:
+            failures += 1
+            report(f"FAIL  concurrent: GET {path}")
+            for d in diffs:
+                report(f"        {d}")
+
+    held = CONNECTIONS_LINE.search(log)
+    if held is None:
+        failures += 1
+        report("FAIL  concurrent: the kernel never said how many connections it held")
+    elif int(held.group(1)) < len(CONCURRENT_PATHS):
+        failures += 1
+        report(f"FAIL  concurrent: the kernel held at most {held.group(1)} at once, "
+               f"with {len(CONCURRENT_PATHS)} clients connected")
+    elif int(held.group(2)) != 0:
+        failures += 1
+        report(f"FAIL  concurrent: the kernel turned {held.group(2)} away")
+    if not failures:
+        report(f"ok    {len(CONCURRENT_PATHS)} clients connected at once, each answered as Linux "
+               f"answered; the kernel held {held.group(1)} at once and turned none away")
+    shutil.rmtree(scratch, ignore_errors=True)
     return failures
 
 
@@ -910,13 +1023,14 @@ def base_heap_taken(log: str) -> list:
 
 
 TIMING = re.compile(
-    r"asked in (\d+) us, answered in (\d+) us, (\d+) disk requests taking (\d+) us")
+    r"waited (\d+) us, answered in (\d+) us, (\d+) disk requests taking (\d+) us")
 
 
 def request_timings(log: str) -> list:
     """**WHAT THE MACHINE SAYS EACH REQUEST COST**, in microseconds, as
-    (waiting for the client to finish asking, answering it, disk requests made
-    while answering, the time those took). Its own clock, so curl, slirp and the
+    (from the connection opening to its turn — the client finishing its request,
+    then the queue — answering it, disk requests made while answering, the time
+    those took). Its own clock, so curl, slirp and the
     emulator's network are all on the other side of the measurement — and the
     disk's share of the answer is its own number."""
     return [(int(m.group(1)), int(m.group(2)), int(m.group(3)), int(m.group(4)))
@@ -1023,6 +1137,9 @@ def main() -> int:
               f"reactions, admin, logout — each answered as Linux answered, all {files} files agree; "
               f"a fresh minted session honored, a stale and a forged one refused, "
               f"and the kernel's own session honored by Linux")
+
+    # ── many clients at once ─────────────────────────────────────────────────
+    failures += concurrent_failures(elf, linux_bin, content, pristine, work, mnt, print)
 
     # ── the client that says nothing ─────────────────────────────────────────
     failures += timeout_failures(elf, pristine, work, mnt, print)

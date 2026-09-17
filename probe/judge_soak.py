@@ -195,7 +195,7 @@ def soak(elf: str, gopher_root: str, work: str) -> int:
                       f"worst {answered[-1] / 1000:.1f}ms; "
                       f"disk median {disk_n[len(disk_n) // 2]} requests "
                       f"{disk_us[len(disk_us) // 2] / 1000:.1f}ms; "
-                      f"waiting for the client median {waited[len(waited) // 2] / 1000:.1f}ms")
+                      f"waited before its turn median {waited[len(waited) // 2] / 1000:.1f}ms")
             print(f"  round {n:>6}  {asked:>6} req  {elapsed / 60:6.1f} min  "
                   f"{(asked - window_asked) / max(window, 0.001):5.1f} req/s now  "
                   f"live {live[-1] if live else '?'}  peak {peaks[-1] if peaks else '?'}  "

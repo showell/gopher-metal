@@ -50,16 +50,32 @@ pub const default_close_ns: u64 = 2 * std.time.ns_per_s;
 /// and sending more than it expects is how a connection mysteriously stalls.
 const segment_max: usize = 512;
 
+/// One turn of the loop for every connection at once: take a frame if there is
+/// one, answer ARP, and let the table see the rest. Null when there was no
+/// frame. The host calls this while nothing is ready to serve; a Stream calls
+/// it while it waits, so the other connections keep moving either way.
+pub fn pump(nic: *net.Net, table: *tcp.Table, ip: [4]u8) ?tcp.Result {
+    const got = nic.poll() orelse return null;
+    defer nic.recycle(got.id);
+
+    if (arp.parseRequest(got.frame)) |req| {
+        if (eql(&req.target_ip, &ip)) {
+            var out: [64]u8 = undefined;
+            const n = arp.writeReply(&out, nic.mac, ip, req);
+            nic.send(out[0..n]);
+        }
+        return .{ .event = .nothing };
+    }
+    return table.handle(nic, got.frame, io.awakeNs() orelse 0);
+}
+
+/// One connection of the table, as a reader and a writer.
 pub const Stream = struct {
     nic: *net.Net,
-    conn: *tcp.Listener,
+    table: *tcp.Table,
+    index: usize,
     /// Our own address, for answering ARP while a read is waiting.
     ip: [4]u8,
-
-    /// How much of what the connection has received we have handed out.
-    consumed: usize = 0,
-    /// The peer has closed, or the connection ended.
-    ended: bool = false,
 
     /// How long a read waits for bytes, and how long a close waits for the FIN
     /// to be acknowledged.
@@ -75,10 +91,11 @@ pub const Stream = struct {
     reader_iface: Reader,
     writer_iface: Writer,
 
-    pub fn init(nic: *net.Net, conn: *tcp.Listener, ip: [4]u8, read_buf: []u8, write_buf: []u8) Stream {
+    pub fn init(nic: *net.Net, table: *tcp.Table, index: usize, ip: [4]u8, read_buf: []u8, write_buf: []u8) Stream {
         return .{
             .nic = nic,
-            .conn = conn,
+            .table = table,
+            .index = index,
             .ip = ip,
             .reader_iface = .{
                 .vtable = &.{ .stream = streamFn },
@@ -102,25 +119,12 @@ pub const Stream = struct {
         return &self.writer_iface;
     }
 
-    /// One turn of the event loop: take a frame if there is one, answer ARP,
-    /// and let TCP see the rest.
-    pub fn pump(self: *Stream) void {
-        const got = self.nic.poll() orelse return;
-        defer self.nic.recycle(got.id);
+    fn conn(self: *Stream) *tcp.Conn {
+        return &self.table.conns[self.index];
+    }
 
-        if (arp.parseRequest(got.frame)) |req| {
-            if (eql(&req.target_ip, &self.ip)) {
-                var out: [64]u8 = undefined;
-                const n = arp.writeReply(&out, self.nic.mac, self.ip, req);
-                self.nic.send(out[0..n]);
-            }
-            return;
-        }
-
-        switch (self.conn.handle(self.nic, got.frame)) {
-            .closed => self.ended = true,
-            else => {},
-        }
+    pub fn pumpOnce(self: *Stream) void {
+        _ = pump(self.nic, self.table, self.ip);
     }
 
     /// Bytes the peer has sent that we have not handed out, waiting for some
@@ -131,15 +135,15 @@ pub const Stream = struct {
         self.timed_out = false;
         const started = self.clock();
         while (true) {
-            if (self.consumed < self.conn.received_len) {
-                return self.conn.received[self.consumed..self.conn.received_len];
-            }
-            if (self.ended) return null;
+            const c = self.conn();
+            if (c.pending().len > 0) return c.pending();
+            // Closed, or the peer has said it is done: nothing more is coming.
+            if (!c.open() or c.peer_done) return null;
             if (self.clock() - started >= self.read_ns) {
                 self.timed_out = true;
                 return null;
             }
-            self.pump();
+            self.pumpOnce();
             asm volatile ("pause");
         }
     }
@@ -157,11 +161,11 @@ pub const Stream = struct {
 
     /// Sends bytes as TCP segments, a segment at a time.
     fn sendAll(self: *Stream, bytes: []const u8) error{WriteFailed}!void {
-        if (self.ended) return error.WriteFailed;
+        if (self.conn().state != .established) return error.WriteFailed;
         var at: usize = 0;
         while (at < bytes.len) {
             const n = @min(segment_max, bytes.len - at);
-            self.conn.send(self.nic, bytes[at..][0..n]);
+            self.table.send(self.nic, self.index, bytes[at..][0..n]);
             at += n;
         }
     }
@@ -170,11 +174,11 @@ pub const Stream = struct {
     /// agrees. `std.http.Server` writes `connection: close` for us; this is the
     /// TCP half of the same statement.
     pub fn finish(self: *Stream) void {
-        self.conn.finish(self.nic);
+        self.table.finish(self.nic, self.index);
         const started = self.clock();
-        while (!self.ended) {
+        while (self.conn().state != .closed) {
             if (self.clock() - started >= self.close_ns) return;
-            self.pump();
+            self.pumpOnce();
             asm volatile ("pause");
         }
     }
@@ -185,7 +189,12 @@ fn streamFn(r: *Reader, w: *Writer, limit: std.Io.Limit) Reader.StreamError!usiz
     const bytes = self.waitForBytes() orelse
         return if (self.timed_out) error.ReadFailed else error.EndOfStream;
     const n = try w.write(limit.slice(bytes));
-    self.consumed += n;
+    const c = self.conn();
+    // A window that had shrunk below a segment is announced when it reopens,
+    // so a peer that filled it does not sit waiting for its own probe.
+    const was_tight = c.room() < segment_max;
+    c.consume(n);
+    if (was_tight and c.room() >= segment_max) self.table.ack(self.nic, self.index);
     return n;
 }
 

@@ -60,6 +60,10 @@ fn firstLine(bytes: []const u8) []const u8 {
     return bytes;
 }
 
+fn isn() u32 {
+    return rng.int(u32);
+}
+
 pub fn kmain() noreturn {
     serial.init();
     serial.put("gopher-metal http probe\n");
@@ -82,7 +86,8 @@ pub fn kmain() noreturn {
     serial.putIp(lease.address);
     serial.put("\n  listening on port 80\n");
 
-    var server = tcp.Listener.init(lease.address, nic.mac, 80, &request, &out);
+    var slots = [_]tcp.Conn{.{ .rx = &request }};
+    var server = tcp.Table.init(lease.address, nic.mac, 80, &slots, &out, isn);
 
     // Bounded rather than forever: a probe that hangs is worse than one that
     // fails, and the run script's timeout should never be what stops it.
@@ -105,14 +110,16 @@ pub fn kmain() noreturn {
             continue;
         }
 
-        switch (server.handle(&nic, got.frame)) {
-            .data => {
-                if (answered or !complete(server.received[0..server.received_len])) continue;
+        const r = server.handle(&nic, got.frame, 0);
+        switch (r.event) {
+            .data, .peer_done => {
+                const pending = server.conns[r.index].pending();
+                if (answered or !complete(pending)) continue;
                 serial.put("  request: ");
-                serial.put(firstLine(server.received[0..server.received_len]));
+                serial.put(firstLine(pending));
                 serial.put("\n");
-                server.send(&nic, response);
-                server.finish(&nic);
+                server.send(&nic, r.index, response);
+                server.finish(&nic, r.index);
                 answered = true;
             },
             .closed => {

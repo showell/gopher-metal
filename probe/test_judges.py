@@ -264,15 +264,16 @@ class Timings(unittest.TestCase):
     disk's share of the answering."""
 
     LINE = ("  request 7: GET / -> ok (base: 70 live bytes, 4096 in pages, peak 8192)\n"
-            "    asked in 94 us, answered in 11600 us, 12 disk requests taking 3400 us\n")
+            "    waited 94 us, answered in 11600 us, 12 disk requests taking 3400 us\n")
 
     def test_all_four_numbers_are_read(self):
         self.assertEqual(G.request_timings(self.LINE), [(94, 11600, 12, 3400)])
 
-    def test_a_line_without_the_disk_is_not_half_read(self):
-        # The format before the block device was counted. Reading it as "zero
-        # disk requests" would report a machine whose disk costs nothing.
-        old = "    asked in 94 us, answered in 11600 us\n"
+    def test_a_line_in_an_older_format_is_not_half_read(self):
+        # "asked in" was the name when the machine held one connection and
+        # the number meant something else; reading it as the new one would
+        # mislabel every old log.
+        old = "    asked in 94 us, answered in 11600 us, 12 disk requests taking 3400 us\n"
         self.assertEqual(G.request_timings(old), [])
 
 
@@ -424,6 +425,25 @@ class Conf(unittest.TestCase):
             finally:
                 G.mount, G.umount = real_mount, real_umount
         self.assertIn("read_timeout_ms = 10000", text)
+
+
+class RawResponse(unittest.TestCase):
+    def test_status_headers_and_body(self):
+        r = G.parse_raw_response(b"HTTP/1.1 303 See Other\r\nLocation: /x\r\n"
+                                 b"Set-Cookie: a=1\r\nSet-Cookie: b=2\r\n\r\nbody")
+        self.assertEqual(r["status"], 303)
+        self.assertEqual(r["headers"]["location"], "/x")
+        self.assertEqual(r["headers"]["set-cookie"], "a=1\nb=2")
+        self.assertEqual(r["body"], b"body")
+
+    def test_a_response_cut_short_is_an_error_not_a_blank_answer(self):
+        self.assertIn("error", G.parse_raw_response(b"HTTP/1.1 200 OK\r\nContent-"))
+        self.assertIn("error", G.parse_raw_response(b""))
+        self.assertIn("error", G.parse_raw_response(b"garbage\r\n\r\n"))
+
+    def test_the_connections_line_is_read(self):
+        m = G.CONNECTIONS_LINE.search("  connections: at most 8 at once, 0 turned away for want of a slot")
+        self.assertEqual((m.group(1), m.group(2)), ("8", "0"))
 
 
 class Patience(unittest.TestCase):

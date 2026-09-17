@@ -14,6 +14,7 @@ pub const dhcp = @import("dhcp.zig");
 pub const arp = @import("arp.zig");
 pub const tcp = @import("tcp.zig");
 pub const stream = @import("stream.zig");
+pub const ready = @import("ready.zig");
 pub const gpt = @import("gpt.zig");
 pub const fat16 = @import("fat16.zig");
 pub const rng = @import("rng.zig");

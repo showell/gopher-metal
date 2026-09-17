@@ -37,6 +37,10 @@ var write_buf: [4096]u8 align(16) = undefined;
 
 const body = "hello from std.http.Server, with no Linux under it\n";
 
+fn isn() u32 {
+    return rng.int(u32);
+}
+
 pub fn kmain() noreturn {
     serial.init();
     serial.put("gopher-metal std.http probe\n");
@@ -59,19 +63,21 @@ pub fn kmain() noreturn {
     serial.putIp(lease.address);
     serial.put("\n  listening on port 80, with zig's own HTTP\n");
 
-    var conn = tcp.Listener.init(lease.address, nic.mac, 80, &tcp_received, &tcp_out);
-    var s = stream.Stream.init(&nic, &conn, lease.address, &read_buf, &write_buf);
+    var slots = [_]tcp.Conn{.{ .rx = &tcp_received }};
+    var table = tcp.Table.init(lease.address, nic.mac, 80, &slots, &tcp_out, isn);
 
-    // Wait for a connection to open before handing the stream to std.http:
-    // `receiveHead` reads until it has a whole request, and a read before the
-    // handshake has nothing to wait on.
+    // Wait for a request to arrive before handing the stream to std.http:
+    // the host only ever serves a connection whose request head is here.
     var spins: usize = 0;
-    while (conn.state != .established and spins < 200_000_000) : (spins += 1) {
-        s.pump();
-        asm volatile ("pause");
+    while (spins < 200_000_000) : (spins += 1) {
+        const c = &table.conns[0];
+        if (c.state == .established and metal.ready.check(c.pending(), c.peer_done) != .waiting) break;
+        if (stream.pump(&nic, &table, lease.address) == null) asm volatile ("pause");
     }
-    if (conn.state != .established) serial.fail("nothing connected before the spin budget ran out");
+    if (table.conns[0].state != .established) serial.fail("nothing connected before the spin budget ran out");
     serial.put("  connected\n");
+    table.claim(0);
+    var s = stream.Stream.init(&nic, &table, 0, lease.address, &read_buf, &write_buf);
 
     var server = std.http.Server.init(s.reader(), s.writer());
 

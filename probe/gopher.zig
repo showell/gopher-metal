@@ -15,9 +15,10 @@
 //!
 //! Its clocks come from its own hardware (wallclock.zig).
 //!
-//! **IT SERVES ONE CONNECTION AT A TIME, IN A LOOP** — which is what
-//! angry-gopher's own server did before it had a thread pool: accept, read one
-//! request, answer, close. Each request gets its own heap, reset afterwards, the
+//! **IT HOLDS MANY CONNECTIONS AND SERVES ONE REQUEST AT A TIME, IN A LOOP**:
+//! a connection whose request has arrived is answered start to finish; the
+//! rest wait in the table meanwhile, and the network keeps moving for all of
+//! them. Each request gets its own heap, reset afterwards, the
 //! way server.zig gives each request an arena it frees wholesale. How many
 //! requests to serve is host configuration, read from `gopher-metal.conf` on
 //! the volume (`requests = N`); without it, forever.
@@ -45,6 +46,7 @@ const stack = metal.stack;
 const pages = metal.pages;
 const pvh = metal.pvh;
 const Io = metal.io;
+const ready = metal.ready;
 
 /// The application, as it is.
 const router = @import("router.zig");
@@ -112,7 +114,18 @@ var sector: [fat16.sector_size]u8 align(4096) = undefined;
 var dhcp_frame: [net.buffer_size]u8 align(16) = undefined;
 var dhcp_reply: [1024]u8 align(16) = undefined;
 var tcp_out: [net.buffer_size]u8 align(16) = undefined;
-var tcp_received: [16384]u8 align(16) = undefined;
+
+/// **HOW MANY CONNECTIONS THE MACHINE HOLDS AT ONCE.** A chat tab holds three
+/// open for as long as it is open, so this is about twenty tabs — a guess,
+/// until the question of how many to size for is answered. Each connection
+/// has its own receive buffer, taken from the machine's pages at boot.
+const max_connections = 64;
+const rx_bytes = 16 * 1024;
+var conn_slots: [max_connections]tcp.Conn = undefined;
+
+fn isn() u32 {
+    return rng.int(u32);
+}
 var read_buf: [16 * 1024]u8 align(16) = undefined;
 var write_buf: [64 * 1024]u8 align(16) = undefined;
 
@@ -229,17 +242,42 @@ pub fn kmain() noreturn {
     serial.putIp(lease.address);
     serial.put("\n  listening on port 80\n");
 
-    var conn = tcp.Listener.init(lease.address, nic.mac, 80, &tcp_received, &tcp_out);
+    const rx_all = pages.allocator.alloc(u8, max_connections * rx_bytes) catch
+        serial.fail("the machine has not enough memory for its connections");
+    for (&conn_slots, 0..) |*c, k| c.* = .{ .rx = rx_all[k * rx_bytes ..][0..rx_bytes] };
+    var table = tcp.Table.init(lease.address, nic.mac, 80, &conn_slots, &tcp_out, isn);
+    serial.put("  holding up to ");
+    serial.putDec(max_connections);
+    serial.put(" connections at once\n");
+
     const request_heap = pages.allocator.alloc(u8, request_heap_bytes) catch
         serial.fail("the machine has not enough memory for a request heap");
     var request_fba = std.heap.FixedBufferAllocator.init(request_heap);
 
-    // ── one connection at a time ────────────────────────────────────────────
+    // ── the loop: talk to the network, serve whatever is ready ──────────────
+    //
+    // **MANY CONNECTIONS, ONE REQUEST AT A TIME.** Every turn, the oldest
+    // connection whose whole request head has arrived is served, start to
+    // finish. One that has been quiet for `read_timeout_ms` without sending a
+    // head is let go. Otherwise the network is polled, which moves every
+    // connection along at once — so a client that connects and says nothing
+    // waits in the table instead of holding the door.
     var served: u64 = 0;
     var deepest: usize = 0;
+    var busiest: usize = 0;
     while (limit == null or served < limit.?) {
-        served += 1;
-        serveOne(io, &nic, &conn, lease.address, request_fba.allocator(), &bus, served, conf.read_ns);
+        busiest = @max(busiest, table.inUse());
+        const now = Io.awakeNs() orelse 0;
+        if (nextReady(&table)) |pick| {
+            served += 1;
+            serveOne(io, &nic, &table, pick, lease.address, request_fba.allocator(), &bus, served, conf.read_ns);
+        } else if (quiet(&table, now, conf.read_ns)) |pick| {
+            served += 1;
+            letGo(&nic, &table, pick, lease.address, served);
+        } else {
+            if (stream.pump(&nic, &table, lease.address) == null) asm volatile ("pause");
+            continue;
+        }
         // What this request used of its heap, BEFORE the reset: the same
         // request must use the same amount every time, and a heap that was not
         // reset would show up as a number that only grows.
@@ -250,6 +288,11 @@ pub fn kmain() noreturn {
         deepest = reportStack(deepest);
     }
 
+    serial.put("  connections: at most ");
+    serial.putDec(busiest);
+    serial.put(" at once, ");
+    serial.putDec(table.refused);
+    serial.put(" turned away for want of a slot\n");
     const mem = router.mem_meter.snapshot();
     const page_stats = pages.stats();
     serial.put("  pages: ");
@@ -273,45 +316,70 @@ pub fn kmain() noreturn {
     serial.pass();
 }
 
-/// Accepts one connection, answers one request on it, and closes it. Every
-/// failure short of a panic is logged and survived.
+/// The oldest connection with something to serve, or null.
+fn nextReady(table: *tcp.Table) ?usize {
+    var best: ?usize = null;
+    for (table.conns, 0..) |*c, i| {
+        if (c.claimed or c.state != .established) continue;
+        if (ready.check(c.pending(), c.peer_done) == .waiting) continue;
+        if (best == null or c.serial < table.conns[best.?].serial) best = i;
+    }
+    return best;
+}
+
+/// The oldest connection that has gone quiet for `read_ns` without sending a
+/// whole request, or null.
+fn quiet(table: *tcp.Table, now: i96, read_ns: u64) ?usize {
+    var best: ?usize = null;
+    for (table.conns, 0..) |*c, i| {
+        if (c.claimed or !c.open()) continue;
+        if (now - c.heard_at < read_ns) continue;
+        if (best == null or c.serial < table.conns[best.?].serial) best = i;
+    }
+    return best;
+}
+
+/// **A CLIENT THAT STOPPED TALKING IS NOT A BROKEN NIC.** It is logged as a
+/// request that never came, the way it always has been, and closed.
+fn letGo(nic: *net.Net, table: *tcp.Table, i: usize, address: [4]u8, number: u64) void {
+    table.claim(i);
+    defer table.release(i);
+    var s = stream.Stream.init(nic, table, i, address, &read_buf, &write_buf);
+    logRequest(number, "(no request)", "the client stopped sending, and was let go");
+    close(&s, table, i);
+}
+
+/// Answers the request waiting on connection `i`, and closes it. Every failure
+/// short of a panic is logged and survived.
 fn serveOne(
     io: Io,
     nic: *net.Net,
-    conn: *tcp.Listener,
+    table: *tcp.Table,
+    i: usize,
     address: [4]u8,
     request_alloc: std.mem.Allocator,
     bus: *Bus,
     number: u64,
     read_ns: u64,
 ) void {
-    var s = stream.Stream.init(nic, conn, address, &read_buf, &write_buf);
+    table.claim(i);
+    defer table.release(i);
+    var s = stream.Stream.init(nic, table, i, address, &read_buf, &write_buf);
     s.read_ns = read_ns;
-    while (conn.state != .established) {
-        s.pump();
-        asm volatile ("pause");
-    }
 
-    // **WHAT THIS MACHINE'S OWN CLOCK SAYS EACH REQUEST COST.** Timing from
-    // outside measures curl, slirp, the virtqueues and the emulator as well,
-    // and the first soak could only say "the whole thing got twelve times
-    // slower" without saying which part. These two are the server's own
-    // account of itself: how long the client took to finish asking, and how
-    // long the route table took to answer.
-    const asked_at = Io.awakeNs() orelse 0;
+    // **WHAT THIS MACHINE'S OWN CLOCK SAYS EACH REQUEST COST.** How long the
+    // connection had been open before its turn came — the client finishing
+    // its request, and then the queue — and how long the route table took to
+    // answer. Timing from outside measures curl, slirp and the emulator too.
+    const opened_at = table.conns[i].opened_at;
 
     var server = std.http.Server.init(s.reader(), s.writer());
     var req = server.receiveHead() catch |e| {
-        // **A CLIENT THAT STOPPED TALKING IS NOT A BROKEN NIC.** std's reader
-        // reports both as ReadFailed and leaves the detail to the
-        // implementation, so the stream is asked which it was: this server
-        // takes one connection at a time, and "someone is holding the site
-        // open" is the thing a log has to be able to say.
         logRequest(number, "(no request)", if (s.timed_out)
             "the client stopped sending, and was let go"
         else
             @errorName(e));
-        close(&s, conn);
+        close(&s, table, i);
         return;
     };
     req.head.keep_alive = false;
@@ -337,8 +405,8 @@ fn serveOne(
     };
     const done_at = Io.awakeNs() orelse 0;
     logRequest(number, what, outcome);
-    serial.put("    asked in ");
-    serial.putDec(@intCast(@divTrunc(head_at - asked_at, 1000)));
+    serial.put("    waited ");
+    serial.putDec(@intCast(@divTrunc(head_at - opened_at, 1000)));
     serial.put(" us, answered in ");
     serial.putDec(@intCast(@divTrunc(done_at - head_at, 1000)));
     serial.put(" us, ");
@@ -348,7 +416,7 @@ fn serveOne(
         serial.putDec(@intCast(@divTrunc(Io.ticksToNs(d.busy_ticks -% disk_ticks), 1000)));
         serial.put(" us\n");
     } else serial.put("no disk\n");
-    close(&s, conn);
+    close(&s, table, i);
 }
 
 /// How deep the calls have gone, said out loud the first time each new depth is
@@ -378,11 +446,11 @@ fn reportStack(deepest: usize) usize {
     return u.used;
 }
 
-fn close(s: *stream.Stream, conn: *tcp.Listener) void {
+fn close(s: *stream.Stream, table: *tcp.Table, i: usize) void {
     s.finish();
-    // A peer that never acknowledged our FIN would otherwise hold the listener
-    // in `closing`, and every later connection would be ignored.
-    if (conn.state != .listen) conn.abandon();
+    // A peer that never acknowledged our FIN would otherwise hold its slot in
+    // `closing` for good.
+    if (table.conns[i].state != .closed) table.abandon(i);
 }
 
 fn logRequest(number: u64, what: []const u8, outcome: []const u8) void {
