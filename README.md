@@ -51,7 +51,8 @@ and its two load-bearing findings are worth repeating here:
     probe/run.sh           # boot each one under microvm (~45 s)
     probe/run.sh clock     # just one
     ./port.sh && zig build gopher && probe/run.sh gopher   # the real server, judged against Linux (~3 min)
-    probe/run.sh quick     # all of the above in Debug, with the judge's quick tier (~3 min)
+    probe/run.sh quick     # all of the above in Debug, with the judge's quick tier
+    probe/run.sh native    # the TCP table on Linux, judged by Linux's own TCP (~1 min)
     probe/run.sh ladder    # one operation many times, at a flat cost (LADDER_SCALE=10 for more)
 
 **Two tiers.** `-Ddev` builds the kernels in Debug — a rebuild of the real
@@ -915,6 +916,48 @@ thousand times. Two numbers are worth a second look even though they do not
 climb: rewriting a file of a dozen bytes takes 15 device requests, and one
 append takes 7. The network rungs are next.
 
+## The TCP table, on Linux, against Linux's TCP
+
+`src/tcp.zig` touches no device: frames go out through whatever "wire" it is
+handed, and the time is a number passed in. So it runs as an ordinary Linux
+program too — `native/serve.zig`, built Debug in four seconds — with a TAP
+device instead of virtio-net and **Linux's own TCP as the peer**. No emulator,
+no slirp, no kernel image. `native/judge_native.py` creates the device, starts
+it at 10.77.0.2, and asks in about a minute what a QEMU boot used to be needed
+for:
+
+```
+ok    connections: 5000 one after another, 89 -> 90 us each (x1.07); 0 left
+      half-closed on Linux's side
+ok    lazy close: 30 clients that close 100 ms after the answer: 0 left in
+      LAST-ACK on Linux's side, 0 in the table
+ok    concurrent: 48 clients x 20: every answer right
+ok    bytes: 5 MB read fast and read with a 2 s pause: exact
+ok    half-close / reset / keepalive
+ok    loss: 5% lost toward the table and 1 in 13 from it: recovered
+```
+
+**Why it exists.** The send side was debugged one 40-second QEMU boot at a
+time, and the bugs it found were ones a reading of RFC 9293 would have named
+in minutes. A cold review against the RFC found eight more, each now a pure
+test with a fake clock; the table's 44 host tests run in a second, timers and
+all. What is left for a real peer is the handful of facts an implementation
+cannot know about itself — and those are what this harness asks.
+
+**What it caught immediately.** The connection cost climbing in the ladder's
+`tcp_conn` rung was ours: when the peer acknowledged our FIN before sending
+its own, the connection was forgotten, and its FIN then found nothing. QEMU's
+network kept every such connection in LAST-ACK and walks that list for every
+frame, so every frame got slower. Linux usually sends its FIN with the
+acknowledgement, which is why the ordinary check could not see it — so the
+harness has a client that closes a moment later, which fails 30 of 30 without
+the fix.
+
+**Two more gates came out of it.** A boot that loses nothing on purpose must
+have no request waiting a second for its turn (a second is a retransmission
+timer, not work), and the ladder's `tcp_conn` rung is now flat at 2,000
+connections.
+
 ## What the TCP does not do
 
 No congestion control, no fast retransmit, no selective acknowledgement, no
@@ -924,7 +967,15 @@ box sits behind Caddy on a private network, and one of them is a measured cost:
 
 - **In-order only.** A segment whose sequence is not exactly what we expect is
   dropped and re-acknowledged, which asks the peer to send it again — and
-  under loss, that makes the peer resend everything after the hole.
+  under loss, that makes the peer resend everything after the hole. (Its
+  acknowledgement number is still taken: it is cumulative, so a newer one
+  cannot be wrong, and a peer repeating its FIN with ours acknowledged must
+  not be made to wait on a timer.)
+- **No round-trip measurement.** The first retransmission wait is RFC 6298's
+  one second, whatever the network actually costs, so recovery on a fast link
+  is a second slower than it need be.
+- **No TIME-WAIT.** A connection is forgotten as soon as both sides have
+  finished, and anything that arrives afterwards is answered with a reset.
 
 ## What lives elsewhere
 

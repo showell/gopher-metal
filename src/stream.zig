@@ -232,13 +232,14 @@ pub const Stream = struct {
 
     /// Says we are done sending, and waits for everything queued to be
     /// delivered and our FIN acknowledged — for as long as the peer keeps
-    /// acknowledging something. `std.http.Server` writes `connection: close`
-    /// for us; this is the TCP half of the same statement.
+    /// acknowledging something. The peer's own FIN is the table's to wait for.
+    /// `std.http.Server` writes `connection: close` for us; this is the TCP
+    /// half of the same statement.
     pub fn finish(self: *Stream) void {
         self.table.finish(self.index);
         var since = self.clock();
         var una = self.conn().una;
-        while (self.conn().state != .closed) {
+        while (self.conn().state != .closed and self.conn().fin != .acknowledged) {
             const c = self.conn();
             if (c.una != una) {
                 since = self.clock();

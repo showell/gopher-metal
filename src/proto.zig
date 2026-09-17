@@ -183,6 +183,8 @@ pub fn parseIpv4(frame: []const u8) ?Packet {
 
     const total = readBe16(ip[2..4]);
     if (total < ihl) return null;
+    // A header damaged on the way describes nothing.
+    if (checksum(ip[0..ihl]) != 0) return null;
     if (eth_header_len + total > frame.len) return null;
 
     return .{

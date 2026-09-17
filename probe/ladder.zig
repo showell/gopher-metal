@@ -20,11 +20,18 @@
 //!   append         512 bytes appended to one file, the way the application
 //!                  appends
 //!   replace        a small file rewritten whole, the way the message count is
+//!   udp_echo       a datagram to an echo server on the host, and back: the NIC
+//!                  and the emulator's network, with no TCP in the way
+//!   tcp_conn       a connection from the host, a tiny request, a tiny answer,
+//!                  and the close — through this machine's TCP table, the way
+//!                  the server holds connections
 //!
 //! **THE VERDICT IS NOT THIS KERNEL'S.** It prints numbers; `probe/run.sh
 //! ladder` decides whether they are flat. The machine's command line says how
 //! long each rung runs (`scale=N` multiplies every rung's count), so the same
-//! kernel answers quickly first and at length once it has earned it.
+//! kernel answers quickly first and at length once it has earned it, and
+//! where the host's echo server listens (`echo_port=N`). The host's side of the
+//! network rungs is `probe/judge_ladder.py`.
 
 const std = @import("std");
 const metal = @import("metal");
@@ -34,6 +41,12 @@ const fat16 = metal.fat16;
 const pages = metal.pages;
 const pvh = metal.pvh;
 const Io = metal.io;
+const net = metal.net;
+const proto = metal.proto;
+const tcp = metal.tcp;
+const arp = metal.arp;
+const rng = metal.rng;
+const dhcp = metal.dhcp;
 
 comptime {
     _ = metal.boot;
@@ -65,6 +78,14 @@ var scratch: [fat16.sector_size]u8 align(4096) = undefined;
 var sector: [fat16.sector_size]u8 align(4096) = undefined;
 var block: [4096]u8 = undefined;
 var chunk: [512]u8 = undefined;
+var nic_mem: net.Memory align(4096) = .{};
+var rng_mem: rng.Memory align(4096) = .{};
+var frame: [net.buffer_size]u8 align(16) = undefined;
+var dhcp_reply: [1024]u8 align(16) = undefined;
+var tcp_out: [net.buffer_size]u8 align(16) = undefined;
+var conn_rx: [4][4096]u8 = undefined;
+var conn_tx: [4][4096]u8 = undefined;
+var conns: [4]tcp.Conn = undefined;
 
 /// The first sector past the FAT volume: run.sh makes the volume 32 MB and the
 /// disk 64 MB, so everything from here on is the ladder's to write.
@@ -73,16 +94,16 @@ const raw_first: u64 = 65536;
 /// Each rung is timed in this many equal parts.
 const tenths = 10;
 
-/// What each rung's count is multiplied by, from `scale=N` on the command line.
-fn scaleFromCommandLine() usize {
+/// A number from the command line (`name=N`), or `default`.
+fn fromCommandLine(comptime name: []const u8, default: usize) usize {
     var words = std.mem.tokenizeScalar(u8, metal.boot.commandLine(), ' ');
     while (words.next()) |word| {
-        if (std.mem.startsWith(u8, word, "scale=")) {
-            return std.fmt.parseInt(usize, word["scale=".len..], 10) catch
-                serial.fail("the command line's scale= is not a number");
+        if (std.mem.startsWith(u8, word, name ++ "=")) {
+            return std.fmt.parseInt(usize, word[name.len + 1 ..], 10) catch
+                serial.fail("the command line's " ++ name ++ "= is not a number");
         }
     }
-    return 1;
+    return default;
 }
 
 /// Runs `op` `count` times and prints the cost per operation of each tenth of
@@ -98,6 +119,10 @@ fn rung(name: []const u8, count: usize, blk: *virtio.Block, context: anytype, co
         spent[t] = now() - began;
         requests[t] = blk.requests - requests_before;
     }
+    report(name, per, spent, requests);
+}
+
+fn report(name: []const u8, per: usize, spent: [tenths]i96, requests: [tenths]u64) void {
     serial.put("rung ");
     serial.put(name);
     serial.put(": ");
@@ -111,6 +136,154 @@ fn rung(name: []const u8, count: usize, blk: *virtio.Block, context: anytype, co
     for (requests) |r| {
         serial.put(" ");
         serial.putDec(r);
+    }
+    serial.put("\n");
+}
+
+/// The network rungs' view of the wire: our address and the host's.
+const Link = struct {
+    nic: *net.Net,
+    ip: [4]u8,
+    host_ip: [4]u8,
+    host_mac: [6]u8,
+    echo_port: u16,
+};
+
+const echo_from: u16 = 40000;
+
+/// Takes whatever has arrived: answers ARP, and hands back the first frame
+/// `want` accepts, copied into `into`. The rest is dropped.
+fn receive(link: *Link, into: []u8, want: *const fn ([]const u8) bool) ?usize {
+    const got = link.nic.poll() orelse return null;
+    defer link.nic.recycle(got.id);
+    if (arp.parseRequest(got.frame)) |req| {
+        if (std.mem.eql(u8, &req.target_ip, &link.ip)) {
+            var out: [64]u8 = undefined;
+            const n = arp.writeReply(&out, link.nic.mac, link.ip, req);
+            link.nic.send(out[0..n]);
+        }
+        return null;
+    }
+    if (!want(got.frame)) return null;
+    @memcpy(into[0..got.frame.len], got.frame);
+    return got.frame.len;
+}
+
+fn isEcho(f: []const u8) bool {
+    const dg = proto.parseUdp(f) orelse return false;
+    return dg.dst_port == echo_from;
+}
+
+fn udpEcho(link: *Link, k: usize) void {
+    const payload = frame[proto.udp_payload_at..][0..64];
+    @memset(payload, 'u');
+    std.mem.writeInt(u64, payload[0..8], k, .little);
+    const len = proto.writeUdp(&frame, link.nic.mac, link.host_mac, link.ip, link.host_ip, echo_from, link.echo_port, payload.len);
+    link.nic.send(frame[0..len]);
+    var back: [net.buffer_size]u8 = undefined;
+    const sent_at = now();
+    while (now() - sent_at < std.time.ns_per_s) {
+        const n = receive(link, &back, isEcho) orelse {
+            asm volatile ("pause");
+            continue;
+        };
+        const dg = proto.parseUdp(back[0..n]).?;
+        if (dg.payload.len >= 8 and std.mem.readInt(u64, dg.payload[0..8], .little) == k) return;
+    }
+    serial.fail("udp_echo: no answer within a second");
+}
+
+fn isn() u32 {
+    return rng.int(u32);
+}
+
+/// **THE TCP RUNG** cannot be `rung`: the host decides when each connection
+/// comes. This one serves `count` connections — a request of any size ending
+/// in a blank line, an answer, our FIN, their FIN — and times each from its
+/// SYN to its close, bucketed by arrival.
+fn tcpConnections(link: *Link, count: usize, blk: *virtio.Block) void {
+    for (&conns, &conn_rx, &conn_tx) |*c, *r, *t| c.* = .{ .rx = r, .tx = t };
+    var table = tcp.Table.init(link.ip, link.nic.mac, 80, &conns, &tcp_out, isn);
+    var wire = metal.stream.Wire{ .nic = link.nic };
+    const per = @max(count / tenths, 1);
+    const total = per * tenths;
+    var spent: [tenths]i96 = @splat(0);
+    // The two legs of each connection: its SYN to its whole request, and the
+    // request to the close — what arrives, and what we answer and the peer
+    // acknowledges.
+    var to_request: [tenths]i96 = @splat(0);
+    var to_close: [tenths]i96 = @splat(0);
+    var started: [conns.len]i96 = @splat(0);
+    var asked: [conns.len]i96 = @splat(0);
+    // Frames each way, by tenth: a cost that grows with a constant count is a
+    // cost per frame that grows.
+    var frames_in: [tenths]u64 = @splat(0);
+    var frames_out: [tenths]u64 = @splat(0);
+    var sent_before: u64 = 0;
+    var done: usize = 0;
+    const answer = "HTTP/1.1 200 OK\r\ncontent-length: 2\r\nconnection: close\r\n\r\nok";
+    serial.put("  tcp_conn: listening\n");
+    var quiet_since = now();
+    while (done < total) {
+        const got = link.nic.poll() orelse {
+            table.transmit(&wire, now());
+            if (now() - quiet_since > 30 * std.time.ns_per_s) serial.fail("tcp_conn: the host stopped connecting");
+            asm volatile ("pause");
+            continue;
+        };
+        quiet_since = now();
+        defer link.nic.recycle(got.id);
+        frames_in[@min(done / per, tenths - 1)] += 1;
+        if (arp.parseRequest(got.frame)) |req| {
+            if (std.mem.eql(u8, &req.target_ip, &link.ip)) {
+                var out: [64]u8 = undefined;
+                const n = arp.writeReply(&out, link.nic.mac, link.ip, req);
+                link.nic.send(out[0..n]);
+            }
+            continue;
+        }
+        const r = table.handle(&wire, got.frame, now());
+        switch (r.event) {
+            .data, .peer_done => {
+                const c = &table.conns[r.index];
+                if (c.state != .established) {} else if (std.mem.indexOf(u8, c.pending(), "\r\n\r\n") != null) {
+                    started[r.index] = c.opened_at;
+                    asked[r.index] = now();
+                    c.consume(c.pending().len);
+                    _ = table.queue(r.index, answer);
+                    table.finish(r.index);
+                }
+            },
+            .closed => {
+                if (started[r.index] != 0) {
+                    const t = @min(done / per, tenths - 1);
+                    const closed_at = now();
+                    spent[t] += closed_at - started[r.index];
+                    to_request[t] += asked[r.index] - started[r.index];
+                    to_close[t] += closed_at - asked[r.index];
+                    started[r.index] = 0;
+                    done += 1;
+                }
+            },
+            else => {},
+        }
+        table.transmit(&wire, now());
+        frames_out[@min(done / per, tenths - 1)] += link.nic.sent - sent_before;
+        sent_before = link.nic.sent;
+    }
+    const none: [tenths]u64 = @splat(blk.requests - blk.requests);
+    report("tcp_conn", per, spent, none);
+    report("tcp_to_request", per, to_request, none);
+    report("tcp_to_close", per, to_close, none);
+    serial.put("note tcp_conn frames in by tenth:");
+    for (frames_in) |f| {
+        serial.put(" ");
+        serial.putDec(f);
+    }
+    serial.put("; out by tenth:");
+    for (frames_out) |f| {
+        serial.put(" ");
+        serial.putDec(f);
     }
     serial.put("\n");
 }
@@ -173,7 +346,8 @@ pub fn kmain() noreturn {
     serial.init();
     serial.put("gopher-metal ladder\n");
 
-    const scale = scaleFromCommandLine();
+    const scale = fromCommandLine("scale", 1);
+    const echo_port = fromCommandLine("echo_port", 0);
     serial.put("  scale ");
     serial.putDec(scale);
     serial.put("\n");
@@ -204,6 +378,21 @@ pub fn kmain() noreturn {
     rung("write_spread", @min(2000 * scale, 60_000), &blk, &blk, writeSpread);
     rung("append", 1000 * scale, &blk, io, append);
     rung("replace", 1000 * scale, &blk, io, replace);
+
+    if (echo_port == 0) serial.fail("no echo_port= on the command line: the network rungs need the host");
+    rng.attach(&rng_mem);
+    const nic_base = virtio.find(virtio.device_id_net) orelse serial.fail("no virtio-net device");
+    var nic = net.Net.init(nic_base, &nic_mem) catch serial.fail("the NIC would not come up");
+    const lease = dhcp.acquire(&nic, &frame, &dhcp_reply) catch serial.fail("no DHCP lease");
+    var link = Link{
+        .nic = &nic,
+        .ip = lease.address,
+        .host_ip = lease.server,
+        .host_mac = lease.server_mac,
+        .echo_port = @intCast(echo_port),
+    };
+    rung("udp_echo", 2000 * scale, &blk, &link, udpEcho);
+    tcpConnections(&link, 200 * scale, &blk);
 
     if (gpa.deinit() == .leak) serial.fail("the allocator rung leaked");
     serial.pass();

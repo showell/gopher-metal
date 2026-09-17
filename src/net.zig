@@ -58,6 +58,8 @@ pub const Net = struct {
     mem: *Memory,
     /// Our own hardware address, from the device.
     mac: [6]u8,
+    /// Frames sent since the device came up.
+    sent: u64 = 0,
 
     pub fn init(base: usize, mem: *Memory) virtio.Error!Net {
         const st = try virtio.negotiate(base, feature_mac);
@@ -89,6 +91,7 @@ pub const Net = struct {
     /// Sends one frame, and waits for the device to say it took it. Waiting is
     /// what keeps `tx_buf` safe to reuse on the next call.
     pub fn send(self: *Net, frame: []const u8) void {
+        self.sent +%= 1;
         const hdr: *Header = @ptrCast(@alignCast(&self.mem.tx_buf));
         hdr.* = .{};
         @memcpy(self.mem.tx_buf[@sizeOf(Header)..][0..frame.len], frame);

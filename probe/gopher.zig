@@ -371,6 +371,10 @@ pub fn kmain() noreturn {
     serial.put(" window probes, ");
     serial.putDec(table.given_up);
     serial.put(" peers given up on, ");
+    serial.putDec(table.fin_waits_expired);
+    serial.put(" never finished, ");
+    serial.putDec(table.strays);
+    serial.put(" strays reset, ");
     serial.putDec(wire.lost);
     serial.put(" frames lost on purpose\n");
     const mem = router.mem_meter.snapshot();
@@ -708,8 +712,11 @@ fn reportStack(deepest: usize) usize {
 fn close(s: *stream.Stream, table: *tcp.Table, i: usize) void {
     s.finish();
     // A peer that stopped acknowledging would otherwise hold its slot in
-    // `closing` until the table's retransmissions ran out.
-    if (table.conns[i].state != .closed) table.abandon(s.wire, i);
+    // `closing` until the table's retransmissions ran out. One that has
+    // acknowledged our FIN is only waiting to send its own, and the table
+    // sees that through.
+    const c = &table.conns[i];
+    if (c.state != .closed and c.fin != .acknowledged) table.abandon(s.wire, i);
 }
 
 fn logRequest(number: u64, what: []const u8, outcome: []const u8) void {

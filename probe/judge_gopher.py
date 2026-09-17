@@ -809,6 +809,16 @@ def run_story(elf, linux_bin, content, pristine, work, mnt, steps, label, report
     linux_window = (int(before) - 1, int(time.time()) + 1)
 
     failures = 0
+    # **A REQUEST THAT WAITED A SECOND WAITED ON A TIMER.** Every answer can
+    # match Linux's while each one waits out a retransmission nobody needed —
+    # which is how a full run once went from three minutes to seven. On a boot
+    # that loses nothing on purpose, no request waits that long for its turn.
+    if not (conf or {}).get("lose_one_sent_in"):
+        slow = [(n + 1, w) for n, (w, _, _, _) in enumerate(request_timings(log)) if w >= WAIT_LIMIT_US]
+        if slow:
+            failures += 1
+            report(f"FAIL  {label}: {len(slow)} requests waited a second or more for their turn "
+                   f"(request {slow[0][0]}: {slow[0][1] // 1000} ms)")
     if code != 1:
         failures += 1
         report(f"FAIL  {label}: the kernel exited {code} after the story: "
@@ -1481,6 +1491,7 @@ def base_heap_taken(log: str) -> list:
     return [int(m.group(2)) for m in BASE_HEAP.finditer(log)]
 
 
+WAIT_LIMIT_US = 900_000
 TIMING = re.compile(
     r"waited (\d+) us, answered in (\d+) us, (\d+) disk requests taking (\d+) us")
 
@@ -1517,7 +1528,8 @@ def request_heap_trace(log: str) -> list:
 
 BULK_MESSAGES = 8
 TCP_LINE = re.compile(r"tcp: (\d+) timeouts sent something again, (\d+) window probes, "
-                      r"(\d+) peers given up on, (\d+) frames lost on purpose")
+                      r"(\d+) peers given up on, \d+ never finished, \d+ strays reset, "
+                      r"(\d+) frames lost on purpose")
 
 
 def bulk_name(n: int) -> bytes:

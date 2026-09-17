@@ -26,8 +26,12 @@
 //!   connection is reset. That is how a peer that vanished without a FIN is
 //!   noticed, and also how one that stops reading is let go: its window stays
 //!   shut, the probes make no progress, and the count runs out.
-//! - **The FIN goes last**, after every queued byte, and only an
-//!   acknowledgement of the FIN itself closes the connection.
+//! - **The FIN goes last**, after every queued byte. Once it is acknowledged
+//!   the connection waits for the peer's FIN, acknowledges it, and closes; a
+//!   peer that never sends one is let go after `fin_wait_ns`. (There is no
+//!   TIME-WAIT: a FIN repeated after the close is answered with a reset.)
+//! - **A segment for no connection we hold is answered with a reset**, so a
+//!   peer never waits on a connection this side has forgotten.
 //!
 //! **STILL THE SMALL TCP**, allowed because this box sits behind Caddy on a
 //! private network: no congestion control, no fast retransmit, no selective
@@ -70,6 +74,8 @@ pub const mss_option = [4]u8{ 2, 4, our_mss >> 8, our_mss & 0xFF };
 pub const first_rto_ns: u64 = 1 * ns_per_s;
 pub const max_rto_ns: u64 = 5 * ns_per_s;
 pub const max_retries: u8 = 6;
+/// How long a connection whose FIN was acknowledged waits for the peer's.
+pub const fin_wait_ns: u64 = 30 * ns_per_s;
 pub const ns_per_ms = 1_000_000;
 pub const ns_per_s = 1_000_000_000;
 
@@ -78,8 +84,8 @@ pub const State = enum {
     closed,
     syn_received,
     established,
-    /// We have said we are done: the queue drains, then our FIN goes, and the
-    /// connection ends when the FIN is acknowledged.
+    /// We have said we are done: the queue drains, then our FIN goes; once it
+    /// is acknowledged and the peer's FIN has arrived, the connection is over.
     closing,
 };
 
@@ -111,12 +117,23 @@ pub const Conn = struct {
     tx_start: usize = 0,
     tx_end: usize = 0,
     sent: usize = 0,
+    /// The most bytes past `una` ever on the wire. A timeout sends from `una`
+    /// again, so `sent` goes back; an acknowledgement of what was sent before
+    /// that is still an acknowledgement.
+    high: usize = 0,
+    /// Our FIN has been on the wire at least once.
+    fin_ever_sent: bool = false,
     /// The oldest sequence number the peer has not acknowledged. Before the
     /// handshake completes it is our SYN's.
     una: u32 = 0,
     fin: Fin = .none,
     /// How many bytes past `una` the peer last said it has room for.
     wnd: u32 = 0,
+    /// The sequence and acknowledgement numbers of the segment that last set
+    /// `wnd` (RFC 9293's SND.WL1 and SND.WL2): an older segment, arriving
+    /// late, does not overrule a newer one's window.
+    wl1: u32 = 0,
+    wl2: u32 = 0,
     /// The largest segment the peer said it takes.
     mss: u16 = default_mss,
     /// When the oldest unacknowledged thing is sent again, or a shut window
@@ -125,6 +142,9 @@ pub const Conn = struct {
     rto_ns: u64 = first_rto_ns,
     /// Timeouts since the peer last acknowledged anything.
     retries: u8 = 0,
+    /// Our FIN is acknowledged and the peer's has not come: until when to
+    /// wait for it.
+    fin_wait_until: ?i96 = null,
 
     /// The peer has sent its FIN: nothing more is coming, but what already
     /// arrived is still there to be read.
@@ -195,6 +215,20 @@ pub const Conn = struct {
         return n;
     }
 
+    /// The sequence number just past the furthest thing we have ever sent.
+    fn highest(self: *const Conn) u32 {
+        var n = self.una +% @as(u32, @intCast(self.high));
+        if (self.state == .syn_received) n +%= 1;
+        if (self.fin_ever_sent and self.fin != .acknowledged) n +%= 1;
+        return n;
+    }
+
+    /// Whether `seq` is past `rcv_nxt` but inside the window we advertise.
+    fn ahead(self: *const Conn, seq: u32) bool {
+        const off = seq -% self.rcv_nxt;
+        return off != 0 and off < @max(self.window(), 1);
+    }
+
     fn reset(self: *Conn) void {
         const rx = self.rx;
         const tx = self.tx;
@@ -250,6 +284,12 @@ pub const Table = struct {
     probes: u64 = 0,
     /// Connections reset because the peer stopped acknowledging.
     given_up: u64 = 0,
+    /// Connections let go because the peer never sent its FIN.
+    fin_waits_expired: u64 = 0,
+    /// Segments for no connection we hold, answered with a reset.
+    strays: u64 = 0,
+    /// Segments whose checksum was wrong, dropped.
+    damaged: u64 = 0,
 
     pub fn init(ip: [4]u8, mac: [6]u8, port: u16, conns: []Conn, out: []u8, isn: *const fn () u32) Table {
         return .{ .local_ip = ip, .local_mac = mac, .port = port, .conns = conns, .out = out, .isn = isn };
@@ -282,33 +322,59 @@ pub const Table = struct {
     /// carries our segment size.
     fn emit(self: *Table, wire: anytype, i: usize, flags: u8, seq: u32, payload: []const u8) void {
         const c = &self.conns[i];
+        self.segment(wire, .{
+            .mac = c.peer_mac,
+            .ip = c.peer_ip,
+            .port = c.peer_port,
+        }, flags, seq, c.rcv_nxt, c.window(), payload);
+    }
+
+    const Peer = struct { mac: [6]u8, ip: [4]u8, port: u16 };
+
+    /// Builds and sends one segment to `to`. A SYN carries our segment size.
+    fn segment(self: *Table, wire: anytype, to: Peer, flags: u8, seq: u32, ack_number: u32, window: u16, payload: []const u8) void {
         const options: []const u8 = if (flags & flag_syn != 0) &mss_option else &.{};
         const len = header_len + options.len;
         const frame_len = proto.writeIpv4(
             self.out,
             self.local_mac,
-            c.peer_mac,
+            to.mac,
             self.local_ip,
-            c.peer_ip,
+            to.ip,
             proto.proto_tcp,
             len + payload.len,
         );
 
         const t = self.out[segment_at..][0 .. len + payload.len];
         @memcpy(t[0..2], &proto.be16(self.port));
-        @memcpy(t[2..4], &proto.be16(c.peer_port));
+        @memcpy(t[2..4], &proto.be16(to.port));
         @memcpy(t[4..8], &proto.be32(seq));
-        @memcpy(t[8..12], &proto.be32(c.rcv_nxt));
+        @memcpy(t[8..12], &proto.be32(ack_number));
         t[12] = @intCast((len / 4) << 4);
         t[13] = flags;
-        @memcpy(t[14..16], &proto.be16(c.window()));
+        @memcpy(t[14..16], &proto.be16(window));
         @memcpy(t[16..18], &proto.be16(0)); // the checksum, over a zeroed checksum
         @memcpy(t[18..20], &proto.be16(0)); // no urgent pointer
         @memcpy(t[header_len..len], options);
         @memcpy(t[len..], payload);
-        @memcpy(t[16..18], &proto.be16(proto.pseudoChecksum(self.local_ip, c.peer_ip, proto.proto_tcp, t)));
+        @memcpy(t[16..18], &proto.be16(proto.pseudoChecksum(self.local_ip, to.ip, proto.proto_tcp, t)));
 
         wire.send(self.out[0..frame_len]);
+    }
+
+    /// **A SEGMENT FOR NO CONNECTION WE HOLD** is answered with a reset
+    /// (RFC 9293 §3.10.7.1): numbered by its acknowledgement if it has one,
+    /// else acknowledging everything it carried.
+    fn refuse(self: *Table, wire: anytype, to: Peer, seq: u32, ack_number: u32, flags: u8, data_len: usize) void {
+        self.strays += 1;
+        if (flags & flag_ack != 0) {
+            self.segment(wire, to, flag_rst, ack_number, 0, 0, "");
+        } else {
+            var through = seq +% @as(u32, @intCast(data_len));
+            if (flags & flag_syn != 0) through +%= 1;
+            if (flags & flag_fin != 0) through +%= 1;
+            self.segment(wire, to, flag_rst | flag_ack, 0, through, 0, "");
+        }
     }
 
     /// Puts as much of `bytes` in connection `i`'s send queue as fits, and says
@@ -381,6 +447,15 @@ pub const Table = struct {
         const c = &self.conns[i];
         const expired = if (c.rto_at) |at| now >= at else false;
 
+        if (c.fin == .acknowledged) {
+            // Waiting for the peer's FIN, with nothing of ours in flight.
+            if (c.fin_wait_until) |until| if (now >= until) {
+                self.fin_waits_expired += 1;
+                self.abandon(wire, i);
+            };
+            return;
+        }
+
         if (c.state == .syn_received) {
             // The SYN-ACK was lost, or its answer was.
             if (!expired) return;
@@ -417,12 +492,14 @@ pub const Table = struct {
             probe = false;
             self.emit(wire, i, flag_psh | flag_ack, c.una +% @as(u32, @intCast(c.sent)), c.tx[c.tx_start + c.sent ..][0..n]);
             c.sent += n;
+            c.high = @max(c.high, c.sent);
             if (c.rto_at == null) c.rto_at = now + c.rto_ns;
         }
 
         if (c.fin == .queued and c.sent == c.queued()) {
             self.emit(wire, i, flag_fin | flag_ack, c.una +% @as(u32, @intCast(c.sent)), "");
             c.fin = .sent;
+            c.fin_ever_sent = true;
             if (c.rto_at == null) c.rto_at = now + c.rto_ns;
         }
     }
@@ -441,30 +518,39 @@ pub const Table = struct {
         self.abandon(wire, i);
     }
 
-    /// Takes in the peer's acknowledgement and window. True once our FIN is
-    /// acknowledged.
-    fn acknowledge(c: *Conn, number: u32, window: u16, now: i96) bool {
-        const flight = c.nxt() -% c.una;
+    /// Takes in the peer's acknowledgement and window, from a segment numbered
+    /// `seq`. True once our FIN is acknowledged.
+    fn acknowledge(c: *Conn, seq: u32, number: u32, window: u16, now: i96) bool {
+        const flight = c.highest() -% c.una;
         const advance = number -% c.una;
         // An acknowledgement of something never sent, or an old one (which
         // wraps to a huge advance): neither says anything current.
         if (advance > flight) return false;
-        c.wnd = window;
+        if (after(seq, c.wl1) or (seq == c.wl1 and !after(c.wl2, number))) {
+            c.wnd = window;
+            c.wl1 = seq;
+            c.wl2 = number;
+        }
         if (advance == 0) return false;
 
-        const bytes = @min(advance, c.sent);
+        const bytes = @min(advance, c.queued());
         c.tx_start += bytes;
-        c.sent -= bytes;
+        c.sent -= @min(c.sent, bytes);
+        c.high -= @min(c.high, bytes);
         if (c.tx_start == c.tx_end) {
             c.tx_start = 0;
             c.tx_end = 0;
         }
         c.una +%= advance;
-        if (advance > bytes) c.fin = .acknowledged;
+        if (advance > bytes) {
+            c.fin = .acknowledged;
+            c.high = 0;
+            c.sent = 0;
+        }
 
         c.retries = 0;
         c.rto_ns = first_rto_ns;
-        c.rto_at = if (c.nxt() != c.una) now + c.rto_ns else null;
+        c.rto_at = if (c.highest() != c.una) now + c.rto_ns else null;
         return c.fin == .acknowledged;
     }
 
@@ -477,6 +563,11 @@ pub const Table = struct {
 
         const t = pkt.payload;
         if (proto.readBe16(t[2..4]) != self.port) return .{ .event = .nothing };
+        // A segment damaged on the way is not a segment.
+        if (proto.pseudoChecksum(pkt.src_ip, pkt.dst_ip, proto.proto_tcp, t) != 0) {
+            self.damaged += 1;
+            return .{ .event = .nothing };
+        }
 
         const src_port = proto.readBe16(t[0..2]);
         const seq = proto.readBe32(t[4..8]);
@@ -490,15 +581,24 @@ pub const Table = struct {
         const found = self.find(pkt.src_ip, src_port);
 
         if (flags & flag_rst != 0) {
+            // **A RESET MUST NAME THE NEXT BYTE WE EXPECT** (RFC 9293, after
+            // RFC 5961). One inside the window but not exactly there is
+            // answered with an acknowledgement, which a genuine peer answers
+            // with an exact reset; anything else is ignored.
             const i = found orelse return .{ .event = .nothing };
-            self.conns[i].reset();
-            return .{ .event = .closed, .index = i };
+            const c = &self.conns[i];
+            if (seq == c.rcv_nxt) return self.close(i);
+            if (c.ahead(seq)) self.emit(wire, i, flag_ack, c.nxt(), "");
+            return .{ .event = .nothing };
         }
 
         // A SYN for no connection we know is the start of one — if there is a
-        // slot for it.
+        // slot for it. Anything else for no connection is refused.
         const i = found orelse {
-            if (flags & flag_syn == 0) return .{ .event = .nothing };
+            if (flags & flag_syn == 0 or flags & flag_ack != 0) {
+                self.refuse(wire, .{ .mac = pkt.src_mac, .ip = pkt.src_ip, .port = src_port }, seq, number, flags, data.len);
+                return .{ .event = .nothing };
+            }
             const slot = self.free() orelse {
                 self.refused += 1;
                 return .{ .event = .nothing };
@@ -509,6 +609,7 @@ pub const Table = struct {
             c.peer_mac = pkt.src_mac;
             c.peer_port = src_port;
             c.rcv_nxt = seq +% 1; // their SYN takes one
+            c.wl1 = seq;
             c.una = self.isn();
             c.mss = @min(parseMss(t[header_len..offset]) orelse default_mss, our_mss);
             c.wnd = window;
@@ -523,24 +624,56 @@ pub const Table = struct {
         };
 
         const c = &self.conns[i];
-        c.heard_at = now;
 
         // A repeated SYN for a connection we already answered: the SYN-ACK was
-        // lost or is late. Say it again, from the same starting number.
+        // lost or is late. Say it again, from the same starting number. On an
+        // established connection it is answered with an acknowledgement.
         if (flags & flag_syn != 0) {
-            if (c.state == .syn_received) self.emit(wire, i, flag_syn | flag_ack, c.una, "");
+            if (c.state == .syn_received) {
+                self.emit(wire, i, flag_syn | flag_ack, c.una, "");
+            } else self.emit(wire, i, flag_ack, c.nxt(), "");
             return .{ .event = .nothing };
         }
 
         // Every segment after the SYN acknowledges something.
         if (flags & flag_ack == 0) return .{ .event = .nothing };
 
+        // **A SEGMENT THAT IS NOT THE NEXT ONE IS ANSWERED, NOT TAKEN.** One
+        // from behind — a repeated FIN whose acknowledgement was lost, a
+        // keepalive probe — or from beyond the window gets an acknowledgement
+        // and nothing else. One ahead but inside the window still says what
+        // the peer has received; only its data and FIN wait.
+        //
+        // Its acknowledgement number still counts if it moves forward: an
+        // acknowledgement is cumulative, so a newer one cannot be wrong, and a
+        // peer that repeats its FIN with our FIN now acknowledged would
+        // otherwise wait on a timer for nothing. (The window rule keeps an old
+        // segment from setting the window.)
+        const early = c.ahead(seq);
+        if (seq != c.rcv_nxt and !early) {
+            const done = c.state != .syn_received and acknowledge(c, seq, number, window, now);
+            self.emit(wire, i, flag_ack, c.nxt(), "");
+            if (done) return self.settle(i, .nothing, true, now);
+            return .{ .event = .nothing };
+        }
+        c.heard_at = now;
+
         var event: Event = .nothing;
         var fin_acknowledged = false;
         if (c.state == .syn_received) {
-            if (number != c.una +% 1) return .{ .event = .nothing };
+            if (early) {
+                self.emit(wire, i, flag_ack, c.nxt(), "");
+                return .{ .event = .nothing };
+            }
+            if (number != c.una +% 1) {
+                // An acknowledgement of something we never sent is refused.
+                self.segment(wire, .{ .mac = c.peer_mac, .ip = c.peer_ip, .port = c.peer_port }, flag_rst, number, 0, 0, "");
+                return .{ .event = .nothing };
+            }
             c.una = number;
             c.wnd = window;
+            c.wl1 = seq;
+            c.wl2 = number;
             c.rto_at = null;
             c.retries = 0;
             c.rto_ns = first_rto_ns;
@@ -548,15 +681,21 @@ pub const Table = struct {
             event = .opened;
             // Their ACK may carry the first data, so fall through.
         } else {
-            fin_acknowledged = acknowledge(c, number, window, now);
+            fin_acknowledged = acknowledge(c, seq, number, window, now);
+        }
+
+        if (early) {
+            // Its data and FIN are not the next thing; ask for what is.
+            if (data.len > 0 or flags & flag_fin != 0) self.emit(wire, i, flag_ack, c.nxt(), "");
+            return self.settle(i, event, fin_acknowledged, now);
         }
 
         // **IN-ORDER ONLY.** Anything else is dropped and re-acknowledged,
         // which asks for it again.
         if (data.len > 0) {
-            if (seq != c.rcv_nxt or c.peer_done) {
+            if (c.peer_done) {
                 self.emit(wire, i, flag_ack, c.nxt(), "");
-                return self.settle(i, event, fin_acknowledged);
+                return self.settle(i, event, fin_acknowledged, now);
             }
             // **WHAT FITS IS TAKEN, AND ONLY THAT IS ACKNOWLEDGED.** A peer
             // that sent past the window will send the rest again, once the
@@ -567,23 +706,32 @@ pub const Table = struct {
             c.rcv_nxt +%= @intCast(n);
             self.emit(wire, i, flag_ack, c.nxt(), "");
             if (n > 0 and event == .nothing) event = .data;
-            if (n < data.len) return self.settle(i, event, fin_acknowledged);
+            if (n < data.len) return self.settle(i, event, fin_acknowledged, now);
         }
 
-        if (flags & flag_fin != 0 and seq +% @as(u32, @intCast(data.len)) == c.rcv_nxt) {
+        if (flags & flag_fin != 0 and !c.peer_done and seq +% @as(u32, @intCast(data.len)) == c.rcv_nxt) {
             c.rcv_nxt +%= 1; // their FIN takes one
             c.peer_done = true;
             self.emit(wire, i, flag_ack, c.nxt(), "");
-            if (!fin_acknowledged) return .{ .event = .peer_done, .index = i };
+            if (c.fin == .acknowledged) return self.close(i);
+            return .{ .event = .peer_done, .index = i };
         }
 
-        return self.settle(i, event, fin_acknowledged);
+        return self.settle(i, event, fin_acknowledged, now);
     }
 
-    /// A connection whose FIN the peer has acknowledged is over; any other
-    /// reports what the frame did.
-    fn settle(self: *Table, i: usize, event: Event, fin_acknowledged: bool) Result {
+    /// Our FIN has just been acknowledged: if the peer has finished too the
+    /// connection is over, and otherwise it waits for the peer's FIN. Any other
+    /// segment reports what it did.
+    fn settle(self: *Table, i: usize, event: Event, fin_acknowledged: bool, now: i96) Result {
         if (!fin_acknowledged) return .{ .event = event, .index = i };
+        const c = &self.conns[i];
+        if (c.peer_done) return self.close(i);
+        c.fin_wait_until = now + fin_wait_ns;
+        return .{ .event = event, .index = i };
+    }
+
+    fn close(self: *Table, i: usize) Result {
         self.conns[i].reset();
         return .{ .event = .closed, .index = i };
     }
@@ -609,6 +757,12 @@ pub fn parseMss(options: []const u8) ?u16 {
 }
 
 const std = @import("std");
+
+/// Whether sequence number `a` comes after `b`, modulo 2^32.
+fn after(a: u32, b: u32) bool {
+    const d = a -% b;
+    return d != 0 and d < 0x8000_0000;
+}
 
 fn eql(a: []const u8, b: []const u8) bool {
     if (a.len != b.len) return false;

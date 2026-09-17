@@ -361,15 +361,67 @@ test "our FIN, then theirs acknowledging it, closes it and frees the slot" {
     try testing.expectEqual(@as(usize, 0), f.table.inUse());
 }
 
-test "our FIN, then just their ACK, also closes it" {
+test "our FIN acknowledged first: the connection waits for theirs, acknowledges it, and closes" {
     var f: Fixture = .{};
     f.init();
     var p = Peer{ .ip = .{ 10, 0, 2, 2 }, .port = 40000 };
     const i = try p.connect(&f.table, &f.wire, 1);
     f.table.finish(i);
     f.table.transmit(&f.wire, 2);
-    const r = p.ackAll(&f.table, &f.wire, 3);
+    try testing.expectEqual(Event.nothing, p.ackAll(&f.table, &f.wire, 3).event);
+    try testing.expectEqual(State.closing, f.table.conns[i].state);
+    try testing.expectEqual(tcp.Fin.acknowledged, f.table.conns[i].fin);
+    // Nothing more of ours goes out while it waits.
+    const sent = f.wire.count;
+    f.table.transmit(&f.wire, 3 + 10 * rto);
+    try testing.expectEqual(sent, f.wire.count);
+
+    const r = p.fin(&f.table, &f.wire, 4);
     try testing.expectEqual(Event.closed, r.event);
+    try testing.expectEqual(flag_ack, f.wire.last().flags);
+    try testing.expectEqual(p.seq +% 1, f.wire.last().ack); // their FIN acknowledged
+    try testing.expectEqual(p.ack, f.wire.last().seq);
+    try testing.expectEqual(@as(usize, 0), f.table.inUse());
+}
+
+test "a peer that never sends its FIN is let go after the wait" {
+    var f: Fixture = .{};
+    f.init();
+    var p = Peer{ .ip = .{ 10, 0, 2, 2 }, .port = 40000 };
+    const i = try p.connect(&f.table, &f.wire, 0);
+    f.table.finish(i);
+    f.table.transmit(&f.wire, 0);
+    _ = p.ackAll(&f.table, &f.wire, 1);
+    f.table.transmit(&f.wire, 1 + tcp.fin_wait_ns - 1);
+    try testing.expectEqual(State.closing, f.table.conns[i].state);
+    f.table.transmit(&f.wire, 1 + tcp.fin_wait_ns);
+    try testing.expectEqual(State.closed, f.table.conns[i].state);
+    try testing.expectEqual(flag_rst | flag_ack, f.wire.last().flags);
+    try testing.expectEqual(@as(u64, 1), f.table.fin_waits_expired);
+}
+
+test "their FIN repeated before we close is acknowledged again, and after, reset" {
+    var f: Fixture = .{};
+    f.init();
+    var p = Peer{ .ip = .{ 10, 0, 2, 2 }, .port = 40000 };
+    const i = try p.connect(&f.table, &f.wire, 0);
+    try testing.expectEqual(Event.peer_done, p.fin(&f.table, &f.wire, 1).event);
+    const first_ack = f.wire.last();
+    // Our acknowledgement was lost; they say it again.
+    const sent = f.wire.count;
+    try testing.expectEqual(Event.nothing, p.fin(&f.table, &f.wire, 2).event);
+    try testing.expectEqual(sent + 1, f.wire.count);
+    try testing.expectEqual(first_ack.ack, f.wire.last().ack);
+
+    f.table.finish(i);
+    f.table.transmit(&f.wire, 3);
+    p.seq +%= 1;
+    try testing.expectEqual(Event.closed, p.ackAll(&f.table, &f.wire, 4).event);
+    // Closed and forgotten: their FIN once more is refused.
+    p.seq -%= 1;
+    _ = p.fin(&f.table, &f.wire, 5);
+    try testing.expectEqual(flag_rst, f.wire.last().flags);
+    try testing.expectEqual(p.ack, f.wire.last().seq);
 }
 
 test "their FIN before our FIN is acknowledged leaves the connection closing" {
@@ -386,14 +438,26 @@ test "their FIN before our FIN is acknowledged leaves the connection closing" {
     try testing.expectEqual(Event.closed, p.ackUpTo(&f.table, &f.wire, p.ack +% 1, 4).event);
 }
 
-test "a segment for no connection, and a stray RST, are ignored" {
+test "a segment for no connection is answered with a reset; a stray reset is not" {
     var f: Fixture = .{};
     f.init();
-    var p = Peer{ .ip = .{ 10, 0, 2, 2 }, .port = 40000 };
+    var p = Peer{ .ip = .{ 10, 0, 2, 2 }, .port = 40000, .ack = 777 };
     var buf: [1600]u8 = undefined;
+    // With an acknowledgement: the reset is numbered by it.
     try testing.expectEqual(Event.nothing, f.table.handle(&f.wire, p.frame(&buf, flag_ack, 1, "hello"), 1).event);
+    try testing.expectEqual(@as(usize, 1), f.wire.count);
+    try testing.expectEqual(flag_rst, f.wire.last().flags);
+    try testing.expectEqual(@as(u32, 777), f.wire.last().seq);
+    try testing.expectEqual(@as(u16, 40000), f.wire.last().dst_port);
+    try testing.expect(f.wire.checksumOk(0));
+    // Without one: the reset acknowledges what the segment carried, its FIN too.
+    _ = f.table.handle(&f.wire, p.frame(&buf, flag_fin, 50, "abc"), 1);
+    try testing.expectEqual(flag_rst | flag_ack, f.wire.last().flags);
+    try testing.expectEqual(@as(u32, 54), f.wire.last().ack);
+    // A reset is never answered.
     try testing.expectEqual(Event.nothing, f.table.handle(&f.wire, p.frame(&buf, flag_rst, 1, ""), 1).event);
-    try testing.expectEqual(@as(usize, 0), f.wire.count);
+    try testing.expectEqual(@as(usize, 2), f.wire.count);
+    try testing.expectEqual(@as(u64, 2), f.table.strays);
     try testing.expectEqual(@as(usize, 0), f.table.inUse());
 }
 
@@ -643,7 +707,10 @@ test "our FIN waits for the queue, and only its own acknowledgement closes" {
     try testing.expectEqual(p.ack +% 50, f.wire.last().seq);
     try testing.expectEqual(Event.nothing, p.ackUpTo(&f.table, &f.wire, p.ack +% 50, 4).event);
     try testing.expectEqual(State.closing, f.table.conns[i].state);
-    try testing.expectEqual(Event.closed, p.ackUpTo(&f.table, &f.wire, p.ack +% 1, 5).event);
+    try testing.expectEqual(tcp.Fin.sent, f.table.conns[i].fin);
+    try testing.expectEqual(Event.nothing, p.ackUpTo(&f.table, &f.wire, p.ack +% 1, 5).event);
+    try testing.expectEqual(tcp.Fin.acknowledged, f.table.conns[i].fin);
+    try testing.expectEqual(Event.closed, p.fin(&f.table, &f.wire, 6).event);
 }
 
 test "a lost FIN is sent again" {
@@ -657,7 +724,8 @@ test "a lost FIN is sent again" {
     f.table.transmit(&f.wire, rto);
     try testing.expectEqual(flag_fin | flag_ack, f.wire.last().flags);
     try testing.expectEqual(fin.seq, f.wire.last().seq);
-    try testing.expectEqual(Event.closed, p.ackAll(&f.table, &f.wire, rto + 10 * ms).event);
+    _ = p.ackAll(&f.table, &f.wire, rto + 10 * ms);
+    try testing.expectEqual(Event.closed, p.fin(&f.table, &f.wire, rto + 20 * ms).event);
 }
 
 test "a lost SYN-ACK is sent again by the timer" {
@@ -746,4 +814,153 @@ test "segment-size options are read past padding and other options" {
     try testing.expectEqual(@as(?u16, null), parseMss(&.{ 2, 4, 5 }));
     try testing.expectEqual(@as(?u16, null), parseMss(&.{ 3, 0 }));
     try testing.expectEqual(@as(?u16, null), parseMss(&.{}));
+}
+
+// ── what the RFC review found ────────────────────────────────────────────────
+
+test "a keepalive probe is acknowledged, and does not count as hearing from the peer" {
+    var f: Fixture = .{};
+    f.init();
+    var p = Peer{ .ip = .{ 10, 0, 2, 2 }, .port = 40000 };
+    const i = try p.connect(&f.table, &f.wire, 1);
+    var buf: [1600]u8 = undefined;
+    const sent = f.wire.count;
+    // A keepalive: one before the next byte expected, and no data.
+    const r = f.table.handle(&f.wire, p.frame(&buf, flag_ack, p.seq -% 1, ""), 50);
+    try testing.expectEqual(Event.nothing, r.event);
+    try testing.expectEqual(sent + 1, f.wire.count);
+    try testing.expectEqual(flag_ack, f.wire.last().flags);
+    try testing.expectEqual(p.seq, f.wire.last().ack);
+    try testing.expectEqual(@as(i96, 1), f.table.conns[i].heard_at);
+}
+
+test "a reset counts only at the next byte expected; one inside the window draws an acknowledgement" {
+    var f: Fixture = .{};
+    f.init();
+    var p = Peer{ .ip = .{ 10, 0, 2, 2 }, .port = 40000 };
+    const i = try p.connect(&f.table, &f.wire, 1);
+    var buf: [1600]u8 = undefined;
+    var sent = f.wire.count;
+    // Far outside the window: ignored, without a word.
+    try testing.expectEqual(Event.nothing, f.table.handle(&f.wire, p.frame(&buf, flag_rst, p.seq +% 100_000, ""), 2).event);
+    try testing.expectEqual(sent, f.wire.count);
+    // Inside it but not exact: a challenge.
+    try testing.expectEqual(Event.nothing, f.table.handle(&f.wire, p.frame(&buf, flag_rst, p.seq +% 10, ""), 2).event);
+    try testing.expectEqual(sent + 1, f.wire.count);
+    try testing.expectEqual(p.seq, f.wire.last().ack);
+    try testing.expectEqual(State.established, f.table.conns[i].state);
+    // Exact: the connection is over.
+    sent = f.wire.count;
+    try testing.expectEqual(Event.closed, f.table.handle(&f.wire, p.frame(&buf, flag_rst, p.seq, ""), 3).event);
+    try testing.expectEqual(sent, f.wire.count);
+}
+
+test "a late acknowledgement does not overrule a newer one's window" {
+    var f: Fixture = .{};
+    f.init();
+    var p = Peer{ .ip = .{ 10, 0, 2, 2 }, .port = 40000, .window = 4000 };
+    const i = try p.connect(&f.table, &f.wire, 0);
+    var body: [300]u8 = undefined;
+    _ = f.table.queue(i, pattern(&body));
+    f.table.transmit(&f.wire, 1);
+    const first = p.ack;
+    _ = p.ackUpTo(&f.table, &f.wire, first +% 100, 2); // newer, window 4000
+    p.window = 0;
+    _ = p.ackUpTo(&f.table, &f.wire, first, 3); // older, window 0, arriving late
+    try testing.expectEqual(@as(u32, 4000), f.table.conns[i].wnd);
+}
+
+test "an acknowledgement of bytes sent before a timeout still counts after it" {
+    var f: Fixture = .{};
+    f.init();
+    var p = Peer{ .ip = .{ 10, 0, 2, 2 }, .port = 40000, .window = 2000 };
+    const i = try p.connect(&f.table, &f.wire, 0);
+    var body: [1000]u8 = undefined;
+    _ = f.table.queue(i, pattern(&body));
+    f.table.transmit(&f.wire, 0);
+    const first = p.ack;
+    // The window shuts, the timer runs out, and one byte goes as a probe.
+    p.window = 0;
+    _ = p.ackUpTo(&f.table, &f.wire, first, 1);
+    f.table.transmit(&f.wire, rto);
+    try testing.expectEqual(@as(usize, 1), f.table.conns[i].sent);
+    // The peer's acknowledgement of all 1000 bytes is still good.
+    p.window = 2000;
+    _ = p.ackUpTo(&f.table, &f.wire, first +% 1000, rto + 1);
+    try testing.expectEqual(@as(usize, 0), f.table.conns[i].queued());
+    try testing.expectEqual(@as(usize, 0), f.table.conns[i].sent);
+    try testing.expectEqual(first +% 1000, f.table.conns[i].una);
+    try testing.expectEqual(@as(?i96, null), f.table.conns[i].rto_at);
+}
+
+test "a handshake ACK of something we never sent is refused with a reset" {
+    var f: Fixture = .{};
+    f.init();
+    var p = Peer{ .ip = .{ 10, 0, 2, 2 }, .port = 40000 };
+    var buf: [1600]u8 = undefined;
+    _ = f.table.handle(&f.wire, p.frame(&buf, flag_syn, p.seq, ""), 0);
+    p.seq +%= 1;
+    p.ack = f.wire.last().seq +% 99;
+    _ = f.table.handle(&f.wire, p.frame(&buf, flag_ack, p.seq, ""), 0);
+    try testing.expectEqual(flag_rst, f.wire.last().flags);
+    try testing.expectEqual(p.ack, f.wire.last().seq);
+    try testing.expectEqual(State.syn_received, f.table.conns[0].state);
+}
+
+test "a segment with a wrong checksum is dropped" {
+    var f: Fixture = .{};
+    f.init();
+    var p = Peer{ .ip = .{ 10, 0, 2, 2 }, .port = 40000 };
+    const i = try p.connect(&f.table, &f.wire, 0);
+    var buf: [1600]u8 = undefined;
+    const frame = p.frame(&buf, flag_psh | flag_ack, p.seq, "hello");
+    buf[frame.len - 1] ^= 0xFF; // damage the payload
+    const sent = f.wire.count;
+    try testing.expectEqual(Event.nothing, f.table.handle(&f.wire, frame, 1).event);
+    try testing.expectEqual(sent, f.wire.count);
+    try testing.expectEqual(@as(usize, 0), f.table.conns[i].pending().len);
+    try testing.expectEqual(@as(u64, 1), f.table.damaged);
+}
+
+test "a SYN on an established connection draws an acknowledgement, not a new connection" {
+    var f: Fixture = .{};
+    f.init();
+    var p = Peer{ .ip = .{ 10, 0, 2, 2 }, .port = 40000 };
+    _ = try p.connect(&f.table, &f.wire, 0);
+    var buf: [1600]u8 = undefined;
+    _ = f.table.handle(&f.wire, p.frame(&buf, flag_syn, 99, ""), 1);
+    try testing.expectEqual(flag_ack, f.wire.last().flags);
+    try testing.expectEqual(@as(usize, 1), f.table.inUse());
+}
+
+test "data ahead of what is expected still carries its acknowledgement" {
+    var f: Fixture = .{};
+    f.init();
+    var p = Peer{ .ip = .{ 10, 0, 2, 2 }, .port = 40000 };
+    const i = try p.connect(&f.table, &f.wire, 0);
+    _ = f.table.queue(i, "answer");
+    f.table.transmit(&f.wire, 0);
+    p.ack +%= 6;
+    var buf: [1600]u8 = undefined;
+    _ = f.table.handle(&f.wire, p.frame(&buf, flag_psh | flag_ack, p.seq +% 5, "later"), 1);
+    try testing.expectEqual(@as(usize, 0), f.table.conns[i].queued()); // "answer" acknowledged
+    try testing.expectEqual(@as(usize, 0), f.table.conns[i].pending().len); // "later" not taken
+    try testing.expectEqual(p.seq, f.wire.last().ack);
+}
+
+test "their FIN first, then again with ours acknowledged, closes at once" {
+    // Seen from QEMU's network: the repeated FIN is numbered before what we
+    // now expect, and its acknowledgement of our FIN must still count.
+    var f: Fixture = .{};
+    f.init();
+    var p = Peer{ .ip = .{ 10, 0, 2, 2 }, .port = 40000 };
+    const i = try p.connect(&f.table, &f.wire, 0);
+    try testing.expectEqual(Event.peer_done, p.fin(&f.table, &f.wire, 1).event);
+    f.table.finish(i);
+    f.table.transmit(&f.wire, 2);
+    try testing.expectEqual(flag_fin | flag_ack, f.wire.last().flags);
+    p.ack = f.wire.last().seq +% 1;
+    // The same FIN again, numbered as before, now acknowledging ours.
+    try testing.expectEqual(Event.closed, p.fin(&f.table, &f.wire, 3).event);
+    try testing.expectEqual(State.closed, f.table.conns[i].state);
 }

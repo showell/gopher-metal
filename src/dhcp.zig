@@ -51,6 +51,9 @@ pub const Lease = struct {
     router: [4]u8 = proto.ip_any,
     dns: [4]u8 = proto.ip_any,
     server: [4]u8 = proto.ip_any,
+    /// The hardware address the lease came from: on QEMU's user network, the
+    /// gateway's, which is where a datagram for the host goes.
+    server_mac: [6]u8 = proto.mac_broadcast,
 };
 
 pub const Error = error{ NoOffer, NoAck, Refused };
@@ -137,6 +140,7 @@ fn exchange(
     want: u8,
     reply: []u8,
     spins: usize,
+    from_mac: *[6]u8,
 ) ?usize {
     nic.send(frame[0..frame_len]);
 
@@ -157,6 +161,7 @@ fn exchange(
 
         const n = @min(dg.payload.len, reply.len);
         @memcpy(reply[0..n], dg.payload[0..n]);
+        from_mac.* = got.frame[6..12].*;
         return n;
     }
     return null;
@@ -180,7 +185,8 @@ pub fn acquire(nic: *net.Net, frame: []u8, reply: []u8) Error!Lease {
     at += 1;
 
     var len = proto.writeUdp(frame, nic.mac, proto.mac_broadcast, proto.ip_any, proto.ip_broadcast, port_client, port_server, at);
-    const offer_len = exchange(nic, frame, len, xid, msg_offer, reply, spins) orelse return Error.NoOffer;
+    var from_mac: [6]u8 = undefined;
+    const offer_len = exchange(nic, frame, len, xid, msg_offer, reply, spins, &from_mac) orelse return Error.NoOffer;
     const offer = reply[0..offer_len];
 
     var lease = Lease{
@@ -201,7 +207,7 @@ pub fn acquire(nic: *net.Net, frame: []u8, reply: []u8) Error!Lease {
     at += 1;
 
     len = proto.writeUdp(frame, nic.mac, proto.mac_broadcast, proto.ip_any, proto.ip_broadcast, port_client, port_server, at);
-    const ack_len = exchange(nic, frame, len, xid, msg_ack, reply, spins) orelse return Error.NoAck;
+    const ack_len = exchange(nic, frame, len, xid, msg_ack, reply, spins, &from_mac) orelse return Error.NoAck;
     const ack = reply[0..ack_len];
 
     // The ACK is the authority, not the offer: a server may hand over
@@ -211,6 +217,7 @@ pub fn acquire(nic: *net.Net, frame: []u8, reply: []u8) Error!Lease {
     if (findOption(ack, opt_router) != null) lease.router = ipOption(ack, opt_router);
     if (findOption(ack, opt_dns) != null) lease.dns = ipOption(ack, opt_dns);
     if (findOption(ack, opt_server_id) != null) lease.server = ipOption(ack, opt_server_id);
+    lease.server_mac = from_mac;
 
     return lease;
 }

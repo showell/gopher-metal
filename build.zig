@@ -166,6 +166,21 @@ pub fn build(b: *std.Build) void {
 
     b.getInstallStep().dependOn(&copy.step);
 
+    // **THE TCP TABLE ON LINUX.** native/serve.zig runs src/'s network code as
+    // an ordinary Debug program behind a TAP device, with Linux's TCP as the
+    // peer; native/judge_native.py asks it questions in seconds.
+    const netcore = b.createModule(.{ .root_source_file = b.path("src/netcore.zig"), .target = b.graph.host });
+    const serve = b.addExecutable(.{
+        .name = "gm-serve",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("native/serve.zig"),
+            .target = b.graph.host,
+            .optimize = .Debug,
+            .imports = &.{.{ .name = "netcore", .module = netcore }},
+        }),
+    });
+    b.step("native", "the TCP table as a Linux program behind a TAP device").dependOn(&b.addInstallArtifact(serve, .{}).step);
+
     // **HOST TESTS** for the parts of src/ that are pure — no ports, no
     // virtqueues — and so can run here rather than in a guest. Every mode a
     // device can report in is a way to be silently wrong, and those modes are

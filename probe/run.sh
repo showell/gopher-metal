@@ -6,6 +6,7 @@
 #   probe/run.sh quick      host tests, Debug kernels, every probe, and the
 #                           judge's quick tier: minutes, for iterating
 #   probe/run.sh gopher     the judge's full run, on whatever gopher.elf is
+#   probe/run.sh native     the TCP table on Linux, against Linux's TCP
 #
 # Prints a line per probe and exits 1 if any failed.
 #
@@ -619,6 +620,22 @@ if [ "$want" = gopher ] || [ $quick = 1 ]; then
     fi
 fi
 
+# **THE TCP TABLE ON LINUX.** src/tcp.zig as a Debug Linux program behind a
+# TAP device, with Linux's own TCP as the peer: facts about the table in
+# seconds, with no emulator in the way. Creates gmtap0 with sudo if missing.
+if [ "$want" = native ] || [ $quick = 1 ]; then
+    if ! ( cd "$HERE/.." && zig build native ) > "$WORK/native.build" 2>&1; then
+        echo "FAIL native | the build failed; see $WORK/native.build"
+        failed=1
+    elif JUDGE_QUICK=$([ $quick = 1 ] && echo 1) python3 "$HERE/../native/judge_native.py" > "$WORK/native.verdict" 2>&1; then
+        echo "PASS native | $(tail -1 "$WORK/native.verdict")"
+    else
+        echo "FAIL native | $(tail -1 "$WORK/native.verdict")"
+        grep "^FAIL" "$WORK/native.verdict" | sed 's/^/             /'
+        failed=1
+    fi
+fi
+
 # **THE LADDER.** Not part of `all`: it measures rather than proves. Each rung
 # repeats one operation and must cost the same at the end as at the start;
 # `probe/judge_ladder.py` decides. LADDER_SCALE multiplies every rung's count,
@@ -634,23 +651,8 @@ if [ "$want" = ladder ]; then
     if [ ! -f "$HERE/ladder.elf" ]; then
         echo "FAIL ladder | no ladder.elf; run: zig build ladder"
         failed=1
-    else
-        started=$(date +%s)
-        timeout $((120 + 60 * scale)) qemu-system-x86_64 -M microvm,rtc=on,pit=on \
-            -kernel "$HERE/ladder.elf" -append "scale=$scale" \
-            -nographic -no-reboot -m 512 \
-            -global virtio-mmio.force-legacy=false \
-            -device isa-debug-exit,iobase=0xf4,iosize=0x04 \
-            -drive id=d,file="$img",format=raw,if=none \
-            -device virtio-blk-device,drive=d \
-            -cpu max > "$WORK/ladder.out" 2>&1
-        code=$?
-        echo "     ladder | scale $scale, $(( $(date +%s) - started )) s, qemu exited $code"
-        python3 "$HERE/judge_ladder.py" "$WORK/ladder.out" | sed 's/^/     /' | sed 's/^     \(PASS\|FAIL\)/\1/'
-        if [ "${PIPESTATUS[0]}" != 0 ] || [ $code != 1 ]; then
-            [ $code != 1 ] && tail -5 "$WORK/ladder.out"
-            failed=1
-        fi
+    elif ! python3 "$HERE/judge_ladder.py" "$HERE/ladder.elf" "$img" "$WORK" "$scale"; then
+        failed=1
     fi
 fi
 

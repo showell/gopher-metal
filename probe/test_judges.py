@@ -445,7 +445,7 @@ class Conf(unittest.TestCase):
 
 class TcpCounts(unittest.TestCase):
     LINE = ("  tcp: 12 timeouts sent something again, 3 window probes, "
-            "0 peers given up on, 41 frames lost on purpose\n")
+            "0 peers given up on, 0 never finished, 3 strays reset, 41 frames lost on purpose\n")
 
     def test_the_kernels_line_is_read(self):
         self.assertEqual(G.tcp_counts("x\n" + self.LINE),
@@ -485,12 +485,20 @@ class Ladder(unittest.TestCase):
     def test_a_slow_first_tenth_is_warm_up_not_growth(self):
         flat, ratio, _ = L.verdict(L.parse(self.LOG)["cpu"])
         self.assertTrue(flat)
-        self.assertAlmostEqual(ratio, 1.05)
+        self.assertAlmostEqual(ratio, 1.0)
 
-    def test_a_cost_that_more_than_doubles_climbs(self):
+    def test_a_cost_that_doubles_climbs(self):
         flat, ratio, _ = L.verdict(L.parse(self.LOG)["append"])
         self.assertFalse(flat)
-        self.assertAlmostEqual(ratio, 2.3)
+        self.assertAlmostEqual(ratio, 2.0)
+
+    def test_a_spike_is_not_growth(self):
+        # The alloc rung's own numbers from one run: a spike in the last tenths,
+        # with a tenth at the old cost among them.
+        r = {"ops": 20000, "ns": [25805, 25620, 29080, 37775, 37176, 39512, 40208, 28940, 59610, 60622],
+             "requests": [0] * 10}
+        flat, ratio, _ = L.verdict(r)
+        self.assertTrue(flat)
 
     def test_flat_cost_with_climbing_requests_is_not_flat(self):
         r = {"ops": 10, "ns": [5] * 10, "requests": [10, 10, 10, 10, 10, 10, 20, 30, 40, 50]}
