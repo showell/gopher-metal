@@ -289,5 +289,35 @@ class ClockJudge(unittest.TestCase):
         self.assertNotEqual(code, 0)
 
 
+class Resolution(unittest.TestCase):
+    """FAT16 stores a modification time in whole EVEN seconds; ext4 stores
+    nanoseconds. Wherever a story judges the ORDER of two writes, it has to put
+    them further apart than the coarser clock's tick — otherwise the judge is
+    demanding that FAT16 be ext4, and the failure it reports is its own."""
+
+    FAT16_TICK = 2.0
+
+    def test_the_second_conversation_is_created_a_tick_later(self):
+        by_name = {s["name"]: s for s in G.MEMBER_STORY}
+        self.assertGreater(by_name["a new topic"]["settle"], self.FAT16_TICK)
+
+    def test_recent_activity_comes_after_both_conversations_are_written(self):
+        # The order it prints is the thing being judged, so it must be asked
+        # last of the three.
+        names = [s["name"] for s in G.MEMBER_STORY]
+        self.assertLess(names.index("a message in it"), names.index("recent activity"))
+        self.assertLess(names.index("a new topic"), names.index("a message in it"))
+
+    def test_every_step_carries_the_field_the_runner_reads(self):
+        for s in G.MEMBER_STORY + G.SEQUENCE:
+            self.assertIn("settle", s, s["name"])
+
+    def test_a_story_waits_no_longer_than_it_has_to(self):
+        # A settle is dead time on both sides, twice. If this starts climbing,
+        # something is being papered over with sleep.
+        total = sum(s["settle"] for s in G.MEMBER_STORY + G.SEQUENCE)
+        self.assertLessEqual(total, 6.0)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=1)

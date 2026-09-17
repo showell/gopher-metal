@@ -163,7 +163,11 @@ if [ "$want" = all ] || [ "$want" = vfat ]; then
             else
                 mnt="$WORK/mnt"
                 mkdir -p "$mnt"
-                sudo mount -o loop,ro,noexec,nosuid,nodev "$img" "$mnt"
+                # **tz=UTC**: DOS timestamps are local time by convention, and
+                # the driver applies the mount's zone to them. Nothing on this
+                # machine has a time zone — the dates it writes are UTC — so
+                # this is what makes the two sides talk about the same instant.
+                sudo mount -o loop,ro,noexec,nosuid,nodev,tz=UTC "$img" "$mnt"
                 got="$(cat "$mnt/auth/damian/_session_secret" 2>/dev/null || true)"
                 names="$(find "$mnt" -type f -printf '%f\n' 2>/dev/null | sort | tr '\n' ' ')"
                 sudo umount "$mnt"
@@ -232,7 +236,20 @@ if [ "$want" = all ] || [ "$want" = append ]; then
                 trunc_size="$(stat -c %s "$mnt/trunc.txt" 2>/dev/null || echo missing)"
                 over="$(cat "$mnt/over.txt" 2>/dev/null || true)"
                 nested="$(cat "$mnt/data/lynrummy/p1/lynrummy-elm/sessions/1/actions.dsl" 2>/dev/null || true)"
+                # What the LINUX DRIVER makes of the dates we wrote.
+                stamp_small="$(stat -c %Y "$mnt/small.txt" 2>/dev/null || echo 0)"
+                stamp_nested="$(stat -c %Y "$mnt/data/lynrummy/p1/lynrummy-elm/sessions/1/actions.dsl" 2>/dev/null || echo 0)"
                 sudo umount "$mnt"
+
+                # The kernel's own clock, from its serial log; the files must be
+                # stamped with about that time. A packing error is years out, so
+                # a wide window still catches every one of them — and the
+                # directory this file is two levels inside was created by the
+                # same machine in the same second, so it is checked too.
+                kernel_now="$(sed -n 's/^ *wall clock \([0-9]*\)$/\1/p' "$WORK/append.out" | head -1)"
+                : "${kernel_now:=0}"
+                skew=$(( stamp_small - kernel_now ))
+                skew_nested=$(( stamp_nested - kernel_now ))
 
                 if ! cmp -s "$WORK/append.want" "$WORK/append.got"; then
                     echo "FAIL append | Linux reads a different log.txt than we appended:"
@@ -250,8 +267,18 @@ if [ "$want" = all ] || [ "$want" = append ]; then
                 elif [ "$nested" != "$(printf '1) draw\n2) meld')" ]; then
                     echo "FAIL append | Linux reads [$nested] in the created tree"
                     failed=1
+                elif [ "$kernel_now" = 0 ]; then
+                    echo "FAIL append | the probe never said what time its clock read"
+                    failed=1
+                elif [ "$skew" -lt -4 ] || [ "$skew" -gt 120 ]; then
+                    echo "FAIL append | Linux dates small.txt ${skew}s from the kernel's clock ($stamp_small vs $kernel_now)"
+                    failed=1
+                elif [ "$skew_nested" -lt -4 ] || [ "$skew_nested" -gt 120 ]; then
+                    echo "FAIL append | Linux dates the nested file ${skew_nested}s from the kernel's clock"
+                    failed=1
                 else
                     echo "     append | the Linux VFAT driver reads all 600 lines and the late append, byte for byte"
+                    echo "     append | and dates the files it read within ${skew}s of the kernel's own clock"
                 fi
             fi
         fi

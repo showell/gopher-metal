@@ -75,6 +75,21 @@ pub fn kmain() noreturn {
         serial.fail("this is not the FAT16 volume the probe expects");
     Io.mount(vol);
 
+    // **THE CLOCK, BECAUSE A FILE HAS A DATE.** Every entry this probe writes
+    // is stamped with the wall clock, and run.sh asks the Linux VFAT driver
+    // what time IT thinks those files were written — an outside reading of our
+    // own encoding. Without a clock the entries would carry no date, which is
+    // honest but proves nothing.
+    const clock = metal.wallclock.start() catch |e| {
+        serial.put("  wallclock: ");
+        serial.put(@errorName(e));
+        serial.put("\n");
+        serial.fail("the clocks would not come up");
+    };
+    serial.put("  wall clock ");
+    serial.putDec(@intCast(clock.unix));
+    serial.put("\n");
+
     const io = Io.io();
     var fba = std.heap.FixedBufferAllocator.init(&heap);
     const alloc = fba.allocator();

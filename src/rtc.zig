@@ -21,6 +21,7 @@
 //! within the polling delay rather than within a second.
 
 const port = @import("port.zig");
+const calendar = @import("civil.zig");
 
 const index_port: u16 = 0x70;
 const data_port: u16 = 0x71;
@@ -158,14 +159,13 @@ pub fn setFormat(f: Format) void {
 
 // ── the pure half ────────────────────────────────────────────────────────────
 
-pub const Civil = struct {
-    year: i32,
-    month: u8,
-    day: u8,
-    hour: u8,
-    minute: u8,
-    second: u8,
-};
+/// The calendar is civil.zig's, because the FAT16 directory entries this
+/// machine writes carry the same dates and must agree with this chip.
+pub const Civil = calendar.Civil;
+pub const daysFromCivil = calendar.daysFromCivil;
+pub const toUnix = calendar.toUnix;
+const isLeap = calendar.isLeap;
+const daysInMonth = calendar.daysInMonth;
 
 pub const DecodeError = error{ BadBcd, OutOfRange };
 
@@ -219,37 +219,6 @@ pub fn decode(raw: Raw) DecodeError!Civil {
     if (civil.day < 1 or civil.day > daysInMonth(civil.year, civil.month)) return error.OutOfRange;
     if (civil.hour > 23 or civil.minute > 59 or civil.second > 59) return error.OutOfRange;
     return civil;
-}
-
-fn isLeap(y: i32) bool {
-    return (@rem(y, 4) == 0 and @rem(y, 100) != 0) or @rem(y, 400) == 0;
-}
-
-fn daysInMonth(y: i32, m: u8) u8 {
-    return switch (m) {
-        1, 3, 5, 7, 8, 10, 12 => 31,
-        4, 6, 9, 11 => 30,
-        2 => if (isLeap(y)) 29 else 28,
-        else => 0,
-    };
-}
-
-/// Days from 1970-01-01 to the given date — Howard Hinnant's days_from_civil,
-/// the same algorithm angry-gopher's timefmt.zig inverts.
-pub fn daysFromCivil(year: i32, month: u8, day: u8) i64 {
-    const y: i64 = @as(i64, year) - @as(i64, if (month <= 2) 1 else 0);
-    const era: i64 = @divFloor(y, 400);
-    const yoe: i64 = y - era * 400; // [0, 399]
-    const m: i64 = month;
-    const mp: i64 = if (m > 2) m - 3 else m + 9; // March = 0
-    const doy: i64 = @divFloor(153 * mp + 2, 5) + @as(i64, day) - 1; // [0, 365]
-    const doe: i64 = yoe * 365 + @divFloor(yoe, 4) - @divFloor(yoe, 100) + doy; // [0, 146096]
-    return era * 146097 + doe - 719468;
-}
-
-pub fn toUnix(c: Civil) i64 {
-    return daysFromCivil(c.year, c.month, c.day) * 86400 +
-        @as(i64, c.hour) * 3600 + @as(i64, c.minute) * 60 + c.second;
 }
 
 // ══ TESTS ════════════════════════════════════════════════════════════════════

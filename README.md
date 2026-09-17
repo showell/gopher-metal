@@ -368,6 +368,42 @@ carries on lying. One blind spot, stated: a stack word that legitimately holds
 the paint value reads as untouched, so the mark can only come out shallower than
 the truth, never deeper.
 
+## A file has a date, and chat's "recent" is built out of it
+
+`/chat/recent` sorts every conversation and document by file modification time
+and prints each one as RFC 3339. On this machine that read zero, so the page
+came back listing 1970 and in the wrong order — the one thing in the whole route
+table that the port could not answer.
+
+FAT16 has exactly one timestamp: two 16-bit words per directory entry, the year
+counted from 1980 and the seconds counted in **twos**. So `src/fat16.zig` writes
+them — at creation, and again on every write that moves a file's size, which is
+where every append and every replace already lands. The filesystem has no clock
+and must not invent one, so the host hands it the machine's: `io.zig` points
+`Volume.clock` at the wall clock, and it answers null until the RTC has been
+read, so a probe kernel with no clock writes entries with no date rather than a
+plausible wrong one.
+
+**UTC, with no time zone anywhere.** DOS dates are local time by convention and
+the Linux VFAT driver applies the mount's zone to them; nothing here has a zone,
+and the application renders Eastern from a Unix time. So the driver is asked
+with `tz=UTC`, and then it agrees:
+
+```
+     append | the Linux VFAT driver reads all 600 lines and the late append, byte for byte
+     append | and dates the files it read within 0s of the kernel's own clock
+```
+
+That gate earns its keep. Stamping nothing puts 1980 on the files
+(`-1474109717s from the kernel's clock`), and writing the two words in the
+wrong order puts 2023 on them (`-99616450s`) — and the second of those passes
+every host test of the packing, because the packing is right and the layout is
+not. Each judge sees what the other cannot.
+
+The calendar itself moved to `src/civil.zig`, because two things now need the
+same dates to be the same instants: the CMOS chip and every directory entry.
+Its round trip is checked for every day from 1980 to 2110.
+
 ## Long names, and the judge
 
 The application stores `auth/<id>/api-key` and `_session_secret` and

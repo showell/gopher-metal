@@ -31,6 +31,7 @@
 //! What is still missing: FAT12/FAT32, and renaming.
 
 const virtio = @import("virtio.zig");
+const civil = @import("civil.zig");
 
 pub const sector_size: u32 = 512;
 pub const Error = error{ NotFat16, BadBootSector, ReadFailed, WriteFailed, NotFound, TooBig, BadChain, BadName, Full, DirectoryFull };
@@ -63,6 +64,65 @@ fn le32(b: []const u8) u32 {
 /// entry is a buffer on a machine with a bump allocator.
 pub const max_name: usize = 64;
 
+/// **A FAT16 DIRECTORY ENTRY CARRIES A DATE, AND THIS MACHINE WRITES IT.**
+///
+/// It is the only timestamp the format has: two 16-bit fields, packed, with the
+/// year counted from 1980 and the seconds counted in TWOS. So a time written
+/// here reads back rounded DOWN to an even second, and that is the resolution
+/// of everything above — chat's "recent activity" sorts conversations by file
+/// modification time, and two messages in the same two seconds sort by name.
+///
+/// **UTC, and no time zone anywhere.** DOS dates are local time by convention
+/// and the Linux VFAT driver applies the mount's `tz` to them; nothing on this
+/// machine has a time zone, and the application renders Eastern from a Unix
+/// time. So these are UTC, and a Linux mount that wants to agree says `tz=UTC`.
+///
+/// Out of range is `none` rather than a wrong date: before 1980 there is no
+/// representation, and after 2107 the year field wraps.
+pub const Dos = struct {
+    date: u16,
+    time: u16,
+
+    /// No date: what an entry written by something that had no clock carries,
+    /// and what `toUnix` reports as zero rather than as 1980.
+    pub const none = Dos{ .date = 0, .time = 0 };
+
+    /// The first and last instants the format can hold.
+    pub const first_unix: i64 = 315532800; // 1980-01-01T00:00:00Z
+    pub const last_unix: i64 = 4354819199; // 2107-12-31T23:59:59Z
+
+    pub fn fromUnix(secs: i64) Dos {
+        if (secs < first_unix or secs > last_unix) return none;
+        const c = civil.fromUnix(secs);
+        const year: u16 = @intCast(c.year - 1980);
+        return .{
+            .date = year << 9 | @as(u16, c.month) << 5 | c.day,
+            .time = @as(u16, c.hour) << 11 | @as(u16, c.minute) << 5 | (@as(u16, c.second) / 2),
+        };
+    }
+
+    /// Unix seconds, or 0 for an entry with no date. A date field of zero is
+    /// what "nobody wrote one" looks like on disk, and answering 1980 for it
+    /// would be a timestamp nobody meant.
+    pub fn toUnix(self: Dos) i64 {
+        if (self.date == 0) return 0;
+        const c = civil.Civil{
+            .year = @as(i32, self.date >> 9) + 1980,
+            .month = @intCast((self.date >> 5) & 0x0F),
+            .day = @intCast(self.date & 0x1F),
+            .hour = @intCast(self.time >> 11),
+            .minute = @intCast((self.time >> 5) & 0x3F),
+            .second = @intCast((self.time & 0x1F) * 2),
+        };
+        // A field can hold month 0, day 0 or hour 31: garbage on the disk must
+        // not become a plausible date.
+        if (c.month < 1 or c.month > 12) return 0;
+        if (c.day < 1 or c.day > civil.daysInMonth(c.year, c.month)) return 0;
+        if (c.hour > 23 or c.minute > 59 or c.second > 58) return 0;
+        return civil.toUnix(c);
+    }
+};
+
 pub const Entry = struct {
     /// The 8.3 alias, trimmed and dotted: "CODEX.CDX", "SESSIO~1".
     name: [12]u8,
@@ -75,6 +135,9 @@ pub const Entry = struct {
     attr: u8,
     first_cluster: u16,
     size: u32,
+    /// When the file was last written, from the entry's own date fields; 0 when
+    /// nothing ever wrote one.
+    mtime_unix: i64 = 0,
 
     /// **WHERE THIS ENTRY SITS.** A file's length lives in its directory entry,
     /// so anything that changes the length has to write that entry back — and
@@ -101,6 +164,13 @@ pub const Entry = struct {
 
 pub const Volume = struct {
     blk: *virtio.Block,
+
+    /// **WHERE THE DATES ON THIS VOLUME COME FROM.** The filesystem has no
+    /// clock of its own and must not invent one, so the host hands it the
+    /// machine's: io.zig points this at the wall clock once the RTC has been
+    /// read. It answers null until then — a probe kernel that never sets a
+    /// clock writes entries with no date rather than a plausible wrong one.
+    clock: ?*const fn () ?i64 = null,
     /// One sector of identity-mapped scratch, which the device writes into.
     scratch: *[sector_size]u8,
 
@@ -592,6 +662,13 @@ pub const Volume = struct {
 
 
     /// Writes the long-name run and the short entry that closes it.
+    /// The date to stamp on an entry being written now.
+    fn stamp(self: *Volume) Dos {
+        const clock = self.clock orelse return .none;
+        const now = clock() orelse return .none;
+        return Dos.fromUnix(now);
+    }
+
     fn writeEntry(
         self: *Volume,
         run: Run,
@@ -637,6 +714,12 @@ pub const Volume = struct {
         @memset(e, 0);
         @memcpy(e[0..11], &short);
         e[11] = attr;
+        // Created now, written now, read now: a file this machine is creating
+        // has one moment, and all three fields say so.
+        const when = self.stamp();
+        putDos(e[14..18], when); // creation time, creation date
+        putLe16(e[18..20], when.date); // last access date
+        putDos(e[22..26], when); // write time, write date
         e[26] = @truncate(first);
         e[27] = @truncate(first >> 8);
         e[28] = @truncate(size);
@@ -914,6 +997,12 @@ pub const Volume = struct {
         if (entry.lba == 0) return Error.NotFound; // never located; refuse to guess
         try self.readSector(entry.lba, self.scratch);
         const e = self.scratch[entry.slot..][0..dirent_size];
+        // **A WRITE MOVES THE MODIFICATION TIME.** This is the one path that
+        // changes a file that already exists — every append and every replace
+        // lands here — and chat's "recent activity" IS this field.
+        const when = self.stamp();
+        putDos(e[22..26], when);
+        putLe16(e[18..20], when.date);
         e[26] = @truncate(first_cluster);
         e[27] = @truncate(first_cluster >> 8);
         e[28] = @truncate(size);
@@ -1124,6 +1213,17 @@ fn takeLongPart(e: []const u8, out: *[max_name]u8, len: *usize, sum: *u8, ok: *b
 }
 
 /// An on-disk 8.3 name, trimmed and dotted.
+fn putLe16(out: *[2]u8, v: u16) void {
+    out[0] = @truncate(v);
+    out[1] = @truncate(v >> 8);
+}
+
+/// A time field then a date field, which is how both pairs sit on disk.
+fn putDos(out: *[4]u8, d: Dos) void {
+    putLe16(out[0..2], d.time);
+    putLe16(out[2..4], d.date);
+}
+
 fn decode(e: []const u8) Entry {
     var out: Entry = .{
         .name = [_]u8{0} ** 12,
@@ -1132,6 +1232,7 @@ fn decode(e: []const u8) Entry {
         .attr = e[11],
         .first_cluster = le16(e[26..28]),
         .size = le32(e[28..32]),
+        .mtime_unix = (Dos{ .time = le16(e[22..24]), .date = le16(e[24..26]) }).toUnix(),
     };
     var n: usize = 0;
     var base: usize = 8;
@@ -1229,4 +1330,92 @@ fn eqlFold(a: []const u8, b: []const u8) bool {
     if (a.len != b.len) return false;
     for (a, b) |x, y| if (upper(x) != upper(y)) return false;
     return true;
+}
+
+// ══ TESTS ════════════════════════════════════════════════════════════════════
+//
+// The pure half only — the packing of a date into the two 16-bit fields a
+// directory entry carries. **The expected on-disk words were computed by hand
+// from the format, and the round trip is checked against an INDEPENDENT
+// oracle**: probe/run.sh writes a volume on the machine and asks the Linux
+// VFAT driver what time it thinks those files were written.
+
+const testing = @import("std").testing;
+
+test "the fields are packed the way the format says" {
+    // 2026-09-17T10:38:52Z: year 46 since 1980, month 9, day 17; hour 10,
+    // minute 38, second 52 -> 26 two-second units.
+    const d = Dos.fromUnix(1789641532);
+    try testing.expectEqual(@as(u16, 46 << 9 | 9 << 5 | 17), d.date);
+    try testing.expectEqual(@as(u16, 10 << 11 | 38 << 5 | 26), d.time);
+    try testing.expectEqual(@as(i64, 1789641532), d.toUnix());
+}
+
+test "an odd second rounds DOWN, and says so on the way back" {
+    const d = Dos.fromUnix(1789641533);
+    try testing.expectEqual(@as(i64, 1789641532), d.toUnix());
+}
+
+test "every two-second instant of a day round-trips" {
+    const midnight: i64 = 1789603200; // 2026-09-17T00:00:00Z
+    var s: i64 = 0;
+    while (s < 86400) : (s += 2) {
+        try testing.expectEqual(midnight + s, Dos.fromUnix(midnight + s).toUnix());
+    }
+}
+
+test "the ends of the range, and past them" {
+    try testing.expectEqual(@as(i64, Dos.first_unix), Dos.fromUnix(Dos.first_unix).toUnix());
+    try testing.expectEqual(@as(i64, Dos.last_unix - 1), Dos.fromUnix(Dos.last_unix).toUnix());
+    // A year the format cannot hold is no date, never a wrapped one.
+    try testing.expectEqual(Dos.none, Dos.fromUnix(Dos.first_unix - 1));
+    try testing.expectEqual(Dos.none, Dos.fromUnix(Dos.last_unix + 1));
+    try testing.expectEqual(Dos.none, Dos.fromUnix(0));
+    try testing.expectEqual(@as(i64, 0), Dos.none.toUnix());
+}
+
+test "a leap day survives both directions" {
+    const leap: i64 = 1582934400; // 2020-02-29T00:00:00Z
+    const d = Dos.fromUnix(leap);
+    try testing.expectEqual(@as(u16, 40 << 9 | 2 << 5 | 29), d.date);
+    try testing.expectEqual(leap, d.toUnix());
+}
+
+test "garbage on the disk is not a plausible date" {
+    // Month 0, month 13, day 0, day 31 of September, hour 31, minute 63: each
+    // is a bit pattern a damaged entry can hold, and none is a time.
+    const bad = [_]Dos{
+        .{ .date = 46 << 9 | 0 << 5 | 17, .time = 0 },
+        .{ .date = 46 << 9 | 13 << 5 | 17, .time = 0 },
+        .{ .date = 46 << 9 | 9 << 5 | 0, .time = 0 },
+        .{ .date = 46 << 9 | 9 << 5 | 31, .time = 0 },
+        .{ .date = 46 << 9 | 2 << 5 | 30, .time = 0 }, // February 30th
+        .{ .date = 46 << 9 | 9 << 5 | 17, .time = 31 << 11 },
+        .{ .date = 46 << 9 | 9 << 5 | 17, .time = 63 << 5 },
+    };
+    for (bad) |d| try testing.expectEqual(@as(i64, 0), d.toUnix());
+}
+
+test "February 29th of a non-leap year is refused" {
+    // 2100 is not a leap year; the field can still hold the 29th.
+    try testing.expectEqual(@as(i64, 0), (Dos{ .date = 120 << 9 | 2 << 5 | 29, .time = 0 }).toUnix());
+    // 2000 is, so the same shape 100 years earlier IS a date.
+    try testing.expect((Dos{ .date = 20 << 9 | 2 << 5 | 29, .time = 0 }).toUnix() != 0);
+}
+
+test "a date of zero is no date, whatever the time field says" {
+    try testing.expectEqual(@as(i64, 0), (Dos{ .date = 0, .time = 10 << 11 }).toUnix());
+}
+
+test "on disk the time word comes first, then the date word" {
+    // The mutation this catches — the two words swapped — reads back through
+    // our own decoder as a date in 2023 and passes every test above. It is the
+    // Linux VFAT driver in probe/run.sh that noticed; this is the same
+    // question asked where it is cheap.
+    const when = Dos.fromUnix(1789641532);
+    var e = [_]u8{0} ** dirent_size;
+    putDos(e[22..26], when);
+    try testing.expectEqual(when.time, le16(e[22..24]));
+    try testing.expectEqual(when.date, le16(e[24..26]));
+    try testing.expectEqual(@as(i64, 1789641532), decode(&e).mtime_unix);
 }

@@ -64,6 +64,20 @@ var volume: ?fat16.Volume = null;
 
 pub fn mount(v: fat16.Volume) void {
     volume = v;
+    // **THE FILESYSTEM GETS THIS MACHINE'S CLOCK.** FAT16 entries carry a date,
+    // and the application's "recent activity" is built entirely out of file
+    // modification times. fat16.zig has no clock of its own and must not invent
+    // one, so it asks this — which answers null until the host has read the RTC,
+    // and files written before then honestly carry no date.
+    volume.?.clock = realUnixOrNull;
+}
+
+/// The wall clock in whole seconds, or null if nothing has set it yet. Unlike
+/// `Clock.now(.real)` this does not panic: a file write is not a session check,
+/// and a probe kernel with no clock still writes files.
+fn realUnixOrNull() ?i64 {
+    if (!realTimeIsSet()) return null;
+    return @intCast(@divFloor(Clock.now(.real, io()).nanoseconds, 1_000_000_000));
 }
 
 pub const Limit = enum(u64) {
@@ -102,14 +116,13 @@ pub const Stat = struct {
     size: u64,
     kind: Kind,
 
-    /// **FAT16 HAS NO NANOSECONDS, AND NO CLOCK WROTE THESE.** A directory
-    /// entry carries a two-second-resolution DOS timestamp and nothing else,
-    /// and this machine does not set it. So `mtime` is always zero, and the one
-    /// thing that reads it — reading_list's cache, which re-parses a document
-    /// when its mtime has ADVANCED — therefore parses once and then trusts its
-    /// cache forever. On a machine where the documents arrive with the disk
-    /// image that is correct behaviour; when this machine can be written to
-    /// while it serves, this is the field that has to start telling the truth.
+    /// **FAT16 HAS NO NANOSECONDS, BUT IT HAS A DATE, AND THIS MACHINE WRITES
+    /// IT.** A directory entry carries a DOS timestamp with two-second
+    /// resolution and nothing finer, so this is always a whole even number of
+    /// seconds in nanoseconds. Two things read it: reading_list's cache, which
+    /// re-parses a document when its mtime has ADVANCED, and chat's "recent
+    /// activity", whose whole model is which files were written last. An entry
+    /// that nothing with a clock ever wrote reads as zero.
     mtime: Timestamp = .{ .nanoseconds = 0 },
 };
 
@@ -157,6 +170,7 @@ pub const File = struct {
         return .{
             .size = self.entry.size,
             .kind = if (self.entry.isDirectory()) .directory else .file,
+            .mtime = .{ .nanoseconds = @as(i96, self.entry.mtime_unix) * 1_000_000_000 },
         };
     }
 
@@ -332,7 +346,11 @@ pub const Dir = struct {
         _ = self;
         const v = try vol();
         const e = v.open(sub_path) catch return Error.FileNotFound;
-        return .{ .size = e.size, .kind = if (e.isDirectory()) .directory else .file };
+        return .{
+            .size = e.size,
+            .kind = if (e.isDirectory()) .directory else .file,
+            .mtime = .{ .nanoseconds = @as(i96, e.mtime_unix) * 1_000_000_000 },
+        };
     }
 
     pub fn access(self: Dir, ignored: Self, sub_path: []const u8, _: AccessOptions) Error!void {

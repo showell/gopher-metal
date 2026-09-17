@@ -135,9 +135,18 @@ CASES = [
 JAR = "$JAR"
 
 
-def step(name, method, path, cookie=None, body=None, raw=None, headers=()):
+def step(name, method, path, cookie=None, body=None, raw=None, headers=(), settle=0.0):
+    """One request in a story. `settle` waits before sending it.
+
+    **A WAIT IS NOT A WORKAROUND HERE; IT IS THE RESOLUTION OF A FAT16 DATE.**
+    /chat/recent orders conversations by file modification time, and FAT16
+    stores that in whole EVEN seconds while ext4 stores nanoseconds. Two writes
+    300 ms apart are ordered on Linux and tied on metal — so asking both sides
+    for the same order would be asking FAT16 to be ext4. Where the story cares
+    about the order of two events, it makes them far enough apart that the
+    coarser clock can tell them apart, and then demands exact agreement."""
     return {"name": name, "method": method, "path": path, "cookie": cookie, "body": body,
-            "raw": raw, "files": [], "headers": list(headers)}
+            "raw": raw, "files": [], "headers": list(headers), "settle": settle}
 
 
 SEQUENCE = [
@@ -205,7 +214,10 @@ MEMBER_STORY = [
     step("the conversation page", "GET", "/chat/c/1_2/general", JAR),
     step("the raw transcript", "GET", "/chat/c/1_2/general/raw", JAR),
     step("chat now resumes the conversation", "GET", "/chat", JAR),
-    step("a new topic", "POST", "/chat/c/1_2/new", JAR, "topic=metal-talk"),
+    # 3 seconds: more than FAT16's two-second granularity, so "metal-talk was
+    # written after general" is a fact both filesystems can hold. /chat/recent
+    # below is judged on the order it produces.
+    step("a new topic", "POST", "/chat/c/1_2/new", JAR, "topic=metal-talk", settle=3.0),
     step("a message in it", "POST", "/chat/c/1_2/metal-talk/send", JAR,
          "markdown=a+second+topic&cid=c4", headers=["X-Chat-Async: 1"]),
     step("a reaction", "POST", "/chat/c/1_2/general/react", JAR, "id=general_1&emoji=%F0%9F%91%8D"),
@@ -695,6 +707,8 @@ def run_story(elf, linux_bin, content, pristine, work, mnt, steps, label, report
     qemu, port, serial = start_kernel(elf, image, scratch)
     metal_answers, jar = [], {}
     for i, s in enumerate(steps):
+        if s.get("settle"):
+            time.sleep(s["settle"])
         if qemu.poll() is not None:
             # The kernel is gone. Every later step is a failure, and asking
             # would only wait out curl's retries.
@@ -713,6 +727,8 @@ def run_story(elf, linux_bin, content, pristine, work, mnt, steps, label, report
     linux_answers, jar = [], {}
     try:
         for i, s in enumerate(steps):
+            if s.get("settle"):
+                time.sleep(s["settle"])
             a = ask(server.port, with_jar(s, jar, minted), os.path.join(scratch, f"l{i}"))
             jar = update_jar(a, jar)
             linux_answers.append(a)
