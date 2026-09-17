@@ -400,6 +400,14 @@ pub const Block = struct {
     pub fn write(self: *Block, lba: u64, addr: u64) u8 {
         return self.transfer(blk_t_out, lba, addr, 512);
     }
+
+    /// The `count` × 512 bytes at `addr` become `count` sectors from `lba`, as
+    /// ONE request — what makes a 10 MB upload about 160 requests instead of
+    /// twenty thousand.
+    pub fn writeMany(self: *Block, lba: u64, addr: u64, count: u32) u8 {
+        if (count == 0 or count > max_sectors) return blk_s_unsupp;
+        return self.transfer(blk_t_out, lba, addr, count * 512);
+    }
 };
 
 /// The memory a Block needs, which a caller places somewhere identity-mapped.

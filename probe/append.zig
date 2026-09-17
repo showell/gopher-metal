@@ -135,6 +135,33 @@ pub fn kmain() noreturn {
     }
     serial.put("  over.txt: a write past the end is refused\n");
 
+    // ── an overwrite from a sector boundary to part-way through a later one ──
+    // The file goes on past the write, so the bytes after it in its last
+    // sector belong to the file and must survive. An overwrite that starts
+    // mid-sector never reaches that sector, which is why over.txt above could
+    // not tell a writer that zeroed them from one that kept them.
+    appendPattern(io, "mid.txt", 0x55, 0, 2000);
+    {
+        var file = Io.Dir.cwd().createFile(io, "mid.txt", .{ .truncate = false }) catch
+            serial.fail("mid.txt would not open");
+        var patch: [700]u8 = undefined;
+        @memset(&patch, 'M');
+        file.writePositionalAll(io, &patch, 512) catch serial.fail("the mid-file overwrite failed");
+    }
+    const mid = Io.Dir.cwd().readFileAlloc(io, "mid.txt", alloc, .limited(4096)) catch
+        serial.fail("mid.txt would not read back");
+    if (mid.len != 2000) serial.fail("the mid-file overwrite changed the file's length");
+    for (mid, 0..) |b, i| {
+        const want: u8 = if (i >= 512 and i < 1212) 'M' else patternByte(0x55, i);
+        if (b != want) {
+            serial.put("  mid.txt byte ");
+            serial.putDec(i);
+            serial.put(" is wrong\n");
+            serial.fail("an overwrite inside a file lost the bytes after it in its last sector");
+        }
+    }
+    serial.put("  mid.txt: bytes 512-1211 overwritten, everything around them kept\n");
+
     // ── the chain-extending case: 600 lines, appended one at a time ─────────
     var want: usize = 0;
     var i: usize = 1;

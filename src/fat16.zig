@@ -453,6 +453,19 @@ pub const Volume = struct {
         if (self.blk.write(self.start_lba + lba, @intFromPtr(from)) != virtio.blk_s_ok) return Error.WriteFailed;
     }
 
+    /// `count` whole sectors straight from `from`, as one request. `from` is
+    /// the caller's buffer, which the device reads directly.
+    ///
+    /// **ONE REQUEST, NOT A LOOP.** writeRuns never asks for more than one
+    /// request's worth — a run is capped there — and nothing else writes in
+    /// bulk, so a loop that split a longer write would be code no test could
+    /// reach. Asking for more is an error instead.
+    fn writeSectors(self: *Volume, lba: u32, count: u32, from: [*]const u8) Error!void {
+        if (count > virtio.Block.max_sectors) return Error.TooBig;
+        if (self.blk.writeMany(self.start_lba + lba, @intFromPtr(from), count) != virtio.blk_s_ok)
+            return Error.WriteFailed;
+    }
+
     /// The FAT entry for a cluster.
     fn fatGet(self: *Volume, cluster: u16) Error!u16 {
         const at = @as(u32, cluster) * 2;
@@ -536,21 +549,7 @@ pub const Volume = struct {
     /// sector is padded with zeros: a cluster is written whole, and the
     /// directory's size field is what says how much of it is the file.
     fn writeChain(self: *Volume, first: u16, bytes: []const u8) Error!void {
-        var cluster = first;
-        var at: usize = 0;
-        while (at < bytes.len) {
-            if (cluster < 2) return Error.BadChain;
-            var s: u32 = 0;
-            while (s < self.sectors_per_cluster and at < bytes.len) : (s += 1) {
-                const n = @min(bytes.len - at, @as(usize, sector_size));
-                @memcpy(self.scratch[0..n], bytes[at..][0..n]);
-                if (n < sector_size) @memset(self.scratch[n..], 0);
-                try self.writeSector(self.clusterSector(cluster) + s, self.scratch);
-                at += n;
-            }
-            if (at >= bytes.len) break;
-            cluster = (try self.nextCluster(cluster)) orelse return Error.BadChain;
-        }
+        return self.writeRuns(first, 0, bytes, .zeros);
     }
 
     /// A run of `needed` consecutive free entries in a directory, growing it if
@@ -1022,44 +1021,92 @@ pub const Volume = struct {
     /// **THE FIRST SECTOR IS READ BEFORE IT IS WRITTEN**, because an append
     /// almost never lands on a sector boundary: the bytes already in that
     /// sector are the end of the file, and writing a fresh sector over them
-    /// would erase back to the last boundary.
+    /// would erase back to the last boundary. So is the last, for an overwrite
+    /// inside the file.
     fn writeAt(self: *Volume, first: u16, offset: u32, bytes: []const u8) Error!void {
+        return self.writeRuns(first, offset, bytes, .kept);
+    }
+
+    /// What goes in a sector a write ends inside: what was there already, or
+    /// zeros. A new file's tail is zeroed, so nothing a deleted file left in
+    /// that sector is carried along.
+    const Tail = enum { kept, zeros };
+
+    /// **A FILE IS WRITTEN AS RUNS**, the way it is read: a run is a cluster
+    /// and every cluster after it whose number is one more. Whole sectors go
+    /// straight from `bytes` to the device, one request per run; only a sector
+    /// the write starts or ends inside goes through the scratch sector.
+    fn writeRuns(self: *Volume, first: u16, offset: u32, bytes: []const u8, tail: Tail) Error!void {
+        if (bytes.len == 0) return;
         const cluster_bytes: u32 = self.sectors_per_cluster * sector_size;
 
-        // Walk to the cluster the offset falls in.
         var cluster = first;
+        if (cluster < 2) return Error.BadChain;
         var skip = offset / cluster_bytes;
         while (skip > 0) : (skip -= 1) {
             cluster = (try self.nextCluster(cluster)) orelse return Error.BadChain;
             if (cluster < 2) return Error.BadChain;
         }
 
-        var within = offset % cluster_bytes; // byte offset inside this cluster
+        var sector_in_cluster: u32 = (offset % cluster_bytes) / sector_size;
+        var skip_in_sector: u32 = (offset % cluster_bytes) % sector_size;
         var at: usize = 0;
+        const max_run = @max(1, virtio.Block.max_sectors / self.sectors_per_cluster);
         while (at < bytes.len) {
-            if (cluster < 2) return Error.BadChain;
-            var s: u32 = within / sector_size;
-            var in_sector: u32 = within % sector_size;
-            while (s < self.sectors_per_cluster and at < bytes.len) : (s += 1) {
-                const lba = self.clusterSector(cluster) + s;
-                const room = sector_size - in_sector;
-                const n = @min(bytes.len - at, @as(usize, room));
-
-                if (in_sector != 0 or n < sector_size) {
-                    // A partial sector: keep what is already there.
-                    try self.readSector(lba, self.scratch);
-                } else {
-                    @memset(self.scratch, 0);
+            var run: u32 = 1;
+            var last = cluster;
+            var after: ?u16 = null;
+            while (true) {
+                const have = run * cluster_bytes - sector_in_cluster * sector_size - skip_in_sector;
+                if (at + have >= bytes.len) break;
+                const next = (try self.nextCluster(last)) orelse break;
+                if (run >= max_run or next != last + 1) {
+                    after = next;
+                    break;
                 }
-                @memcpy(self.scratch[in_sector..][0..n], bytes[at..][0..n]);
-                try self.writeSector(lba, self.scratch);
-
-                at += n;
-                in_sector = 0;
+                last = next;
+                run += 1;
             }
+
+            var lba = self.clusterSector(cluster) + sector_in_cluster;
+            var sectors_left = run * self.sectors_per_cluster - sector_in_cluster;
+
+            if (skip_in_sector != 0) {
+                // Starting inside a sector: keep what is before the offset.
+                try self.readSector(lba, self.scratch);
+                const n = @min(bytes.len - at, @as(usize, sector_size - skip_in_sector));
+                @memcpy(self.scratch[skip_in_sector..][0..n], bytes[at..][0..n]);
+                try self.writeSector(lba, self.scratch);
+                at += n;
+                lba += 1;
+                sectors_left -= 1;
+                skip_in_sector = 0;
+            }
+
+            const whole: u32 = @intCast(@min(@as(usize, sectors_left), (bytes.len - at) / sector_size));
+            if (whole > 0) {
+                try self.writeSectors(lba, whole, bytes[at..].ptr);
+                at += @as(usize, whole) * sector_size;
+                lba += whole;
+                sectors_left -= whole;
+            }
+
+            if (at < bytes.len and sectors_left > 0) {
+                // Ending inside a sector.
+                switch (tail) {
+                    .kept => try self.readSector(lba, self.scratch),
+                    .zeros => @memset(self.scratch, 0),
+                }
+                const n = bytes.len - at;
+                @memcpy(self.scratch[0..n], bytes[at..][0..n]);
+                try self.writeSector(lba, self.scratch);
+                at += n;
+            }
+
             if (at >= bytes.len) break;
-            within = 0;
-            cluster = (try self.nextCluster(cluster)) orelse return Error.BadChain;
+            cluster = after orelse ((try self.nextCluster(last)) orelse return Error.BadChain);
+            if (cluster < 2) return Error.BadChain;
+            sector_in_cluster = 0;
         }
     }
 

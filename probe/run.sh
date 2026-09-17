@@ -248,7 +248,28 @@ if [ "$want" = all ] || [ "$want" = append ]; then
                 # What the LINUX DRIVER makes of the dates we wrote.
                 stamp_small="$(stat -c %Y "$mnt/small.txt" 2>/dev/null || echo 0)"
                 stamp_nested="$(stat -c %Y "$mnt/data/lynrummy/p1/lynrummy-elm/sessions/1/actions.dsl" 2>/dev/null || echo 0)"
+                # The read sweep's files, written a run at a time: one long
+                # run, and one whose chain breaks at every cluster.
+                cp "$mnt/big.txt" "$WORK/append.big" 2>/dev/null || rm -f "$WORK/append.big"
+                cp "$mnt/frag.txt" "$WORK/append.frag" 2>/dev/null || rm -f "$WORK/append.frag"
                 sudo umount "$mnt"
+                # patternByte in probe/append.zig, restated here.
+                pattern_check="$(python3 - "$WORK/append.big" "$WORK/append.frag" <<'CHECK'
+import sys
+def want(seed, n):
+    return bytes(((p * 2654435761) >> 13) & 0xFF ^ seed for p in range(n))
+for path, seed, n in ((sys.argv[1], 0x33, 100 * 1024), (sys.argv[2], 0x11, 60000)):
+    try:
+        got = open(path, "rb").read()
+    except OSError:
+        print(f"{path.rsplit('.', 1)[1]}.txt is missing"); sys.exit(1)
+    w = want(seed, n)
+    if got != w:
+        at = next((i for i, (a, b) in enumerate(zip(got, w)) if a != b), min(len(got), len(w)))
+        print(f"{path.rsplit('.', 1)[1]}.txt differs at byte {at} ({len(got)} bytes, want {n})"); sys.exit(1)
+print("ok")
+CHECK
+)"
 
                 # The kernel's own clock, from its serial log; the files must be
                 # stamped with about that time. A packing error is years out, so
@@ -283,6 +304,9 @@ if [ "$want" = all ] || [ "$want" = append ]; then
                 elif [ "$nested" != "$(printf '1) draw\n2) meld')" ]; then
                     echo "FAIL append | Linux reads [$nested] in the created tree"
                     failed=1
+                elif [ "$pattern_check" != ok ]; then
+                    echo "FAIL append | the Linux VFAT driver reads the run-written files wrong: $pattern_check"
+                    failed=1
                 elif [ "$kernel_now" = 0 ]; then
                     echo "FAIL append | the probe never said what time its clock read"
                     failed=1
@@ -295,6 +319,7 @@ if [ "$want" = all ] || [ "$want" = append ]; then
                 else
                     echo "     append | the Linux VFAT driver reads all 600 lines and the late append, byte for byte"
                     echo "     append | and dates the files it read within ${skew}s of the kernel's own clock"
+                    echo "     append | and reads the run-written files — one long run, one broken at every cluster — byte for byte"
                 fi
             fi
         fi
