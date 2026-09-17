@@ -6,6 +6,9 @@
 #   probe/run.sh quick      host tests, Debug kernels, every probe, and the
 #                           judge's quick tier: minutes, for iterating
 #   probe/run.sh gopher     the judge's full run, on whatever gopher.elf is
+#   probe/run.sh gopher uploads       ONE gate of it, in about a minute
+#   probe/run.sh gopher isolated      a boot per single request: what a push
+#                                     is judged on
 #   probe/run.sh native     the TCP table on Linux, against Linux's TCP
 #
 # Prints a line per probe and exits 1 if any failed.
@@ -40,6 +43,14 @@ WORK="$HOME/build/gopher-metal/probe"
 mkdir -p "$WORK"
 
 want="${1:-all}"
+# `run.sh gopher <gate>` asks for one gate of the judge; `isolated` asks for a
+# boot per single request instead of one boot for all of them. The judge prints
+# the gate names when given one it does not know.
+gate="${2:-}"
+if [ "$gate" = isolated ]; then
+    export JUDGE_ISOLATED=1
+    gate=""
+fi
 
 # **THE JUDGES ARE TESTED FIRST.** Several checks below are decided by Python
 # that compares, normalizes and parses; a judge that is wrong is a gate that
@@ -605,7 +616,8 @@ if [ "$want" = gopher ] || [ $quick = 1 ]; then
         echo "FAIL gopher | the Linux build of the same source failed; see $WORK/gopher.linux-build"
         failed=1
     else
-        JUDGE_QUICK=$([ $quick = 1 ] && echo 1) python3 "$HERE/judge_gopher.py" "$HERE/gopher.elf" \
+        JUDGE_QUICK=$([ $quick = 1 ] && echo 1) JUDGE_ONLY="$gate" \
+            python3 "$HERE/judge_gopher.py" "$HERE/gopher.elf" \
             "$GOPHER_ROOT/zig-server/zig-out/bin/zig-server" "$GOPHER_ROOT" "$WORK/gopher" \
             > "$WORK/gopher.verdict" 2>&1
         code=$?
@@ -613,6 +625,7 @@ if [ "$want" = gopher ] || [ $quick = 1 ]; then
         case $code in
             0) echo "PASS gopher | (${gmode#gopher-metal-build=}) $(tail -1 "$WORK/gopher.verdict")" ;;
             77) echo "     gopher | $(tail -1 "$WORK/gopher.verdict")" ;;
+            2) echo "FAIL gopher | $(cat "$WORK/gopher.verdict")"; failed=1 ;;
             *) echo "FAIL gopher | $(tail -1 "$WORK/gopher.verdict")"
                grep -A3 "^FAIL" "$WORK/gopher.verdict" | head -20 | sed 's/^/             /'
                failed=1 ;;

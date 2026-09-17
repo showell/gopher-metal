@@ -50,10 +50,22 @@ and its two load-bearing findings are worth repeating here:
     zig build kernels      # every kernel into probe/
     probe/run.sh           # boot each one under microvm (~45 s)
     probe/run.sh clock     # just one
-    ./port.sh && zig build gopher && probe/run.sh gopher   # the real server, judged against Linux (~3 min)
+    ./port.sh && zig build gopher && probe/run.sh gopher   # the real server, judged against Linux (~4 min)
+    probe/run.sh gopher uploads   # ONE gate of that judge, in about a minute
+    probe/run.sh gopher isolated  # a boot per single request: what a push is judged on
     probe/run.sh quick     # all of the above in Debug, with the judge's quick tier
     probe/run.sh native    # the TCP table on Linux, judged by Linux's own TCP (~1 min)
     probe/run.sh ladder    # one operation many times, at a flat cost (LADDER_SCALE=10 for more)
+
+**One gate at a time.** Every gate of the gopher judge boots QEMU, and the
+whole run is four minutes; a change to one gate should be answerable in one of
+those minutes. `probe/run.sh gopher <gate>` runs one — the names are `cases
+members streams-linux streams-metal budget churn bulk uploads slow lagging
+concurrent timeouts endurance stamina`, and a name it does not know is an
+error, not a silently complete run. The single requests go to one boot by
+default (2 s, against fifteen boots and a minute and a half); `probe/run.sh
+gopher isolated` gives each its own boot, which is what proves an answer owes
+nothing to an earlier one, and is what a push is judged on.
 
 **Two tiers.** `-Ddev` builds the kernels in Debug — a rebuild of the real
 server in 6.5 s instead of ReleaseSafe's 40 — and `run.sh quick` builds that

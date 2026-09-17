@@ -18,6 +18,8 @@ import sys
 import tempfile
 import threading
 import time
+import ast
+import textwrap
 import inspect
 import unittest
 
@@ -758,6 +760,54 @@ class Uploads(unittest.TestCase):
     def test_the_quick_tier_leaves_out_the_big_one(self):
         # Reading 40 MB through the machine is the slowest thing in the gate.
         self.assertIn("if not QUICK", inspect.getsource(G.upload_story))
+
+
+
+class Gates(unittest.TestCase):
+    """**EVERY GATE IS ASKABLE, AND EVERY GATE IS GUARDED.** A gate that runs
+    whatever was asked for costs a QEMU boot that nobody wanted; one that is
+    never reachable by name is a gate that cannot be iterated on."""
+
+    def setUp(self):
+        self.tree = ast.parse(textwrap.dedent(inspect.getsource(G.main)))
+
+    @staticmethod
+    def asks_want(test) -> bool:
+        return any(isinstance(n, ast.Call) and getattr(n.func, "id", "") == "want"
+                   for n in ast.walk(test))
+
+    def guarded_nodes(self) -> set:
+        out = set()
+        for node in ast.walk(self.tree):
+            if isinstance(node, ast.If) and self.asks_want(node.test):
+                out |= {id(n) for n in ast.walk(node)}
+        return out
+
+    def named_gates(self) -> set:
+        return {n.args[0].value for n in ast.walk(self.tree)
+                if isinstance(n, ast.Call) and getattr(n.func, "id", "") == "want"
+                and n.args and isinstance(n.args[0], ast.Constant)}
+
+    def test_every_gate_in_the_list_is_asked_for_somewhere(self):
+        self.assertEqual(set(G.GATES), self.named_gates())
+
+    def test_the_list_has_no_duplicates(self):
+        self.assertEqual(len(G.GATES), len(set(G.GATES)))
+
+    def test_every_check_that_boots_qemu_is_behind_a_gate(self):
+        guarded = self.guarded_nodes()
+        loose = [n.func.id for n in ast.walk(self.tree)
+                 if isinstance(n, ast.Call) and getattr(n.func, "id", "").endswith("_failures")
+                 and id(n) not in guarded]
+        self.assertEqual([], loose, "these run whatever gate was asked for")
+
+    def test_the_long_boots_are_gates_too(self):
+        self.assertTrue(G.LONG <= set(G.GATES))
+
+    def test_a_gate_nobody_named_is_an_error(self):
+        # Silently running everything when asked for "uplaods" is the failure
+        # mode this exists to prevent.
+        self.assertNotIn("uplaods", G.GATES)
 
 
 

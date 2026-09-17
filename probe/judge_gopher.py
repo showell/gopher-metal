@@ -461,6 +461,22 @@ def silent_client(port: int, payload: bytes):
 # keeps the real values; both prove the configured number is what governs.
 QUICK = bool(os.environ.get("JUDGE_QUICK"))
 
+# **ONE GATE AT A TIME, WHEN THAT IS WHAT THE QUESTION IS.** Every gate here
+# boots QEMU, and the whole run is minutes; a change to one of them should be
+# answerable in one of those minutes. `JUDGE_ONLY=uploads` (probe/run.sh gopher
+# uploads) runs that gate and nothing else. An unknown name is an error, not a
+# silently complete run.
+GATES = ["cases", "members", "streams-linux", "streams-metal", "budget", "churn",
+         "bulk", "uploads", "slow", "lagging", "concurrent", "timeouts",
+         "endurance", "stamina"]
+# The boots that exist to be long. The quick tier leaves them out; asking for
+# one by name still runs it.
+LONG = {"endurance", "stamina"}
+# **A BOOT PER SINGLE REQUEST** — what proves an answer owes nothing to an
+# earlier one. It costs fifteen boots, so it is what a push is judged on
+# (`probe/run.sh gopher isolated`), not what every run pays for.
+ISOLATED = bool(os.environ.get("JUDGE_ISOLATED"))
+
 # **A PACKET CAPTURE, WHEN ASKED FOR.** With JUDGE_CAPTURE set, every boot
 # writes what crossed its NIC to `net.pcap` beside its serial log, for tcpdump.
 CAPTURE = bool(os.environ.get("JUDGE_CAPTURE"))
@@ -1988,6 +2004,16 @@ def main() -> int:
             print(f"SKIPPED: {tool} is not installed")
             return 77
 
+    asked = [g for g in os.environ.get("JUDGE_ONLY", "").replace(",", " ").split()]
+    unknown = [g for g in asked if g not in GATES]
+    if unknown:
+        print(f"no such gate: {' '.join(unknown)}. The gates are: {' '.join(GATES)}")
+        return 2
+    chosen = set(asked) if asked else set(GATES) - (LONG if QUICK else set())
+
+    def want(gate: str) -> bool:
+        return gate in chosen
+
     shutil.rmtree(work, ignore_errors=True)
     os.makedirs(work)
     content = os.path.join(work, "content")
@@ -2002,18 +2028,16 @@ def main() -> int:
     lap("staging")
 
     failures = 0
-    # **ONE BOOT FOR ALL OF THEM, IN THE QUICK TIER.** A boot per request is
-    # what proves each answer owes nothing to an earlier one; the quick tier
-    # asks them all of one machine instead, still against Linux.
-    cases = [] if QUICK else CASES
-    if QUICK:
+    per_case = 0
+    if want("cases") and not ISOLATED:
         steps = [step(c["name"], c["method"], c["path"], c["cookie"], c["body"]) for c in CASES]
         f, _, answers, _ = run_story(elf, linux_bin, content, pristine, work, mnt,
                                      steps, "single requests, one boot", print)
         failures += f
+        per_case = f
         if not f:
             print(f"ok    {len(CASES)} single requests to one boot, each answered as Linux answered")
-    for c in cases:
+    for c in (CASES if want("cases") and ISOLATED else []):
         scratch = tempfile.mkdtemp(dir=work)
         image = os.path.join(scratch, "disk.img")
         shutil.copy(pristine, image)
@@ -2025,6 +2049,7 @@ def main() -> int:
         label = f"{c['name']}  ({c['method']} {c['path']})"
         if diffs:
             failures += 1
+            per_case += 1
             print(f"FAIL  {label}")
             for d in diffs:
                 print(f"        {d}")
@@ -2033,172 +2058,186 @@ def main() -> int:
             print(f"ok    {label} -> {metal['status']}, {len(metal['body'])} bytes{extra}")
         shutil.rmtree(scratch, ignore_errors=True)
 
-    per_case = failures
-    lap("single requests")
+    if want("cases"):
+        lap("single requests, a boot each" if ISOLATED else "single requests, one boot")
 
     # ── the member story ─────────────────────────────────────────────────────
-    now = int(time.time())
-    minted = {
-        FRESH: mint_session("1", now),
-        STALE: mint_session("1", now - 400 * 86400),
-        FORGED: forge_session("1", "2", now),
-    }
-    f, log, answers, files = run_story(elf, linux_bin, content, pristine, work, mnt,
-                                       MEMBER_STORY, "members", print, minted)
-    failures += f
-    # Each minted cookie must be answered as its name says, not merely the same
-    # on both sides: two servers that both honored a stale session would agree.
-    by_name = {s["name"]: a for s, a in zip(MEMBER_STORY, answers)}
-    for name, want in (("a session minted outside both servers", 200),
-                       ("a session 400 days old", 303), ("a forged session", 303)):
-        got = by_name[name].get("status")
-        if got != want:
+    if want("members"):
+        now = int(time.time())
+        minted = {
+            FRESH: mint_session("1", now),
+            STALE: mint_session("1", now - 400 * 86400),
+            FORGED: forge_session("1", "2", now),
+        }
+        f, log, answers, files = run_story(elf, linux_bin, content, pristine, work, mnt,
+                                           MEMBER_STORY, "members", print, minted)
+        failures += f
+        # Each minted cookie must be answered as its name says, not merely the same
+        # on both sides: two servers that both honored a stale session would agree.
+        by_name = {s["name"]: a for s, a in zip(MEMBER_STORY, answers)}
+        for name, want in (("a session minted outside both servers", 200),
+                           ("a session 400 days old", 303), ("a forged session", 303)):
+            got = by_name[name].get("status")
+            if got != want:
+                failures += 1
+                print(f"FAIL  members: {name} answered {got}, want {want}")
+        # A session the KERNEL minted must be honored by Linux: same secret, same
+        # HMAC, and the kernel's clock close enough to Linux's.
+        login = by_name["the right one (a $2a$ hash)"]
+        metal_session = update_jar(login, {}).get("gopher_auth")
+        if not metal_session:
             failures += 1
-            print(f"FAIL  members: {name} answered {got}, want {want}")
-    # A session the KERNEL minted must be honored by Linux: same secret, same
-    # HMAC, and the kernel's clock close enough to Linux's.
-    login = by_name["the right one (a $2a$ hash)"]
-    metal_session = update_jar(login, {}).get("gopher_auth")
-    if not metal_session:
-        failures += 1
-        print("FAIL  members: the kernel's login set no session cookie")
-    else:
-        scratch = tempfile.mkdtemp(dir=work)
-        linux = ask_linux(linux_bin, content,
-                          step("a kernel-minted session, on Linux", "GET", "/chat/conversations",
-                               f"gopher_auth={metal_session}"), scratch)
-        if linux.get("status") != 200:
-            failures += 1
-            print(f"FAIL  members: Linux refused the session the kernel minted ({linux.get('status')})")
-        shutil.rmtree(scratch, ignore_errors=True)
-    if not f and metal_session:
-        print(f"ok    the member story: {len(MEMBER_STORY)} requests to ONE boot — login, chat, topics, "
-              f"reactions, admin, logout — each answered as Linux answered, all {files} files agree; "
-              f"a fresh minted session honored, a stale and a forged one refused, "
-              f"and the kernel's own session honored by Linux")
+            print("FAIL  members: the kernel's login set no session cookie")
+        else:
+            scratch = tempfile.mkdtemp(dir=work)
+            linux = ask_linux(linux_bin, content,
+                              step("a kernel-minted session, on Linux", "GET", "/chat/conversations",
+                                   f"gopher_auth={metal_session}"), scratch)
+            if linux.get("status") != 200:
+                failures += 1
+                print(f"FAIL  members: Linux refused the session the kernel minted ({linux.get('status')})")
+            shutil.rmtree(scratch, ignore_errors=True)
+        if not f and metal_session:
+            print(f"ok    the member story: {len(MEMBER_STORY)} requests to ONE boot — login, chat, topics, "
+                  f"reactions, admin, logout — each answered as Linux answered, all {files} files agree; "
+                  f"a fresh minted session honored, a stale and a forged one refused, "
+                  f"and the kernel's own session honored by Linux")
 
-    lap("member story")
+        lap("member story")
 
     # ── a live stream, on both ───────────────────────────────────────────────
-    failures += linux_sse_failures(linux_bin, content, work, print)
-    lap("streams on Linux")
-    failures += metal_sse_failures(elf, pristine, work, mnt, print)
-    lap("streams on the machine")
-    failures += budget_failures(elf, pristine, work, mnt, print)
-    lap("stream budget")
-    failures += churn_failures(elf, pristine, work, mnt, print)
-    lap("stream churn")
+    if want("streams-linux"):
+        failures += linux_sse_failures(linux_bin, content, work, print)
+        lap("streams on Linux")
+    if want("streams-metal"):
+        failures += metal_sse_failures(elf, pristine, work, mnt, print)
+        lap("streams on the machine")
+    if want("budget"):
+        failures += budget_failures(elf, pristine, work, mnt, print)
+        lap("stream budget")
+    if want("churn"):
+        failures += churn_failures(elf, pristine, work, mnt, print)
+        lap("stream churn")
 
     # ── the send side ────────────────────────────────────────────────────────
-    failures += bulk_failures(elf, linux_bin, content, pristine, work, mnt, print)
-    lap("bulk")
-    failures += upload_failures(elf, linux_bin, content, pristine, work, mnt, print)
-    lap("uploads")
-    failures += slow_reader_failures(elf, linux_bin, content, work, mnt, print)
-    lap("slow readers")
-    failures += lagging_stream_failures(elf, pristine, work, mnt, print)
-    lap("a lagging stream")
+    if want("bulk"):
+        failures += bulk_failures(elf, linux_bin, content, pristine, work, mnt, print)
+        lap("bulk")
+    if want("uploads"):
+        failures += upload_failures(elf, linux_bin, content, pristine, work, mnt, print)
+        lap("uploads")
+    if want("slow"):
+        failures += slow_reader_failures(elf, linux_bin, content, work, mnt, print)
+        lap("slow readers")
+    if want("lagging"):
+        failures += lagging_stream_failures(elf, pristine, work, mnt, print)
+        lap("a lagging stream")
 
     # ── many clients at once ─────────────────────────────────────────────────
-    failures += concurrent_failures(elf, linux_bin, content, pristine, work, mnt, print)
-    lap("many clients")
+    if want("concurrent"):
+        failures += concurrent_failures(elf, linux_bin, content, pristine, work, mnt, print)
+        lap("many clients")
 
     # ── the client that says nothing ─────────────────────────────────────────
-    failures += timeout_failures(elf, pristine, work, mnt, print)
-    lap("silent clients")
-    if QUICK:
-        print(f"{len(CASES) - per_case} of {len(CASES)} single requests, and "
-              f"{'every' if failures == per_case else 'not every'} quick boot, answered as Linux "
-              f"answered ({lap.total():.0f} s; the long boots are left to the full run)")
-        return 1 if failures else 0
-
+    if want("timeouts"):
+        failures += timeout_failures(elf, pristine, work, mnt, print)
+        lap("silent clients")
     # ── endurance: the writes, read back every round ─────────────────────────
-    f, log, answers, files = run_story(elf, linux_bin, content, pristine, work, mnt,
-                                       ENDURANCE, "endurance", print)
-    marks = missing_marks(ENDURANCE, answers, print, "endurance")
-    failures += f + marks
-    # **THE WRITES ARE WHERE THE HEAP IS ACTUALLY CHURNED.** Reads allocate and
-    # free in order, and a bump allocator gives back a free that was the last
-    # thing it handed out — so a read-only run can look perfectly frugal while
-    # the machine has no way to reclaim anything. These numbers are the honest
-    # ones, and they are reported whether or not anything failed.
-    live, taken, peak = base_heap_trace(log), base_heap_taken(log), base_heap_peak(log)
-    if live and peak:
-        at = min(6, len(peak) - 1)
-        grew = peak[-1] - peak[at]
-        print(f"      endurance: {live[-1]} live bytes in {taken[-1]} bytes of pages; peak "
-              f"{peak[at]} after {at + 1} requests, {peak[-1]} after {len(peak)} "
-              f"({grew} bytes of growth over the writes)")
-        # A peak that climbs with every request is a machine with a clock on it.
-        # Early rise is caches filling; a bump allocator would never stop.
-        if grew > 256 * 1024:
-            failures += 1
-            print(f"FAIL  endurance: the peak grew {grew} bytes over {len(peak)} requests — "
-                  f"this machine is not reusing what it frees")
-    if not f and not marks:
-        reads = sum(1 for s in ENDURANCE if s["expect"])
-        print(f"ok    endurance: {ENDURANCE_ROUNDS} rounds of write-then-read-it-all-back to ONE boot "
-              f"({len(ENDURANCE)} requests) — every one of the {reads} read-backs held every mark "
-              f"written before it, each answered as Linux answered, and all {files} files agree")
+    if want("endurance"):
+        f, log, answers, files = run_story(elf, linux_bin, content, pristine, work, mnt,
+                                           ENDURANCE, "endurance", print)
+        marks = missing_marks(ENDURANCE, answers, print, "endurance")
+        failures += f + marks
+        # **THE WRITES ARE WHERE THE HEAP IS ACTUALLY CHURNED.** Reads allocate and
+        # free in order, and a bump allocator gives back a free that was the last
+        # thing it handed out — so a read-only run can look perfectly frugal while
+        # the machine has no way to reclaim anything. These numbers are the honest
+        # ones, and they are reported whether or not anything failed.
+        live, taken, peak = base_heap_trace(log), base_heap_taken(log), base_heap_peak(log)
+        if live and peak:
+            at = min(6, len(peak) - 1)
+            grew = peak[-1] - peak[at]
+            print(f"      endurance: {live[-1]} live bytes in {taken[-1]} bytes of pages; peak "
+                  f"{peak[at]} after {at + 1} requests, {peak[-1]} after {len(peak)} "
+                  f"({grew} bytes of growth over the writes)")
+            # A peak that climbs with every request is a machine with a clock on it.
+            # Early rise is caches filling; a bump allocator would never stop.
+            if grew > 256 * 1024:
+                failures += 1
+                print(f"FAIL  endurance: the peak grew {grew} bytes over {len(peak)} requests — "
+                      f"this machine is not reusing what it frees")
+        if not f and not marks:
+            reads = sum(1 for s in ENDURANCE if s["expect"])
+            print(f"ok    endurance: {ENDURANCE_ROUNDS} rounds of write-then-read-it-all-back to ONE boot "
+                  f"({len(ENDURANCE)} requests) — every one of the {reads} read-backs held every mark "
+                  f"written before it, each answered as Linux answered, and all {files} files agree")
 
-    lap("endurance")
+        lap("endurance")
 
     # ── stamina ──────────────────────────────────────────────────────────────
-    rounds = STAMINA * STAMINA_ROUNDS
-    f, log, answers, _ = run_story(elf, linux_bin, content, pristine, work, mnt,
-                                   rounds, "stamina", print)
-    failures += f
-    first = {}
-    drift = 0
-    for s, a in zip(rounds, answers):
-        key = s["path"]
-        body = a.get("body")
-        if key not in first:
-            first[key] = body
-        elif body != first[key]:
-            drift += 1
-    if drift:
-        failures += 1
-        print(f"FAIL  stamina: {drift} answers differed from the first answer to the same request")
-    trace = base_heap_trace(log)
-    settled = trace[len(STAMINA) * 2:]  # after two rounds, anything cached is cached
-    if len(trace) != len(rounds):
-        failures += 1
-        print(f"FAIL  stamina: the kernel logged {len(trace)} requests, not {len(rounds)}")
-    elif settled and max(settled) != min(settled):
-        failures += 1
-        print(f"FAIL  stamina: the base heap grew from {min(settled)} to {max(settled)} live bytes "
-              f"over {len(rounds)} requests")
-    # The request heap: each request must use what the same request used in the
-    # first round. One that was never reset would only ever grow.
-    used = request_heap_trace(log)
-    per = len(STAMINA)
-    wandered = [i for i in range(per, len(used)) if used[i] != used[i % per]]
-    if len(used) != len(rounds):
-        failures += 1
-        print(f"FAIL  stamina: the kernel logged {len(used)} request-heap figures, not {len(rounds)}")
-    elif wandered:
-        i = wandered[0]
-        failures += 1
-        print(f"FAIL  stamina: request {i + 1} ({rounds[i]['path']}) used {used[i]} bytes of its heap; "
-              f"the same request used {used[i % per]} the first time")
-    if not f and not drift and len(trace) == len(rounds) and not wandered and len(used) == len(rounds) \
-            and (not settled or max(settled) == min(settled)):
-        print(f"ok    stamina: {len(rounds)} requests to one boot, every answer the same, "
-              f"base heap steady at {trace[-1]} live bytes, each request's heap the same every round "
-              f"({', '.join(str(u) for u in used[:per])} bytes)")
-        peaks = base_heap_peak(log)
-        if peaks:
-            at = peaks[min(6, len(peaks) - 1)]
-            print(f"      stamina: peak memory {at} bytes after seven requests, "
-                  f"{peaks[-1]} after {len(peaks)} — "
-                  + ("unchanged: every request's memory is reclaimed and reused"
-                     if peaks[-1] == at else f"{peaks[-1] - at} bytes of growth"))
+    if want("stamina"):
+        rounds = STAMINA * STAMINA_ROUNDS
+        f, log, answers, _ = run_story(elf, linux_bin, content, pristine, work, mnt,
+                                       rounds, "stamina", print)
+        failures += f
+        first = {}
+        drift = 0
+        for s, a in zip(rounds, answers):
+            key = s["path"]
+            body = a.get("body")
+            if key not in first:
+                first[key] = body
+            elif body != first[key]:
+                drift += 1
+        if drift:
+            failures += 1
+            print(f"FAIL  stamina: {drift} answers differed from the first answer to the same request")
+        trace = base_heap_trace(log)
+        settled = trace[len(STAMINA) * 2:]  # after two rounds, anything cached is cached
+        if len(trace) != len(rounds):
+            failures += 1
+            print(f"FAIL  stamina: the kernel logged {len(trace)} requests, not {len(rounds)}")
+        elif settled and max(settled) != min(settled):
+            failures += 1
+            print(f"FAIL  stamina: the base heap grew from {min(settled)} to {max(settled)} live bytes "
+                  f"over {len(rounds)} requests")
+        # The request heap: each request must use what the same request used in the
+        # first round. One that was never reset would only ever grow.
+        used = request_heap_trace(log)
+        per = len(STAMINA)
+        wandered = [i for i in range(per, len(used)) if used[i] != used[i % per]]
+        if len(used) != len(rounds):
+            failures += 1
+            print(f"FAIL  stamina: the kernel logged {len(used)} request-heap figures, not {len(rounds)}")
+        elif wandered:
+            i = wandered[0]
+            failures += 1
+            print(f"FAIL  stamina: request {i + 1} ({rounds[i]['path']}) used {used[i]} bytes of its heap; "
+                  f"the same request used {used[i % per]} the first time")
+        if not f and not drift and len(trace) == len(rounds) and not wandered and len(used) == len(rounds) \
+                and (not settled or max(settled) == min(settled)):
+            print(f"ok    stamina: {len(rounds)} requests to one boot, every answer the same, "
+                  f"base heap steady at {trace[-1]} live bytes, each request's heap the same every round "
+                  f"({', '.join(str(u) for u in used[:per])} bytes)")
+            peaks = base_heap_peak(log)
+            if peaks:
+                at = peaks[min(6, len(peaks) - 1)]
+                print(f"      stamina: peak memory {at} bytes after seven requests, "
+                      f"{peaks[-1]} after {len(peaks)} — "
+                      + ("unchanged: every request's memory is reclaimed and reused"
+                         if peaks[-1] == at else f"{peaks[-1] - at} bytes of growth"))
 
-    lap("stamina")
-    print(f"{len(CASES) - per_case} of {len(CASES)} single requests, and "
-          f"{'all three' if failures == per_case else 'not all three'} long-running boots, "
-          f"answered as Linux answered ({lap.total():.0f} s)")
+        lap("stamina")
+    names = " ".join(g for g in GATES if g in chosen)
+    took = f"{lap.total():.0f} s"
+    if failures:
+        print(f"{failures} failure(s) over: {names} ({took})")
+    elif chosen == set(GATES):
+        boots = "a boot each" if ISOLATED else "one boot"
+        print(f"{len(CASES)} of {len(CASES)} single requests ({boots}), and every other gate, "
+              f"answered as Linux answered ({took})")
+    else:
+        print(f"answered as Linux answered: {names} ({took})")
     return 1 if failures else 0
 
 
