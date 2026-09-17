@@ -916,15 +916,11 @@ thousand times. Two numbers are worth a second look even though they do not
 climb: rewriting a file of a dozen bytes takes 15 device requests, and one
 append takes 7.
 
-**The one rung that climbed was ours**, and it was the close bug: a connection
-whose FIN had been acknowledged was forgotten before the peer's own FIN
-arrived, so QEMU's network kept it in LAST-ACK and walked a list that grew all
-day. With that fixed, a soak of 4,201 requests holds 39 req/s from the first
-window to the last, the time waiting for the network before a request's turn
-stays at 3.3 ms throughout, and the machine's own answer time rises only from
-6.6 ms to 15.8 ms — while the transcript it reads and appends to grows from
-16 KB to 167 KB. Ten times the bytes for 2.4 times the time is the shape of
-work, not of drift.
+**The one rung that climbed was ours.** A connection whose FIN has been
+acknowledged is not finished: forgetting it before the peer's own FIN arrives
+leaves the peer in LAST-ACK, and a peer that walks its connection list per
+frame — slirp does — gets slower at everything for as long as the machine is
+up. The slowdown was ours, not the emulator's.
 
 ## The TCP table, on Linux, against Linux's TCP
 
