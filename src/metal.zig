@@ -3,6 +3,7 @@
 //! that imports this and provides `kmain`.
 
 pub const boot = @import("boot.zig");
+pub const stack = @import("stack.zig");
 pub const serial = @import("serial.zig");
 pub const virtio = @import("virtio.zig");
 pub const net = @import("net.zig");

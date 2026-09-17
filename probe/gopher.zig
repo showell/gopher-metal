@@ -41,6 +41,7 @@ const tcp = metal.tcp;
 const stream = metal.stream;
 const gpt = metal.gpt;
 const fat16 = metal.fat16;
+const stack = metal.stack;
 const Io = metal.io;
 
 /// The application, as it is.
@@ -49,6 +50,13 @@ const Bus = router.Bus;
 
 comptime {
     _ = metal.boot;
+    // **NO THREADS, AND THE COMPILER AGREES.** A freestanding target is
+    // single-threaded, so `std.Thread.spawn` is not a thing that compiles here
+    // -- which is why the Linux host's task pool is not part of the port, and
+    // why every lock, futex and group in the application costs nothing (see
+    // src/io.zig). If this ever stops holding, the concurrency stubs there are
+    // lies and this must not build.
+    if (!@import("builtin").single_threaded) @compileError("this host serves one connection at a time; std.Io's concurrency here is stubbed for a single thread");
 }
 
 /// std.heap asks a freestanding target for its page size rather than assuming
@@ -138,6 +146,7 @@ pub fn kmain() noreturn {
 
     // ── one connection at a time ────────────────────────────────────────────
     var served: u64 = 0;
+    var deepest: usize = 0;
     while (limit == null or served < limit.?) {
         served += 1;
         serveOne(io, &nic, &conn, lease.address, request_fba.allocator(), &bus, served);
@@ -148,6 +157,7 @@ pub fn kmain() noreturn {
         serial.putDec(request_fba.end_index);
         serial.put(" bytes\n");
         request_fba.reset();
+        deepest = reportStack(deepest);
     }
 
     const mem = router.mem_meter.snapshot();
@@ -158,6 +168,11 @@ pub fn kmain() noreturn {
     serial.put(" live bytes in ");
     serial.putDec(mem.live_allocs);
     serial.put(" allocations\n");
+    serial.put("  stack high water: ");
+    serial.putDec(deepest);
+    serial.put(" of ");
+    serial.putDec(stack.size);
+    serial.put(" bytes\n");
     serial.pass();
 }
 
@@ -203,6 +218,33 @@ fn serveOne(
     };
     logRequest(number, what, outcome);
     close(&s, conn);
+}
+
+/// How deep the calls have gone, said out loud the first time each new depth is
+/// reached: a request that needs more stack than every request before it is
+/// worth a line, and one that needs no more is not.
+///
+/// **A BREACHED GUARD STOPS THE MACHINE.** Past the end of the stack is `.bss`
+/// -- the heaps, the virtqueues, the volume's sector buffer -- so a frame that
+/// runs off the end corrupts whatever it lands on and the machine carries on
+/// lying. This is the one place that can still be said clearly.
+fn reportStack(deepest: usize) usize {
+    const u = stack.usage();
+    if (u.guard_breached) {
+        serial.put("    stack: ");
+        serial.putDec(u.used);
+        serial.put(" of ");
+        serial.putDec(u.size);
+        serial.put(" bytes used\n");
+        serial.fail("the stack guard was written: the next call would corrupt .bss");
+    }
+    if (u.used <= deepest) return deepest;
+    serial.put("    stack high water: ");
+    serial.putDec(u.used);
+    serial.put(" of ");
+    serial.putDec(u.size);
+    serial.put(" bytes\n");
+    return u.used;
 }
 
 fn close(s: *stream.Stream, conn: *tcp.Listener) void {

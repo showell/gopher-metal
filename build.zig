@@ -64,6 +64,13 @@ pub fn build(b: *std.Build) void {
                 .optimize = optimize,
                 .pic = false,
                 .code_model = .kernel,
+                // **THERE IS ONE THREAD AND THERE WILL NOT BE ANOTHER.** A
+                // freestanding target is not single-threaded by default, so
+                // without this std keeps the threaded lowerings -- real atomic
+                // instructions, thread-local storage -- for a machine that has
+                // one core, no preemption and no scheduler. Saying so is what
+                // entitles src/io.zig to stub the whole concurrency family.
+                .single_threaded = true,
                 .imports = &.{.{ .name = "metal", .module = metal }},
             }),
         });
@@ -122,6 +129,7 @@ pub fn build(b: *std.Build) void {
             .optimize = optimize,
             .pic = false,
             .code_model = .kernel,
+            .single_threaded = true,
             .imports = &.{
                 .{ .name = "metal", .module = metal },
                 .{ .name = "router.zig", .module = app },
@@ -141,7 +149,7 @@ pub fn build(b: *std.Build) void {
     // device can report in is a way to be silently wrong, and those modes are
     // cheaper to enumerate on the host than to provoke in QEMU.
     const test_step = b.step("test", "host unit tests for the pure parts of src/");
-    for ([_][]const u8{"src/rtc.zig"}) |path| {
+    for ([_][]const u8{ "src/rtc.zig", "src/stack.zig" }) |path| {
         const unit = b.addTest(.{ .root_module = b.createModule(.{
             .root_source_file = b.path(path),
             .target = b.graph.host,

@@ -64,6 +64,60 @@ class Normalize(unittest.TestCase):
         self.assertEqual(G.normalize(an_hour_off, self.W), an_hour_off)
 
 
+class MoreNormalize(unittest.TestCase):
+    W = (1789600000, 1789600090)
+
+    def test_rfc3339_inside_the_window_is_now(self):
+        # 1789600050 is 2026-09-16T23:07:30Z.
+        self.assertEqual(G.normalize(b"at 2026-09-16T23:07:30Z.", self.W), b"at <NOW-RFC3339>.")
+
+    def test_rfc3339_outside_the_window_is_left_alone(self):
+        data = b"at 2026-09-16T22:07:30Z and 2025-09-16T05:20:00Z"
+        self.assertEqual(G.normalize(data, self.W), data)
+
+    def test_a_session_minted_in_the_window_loses_its_time_and_mac(self):
+        cookie = G.mint_session("1", 1789600050).encode()
+        self.assertEqual(G.normalize(cookie, self.W), b"gopher_auth=MQ.<NOW>.<MAC>")
+
+    def test_a_session_minted_outside_the_window_keeps_both(self):
+        cookie = G.mint_session("1", 1758000000).encode()
+        self.assertEqual(G.normalize(cookie, self.W), cookie)
+
+
+class Sessions(unittest.TestCase):
+    def test_the_minted_format_is_signsessions(self):
+        # Checked once against users.signSession itself, for this secret.
+        self.assertEqual(G.mint_session("1", 1789600000),
+                         "gopher_auth=MQ.1789600000.b89_jCbiAAoR-wSNNVBb2hogDPNxtibiP_8VnsWvtUs")
+
+    def test_a_forgery_claims_one_id_with_anothers_mac(self):
+        real2 = G.mint_session("2", 1789600000)
+        forged = G.forge_session("1", "2", 1789600000)
+        self.assertTrue(forged.startswith("gopher_auth=MQ."))
+        self.assertEqual(forged.split(".", 1)[1], real2.split(".", 1)[1])
+        self.assertNotEqual(forged, G.mint_session("1", 1789600000))
+
+
+class Jar(unittest.TestCase):
+    def test_every_cookie_is_kept(self):
+        a = {"headers": {"set-cookie": "gopher_uid=1; Path=/\ngopher_auth=MQ.1.x; Path=/"}}
+        self.assertEqual(G.update_jar(a, {}), {"gopher_uid": "1", "gopher_auth": "MQ.1.x"})
+
+    def test_max_age_zero_removes(self):
+        a = {"headers": {"set-cookie": "gopher_uid=; Path=/; Max-Age=0\ngopher_auth=; Path=/; Max-Age=0"}}
+        self.assertEqual(G.update_jar(a, {"gopher_uid": "1", "gopher_auth": "x", "other": "y"}), {"other": "y"})
+
+    def test_the_jar_becomes_one_cookie_header(self):
+        s = G.step("x", "GET", "/", G.JAR)
+        c = G.with_jar(s, {"gopher_uid": "1", "gopher_auth": "MQ.1.x"})["cookie"]
+        self.assertEqual(c, "gopher_uid=1; gopher_auth=MQ.1.x")
+        self.assertIsNone(G.with_jar(s, {})["cookie"])
+
+    def test_minted_placeholders_resolve_on_both_sides(self):
+        s = G.step("x", "GET", "/", G.FRESH)
+        self.assertEqual(G.with_jar(s, {}, {G.FRESH: "gopher_auth=abc"})["cookie"], "gopher_auth=abc")
+
+
 class Eastern(unittest.TestCase):
     """judge_gopher restates angry-gopher's formatEastern with zoneinfo. These
     are the cases that format has to get right. Each expected string was worked

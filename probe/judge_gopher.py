@@ -36,6 +36,10 @@ Without it the whole check is SKIPPED — exit 77 — and says so.
 
 Exit 0 when every case agrees, 1 when any does not, 77 when it could not run.
 """
+import base64
+import calendar
+import hashlib
+import hmac
 import json
 import os
 import re
@@ -51,6 +55,12 @@ import zoneinfo
 SECTOR = 512
 PART_FIRST = 2048
 STAGED_TIME = 1758000000
+
+# Two chat members, both with the bcrypt hash golang.org/x/crypto wrote for
+# angry-gopher's old server — so logging in also exercises the `$2a$` path.
+MEMBER_PASSWORD = "correct horse battery staple"
+MEMBER_HASH = "$2a$10$TC9LJ0KU0TIrFl9Hk8FCAeU1bThg2GoSYXAqsjQLdIBSHIxGVfDza"
+SESSION_SECRET = b"gopher-metal judge secret, 32+ bytes of it"
 P1 = "gopher_uid=1"
 GAME1 = "data/lynrummy/1"
 
@@ -125,9 +135,9 @@ CASES = [
 JAR = "$JAR"
 
 
-def step(name, method, path, cookie=None, body=None, raw=None):
+def step(name, method, path, cookie=None, body=None, raw=None, headers=()):
     return {"name": name, "method": method, "path": path, "cookie": cookie, "body": body,
-            "raw": raw, "files": []}
+            "raw": raw, "files": [], "headers": list(headers)}
 
 
 SEQUENCE = [
@@ -154,6 +164,66 @@ SEQUENCE = [
     step("the index knows Bob", "GET", "/", JAR),
     step("player 1's staged game is untouched", "GET", "/game/api/sessions", P1),
 ]
+
+def mint_session(uid: str, issued: int) -> str:
+    """A gopher_auth cookie made HERE, from the staged secret and the format in
+    users.zig's signSession — not by either server. Both must honor a fresh one
+    and refuse a stale one, which is session expiry, which is what the kernel's
+    wall clock exists for."""
+    b64 = lambda b: base64.urlsafe_b64encode(b).rstrip(b"=").decode()
+    mac = hmac.new(SESSION_SECRET, f"{uid}\n{issued}".encode(), hashlib.sha256).digest()
+    return f"gopher_auth={b64(uid.encode())}.{issued}.{b64(mac)}"
+
+
+def forge_session(claimed: str, signed_for: str, issued: int) -> str:
+    """A cookie that CLAIMS `claimed` but carries the valid MAC for
+    `signed_for` — what someone holding their own session would try."""
+    real = mint_session(signed_for, issued)            # gopher_auth=<id>.<t>.<mac>
+    _, _, rest = real.partition(".")                   # <t>.<mac>
+    b64 = base64.urlsafe_b64encode(claimed.encode()).rstrip(b"=").decode()
+    return f"gopher_auth={b64}.{rest}"
+
+
+FRESH = "$FRESH"      # minted when the story starts: must be honored
+STALE = "$STALE"      # minted 400 days back: must be refused
+FORGED = "$FORGED"    # a fresh one with the MAC of another id: must be refused
+
+MEMBER_STORY = [
+    step("chat, anonymous", "GET", "/chat"),
+    step("a wrong password", "POST", "/login/full", None,
+         "name=Steve&password=hunter2&action=login&next=%2Fchat"),
+    step("the right one (a $2a$ hash)", "POST", "/login/full", None,
+         "name=Steve&password=correct+horse+battery+staple&action=login&next=%2Fchat"),
+    step("chat, with no conversations yet", "GET", "/chat", JAR),
+    step("the conversations API", "GET", "/chat/conversations", JAR),
+    step("a message, as a form post", "POST", "/chat/c/1_2/general/send", JAR,
+         "markdown=hello+from+bare+metal&cid=c1"),
+    step("a message, async, with markdown", "POST", "/chat/c/1_2/general/send", JAR,
+         "markdown=**bold**+and+%60code%60&cid=c2", headers=["X-Chat-Async: 1"]),
+    step("hostile markdown is refused at the door", "POST", "/chat/c/1_2/general/send", JAR,
+         "markdown=" + "%5B" * 300 + "&cid=c3", headers=["X-Chat-Async: 1"]),
+    step("the conversation page", "GET", "/chat/c/1_2/general", JAR),
+    step("the raw transcript", "GET", "/chat/c/1_2/general/raw", JAR),
+    step("chat now resumes the conversation", "GET", "/chat", JAR),
+    step("a new topic", "POST", "/chat/c/1_2/new", JAR, "topic=metal-talk"),
+    step("a message in it", "POST", "/chat/c/1_2/metal-talk/send", JAR,
+         "markdown=a+second+topic&cid=c4", headers=["X-Chat-Async: 1"]),
+    step("a reaction", "POST", "/chat/c/1_2/general/react", JAR, "id=general_1&emoji=%F0%9F%91%8D"),
+    step("the reactions file", "GET", "/chat/c/1_2/general/reactions", JAR),
+    step("recent activity", "GET", "/chat/recent", JAR),
+    step("docs", "GET", "/chat/docs", JAR),
+    step("links", "GET", "/chat/links", JAR),
+    step("settings", "GET", "/settings", JAR),
+    step("the admin roster (Steve is uid 1)", "GET", "/admin", JAR),
+    step("the game roster", "GET", "/admin/lynrummy", JAR),
+    step("someone else's DM is not his", "GET", "/chat/c/2_9/general", JAR),
+    step("a session minted outside both servers", "GET", "/chat/conversations", FRESH),
+    step("a session 400 days old", "GET", "/chat/conversations", STALE),
+    step("a forged session", "GET", "/chat/conversations", FORGED),
+    step("logging out", "POST", "/logout", JAR, "release=no"),
+    step("chat, after logging out", "GET", "/chat", JAR),
+]
+
 
 # STAMINA: the same few requests, many times, to one boot. Every answer must
 # equal the first answer to that request, and the base heap — what survives
@@ -183,6 +253,13 @@ def stage(root: str, gopher_root: str) -> None:
     for d in ("data/lynrummy", "data/chat", "data/users", "auth"):
         os.makedirs(os.path.join(root, d), exist_ok=True)
     write(root, "data/players/1/name", "Steve")
+    write(root, "auth/1/name", "Steve")
+    write(root, "auth/1/password", MEMBER_HASH)
+    write(root, "auth/2/name", "apoorva")
+    write(root, "auth/2/password", MEMBER_HASH)
+    write(root, "auth/next-id.txt", "3\n")
+    with open(os.path.join(root, "data/chat/_session_secret"), "wb") as f:
+        f.write(SESSION_SECRET)
     write(root, "data/players/next-id.txt", "1\n")
     # One finished game and one puzzle session for player 1, at a fixed time.
     write(root, f"{GAME1}/lynrummy-elm/sessions/1/meta",
@@ -267,11 +344,19 @@ def ask_raw(port: int, payload: bytes) -> dict:
     return {"status": 0, "headers": {}, "body": got}
 
 
-def with_jar(c: dict, jar):
-    """The step with "$JAR" replaced by this side's current cookie."""
-    if c.get("cookie") != JAR:
-        return c
-    return dict(c, cookie=jar)
+def with_jar(c: dict, jar, minted=None):
+    """The step with a cookie placeholder resolved: "$JAR" is every cookie this
+    side's own responses have set; the minted ones are shared by both sides."""
+    cookie = c.get("cookie")
+    if cookie == JAR:
+        if not jar:
+            return dict(c, cookie=None)
+        if isinstance(jar, str):
+            return dict(c, cookie=jar)
+        return dict(c, cookie="; ".join(f"{k}={v}" for k, v in jar.items()))
+    if minted and cookie in minted:
+        return dict(c, cookie=minted[cookie])
+    return c
 
 
 def ask(port: int, c: dict, scratch: str) -> dict:
@@ -288,6 +373,8 @@ def ask(port: int, c: dict, scratch: str) -> dict:
         cmd += ["-b", c["cookie"]]
     if c["body"] is not None:
         cmd += ["--data-raw", c["body"]]
+    for h in c.get("headers", ()):
+        cmd += ["-H", h]
     cmd.append(f"http://127.0.0.1:{port}{c['path']}")
     p = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
     if p.returncode != 0:
@@ -297,7 +384,10 @@ def ask(port: int, c: dict, scratch: str) -> dict:
         for line in f.read().decode("latin-1").splitlines()[1:]:
             if ":" in line:
                 k, v = line.split(":", 1)
-                headers[k.strip().lower()] = v.strip()
+                k, v = k.strip().lower(), v.strip()
+                # Several Set-Cookie headers are several cookies; keep them all,
+                # in order, rather than the last.
+                headers[k] = headers[k] + "\n" + v if k == "set-cookie" and k in headers else v
     with open(out, "rb") as f:
         payload = f.read()
     return {"status": int(p.stdout), "headers": headers, "body": payload}
@@ -368,7 +458,12 @@ class LinuxServer:
         self.port = free_port()
         conf = os.path.join(root, "gopher.conf")
         with open(conf, "w") as f:
-            f.write(f"data_dir = {root}/data\nauth_dir = {root}/auth\n")
+            # **RELATIVE, like the kernel's.** The server runs with cwd=root, so
+            # `data` is the same directory either way — but the admin roster
+            # PRINTS its data root on the page, and an absolute path here would
+            # be a difference between two hosts' configuration rather than
+            # between two answers.
+            f.write("data_dir = data\nauth_dir = auth\n")
         env = dict(os.environ, GOPHER_CONFIG=conf, GOPHER_PORT=str(self.port))
         self.log = open(log, "wb")
         # Popen gives the server's OWN pid, so stopping it stops it — not a
@@ -414,6 +509,8 @@ def ask_linux(binary: str, content: str, c: dict, scratch: str) -> dict:
 
 COMPARED_HEADERS = ("location", "set-cookie", "content-type")
 UNIX_TIME = re.compile(rb"\b1[5-9]\d{8}\b")
+RFC3339 = re.compile(rb"\b\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z\b")
+SESSION_MAC = re.compile(rb"\.<NOW>\.[A-Za-z0-9_-]{43}")
 
 
 EASTERN = zoneinfo.ZoneInfo("America/New_York")
@@ -440,6 +537,15 @@ def normalize(data: bytes, window) -> bytes:
         return b"<NOW>" if lo <= int(m.group(0)) <= hi else m.group(0)
 
     data = UNIX_TIME.sub(sub, data)
+
+    def sub_rfc(m):
+        t = calendar.timegm(time.strptime(m.group(0).decode(), "%Y-%m-%dT%H:%M:%SZ"))
+        return b"<NOW-RFC3339>" if lo <= t <= hi else m.group(0)
+
+    data = RFC3339.sub(sub_rfc, data)
+    # A session cookie minted in the window: its MAC covers the time, so it
+    # differs whenever the time does.
+    data = SESSION_MAC.sub(b".<NOW>.<MAC>", data)
     for minute in range(lo - lo % 60, hi + 60, 60):
         data = data.replace(eastern(minute), b"<NOW-EASTERN>")
     return data
@@ -458,6 +564,10 @@ def differences(c: dict, metal: dict, linux: dict) -> list:
         out.append(f"status {metal['status']} on metal, {linux['status']} on Linux")
     for h in COMPARED_HEADERS:
         m, l = metal["headers"].get(h), linux["headers"].get(h)
+        if m is not None:
+            m = normalize(m.encode("latin-1"), metal["window"]).decode("latin-1")
+        if l is not None:
+            l = normalize(l.encode("latin-1"), linux["window"]).decode("latin-1")
         if m != l:
             out.append(f"{h}: metal {m!r}, Linux {l!r}")
     if c["path"] == "/version":
@@ -543,13 +653,29 @@ def read_or_none(path: str):
 def cookie_from(answer: dict, jar):
     """The gopher_uid a response set, or the jar unchanged."""
     sc = answer.get("headers", {}).get("set-cookie", "")
-    m = re.match(r"(gopher_uid=[A-Za-z0-9]+)", sc)
+    m = re.search(r"(gopher_uid=[A-Za-z0-9]+)", sc)
     return m.group(1) if m else jar
+
+
+def update_jar(answer: dict, jar: dict) -> dict:
+    """Every cookie a response set, as a browser would keep them: a value
+    replaces the old one, and Max-Age=0 removes it."""
+    jar = dict(jar or {})
+    for line in answer.get("headers", {}).get("set-cookie", "").split("\n"):
+        if "=" not in line:
+            continue
+        pair, _, attrs = line.partition(";")
+        name, _, value = pair.strip().partition("=")
+        if re.search(r"(?i)max-age=0\b", attrs) or value == "":
+            jar.pop(name, None)
+        else:
+            jar[name] = value
+    return jar
 
 
 def tree(root: str) -> dict:
     out = {}
-    for dirpath, _, files in os.walk(os.path.join(root, "data")):
+    for dirpath, _, files in [w for top in ("data", "auth") for w in os.walk(os.path.join(root, top))]:
         for f in files:
             full = os.path.join(dirpath, f)
             with open(full, "rb") as fh:
@@ -557,7 +683,7 @@ def tree(root: str) -> dict:
     return out
 
 
-def run_story(elf, linux_bin, content, pristine, work, mnt, steps, label, report):
+def run_story(elf, linux_bin, content, pristine, work, mnt, steps, label, report, minted=None):
     """Tells `steps` to one kernel and one Linux server. Returns (failures,
     kernel serial log, per-step kernel answers)."""
     scratch = tempfile.mkdtemp(dir=work)
@@ -567,10 +693,15 @@ def run_story(elf, linux_bin, content, pristine, work, mnt, steps, label, report
 
     before = time.time()
     qemu, port, serial = start_kernel(elf, image, scratch)
-    metal_answers, jar = [], None
+    metal_answers, jar = [], {}
     for i, s in enumerate(steps):
-        a = ask(port, with_jar(s, jar), os.path.join(scratch, f"k{i}"))
-        jar = cookie_from(a, jar)
+        if qemu.poll() is not None:
+            # The kernel is gone. Every later step is a failure, and asking
+            # would only wait out curl's retries.
+            metal_answers.append({"error": f"the kernel had already exited ({qemu.returncode})"})
+            continue
+        a = ask(port, with_jar(s, jar, minted), os.path.join(scratch, f"k{i}"))
+        jar = update_jar(a, jar)
         metal_answers.append(a)
     code, log = finish_kernel(qemu, serial)
     metal_window = (int(before) - 1, int(time.time()) + 1)
@@ -579,11 +710,11 @@ def run_story(elf, linux_bin, content, pristine, work, mnt, steps, label, report
     shutil.copytree(content, root)
     before = time.time()
     server = LinuxServer(linux_bin, root, os.path.join(scratch, "linux.log"))
-    linux_answers, jar = [], None
+    linux_answers, jar = [], {}
     try:
         for i, s in enumerate(steps):
-            a = ask(server.port, with_jar(s, jar), os.path.join(scratch, f"l{i}"))
-            jar = cookie_from(a, jar)
+            a = ask(server.port, with_jar(s, jar, minted), os.path.join(scratch, f"l{i}"))
+            jar = update_jar(a, jar)
             linux_answers.append(a)
     finally:
         server.stop()
@@ -695,6 +826,47 @@ def main() -> int:
         print(f"ok    the story: {len(SEQUENCE)} requests to ONE boot, each answered as Linux answered, "
               f"and all {files} data files agree")
 
+    # ── the member story ─────────────────────────────────────────────────────
+    now = int(time.time())
+    minted = {
+        FRESH: mint_session("1", now),
+        STALE: mint_session("1", now - 400 * 86400),
+        FORGED: forge_session("1", "2", now),
+    }
+    f, log, answers, files = run_story(elf, linux_bin, content, pristine, work, mnt,
+                                       MEMBER_STORY, "members", print, minted)
+    failures += f
+    # Each minted cookie must be answered as its name says, not merely the same
+    # on both sides: two servers that both honored a stale session would agree.
+    by_name = {s["name"]: a for s, a in zip(MEMBER_STORY, answers)}
+    for name, want in (("a session minted outside both servers", 200),
+                       ("a session 400 days old", 303), ("a forged session", 303)):
+        got = by_name[name].get("status")
+        if got != want:
+            failures += 1
+            print(f"FAIL  members: {name} answered {got}, want {want}")
+    # A session the KERNEL minted must be honored by Linux: same secret, same
+    # HMAC, and the kernel's clock close enough to Linux's.
+    login = by_name["the right one (a $2a$ hash)"]
+    metal_session = update_jar(login, {}).get("gopher_auth")
+    if not metal_session:
+        failures += 1
+        print("FAIL  members: the kernel's login set no session cookie")
+    else:
+        scratch = tempfile.mkdtemp(dir=work)
+        linux = ask_linux(linux_bin, content,
+                          step("a kernel-minted session, on Linux", "GET", "/chat/conversations",
+                               f"gopher_auth={metal_session}"), scratch)
+        if linux.get("status") != 200:
+            failures += 1
+            print(f"FAIL  members: Linux refused the session the kernel minted ({linux.get('status')})")
+        shutil.rmtree(scratch, ignore_errors=True)
+    if not f and metal_session:
+        print(f"ok    the member story: {len(MEMBER_STORY)} requests to ONE boot — login, chat, topics, "
+              f"reactions, admin, logout — each answered as Linux answered, all {files} files agree; "
+              f"a fresh minted session honored, a stale and a forged one refused, "
+              f"and the kernel's own session honored by Linux")
+
     # ── stamina ──────────────────────────────────────────────────────────────
     rounds = STAMINA * STAMINA_ROUNDS
     f, log, answers, _ = run_story(elf, linux_bin, content, pristine, work, mnt,
@@ -741,7 +913,7 @@ def main() -> int:
               f"({', '.join(str(u) for u in used[:per])} bytes)")
 
     print(f"{len(CASES) - per_case} of {len(CASES)} single requests, and "
-          f"{'both' if failures == per_case else 'not both'} long-running boots, "
+          f"{'all three' if failures == per_case else 'not all three'} long-running boots, "
           f"answered as Linux answered")
     return 1 if failures else 0
 

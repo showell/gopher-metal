@@ -333,6 +333,41 @@ lock without an unlock is real re-entrancy that would deadlock on a threaded
 host. It cannot happen here — so if it does, the assumption this design rests
 on is wrong, and the machine says so rather than carrying on.
 
+**And the compiler is told, because it does not assume it.** A freestanding
+target is *not* single-threaded by default, so std kept the threaded lowerings —
+real atomic instructions, thread-local storage — for a machine with one core, no
+preemption and no scheduler. Every kernel here builds with `single_threaded =
+true`, and `probe/gopher.zig` refuses to compile if that ever stops being so:
+the stubs above are only honest under it. Nothing named `std.Thread` appears in
+`src/`, in the ported application, or in the linked ELF. The task pool that
+serves requests on Linux lives in `server.zig`, which is a host — and this
+machine has its own.
+
+## The stack is 16 MB, and its depth is measured
+
+The kernel ran on 64 KB. The same route table on Linux runs on a thread from
+`std.Thread`'s pool, which gets `SpawnConfig.default_stack_size` — 16 MB, 250
+times more. The frames are the same frames either way, and `/chat/recent` went
+deeper than 64 KB: the machine triple-faulted, which is a reset with nothing in
+the log, because a fault handler needs a stack too and there was none left.
+
+So `src/stack.zig` declares the region at exactly std's own number, in `.bss` so
+the 16 MB is a program header rather than 16 MB of zeros in the kernel image.
+**The boot stub paints the whole thing with 0xA5A5A5A5A5A5A5A5 before it points
+`%rsp` at it** — `rep stosq` over memory nothing is running on yet. Afterwards
+the lowest word that is no longer painted is the high-water mark: everything
+below it has never been written by any call this boot. That is the real depth of
+the real route table on real requests, not an estimate. The serial log says it
+the first time each new depth is reached, so a request that goes deeper than
+every request before it is one line and a request that does not is silent.
+
+The bottom 64 KB is a guard, and writing it stops the machine. Past the end of
+the stack is `.bss` — the heaps, the virtqueues, the volume's sector buffer — so
+a frame that runs off the end corrupts whatever it lands on and the machine
+carries on lying. One blind spot, stated: a stack word that legitimately holds
+the paint value reads as untouched, so the mark can only come out shallower than
+the truth, never deeper.
+
 ## Long names, and the judge
 
 The application stores `auth/<id>/api-key` and `_session_secret` and

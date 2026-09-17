@@ -11,7 +11,15 @@
 //!
 //!     comptime { _ = @import("boot"); }
 
+const std = @import("std");
 const root = @import("root");
+const stack = @import("stack.zig");
+
+comptime {
+    // The stack region and the telemetry that reads it are declared there; the
+    // stub below is what paints it and what points %rsp at it.
+    _ = stack;
+}
 
 // The note is assembly because it must be a real SHT_NOTE section for QEMU to
 // find it in a PT_NOTE segment, and `linksection` makes PROGBITS.
@@ -51,7 +59,6 @@ export var page_directories align(4096) linksection(".data") = blk: {
 /// triple fault.
 export var pml4 align(4096) linksection(".data") = [_]u64{0} ** 512;
 export var pdpt align(4096) linksection(".data") = [_]u64{0} ** 512;
-export var stack align(16) linksection(".data") = [_]u8{0} ** (64 * 1024);
 
 /// A flat GDT: a 64-bit code segment and a data segment, which is all long
 /// mode looks at.
@@ -70,54 +77,70 @@ export fn kmain_trampoline() callconv(.c) noreturn {
     root.kmain();
 }
 
+/// **THE STACK IS PAINTED BEFORE IT IS USED**, in long mode and before %rsp
+/// points anywhere: `rep stosq` over the whole region, which nothing is running
+/// on yet. Afterwards stack.zig can say how deep the deepest call went, because
+/// what is still painted was never written. The three constants come from
+/// stack.zig rather than being spelled here, so the region that is painted and
+/// the region that is measured cannot drift apart.
+///
+/// %rsp starts 16 bytes below the top so it is 16-aligned at the `call`, which
+/// is what the ABI the compiler generates for expects, and so the first frame's
+/// return address is inside the region rather than one byte past it.
 export fn _start() callconv(.naked) noreturn {
-    asm volatile (
-        \\.code32
-        \\  cli
-        \\  movl $pdpt, %eax
-        \\  orl $3, %eax
-        \\  movl %eax, pml4
-        \\  movl $0, pml4 + 4
-        \\  movl $page_directories, %eax
-        \\  orl $3, %eax
-        \\  movl %eax, pdpt + 0
-        \\  movl $0, pdpt + 4
-        \\  addl $4096, %eax
-        \\  movl %eax, pdpt + 8
-        \\  movl $0, pdpt + 12
-        \\  addl $4096, %eax
-        \\  movl %eax, pdpt + 16
-        \\  movl $0, pdpt + 20
-        \\  addl $4096, %eax
-        \\  movl %eax, pdpt + 24
-        \\  movl $0, pdpt + 28
-        \\  movl %cr4, %eax
-        \\  orl $0x20, %eax          // PAE
-        \\  movl %eax, %cr4
-        \\  movl $pml4, %eax
-        \\  movl %eax, %cr3
-        \\  movl $0xC0000080, %ecx   // EFER
-        \\  rdmsr
-        \\  orl $0x100, %eax         // LME
-        \\  wrmsr
-        \\  movl %cr0, %eax
-        \\  orl $0x80000001, %eax    // paging + protection: long mode arms here
-        \\  movl %eax, %cr0
-        \\  movw $23, gdt_pointer
-        \\  movl $gdt, %eax
-        \\  movl %eax, gdt_pointer + 2
-        \\  lgdt gdt_pointer
-        \\  ljmp $0x08, $.Llong
-        \\.code64
-        \\.Llong:
-        \\  movw $0x10, %ax
-        \\  movw %ax, %ds
-        \\  movw %ax, %es
-        \\  movw %ax, %ss
-        \\  movw %ax, %fs
-        \\  movw %ax, %gs
-        \\  leaq stack + 65520, %rsp
-        \\  call kmain_trampoline
-        \\  hlt
-    );
+    asm volatile (std.fmt.comptimePrint(
+            \\.code32
+            \\  cli
+            \\  movl $pdpt, %eax
+            \\  orl $3, %eax
+            \\  movl %eax, pml4
+            \\  movl $0, pml4 + 4
+            \\  movl $page_directories, %eax
+            \\  orl $3, %eax
+            \\  movl %eax, pdpt + 0
+            \\  movl $0, pdpt + 4
+            \\  addl $4096, %eax
+            \\  movl %eax, pdpt + 8
+            \\  movl $0, pdpt + 12
+            \\  addl $4096, %eax
+            \\  movl %eax, pdpt + 16
+            \\  movl $0, pdpt + 20
+            \\  addl $4096, %eax
+            \\  movl %eax, pdpt + 24
+            \\  movl $0, pdpt + 28
+            \\  movl %cr4, %eax
+            \\  orl $0x20, %eax          // PAE
+            \\  movl %eax, %cr4
+            \\  movl $pml4, %eax
+            \\  movl %eax, %cr3
+            \\  movl $0xC0000080, %ecx   // EFER
+            \\  rdmsr
+            \\  orl $0x100, %eax         // LME
+            \\  wrmsr
+            \\  movl %cr0, %eax
+            \\  orl $0x80000001, %eax    // paging + protection: long mode arms here
+            \\  movl %eax, %cr0
+            \\  movw $23, gdt_pointer
+            \\  movl $gdt, %eax
+            \\  movl %eax, gdt_pointer + 2
+            \\  lgdt gdt_pointer
+            \\  ljmp $0x08, $.Llong
+            \\.code64
+            \\.Llong:
+            \\  movw $0x10, %ax
+            \\  movw %ax, %ds
+            \\  movw %ax, %es
+            \\  movw %ax, %ss
+            \\  movw %ax, %fs
+            \\  movw %ax, %gs
+            \\  cld
+            \\  leaq kernel_stack(%rip), %rdi
+            \\  movabsq ${d}, %rax
+            \\  movq ${d}, %rcx
+            \\  rep stosq
+            \\  leaq kernel_stack(%rip), %rsp
+            \\  addq ${d}, %rsp
+            \\  call kmain_trampoline
+            \\  hlt
+        , .{ stack.paint, stack.size / 8, stack.size - 16 }));
 }
