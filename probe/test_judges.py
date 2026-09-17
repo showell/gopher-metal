@@ -442,8 +442,14 @@ class RawResponse(unittest.TestCase):
         self.assertIn("error", G.parse_raw_response(b"garbage\r\n\r\n"))
 
     def test_the_streams_line_is_read(self):
-        m = G.STREAMS_LINE.search("  streams: at most 3 held at once, 2 ended\n")
-        self.assertEqual((m.group(1), m.group(2)), ("3", "2"))
+        m = G.STREAMS_LINE.search("  streams: at most 3 held at once, 2 ended, 0 still subscribed\n")
+        self.assertEqual(m.groups(), ("3", "2", "0"))
+        # The line without the subscriber count is an older kernel's.
+        self.assertIsNone(G.STREAMS_LINE.search("  streams: at most 3 held at once, 2 ended\n"))
+
+    def test_the_final_heap_line_is_read(self):
+        m = G.FINAL_HEAP.search("  served 9 request(s); base heap holds 384 live bytes in 7 allocations")
+        self.assertEqual(m.groups(), ("384", "7"))
 
     def test_the_connections_line_is_read(self):
         m = G.CONNECTIONS_LINE.search("  connections: at most 8 at once, 0 turned away for want of a slot")

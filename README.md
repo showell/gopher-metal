@@ -754,10 +754,33 @@ with one held and one ended by the end of the boot. Three mutants of the table
 fail it: never draining, never noticing a client that left, and closing a kept
 stream's connection anyway.
 
-Not yet: a ping is untested (the keepalive is 25 seconds), a client that
-vanishes without a FIN or reset is never noticed (there is no retransmit timer
-to give up), and frames go out without regard to the peer's window. Those are
-the lifecycle and send-side steps.
+**A tab, as a browser holds it.** The judge opens one user's three streams at
+once — her conversation, her notifications, her sidebar — and has another user
+send on the conversation and then start a new topic. Each stream must get its
+own event (the message marked as not hers, "Steve sent you a message", the
+topic added), and after 27 quiet seconds each must be pinged: once, not in a
+flood. A host that pinged on every turn would have delivered a ping too — the
+mutant sent 15,339 in 28 seconds — so the gate also requires that none came
+before the 25-second keepalive was due.
+
+**Streams cannot starve requests.** A held stream occupies a connection slot
+for as long as its tab is open, so `gopher-metal.conf` gets a third key,
+`streams = N` (by default all but 16 of the 64 slots). When the budget is full,
+a new stream ends the OLDEST: its browser reconnects, and a conversation stream
+resumes from its last event. With a budget of two, the judge opens three,
+checks the first was closed and the other two still receive.
+
+**Nothing is kept per stream.** 5 streams and then 25, opened and closed one
+after another — half by a polite FIN, half by a reset — must each be ended
+because their client went away, leave nobody subscribed, and end two boots
+holding the same number of live bytes. The first run differed by exactly one
+byte: the kernel kept its own config file's text in the long-lived heap, and
+`requests = 8` is one byte shorter than `requests = 28`. It frees the text now,
+and both boots end at 490 bytes.
+
+Not yet: a client that vanishes without a FIN or reset is never noticed (there
+is no retransmit timer to give up), and frames go out without regard to the
+peer's window. Those are the send side.
 
 ## What the TCP does not do
 

@@ -45,6 +45,7 @@ import os
 import re
 import shutil
 import socket
+import struct
 import subprocess
 import sys
 import tempfile
@@ -407,11 +408,14 @@ def ask(port: int, c: dict, scratch: str, patience: int = 400) -> dict:
     return {"status": int(p.stdout), "headers": headers, "body": payload}
 
 
-def set_request_limit(image: str, n: int, mnt: str, read_timeout_ms: int = 10000) -> None:
+def set_request_limit(image: str, n: int, mnt: str, read_timeout_ms: int = 10000,
+                      streams: int = None) -> None:
     mount(image, mnt, writable=True)
     try:
         with open(os.path.join(mnt, "gopher-metal.conf"), "w") as f:
             f.write(f"requests = {n}\nread_timeout_ms = {read_timeout_ms}\n")
+            if streams is not None:
+                f.write(f"streams = {streams}\n")
     finally:
         umount(mnt)
 
@@ -1097,19 +1101,135 @@ def sse_story(port: int, scratch: str, report, label: str) -> int:
     return failures
 
 
+APOORVA_LOGIN = "name=apoorva&password=correct+horse+battery+staple&action=login&next=%2Fchat"
+
+
+def open_stream(port: int, path: str, cookie: str):
+    sock = socket.create_connection(("127.0.0.1", port), timeout=30)
+    sock.sendall((f"GET {path} HTTP/1.1\r\nHost: judge\r\nCookie: {cookie}\r\n"
+                  f"Accept: text/event-stream\r\n\r\n").encode())
+    return sock
+
+
+def tab_story(port: int, scratch: str, report, label: str) -> int:
+    """**A CHAT TAB, AS A BROWSER HOLDS IT: THREE STREAMS AT ONCE**, fed by
+    another user. Eight requests:
+
+      1-2. Steve and Apoorva log in
+      3.   Steve starts topic `tab`
+      4-6. Apoorva opens her tab's streams: `tab`'s conversation,
+           notifications, sidebar
+      7.   Steve sends on `tab`: her conversation stream shows it as not hers,
+           and her notifications say he sent it
+      8.   Steve starts a NEW topic: her sidebar is told it was added
+
+    Then 27 quiet seconds, in which every one of the three must be pinged: the
+    application's keepalive is 25. Presence also pushes "came online" events at
+    moments nobody controls, so each check looks for its own event rather than
+    for silence."""
+    failures = 0
+
+    def fail(msg):
+        nonlocal failures
+        failures += 1
+        report(f"FAIL  {label}: {msg}")
+
+    def login(body):
+        return update_jar(ask(port, step("log in", "POST", "/login/full", None, body), scratch,
+                              patience=60), {})
+
+    def cookie_of(jar):
+        return "; ".join(f"{k}={v}" for k, v in jar.items())
+
+    steve = cookie_of(login(LOGIN_BODY))
+    apoorva = cookie_of(login(APOORVA_LOGIN))
+    if not steve or not apoorva:
+        fail("a login set no session cookie")
+        return failures
+
+    def send(topic, text, cid):
+        a = ask(port, step(f"send {text}", "POST", f"/chat/c/1_2/{topic}/send", steve,
+                           f"markdown={text}&cid={cid}", headers=["X-Chat-Async: 1"]),
+                scratch, patience=60)
+        if a.get("status") not in (200, 204):
+            fail(f"sending {text} was answered {a.get('status', a.get('error'))}")
+
+    send("tab", "tab-opener", "t1")
+    opened = time.time()
+    conv = open_stream(port, "/chat/c/1_2/tab/stream?since=0", apoorva)
+    notify = open_stream(port, "/chat/notifications", apoorva)
+    sidebar = open_stream(port, "/chat/sidebar/stream", apoorva)
+    socks = [conv, notify, sidebar]
+    try:
+        got = {s: b"" for s in socks}
+        got[conv] = read_until(conv, b"tab-opener", time.time() + 30)
+        # The two live-only streams answer with their head and nothing else.
+        for s in (notify, sidebar):
+            got[s] = read_until(s, b"\r\n\r\n", time.time() + 30)
+            if not got[s].startswith(b"HTTP/1.1 200"):
+                fail(f"a live-only stream answered {got[s][:40]!r}")
+
+        send("tab", "tab-live", "t2")
+        got[conv] = read_until(conv, b"tab-live", time.time() + 15, got[conv])
+        live = got[conv].partition(b"tab-live")[0].rpartition(b"id: ")[2] + b"tab-live"
+        if b"tab-live" not in got[conv]:
+            fail("the message never reached her conversation stream")
+        elif b'"mine":false' not in got[conv][got[conv].rfind(b"id: "):]:
+            fail(f"his message is marked as hers on her stream: {live[:120]!r}")
+        got[notify] = read_until(notify, b"Steve sent you a message on tab.", time.time() + 15, got[notify])
+        if b"Steve sent you a message on tab." not in got[notify]:
+            fail(f"her notifications never said he sent it: {got[notify][-160:]!r}")
+
+        send("tab-other", "other-opener", "o1")
+        got[sidebar] = read_until(sidebar, b'"sid":"tab-other"', time.time() + 15, got[sidebar])
+        if b'"kind":"topic-added"' not in got[sidebar] or b'"sid":"tab-other"' not in got[sidebar]:
+            fail(f"her sidebar was never told the new topic was added: {got[sidebar][-160:]!r}")
+
+        # **A PING IS RARE.** A host that pinged every turn would flood the
+        # network and still deliver a ping; so none may have come before the
+        # keepalive was due…
+        if time.time() - opened < 20:
+            for name, s in (("conversation", conv), ("notifications", notify), ("sidebar", sidebar)):
+                if b": ping" in got[s]:
+                    fail(f"her {name} stream was pinged within {time.time() - opened:.0f}s of opening")
+        # …and after 25 quiet seconds, each is pinged — once, or at most twice.
+        marks = {s: len(got[s]) for s in socks}
+        deadline = time.time() + 27
+        for s in socks:
+            got[s] = read_until(s, b": ping", deadline, got[s])
+        for s in socks:
+            got[s] = read_until(s, b"never", time.time() + 1.0, got[s])  # whatever else came
+        for name, s in (("conversation", conv), ("notifications", notify), ("sidebar", sidebar)):
+            pings = got[s][marks[s]:].count(b": ping")
+            if pings == 0:
+                fail(f"her {name} stream was not pinged in 27 quiet seconds")
+            elif pings > 2:
+                fail(f"her {name} stream was pinged {pings} times in 28 seconds, with a 25-second keepalive")
+    finally:
+        for s in socks:
+            s.close()
+    if not failures:
+        report(f"ok    {label}: one tab's three streams at once — his message on her conversation "
+               f"(not hers), in her notifications, his new topic in her sidebar, and all three "
+               f"pinged after 25 quiet seconds")
+    return failures
+
+
 def linux_sse_failures(linux_bin, content, work, report) -> int:
     scratch = tempfile.mkdtemp(dir=work)
     root = os.path.join(scratch, "linux")
     shutil.copytree(content, root)
     server = LinuxServer(linux_bin, root, os.path.join(scratch, "linux.log"))
     try:
-        return sse_story(server.port, scratch, report, "live stream on Linux")
+        return (sse_story(server.port, scratch, report, "live stream on Linux")
+                + tab_story(server.port, scratch, report, "a chat tab on Linux"))
     finally:
         server.stop()
         shutil.rmtree(scratch, ignore_errors=True)
 
 
-STREAMS_LINE = re.compile(r"streams: at most (\d+) held at once, (\d+) ended")
+STREAMS_LINE = re.compile(r"streams: at most (\d+) held at once, (\d+) ended, (\d+) still subscribed")
+FINAL_HEAP = re.compile(r"base heap holds (\d+) live bytes in (\d+) allocations")
 
 
 def metal_sse_failures(elf, pristine, work, mnt, report) -> int:
@@ -1135,11 +1255,174 @@ def metal_sse_failures(elf, pristine, work, mnt, report) -> int:
         failures += 1
         report("FAIL  live stream on the machine: the kernel never ended the stream its client closed")
     held = STREAMS_LINE.search(log)
-    if held is None or (held.group(1), held.group(2)) != ("1", "1"):
+    if held is None or held.groups() != ("1", "1", "0"):
         failures += 1
         report(f"FAIL  live stream on the machine: the kernel's stream count reads "
-               f"{held.group(0) if held else 'nothing'}, want 1 held and 1 ended")
+               f"{held.group(0) if held else 'nothing'}, want 1 held, 1 ended, 0 still subscribed")
     shutil.rmtree(scratch, ignore_errors=True)
+    return failures + metal_tab_failures(elf, pristine, work, mnt, report)
+
+
+def metal_tab_failures(elf, pristine, work, mnt, report) -> int:
+    scratch = tempfile.mkdtemp(dir=work)
+    image = os.path.join(scratch, "disk.img")
+    shutil.copy(pristine, image)
+    set_request_limit(image, 9, mnt)  # the tab's eight, and one to finish on
+    qemu, port, serial = start_kernel(elf, image, scratch)
+    try:
+        failures = tab_story(port, scratch, report, "a chat tab on the machine")
+        ask(port, step("the last request", "GET", "/nope"), scratch, patience=60)
+    finally:
+        code, log = finish_kernel(qemu, serial)
+    if code != 1:
+        failures += 1
+        report(f"FAIL  a chat tab on the machine: the kernel exited {code}")
+    if log.count("stream ended: its client went away") != 3:
+        failures += 1
+        report(f"FAIL  a chat tab on the machine: {log.count('stream ended: its client went away')} "
+               f"streams ended because their client left, want 3")
+    held = STREAMS_LINE.search(log)
+    if held is None or held.groups() != ("3", "3", "0"):
+        failures += 1
+        report(f"FAIL  a chat tab on the machine: the stream count reads "
+               f"{held.group(0) if held else 'nothing'}, want 3 held, 3 ended, 0 still subscribed")
+    shutil.rmtree(scratch, ignore_errors=True)
+    return failures
+
+
+def boot_with(elf, pristine, work, mnt, requests, **conf):
+    scratch = tempfile.mkdtemp(dir=work)
+    image = os.path.join(scratch, "disk.img")
+    shutil.copy(pristine, image)
+    set_request_limit(image, requests, mnt, **conf)
+    qemu, port, serial = start_kernel(elf, image, scratch)
+    return scratch, qemu, port, serial
+
+
+def login_cookie(port, scratch, body=LOGIN_BODY) -> str:
+    jar = update_jar(ask(port, step("log in", "POST", "/login/full", None, body), scratch, patience=60), {})
+    return "; ".join(f"{k}={v}" for k, v in jar.items())
+
+
+def send_live(port, scratch, cookie, topic, text, cid):
+    return ask(port, step(f"send {text}", "POST", f"/chat/c/1_2/{topic}/send", cookie,
+                          f"markdown={text}&cid={cid}", headers=["X-Chat-Async: 1"]),
+               scratch, patience=60)
+
+
+def budget_failures(elf, pristine, work, mnt, report) -> int:
+    """**STREAMS CANNOT STARVE REQUESTS.** With a budget of two, a third stream
+    ends the OLDEST — the browser would reconnect and resume — and the other two
+    go on receiving; the site goes on answering. Seven requests: log in, a first
+    message, streams A, B and C, a live message, one to finish on."""
+    label = "the stream budget"
+    scratch, qemu, port, serial = boot_with(elf, pristine, work, mnt, 7, streams=2)
+    failures = 0
+
+    def fail(msg):
+        nonlocal failures
+        failures += 1
+        report(f"FAIL  {label}: {msg}")
+
+    socks = []
+    try:
+        cookie = login_cookie(port, scratch)
+        send_live(port, scratch, cookie, "budget", "budget-opener", "b0")
+        got = []
+        for _ in range(3):
+            sock = open_stream(port, "/chat/c/1_2/budget/stream?since=0", cookie)
+            socks.append(sock)
+            got.append(read_until(sock, b"budget-opener", time.time() + 30))
+        # A — the oldest — was ended to make room for C: its socket reads the end.
+        rest = read_until(socks[0], b"never", time.time() + 5, got[0])
+        a_ended = False
+        try:
+            socks[0].settimeout(2)
+            a_ended = socks[0].recv(64) == b""
+        except OSError:
+            a_ended = True
+        if not a_ended:
+            fail("the oldest stream was not closed when a third was opened with a budget of two")
+        send_live(port, scratch, cookie, "budget", "budget-live", "b1")
+        for name, k in (("B", 1), ("C", 2)):
+            got[k] = read_until(socks[k], b"budget-live", time.time() + 15, got[k])
+            if b"budget-live" not in got[k]:
+                fail(f"stream {name}, still within the budget, never got the live message")
+        if b"budget-live" in rest:
+            fail("the ended stream still received the live message")
+    finally:
+        for sock in socks:
+            sock.close()
+        ask(port, step("the last request", "GET", "/nope"), scratch, patience=60)
+        code, log = finish_kernel(qemu, serial)
+    if code != 1:
+        fail(f"the kernel exited {code}")
+    if log.count("stream ended: to make room for a newer one") != 1:
+        fail(f"{log.count('stream ended: to make room for a newer one')} streams were ended to make room, want 1")
+    held = STREAMS_LINE.search(log)
+    if held is None or held.groups() != ("2", "3", "0"):
+        fail(f"the stream count reads {held.group(0) if held else 'nothing'}, "
+             f"want at most 2 held, 3 ended, 0 still subscribed")
+    if not failures:
+        report(f"ok    {label}: with room for two, a third stream ended the oldest; the other two "
+               f"got the live message, and nothing was left subscribed")
+    shutil.rmtree(scratch, ignore_errors=True)
+    return failures
+
+
+def churn(elf, pristine, work, mnt, n: int, report):
+    """n streams opened and closed one after another — half by a polite FIN,
+    half by a reset. Answers (failures, the heap's live bytes at the end)."""
+    label = f"{n} streams opened and closed"
+    scratch, qemu, port, serial = boot_with(elf, pristine, work, mnt, n + 3)
+    failures = 0
+    try:
+        cookie = login_cookie(port, scratch)
+        send_live(port, scratch, cookie, "churn", "churn-opener", "c0")
+        for k in range(n):
+            sock = open_stream(port, "/chat/c/1_2/churn/stream?since=0", cookie)
+            read_until(sock, b"churn-opener", time.time() + 30)
+            if k % 2:
+                sock.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER, struct.pack("ii", 1, 0))
+            sock.close()
+    finally:
+        ask(port, step("the last request", "GET", "/nope"), scratch, patience=60)
+        code, log = finish_kernel(qemu, serial)
+    if code != 1:
+        failures += 1
+        report(f"FAIL  {label}: the kernel exited {code}")
+    went = log.count("stream ended: its client went away")
+    if went != n:
+        failures += 1
+        report(f"FAIL  {label}: {went} ended because their client went away, want {n}")
+    held = STREAMS_LINE.search(log)
+    if held is None or held.group(2) != str(n) or held.group(3) != "0":
+        failures += 1
+        report(f"FAIL  {label}: the stream count reads {held.group(0) if held else 'nothing'}, "
+               f"want {n} ended and 0 still subscribed")
+    heap = FINAL_HEAP.search(log)
+    shutil.rmtree(scratch, ignore_errors=True)
+    return failures, (int(heap.group(1)) if heap else None)
+
+
+def churn_failures(elf, pristine, work, mnt, report) -> int:
+    """**NOTHING IS KEPT PER STREAM.** The same boot with 5 streams churned and
+    with 25 must end holding the same number of live bytes: anything a stream
+    left behind would show up 20 times over."""
+    f5, heap5 = churn(elf, pristine, work, mnt, 5, report)
+    f25, heap25 = churn(elf, pristine, work, mnt, 25, report)
+    failures = f5 + f25
+    if heap5 is None or heap25 is None:
+        failures += 1
+        report("FAIL  stream churn: a boot did not report its heap")
+    elif heap5 != heap25:
+        failures += 1
+        report(f"FAIL  stream churn: {heap5} live bytes after 5 streams, {heap25} after 25 — "
+               f"{(heap25 - heap5) / 20:.1f} bytes kept per stream")
+    if not failures:
+        report(f"ok    stream churn: 5 and then 25 streams opened and closed (half by reset), every "
+               f"one ended because its client went away, nothing left subscribed, and both boots "
+               f"end holding {heap5} live bytes")
     return failures
 
 
@@ -1273,6 +1556,8 @@ def main() -> int:
     # ── a live stream, on both ───────────────────────────────────────────────
     failures += linux_sse_failures(linux_bin, content, work, print)
     failures += metal_sse_failures(elf, pristine, work, mnt, print)
+    failures += budget_failures(elf, pristine, work, mnt, print)
+    failures += churn_failures(elf, pristine, work, mnt, print)
 
     # ── many clients at once ─────────────────────────────────────────────────
     failures += concurrent_failures(elf, linux_bin, content, pristine, work, mnt, print)

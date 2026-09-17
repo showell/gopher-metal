@@ -290,7 +290,7 @@ pub fn kmain() noreturn {
         const now = Io.awakeNs() orelse 0;
         if (nextReady(&table)) |pick| {
             served += 1;
-            serveOne(io, &nic, &table, pick, lease.address, request_fba.allocator(), &hub, served, conf.read_ns);
+            serveOne(io, &nic, &table, pick, lease.address, request_fba.allocator(), &hub, served, conf.read_ns, conf.streams);
         } else if (quiet(&table, now, conf.read_ns)) |pick| {
             served += 1;
             letGo(&nic, &table, pick, lease.address, served);
@@ -323,7 +323,11 @@ pub fn kmain() noreturn {
     serial.putDec(held_most);
     serial.put(" held at once, ");
     serial.putDec(streams_ended);
-    serial.put(" ended\n");
+    serial.put(" ended, ");
+    // Every stream has been ended, so every subscriber should be gone: one
+    // left behind is a stream that was never dropped.
+    serial.putDec(hub.entries.items.len);
+    serial.put(" still subscribed\n");
 
     serial.put("  connections: at most ");
     serial.putDec(busiest);
@@ -398,6 +402,7 @@ fn serveOne(
     hub: *Hub,
     number: u64,
     read_ns: u64,
+    max_streams: usize,
 ) void {
     table.claim(i);
     // A connection that now carries a kept stream stays claimed and open.
@@ -443,6 +448,12 @@ fn serveOne(
     if (bus.kept) |kept| {
         // The handler wrote the stream's head and backlog; the live part is
         // this machine's now.
+        // **THE BUDGET IS KEPT BY ENDING THE OLDEST.** A browser whose stream
+        // ends reconnects, and a conversation stream resumes from its last
+        // event; a new tab that could not open at all would not.
+        if (held_now >= max_streams) {
+            if (oldestHeld(table)) |slot| endStream(slot, nic, table, address, hub, "to make room for a newer one");
+        }
         held[i] = .{ .conn = i, .kept = kept, .last_write = Io.awakeNs() orelse 0 };
         held_now += 1;
         held_most = @max(held_most, held_now);
@@ -499,6 +510,15 @@ fn serviceStreams(nic: *net.Net, table: *tcp.Table, address: [4]u8, hub: *Hub, s
         };
         h.last_write = now;
     }
+}
+
+fn oldestHeld(table: *tcp.Table) ?*?Held {
+    var best: ?*?Held = null;
+    for (&held) |*slot| {
+        const h = slot.* orelse continue;
+        if (best == null or table.conns[h.conn].serial < table.conns[best.?.*.?.conn].serial) best = slot;
+    }
+    return best;
 }
 
 /// Ends a held stream: its subscriber leaves the bus, its connection closes,
@@ -575,6 +595,7 @@ fn logRequest(number: u64, what: []const u8, outcome: []const u8) void {
 ///
 ///     requests = N            serve N and stop; absent, serve until stopped
 ///     read_timeout_ms = N     how long a connection may say nothing
+///     streams = N             how many live streams may be held at once
 ///
 /// A key that is not one of those is a misconfiguration, and stops the machine
 /// rather than being ignored: a timeout that was silently not applied is how a
@@ -582,11 +603,24 @@ fn logRequest(number: u64, what: []const u8, outcome: []const u8) void {
 const Config = struct {
     requests: ?u64 = null,
     read_ns: u64 = stream.default_read_ns,
+    /// **HOW MANY STREAMS MAY BE HELD AT ONCE.** A held stream occupies a
+    /// connection slot for as long as its tab is open, so without a budget the
+    /// streams alone could fill the table and every new page load would be
+    /// turned away. The rest of the slots are for requests.
+    streams: usize = max_connections - reserved_for_requests,
 };
+
+/// Connection slots no stream may take.
+const reserved_for_requests = 16;
 
 fn readConfig(io: Io, alloc: std.mem.Allocator) Config {
     var conf = Config{};
     const text = Io.Dir.cwd().readFileAlloc(io, config_path, alloc, .limited(4096)) catch return conf;
+    // Every setting is a number, so nothing needs the text once it is read. It
+    // used to stay in the long-lived heap, where a longer file meant a bigger
+    // heap for the life of the boot — which the stream-churn gate saw as one
+    // byte between `requests = 8` and `requests = 28`.
+    defer alloc.free(text);
     var lines = std.mem.splitScalar(u8, text, '\n');
     var said_anything = false;
     while (lines.next()) |raw| {
@@ -605,8 +639,14 @@ fn readConfig(io: Io, alloc: std.mem.Allocator) Config {
                 serial.fail(config_path ++ ": `read_timeout_ms` is not a number");
             if (ms == 0) serial.fail(config_path ++ ": a read timeout of zero would answer nobody");
             conf.read_ns = ms * std.time.ns_per_ms;
+        } else if (std.mem.eql(u8, key, "streams")) {
+            const n = std.fmt.parseInt(usize, value, 10) catch
+                serial.fail(config_path ++ ": `streams` is not a number");
+            if (n == 0 or n > max_connections - reserved_for_requests)
+                serial.fail(config_path ++ ": `streams` must leave room for requests");
+            conf.streams = n;
         } else {
-            serial.fail(config_path ++ ": the keys are `requests` and `read_timeout_ms`");
+            serial.fail(config_path ++ ": the keys are `requests`, `read_timeout_ms` and `streams`");
         }
     }
     if (!said_anything) serial.fail(config_path ++ " is present but says nothing");
