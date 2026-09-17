@@ -348,11 +348,10 @@ class Endurance(unittest.TestCase):
 
     def test_each_read_back_demands_one_more_mark_than_the_last(self):
         expects = [s["expect"] for s in G.ENDURANCE if s["expect"]]
-        # Two read-backs per round (the transcript and the moves).
-        self.assertEqual(len(expects), G.ENDURANCE_ROUNDS * 2)
+        # One read-back per round: the whole transcript.
+        self.assertEqual(len(expects), G.ENDURANCE_ROUNDS)
         for n in range(G.ENDURANCE_ROUNDS):
-            self.assertEqual(len(expects[2 * n]), n + 1)
-            self.assertEqual(len(expects[2 * n + 1]), n + 1)
+            self.assertEqual(len(expects[n]), n + 1)
         self.assertEqual(expects[-1][-1], G.mark(G.ENDURANCE_ROUNDS))
 
     def test_every_mark_written_is_demanded_back(self):
@@ -362,16 +361,15 @@ class Endurance(unittest.TestCase):
             demanded |= set(s["expect"])
         self.assertEqual(written, demanded)
 
-    def test_it_writes_to_both_stores(self):
-        paths = {s["path"] for s in G.ENDURANCE if s["method"] == "POST"}
+    def test_it_is_chat_and_nothing_else(self):
+        # Lyn Rummy stays on the Linux droplet: nothing here may reach for it.
+        paths = {s["path"] for s in G.ENDURANCE}
         self.assertIn("/chat/c/1_2/general/send", paths)
-        self.assertIn("/game/sessions/1/actions", paths)
+        for p in paths:
+            self.assertFalse(p.startswith(("/game", "/puzzles", "/play")), p)
 
-    def test_the_moves_continue_the_staged_game_rather_than_renumbering_it(self):
-        # The fixture leaves two moves on disk; round 1 is move 3.
-        first = next(s for s in G.ENDURANCE if s["path"] == "/game/sessions/1/actions"
-                     and s["method"] == "POST")
-        self.assertTrue(first["body"].startswith("3) "), first["body"])
+    def test_docs_are_part_of_the_chat_surface_and_are_asked_for(self):
+        self.assertIn("/chat/docs", {s["path"] for s in G.ENDURANCE})
 
 
 class Conf(unittest.TestCase):
@@ -518,13 +516,13 @@ class Resolution(unittest.TestCase):
         self.assertLess(names.index("a new topic"), names.index("a message in it"))
 
     def test_every_step_carries_the_field_the_runner_reads(self):
-        for s in G.MEMBER_STORY + G.SEQUENCE:
+        for s in G.MEMBER_STORY:
             self.assertIn("settle", s, s["name"])
 
     def test_a_story_waits_no_longer_than_it_has_to(self):
         # A settle is dead time on both sides, twice. If this starts climbing,
         # something is being papered over with sleep.
-        total = sum(s["settle"] for s in G.MEMBER_STORY + G.SEQUENCE)
+        total = sum(s["settle"] for s in G.MEMBER_STORY)
         self.assertLessEqual(total, 6.0)
 
 

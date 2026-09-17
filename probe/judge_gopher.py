@@ -85,43 +85,9 @@ CASES = [
     case("old login door", "GET", "/login"),
     case("password gate", "GET", "/login/full"),
     case("admin, anonymous", "GET", "/admin"),
-    case("game admin, anonymous", "GET", "/admin/lynrummy"),
     case("admin, a bare uid is not a member", "GET", "/admin", P1),
-    case("name page", "GET", "/play"),
-    case("name page remembers next", "GET", "/play?next=/puzzles"),
-    case("puzzles, nameless", "GET", "/puzzles"),
-    case("game, nameless", "GET", "/game"),
-    case("game as player 1 (the player store)", "GET", "/game", P1),
-    case("game as a player with no row", "GET", "/game", "gopher_uid=99"),
-    case("game, a traversal in the cookie", "GET", "/game", "gopher_uid=.."),
     case("version", "GET", "/version"),
 
-    # ── a staged session, read back (times rendered in Eastern) ────────────
-    case("session list (HTML, Eastern time)", "GET", "/game/sessions", P1),
-    case("session list (JSON)", "GET", "/game/api/sessions", P1),
-    case("session detail", "GET", "/game/sessions/1", P1),
-    case("session bootstrap", "GET", "/game/sessions/1/actions", P1),
-    case("a session that does not exist", "GET", "/game/sessions/9", P1),
-    case("resume a session", "GET", "/game/1", P1),
-    case("resume nonsense", "GET", "/game/abc", P1),
-
-    # ── writes ─────────────────────────────────────────────────────────────
-    case("a name that fails validation", "POST", "/play", None, "name=a%3Cb&next=%2Fgame",
-         files=["data/players/next-id.txt"]),
-    case("a new player", "POST", "/play", None, "name=Zed&next=%2Fgame",
-         files=["data/players/p1/name", "data/players/next-id.txt"]),
-    case("a new game session (stamps the time)", "POST", "/game/new-session", P1, "board: staged-by-the-judge",
-         files=[f"{GAME1}/lynrummy-elm/sessions/2/meta", f"{GAME1}/next-session-id.txt"]),
-    case("a move (an append, and last-seen)", "POST", "/game/sessions/1/actions", P1, "3) pass",
-         files=[f"{GAME1}/lynrummy-elm/sessions/1/actions.dsl", "data/players/1/last-seen"]),
-    case("an annotation (a new file by append)", "POST", "/game/sessions/1/annotations", P1, '{"note":"judged"}',
-         files=[f"{GAME1}/lynrummy-elm/sessions/1/annotations.jsonl"]),
-    case("a move into a missing session", "POST", "/game/sessions/9/actions", P1, "1) nope",
-         files=[f"{GAME1}/lynrummy-elm/sessions/9/actions.dsl"]),
-    case("the puzzle page (allocates a session, stamps the time)", "GET", "/puzzles", P1,
-         files=[f"{GAME1}/puzzle/sessions/2/meta", f"{GAME1}/next-puzzle-id.txt"]),
-    case("a puzzle move (creates its directory)", "POST", "/puzzles/sessions/1/puzzles/3/actions", P1, "1) solved",
-         files=[f"{GAME1}/puzzle/sessions/1/puzzle_3/actions.dsl"]),
 ]
 
 
@@ -150,30 +116,11 @@ def step(name, method, path, cookie=None, body=None, raw=None, headers=(), settl
             "expect": list(expect)}
 
 
-SEQUENCE = [
-    step("a stranger at the door", "GET", "/"),
-    step("sent to the name page", "GET", "/game"),
-    step("names themselves", "POST", "/play", None, "name=Ann&next=%2Fgame"),
-    step("plays, as Ann", "GET", "/game", JAR),
-    step("starts a game", "POST", "/game/new-session", JAR, "board: ann's first"),
-    step("moves", "POST", "/game/sessions/1/actions", JAR, "1) draw"),
-    step("moves again", "POST", "/game/sessions/1/actions", JAR, "2) meld"),
-    step("annotates", "POST", "/game/sessions/1/annotations", JAR, '{"note":"good hand"}'),
-    step("lists her games", "GET", "/game/api/sessions", JAR),
-    step("resumes", "GET", "/game/sessions/1/actions", JAR),
-    step("starts a second game", "POST", "/game/new-session", JAR, "board: ann's second"),
-    step("sees both, newest first", "GET", "/game/sessions", JAR),
-    step("garbage on the wire", "RAW", "-", raw=b"this is not http\r\n\r\n"),
-    step("still serving after garbage", "GET", "/nope"),
-    step("a connection that says nothing", "RAW", "-", raw=b""),
-    step("still serving after silence", "GET", "/play"),
-    step("a second stranger names themselves", "POST", "/play", None, "name=Bob&next=%2Fpuzzles"),
-    step("Bob opens the puzzles", "GET", "/puzzles", JAR),
-    step("Bob solves one", "POST", "/puzzles/sessions/1/puzzles/0/actions", JAR, "1) solved"),
-    step("Bob is not an admin", "GET", "/admin/lynrummy", JAR),
-    step("the index knows Bob", "GET", "/", JAR),
-    step("player 1's staged game is untouched", "GET", "/game/api/sessions", P1),
-]
+# **THE WIRE, NOT THE GAME.** This was a Lyn Rummy player's story — names
+# herself, plays, moves, annotates — and Lyn Rummy stays on the Linux droplet.
+# What it carried that is not about the game is what a server has to survive on
+# an open socket, so those steps moved into the member story below rather than
+# being deleted with it.
 
 def mint_session(uid: str, issued: int) -> str:
     """A gopher_auth cookie made HERE, from the staged secret and the format in
@@ -235,6 +182,13 @@ MEMBER_STORY = [
     step("a forged session", "GET", "/chat/conversations", FORGED),
     step("logging out", "POST", "/logout", JAR, "release=no"),
     step("chat, after logging out", "GET", "/chat", JAR),
+    # What arrives on a socket is not always a request, and a server that takes
+    # one connection at a time has to survive each of these AND answer the next
+    # caller. (These four came from the Lyn Rummy story, which is gone.)
+    step("garbage on the wire", "RAW", "-", raw=b"this is not http\r\n\r\n"),
+    step("still serving after garbage", "GET", "/nope"),
+    step("a connection that says nothing", "RAW", "-", raw=b""),
+    step("still serving after silence", "GET", "/chat"),
 ]
 
 
@@ -267,10 +221,7 @@ def endurance_steps(rounds: int) -> list:
                  f"markdown={mark(n).decode()}&cid=e{n}", headers=["X-Chat-Async: 1"]),
             step(f"the whole transcript, round {n}", "GET", "/chat/c/1_2/general/raw", JAR,
                  expect=marks),
-            step(f"a move, round {n}", "POST", "/game/sessions/1/actions", P1,
-                 f"{n + 2}) draw {mark(n).decode()}"),
-            step(f"every move, round {n}", "GET", "/game/sessions/1/actions", P1,
-                 expect=marks),
+            step(f"the docs page, round {n}", "GET", "/chat/docs", JAR),
         ]
     return steps
 
@@ -285,7 +236,10 @@ STAMINA_ROUNDS = 100
 STAMINA = [
     step("index", "GET", "/"),
     step("the 27 KB pdf", "GET", "/steve-resume.pdf"),
-    step("player 1's game list", "GET", "/game/sessions", P1),
+    # Anonymous: stamina repeats one step a hundred times with no login before
+    # it, so this asks for what a stranger gets — which must be the same answer
+    # every time, which is the whole point of the boot.
+    step("chat, anonymous", "GET", "/chat"),
 ]
 
 
@@ -1009,14 +963,6 @@ def main() -> int:
         shutil.rmtree(scratch, ignore_errors=True)
 
     per_case = failures
-
-    # ── the story ────────────────────────────────────────────────────────────
-    f, log, _, files = run_story(elf, linux_bin, content, pristine, work, mnt,
-                                 SEQUENCE, "story", print)
-    failures += f
-    if not f:
-        print(f"ok    the story: {len(SEQUENCE)} requests to ONE boot, each answered as Linux answered, "
-              f"and all {files} data files agree")
 
     # ── the member story ─────────────────────────────────────────────────────
     now = int(time.time())
