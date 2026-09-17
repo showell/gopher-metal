@@ -1109,6 +1109,40 @@ def linux_sse_failures(linux_bin, content, work, report) -> int:
         shutil.rmtree(scratch, ignore_errors=True)
 
 
+STREAMS_LINE = re.compile(r"streams: at most (\d+) held at once, (\d+) ended")
+
+
+def metal_sse_failures(elf, pristine, work, mnt, report) -> int:
+    """The same live-stream story, told to the machine — whose stream table
+    keeps the stream its handler handed over. Then the story's client closes
+    the stream, one more request lets the kernel reach its count, and the log
+    must say the stream was ended because its client went away."""
+    scratch = tempfile.mkdtemp(dir=work)
+    image = os.path.join(scratch, "disk.img")
+    shutil.copy(pristine, image)
+    set_request_limit(image, 5, mnt)  # the story's four, and one to finish on
+    qemu, port, serial = start_kernel(elf, image, scratch)
+    try:
+        failures = sse_story(port, scratch, report, "live stream on the machine")
+        ask(port, step("the last request", "GET", "/nope"), scratch, patience=60)
+    finally:
+        code, log = finish_kernel(qemu, serial)
+    if code != 1:
+        failures += 1
+        report(f"FAIL  live stream on the machine: the kernel exited {code}: "
+               + " | ".join(log.splitlines()[-3:]))
+    if "stream ended: its client went away" not in log:
+        failures += 1
+        report("FAIL  live stream on the machine: the kernel never ended the stream its client closed")
+    held = STREAMS_LINE.search(log)
+    if held is None or (held.group(1), held.group(2)) != ("1", "1"):
+        failures += 1
+        report(f"FAIL  live stream on the machine: the kernel's stream count reads "
+               f"{held.group(0) if held else 'nothing'}, want 1 held and 1 ended")
+    shutil.rmtree(scratch, ignore_errors=True)
+    return failures
+
+
 def base_heap_trace(log: str) -> list:
     """What the base heap holds after each request: LIVE bytes."""
     return [int(m.group(1)) for m in BASE_HEAP.finditer(log)]
@@ -1236,8 +1270,9 @@ def main() -> int:
               f"a fresh minted session honored, a stale and a forged one refused, "
               f"and the kernel's own session honored by Linux")
 
-    # ── a live stream (Linux; the machine's stream table is the next step) ───
+    # ── a live stream, on both ───────────────────────────────────────────────
     failures += linux_sse_failures(linux_bin, content, work, print)
+    failures += metal_sse_failures(elf, pristine, work, mnt, print)
 
     # ── many clients at once ─────────────────────────────────────────────────
     failures += concurrent_failures(elf, linux_bin, content, pristine, work, mnt, print)

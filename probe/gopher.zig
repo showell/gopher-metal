@@ -12,7 +12,7 @@
 //!   1. mem_meter.init(base)   base is a bump allocator over a static block
 //!   2. roots.point(base, …)   data/ and auth/, on the volume
 //!   3. a Hub over base        each request gets a Bus handle on it
-//!   4. serve what was kept    not yet: a kept stream is logged and dropped
+//!   4. serve what was kept    a table of held streams, drained every turn
 //!
 //! Its clocks come from its own hardware (wallclock.zig).
 //!
@@ -129,6 +129,23 @@ var conn_slots: [max_connections]tcp.Conn = undefined;
 fn isn() u32 {
     return rng.int(u32);
 }
+
+/// **THE STREAMS THIS MACHINE KEEPS.** A request that kept a stream leaves its
+/// connection open and claimed, and the stream lives here, indexed by that
+/// connection — so there is always room, and no search. Every turn of the loop
+/// drains each one's mailbox and writes what arrived; one that has been quiet
+/// for the application's keepalive gets a ping; one whose client has gone is
+/// ended. That is the whole of "iterating through the open sessions".
+const Held = struct {
+    conn: usize,
+    kept: streams.Kept,
+    last_write: i96,
+};
+var held: [max_connections]?Held = @splat(null);
+var held_now: usize = 0;
+var held_most: usize = 0;
+var streams_ended: u64 = 0;
+const keepalive_ns: i96 = streams.Subscriber.keepalive_s * std.time.ns_per_s;
 var read_buf: [16 * 1024]u8 align(16) = undefined;
 var write_buf: [64 * 1024]u8 align(16) = undefined;
 
@@ -278,6 +295,9 @@ pub fn kmain() noreturn {
             served += 1;
             letGo(&nic, &table, pick, lease.address, served);
         } else {
+            // Nothing to serve: keep the streams moving, then the network.
+            serviceStreams(&nic, &table, lease.address, &hub, request_fba.allocator(), now);
+            request_fba.reset();
             if (stream.pump(&nic, &table, lease.address) == null) asm volatile ("pause");
             continue;
         }
@@ -289,7 +309,21 @@ pub fn kmain() noreturn {
         serial.put(" bytes\n");
         request_fba.reset();
         deepest = reportStack(deepest);
+        // Right after a request, so what it published goes out without waiting
+        // for the loop to go idle. Only sooner: the idle pass would send it too.
+        serviceStreams(&nic, &table, lease.address, &hub, request_fba.allocator(), Io.awakeNs() orelse 0);
+        request_fba.reset();
     }
+
+    // The boot is over: every stream still held ends with it.
+    for (&held) |*slot| {
+        if (slot.* != null) endStream(slot, &nic, &table, lease.address, &hub, "the machine is stopping");
+    }
+    serial.put("  streams: at most ");
+    serial.putDec(held_most);
+    serial.put(" held at once, ");
+    serial.putDec(streams_ended);
+    serial.put(" ended\n");
 
     serial.put("  connections: at most ");
     serial.putDec(busiest);
@@ -366,7 +400,9 @@ fn serveOne(
     read_ns: u64,
 ) void {
     table.claim(i);
-    defer table.release(i);
+    // A connection that now carries a kept stream stays claimed and open.
+    var kept_open = false;
+    defer if (!kept_open) table.release(i);
     var s = stream.Stream.init(nic, table, i, address, &read_buf, &write_buf);
     s.read_ns = read_ns;
 
@@ -405,12 +441,13 @@ fn serveOne(
         outcome = @errorName(e);
     };
     if (bus.kept) |kept| {
-        // **NOT YET SERVED HERE.** The handler has written the stream's head
-        // and backlog and handed the live part over; this machine has no
-        // stream table yet, so it ends the stream and closes the connection.
-        // The browser reconnects and resumes from its last event.
-        streams.drop(hub, kept);
-        outcome = "a stream, ended after its backlog (streams are not kept on this machine yet)";
+        // The handler wrote the stream's head and backlog; the live part is
+        // this machine's now.
+        held[i] = .{ .conn = i, .kept = kept, .last_write = Io.awakeNs() orelse 0 };
+        held_now += 1;
+        held_most = @max(held_most, held_now);
+        kept_open = true;
+        outcome = "ok, and its stream is kept";
     }
     s.writer().flush() catch {
         outcome = "the response would not flush";
@@ -428,7 +465,56 @@ fn serveOne(
         serial.putDec(@intCast(@divTrunc(Io.ticksToNs(d.busy_ticks -% disk_ticks), 1000)));
         serial.put(" us\n");
     } else serial.put("no disk\n");
-    close(&s, table, i);
+    if (!kept_open) close(&s, table, i);
+}
+
+/// One pass over the held streams: end the ones whose client has gone, write
+/// what has arrived for the rest, ping the quiet ones. `scratch` holds the
+/// rendered frames for this pass only.
+fn serviceStreams(nic: *net.Net, table: *tcp.Table, address: [4]u8, hub: *Hub, scratch: std.mem.Allocator, now: i96) void {
+    for (&held) |*slot| {
+        const h = if (slot.*) |*h| h else continue;
+        const c = &table.conns[h.conn];
+        if (!c.open() or c.peer_done) {
+            endStream(slot, nic, table, address, hub, "its client went away");
+            continue;
+        }
+        var out: std.ArrayList(u8) = .empty;
+        const frames = streams.drainKept(h.kept, scratch, &out) catch {
+            endStream(slot, nic, table, address, hub, "there was no room to render it");
+            continue;
+        };
+        if (frames == 0 and now - h.last_write >= keepalive_ns) {
+            out.appendSlice(scratch, streams.ping) catch {};
+        }
+        if (out.items.len == 0) continue;
+        var s = stream.Stream.init(nic, table, h.conn, address, &read_buf, &write_buf);
+        s.writer().writeAll(out.items) catch {
+            endStream(slot, nic, table, address, hub, "a write to it failed");
+            continue;
+        };
+        s.writer().flush() catch {
+            endStream(slot, nic, table, address, hub, "a write to it failed");
+            continue;
+        };
+        h.last_write = now;
+    }
+}
+
+/// Ends a held stream: its subscriber leaves the bus, its connection closes,
+/// its slot is free again.
+fn endStream(slot: *?Held, nic: *net.Net, table: *tcp.Table, address: [4]u8, hub: *Hub, why: []const u8) void {
+    const h = slot.*.?;
+    streams.drop(hub, h.kept);
+    var s = stream.Stream.init(nic, table, h.conn, address, &read_buf, &write_buf);
+    close(&s, table, h.conn);
+    table.release(h.conn);
+    slot.* = null;
+    held_now -= 1;
+    streams_ended += 1;
+    serial.put("  stream ended: ");
+    serial.put(why);
+    serial.put("\n");
 }
 
 /// How deep the calls have gone, said out loud the first time each new depth is

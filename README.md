@@ -723,6 +723,42 @@ ok    a silent client holds nobody up and is still let go when the volume says:
 That second gate used to prove the opposite: the caller queued behind a silent
 client waited 6.1 s and 18.1 s.
 
+## The machine keeps chat's live streams
+
+A chat tab holds its conversation's stream open, and every message sent in that
+conversation has to appear on it. angry-gopher's streams are now **described by
+the application and kept by the host** (angry-gopher `950b7e34`): a stream
+handler writes its head and backlog, then hands the host a `Kept` — its bus
+subscriber, and how to render an event for this viewer — and returns. Linux
+serves that on the connection's own task exactly as the handler's loop used to.
+
+This machine keeps a **table of held streams**, indexed by the connection each
+one lives on. A request that kept a stream leaves its connection open and
+claimed. Every turn of the loop drains each held stream's mailbox and writes the
+frames; one quiet for the application's keepalive gets a ping; one whose client
+has gone — its FIN or reset seen by the connection table — is ended: subscriber
+dropped, connection closed, slot released. No threads, no fibers: one loop over
+state machines.
+
+The judge holds a stream open on both hosts and requires the same story from
+each:
+
+```
+ok    live stream on Linux: a stream held open got its backlog first, then the
+      message sent on another connection, numbered 1
+ok    live stream on the machine: (the same)
+```
+
+and on the machine, that the stream was ended because its client went away,
+with one held and one ended by the end of the boot. Three mutants of the table
+fail it: never draining, never noticing a client that left, and closing a kept
+stream's connection anyway.
+
+Not yet: a ping is untested (the keepalive is 25 seconds), a client that
+vanishes without a FIN or reset is never noticed (there is no retransmit timer
+to give up), and frames go out without regard to the peer's window. Those are
+the lifecycle and send-side steps.
+
 ## What the TCP does not do
 
 No congestion control, no retransmission, no out-of-order reassembly, no

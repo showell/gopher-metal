@@ -441,6 +441,10 @@ class RawResponse(unittest.TestCase):
         self.assertIn("error", G.parse_raw_response(b""))
         self.assertIn("error", G.parse_raw_response(b"garbage\r\n\r\n"))
 
+    def test_the_streams_line_is_read(self):
+        m = G.STREAMS_LINE.search("  streams: at most 3 held at once, 2 ended\n")
+        self.assertEqual((m.group(1), m.group(2)), ("3", "2"))
+
     def test_the_connections_line_is_read(self):
         m = G.CONNECTIONS_LINE.search("  connections: at most 8 at once, 0 turned away for want of a slot")
         self.assertEqual((m.group(1), m.group(2)), ("8", "0"))
