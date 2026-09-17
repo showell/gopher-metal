@@ -374,6 +374,130 @@ class Endurance(unittest.TestCase):
         self.assertTrue(first["body"].startswith("3) "), first["body"])
 
 
+class Conf(unittest.TestCase):
+    """What the kernel reads off its own volume. The judge writes it, so the
+    judge's tests are where a typo in a key name gets caught — the kernel stops
+    on an unknown key, which is a failure with no diff to read."""
+
+    def test_both_keys_are_written_and_spelled_as_the_kernel_reads_them(self):
+        import re as _re
+        written = {}
+
+        def fake_mount(image, mnt, writable):
+            written["mnt"] = mnt
+
+        with tempfile.TemporaryDirectory() as d:
+            real_mount, real_umount = G.mount, G.umount
+            G.mount, G.umount = fake_mount, lambda m: None
+            try:
+                G.set_request_limit("unused.img", 7, d, read_timeout_ms=1234)
+                text = open(os.path.join(d, "gopher-metal.conf")).read()
+            finally:
+                G.mount, G.umount = real_mount, real_umount
+        self.assertEqual(text, "requests = 7\nread_timeout_ms = 1234\n")
+        # The kernel's parser: `key = value`, one per line, nothing else.
+        for line in text.strip().splitlines():
+            self.assertRegex(line, _re.compile(r"^(requests|read_timeout_ms) = \d+$"))
+
+    def test_a_default_timeout_is_written_when_none_is_asked_for(self):
+        with tempfile.TemporaryDirectory() as d:
+            real_mount, real_umount = G.mount, G.umount
+            G.mount, G.umount = lambda *a, **k: None, lambda m: None
+            try:
+                G.set_request_limit("unused.img", 1, d)
+                text = open(os.path.join(d, "gopher-metal.conf")).read()
+            finally:
+                G.mount, G.umount = real_mount, real_umount
+        self.assertIn("read_timeout_ms = 10000", text)
+
+
+class Patience(unittest.TestCase):
+    """How long the judge itself will wait. The retries exist for a guest coming
+    up, where slirp drops the first SYN; a caller waiting on a BUSY kernel needs
+    a bound instead, or a machine that never lets go takes twenty minutes to
+    become a failure."""
+
+    class Caught(Exception):
+        def __init__(self, cmd):
+            self.cmd = cmd
+
+    def curl(self, patience):
+        """The command ask() would have run, caught before it runs."""
+        with tempfile.TemporaryDirectory() as d:
+            real_run = subprocess.run
+
+            def fake(cmd, **kw):
+                raise Patience.Caught(cmd)
+
+            subprocess.run = fake
+            try:
+                G.ask(1, G.step("x", "GET", "/"), d, patience=patience)
+            except Patience.Caught as c:
+                return c.cmd
+            finally:
+                subprocess.run = real_run
+            self.fail("ask() did not run curl")
+
+    def worst_case(self, cmd):
+        max_time = int(cmd[cmd.index("--max-time") + 1])
+        tries = int(cmd[cmd.index("--retry") + 1])
+        delay = int(cmd[cmd.index("--retry-delay") + 1])
+        return tries * (max_time + delay) + max_time
+
+    def test_a_short_patience_really_is_short(self):
+        self.assertLessEqual(self.worst_case(self.curl(60)), 120)
+
+    def test_the_default_still_outlasts_a_guest_coming_up(self):
+        # Bring-up needs about six seconds of retrying, and a slow boot more.
+        cmd = self.curl(400)
+        self.assertGreaterEqual(int(cmd[cmd.index("--retry") + 1]), 10)
+
+    def test_it_never_asks_for_zero_tries(self):
+        cmd = self.curl(1)
+        self.assertGreaterEqual(int(cmd[cmd.index("--retry") + 1]), 1)
+
+
+class SilentClient(unittest.TestCase):
+    """The judge's worst client: connects, says half a request, and holds."""
+
+    def test_it_connects_and_leaves_the_socket_open(self):
+        listener = socket.socket()
+        listener.bind(("127.0.0.1", 0))
+        listener.listen(1)
+        try:
+            sock = G.silent_client(listener.getsockname()[1], b"GET / HTTP/1.1\r\n")
+            accepted, _ = listener.accept()
+            try:
+                self.assertEqual(accepted.recv(64), b"GET / HTTP/1.1\r\n")
+                # Still open: the point is that it does NOT hang up, which is
+                # the case the kernel already handles.
+                accepted.settimeout(0.2)
+                with self.assertRaises(TimeoutError):
+                    accepted.recv(64)
+            finally:
+                accepted.close()
+                sock.close()
+        finally:
+            listener.close()
+
+    def test_it_can_say_nothing_at_all(self):
+        listener = socket.socket()
+        listener.bind(("127.0.0.1", 0))
+        listener.listen(1)
+        try:
+            sock = G.silent_client(listener.getsockname()[1], b"")
+            accepted, _ = listener.accept()
+            accepted.settimeout(0.2)
+            try:
+                with self.assertRaises(TimeoutError):
+                    accepted.recv(64)
+            finally:
+                accepted.close()
+                sock.close()
+        finally:
+            listener.close()
+
+
 class Resolution(unittest.TestCase):
     """FAT16 stores a modification time in whole EVEN seconds; ext4 stores
     nanoseconds. Wherever a story judges the ORDER of two writes, it has to put

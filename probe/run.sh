@@ -536,4 +536,25 @@ if [ "$want" = gopher ]; then
     fi
 fi
 
+# **THE LONG BOOT.** Not part of `all`: it takes as long as it takes, which is
+# the point. `probe/run.sh soak` boots one kernel and keeps it serving —
+# thousands of requests, reads and writes mixed, checking that nothing is lost,
+# that memory is reclaimed, that it does not slow down, and that the Linux VFAT
+# driver still finds every mark at the end. SOAK_ROUNDS says how many rounds.
+if [ "$want" = soak ]; then
+    GOPHER_ROOT="${GOPHER_ROOT:-$HOME/showell_repos/angry-gopher}"
+    if [ ! -f "$HERE/gopher.elf" ]; then
+        echo "FAIL soak | no gopher.elf; run: ./port.sh && zig build gopher"
+        failed=1
+    else
+        python3 "$HERE/judge_soak.py" "$HERE/gopher.elf" "$GOPHER_ROOT" "$WORK/soak"
+        code=$?
+        case $code in
+            0) echo "PASS soak" ;;
+            77) echo "     soak | SKIPPED" ;;
+            *) echo "FAIL soak | see the log above"; failed=1 ;;
+        esac
+    fi
+fi
+
 exit $failed

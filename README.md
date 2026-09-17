@@ -573,6 +573,43 @@ partition at LBA 2048, which is why its `Fat16` cites a `Gpt` chapter — and wh
 a reader that mounts sector 0 finds a boot sector of zeros and concludes,
 correctly and uselessly, that the volume is not FAT16.
 
+## Every wait is a measured duration
+
+A client that connects and then says nothing is this server's worst case,
+because it takes one connection at a time: that client holds the whole site.
+Both waits in `src/stream.zig` used to be bounded by spin counts — "two hundred
+million turns of the loop, then give up" — which is some unknown number of
+seconds that changes with the CPU, and which ended in a silent end-of-stream as
+though the client had politely hung up.
+
+Now that the machine has measured its own timestamp counter, they are
+durations, and the one that matters is host configuration on the volume
+alongside `requests`:
+
+    requests = N            serve N and stop; absent, serve until stopped
+    read_timeout_ms = N     how long a connection may say nothing
+
+A key that is neither stops the machine, because a timeout that was silently
+not applied is exactly how a server ends up held open by one client. And
+`std.Io.Reader` reports both a dead NIC and a quiet client as `ReadFailed`,
+leaving the detail to the implementation — so the stream keeps it, and the log
+can say which:
+
+```
+  request 1: (no request) -> the client stopped sending, and was let go
+  request 2: GET / -> ok (base: 93 live bytes, ...)
+```
+
+**"It recovered" is not the claim.** The claim is that the configured number is
+what governs, and the only way to show that is to change it and watch the answer
+move. So the judge boots twice, holds a socket open with half a request line in
+it, and times the caller queued behind it:
+
+```
+ok    a silent client is let go after the time the volume says: the caller behind it
+      waited 6.1s at 2000 ms and 18.1s at 6000 ms, and the machine served it either way
+```
+
 ## What the TCP does not do
 
 No congestion control, no retransmission, no out-of-order reassembly, no

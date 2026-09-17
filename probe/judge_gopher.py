@@ -412,14 +412,21 @@ def with_jar(c: dict, jar, minted=None):
     return c
 
 
-def ask(port: int, c: dict, scratch: str) -> dict:
+def ask(port: int, c: dict, scratch: str, patience: int = 400) -> dict:
     """One request by curl, which does the waiting while a guest boots. It never
     follows a redirect: the redirect IS the answer being compared."""
     if c.get("raw") is not None:
         return ask_raw(port, c["raw"])
     os.makedirs(scratch, exist_ok=True)
     hdr, out = os.path.join(scratch, "hdr"), os.path.join(scratch, "body")
-    cmd = ["curl", "-sS", "--max-time", "30", "--retry", "40", "--retry-delay", "1",
+    # **THE RETRIES ARE FOR A GUEST COMING UP**, where slirp drops the first SYN
+    # and the next attempt is six seconds later. A caller that is waiting on a
+    # BUSY kernel needs the opposite: a bound, so that a machine which never
+    # lets go becomes a failure in a minute rather than in twenty. `patience`
+    # is that bound, in seconds, and the retries are scaled to fit inside it.
+    tries = max(1, patience // 30)
+    cmd = ["curl", "-sS", "--max-time", str(min(30, patience)),
+           "--retry", str(tries), "--retry-delay", "1",
            "--retry-connrefused", "--retry-all-errors", "-D", hdr, "-o", out,
            "-w", "%{http_code}", "-X", c["method"]]
     if c["cookie"]:
@@ -446,13 +453,28 @@ def ask(port: int, c: dict, scratch: str) -> dict:
     return {"status": int(p.stdout), "headers": headers, "body": payload}
 
 
-def set_request_limit(image: str, n: int, mnt: str) -> None:
+def set_request_limit(image: str, n: int, mnt: str, read_timeout_ms: int = 10000) -> None:
     mount(image, mnt, writable=True)
     try:
         with open(os.path.join(mnt, "gopher-metal.conf"), "w") as f:
-            f.write(f"requests = {n}\n")
+            f.write(f"requests = {n}\nread_timeout_ms = {read_timeout_ms}\n")
     finally:
         umount(mnt)
+
+
+def silent_client(port: int, payload: bytes):
+    """**A CLIENT THAT CONNECTS AND THEN SAYS (ALMOST) NOTHING.** This server
+    takes one connection at a time, so this is the request that holds the whole
+    site: half a request line and then silence, with the socket left open. The
+    kernel must let it go on its own and answer the next caller.
+
+    Returns the open socket, which the caller closes when it is done proving
+    the point — closing it early would be the polite hangup the kernel already
+    handled."""
+    sock = socket.create_connection(("127.0.0.1", port), timeout=5)
+    if payload:
+        sock.sendall(payload)
+    return sock
 
 
 def start_kernel(elf: str, image: str, scratch: str):
@@ -847,6 +869,65 @@ def missing_marks(steps, answers, report, label) -> int:
     return failures
 
 
+def held_open(elf, pristine, work, mnt, ms: int):
+    """One boot, one client that connects and then says nothing, and one caller
+    behind it. Returns (how long the caller waited, its answer, the serial log)."""
+    scratch = tempfile.mkdtemp(dir=work)
+    image = os.path.join(scratch, "disk.img")
+    shutil.copy(pristine, image)
+    set_request_limit(image, 2, mnt, read_timeout_ms=ms)
+    qemu, port, serial = start_kernel(elf, image, scratch)
+    held = silent_client(port, b"GET / HTTP/1.1\r\n")  # half a request, then silence
+    began = time.time()
+    # 60 seconds: this kernel said it was listening before the silent client
+    # connected, so the only thing the caller is waiting for is the silent one
+    # to be let go. Three times the longest timeout under test is 18s.
+    answer = ask(port, step("the caller behind the silent one", "GET", "/"),
+                 os.path.join(scratch, "after"), patience=60)
+    waited = time.time() - began
+    held.close()
+    _, log = finish_kernel(qemu, serial)
+    shutil.rmtree(scratch, ignore_errors=True)
+    return waited, answer, log
+
+
+def timeout_failures(elf, pristine, work, mnt, report) -> int:
+    """**THE ONE-AT-A-TIME SERVER'S WORST CLIENT.** It connects, sends half a
+    request line, and waits. Until this machine had a clock, the wait was bounded
+    by a spin count — some unknown number of seconds — and ended in a silent
+    end-of-stream as though the client had hung up politely.
+
+    Two boots with two different `read_timeout_ms`, because "it recovered" is
+    not the claim. The claim is that the configured number is what governs, and
+    the only way to show that is to change it and watch the answer move."""
+    failures = 0
+    times = {}
+    for ms in (2000, 6000):
+        waited, answer, log = held_open(elf, pristine, work, mnt, ms)
+        times[ms] = waited
+        if answer.get("status") != 200:
+            failures += 1
+            report(f"FAIL  timeout: with read_timeout_ms={ms} the caller behind a silent client "
+                   f"got {answer.get('status', answer.get('error'))}, not 200")
+        if "the client stopped sending" not in log:
+            failures += 1
+            report(f"FAIL  timeout: with read_timeout_ms={ms} the kernel never said it let the "
+                   f"silent client go: {' | '.join(log.splitlines()[-3:])}")
+    # Three times the configured wait is what both cost, end to end — the
+    # caller's own connect is retried while the kernel is busy. What matters is
+    # that four more seconds of patience cost at least four more seconds.
+    moved = times[6000] - times[2000]
+    if moved < 4.0:
+        failures += 1
+        report(f"FAIL  timeout: tripling the timeout moved the wait by only {moved:.1f}s "
+               f"({times[2000]:.1f}s then {times[6000]:.1f}s) — the setting does not govern")
+    if not failures:
+        report(f"ok    a silent client is let go after the time the volume says: the caller "
+               f"behind it waited {times[2000]:.1f}s at 2000 ms and {times[6000]:.1f}s at 6000 ms, "
+               f"and the machine served it either way")
+    return failures
+
+
 def base_heap_trace(log: str) -> list:
     """What the base heap holds after each request: LIVE bytes."""
     return [int(m.group(1)) for m in BASE_HEAP.finditer(log)]
@@ -966,6 +1047,9 @@ def main() -> int:
               f"reactions, admin, logout — each answered as Linux answered, all {files} files agree; "
               f"a fresh minted session honored, a stale and a forged one refused, "
               f"and the kernel's own session honored by Linux")
+
+    # ── the client that says nothing ─────────────────────────────────────────
+    failures += timeout_failures(elf, pristine, work, mnt, print)
 
     # ── endurance: the writes, read back every round ─────────────────────────
     f, log, answers, files = run_story(elf, linux_bin, content, pristine, work, mnt,

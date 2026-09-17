@@ -518,6 +518,18 @@ pub fn clockIsStarted() bool {
     return tsc_hz != 0;
 }
 
+/// Nanoseconds since `startClock`, or null if this machine has not measured its
+/// timestamp counter yet.
+///
+/// **UNLIKE `Clock.now`, THIS DOES NOT PANIC.** A deadline is something code
+/// may reasonably ask about before deciding whether it can have one — and the
+/// answer "this machine cannot measure a duration yet" is a fact, not a fault.
+/// Session expiry is a different matter, which is why `.real` still panics.
+pub fn awakeNs() ?i96 {
+    if (tsc_hz == 0) return null;
+    return sinceBoot();
+}
+
 /// Nanoseconds between two TSC readings, at the measured rate.
 fn ticksToNs(ticks: u64) i96 {
     if (tsc_hz == 0) @panic(clock_unset_msg);

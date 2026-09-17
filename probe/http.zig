@@ -64,6 +64,13 @@ pub fn kmain() noreturn {
     serial.init();
     serial.put("gopher-metal http probe\n");
 
+    // **A CONNECTION IS READ AGAINST A CLOCK.** stream.zig bounds every wait by
+    // a measured duration rather than a spin count, so the timestamp counter's
+    // rate has to be known before anything is served. No wall clock is needed
+    // for that — only the rate.
+    const hz = metal.pit.calibrate() catch serial.fail("the PIT would not calibrate the TSC");
+    metal.io.startClock(hz);
+
     rng.attach(&rng_mem);
     const base = virtio.find(virtio.device_id_net) orelse
         serial.fail("no virtio-net device in any mmio slot");

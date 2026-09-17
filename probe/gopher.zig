@@ -181,7 +181,11 @@ pub fn kmain() noreturn {
         serial.fail("roots.point could not allocate the store paths");
     var bus = Bus.init(io, base);
 
-    const limit = requestLimit(io, base);
+    const conf = readConfig(io, base);
+    const limit = conf.requests;
+    serial.put("  a connection may say nothing for ");
+    serial.putDec(conf.read_ns / std.time.ns_per_ms);
+    serial.put(" ms\n");
     if (limit) |n| {
         serial.put("  serving ");
         serial.putDec(n);
@@ -209,7 +213,7 @@ pub fn kmain() noreturn {
     var deepest: usize = 0;
     while (limit == null or served < limit.?) {
         served += 1;
-        serveOne(io, &nic, &conn, lease.address, request_fba.allocator(), &bus, served);
+        serveOne(io, &nic, &conn, lease.address, request_fba.allocator(), &bus, served, conf.read_ns);
         // What this request used of its heap, BEFORE the reset: the same
         // request must use the same amount every time, and a heap that was not
         // reset would show up as a number that only grows.
@@ -253,8 +257,10 @@ fn serveOne(
     request_alloc: std.mem.Allocator,
     bus: *Bus,
     number: u64,
+    read_ns: u64,
 ) void {
     var s = stream.Stream.init(nic, conn, address, &read_buf, &write_buf);
+    s.read_ns = read_ns;
     while (conn.state != .established) {
         s.pump();
         asm volatile ("pause");
@@ -262,7 +268,15 @@ fn serveOne(
 
     var server = std.http.Server.init(s.reader(), s.writer());
     var req = server.receiveHead() catch |e| {
-        logRequest(number, "(no request)", @errorName(e));
+        // **A CLIENT THAT STOPPED TALKING IS NOT A BROKEN NIC.** std's reader
+        // reports both as ReadFailed and leaves the detail to the
+        // implementation, so the stream is asked which it was: this server
+        // takes one connection at a time, and "someone is holding the site
+        // open" is the thing a log has to be able to say.
+        logRequest(number, "(no request)", if (s.timed_out)
+            "the client stopped sending, and was let go"
+        else
+            @errorName(e));
         close(&s, conn);
         return;
     };
@@ -338,25 +352,49 @@ fn logRequest(number: u64, what: []const u8, outcome: []const u8) void {
     serial.put(")\n");
 }
 
-/// `requests = N` from the volume's gopher-metal.conf, or null to serve until
-/// stopped. A file that is present but says something else is a
-/// misconfiguration, and stops the machine rather than being guessed at.
-fn requestLimit(io: Io, alloc: std.mem.Allocator) ?u64 {
-    const text = Io.Dir.cwd().readFileAlloc(io, config_path, alloc, .limited(4096)) catch return null;
+/// **HOST CONFIGURATION, FROM THE VOLUME.** What a Linux host would read from
+/// a config file or the environment, this reads from `gopher-metal.conf` on the
+/// disk it serves — the two things that are about this machine rather than
+/// about the site:
+///
+///     requests = N            serve N and stop; absent, serve until stopped
+///     read_timeout_ms = N     how long a connection may say nothing
+///
+/// A key that is not one of those is a misconfiguration, and stops the machine
+/// rather than being ignored: a timeout that was silently not applied is how a
+/// server ends up held open by one client.
+const Config = struct {
+    requests: ?u64 = null,
+    read_ns: u64 = stream.default_read_ns,
+};
+
+fn readConfig(io: Io, alloc: std.mem.Allocator) Config {
+    var conf = Config{};
+    const text = Io.Dir.cwd().readFileAlloc(io, config_path, alloc, .limited(4096)) catch return conf;
     var lines = std.mem.splitScalar(u8, text, '\n');
+    var said_anything = false;
     while (lines.next()) |raw| {
         const line = std.mem.trim(u8, raw, " \t\r");
         if (line.len == 0 or line[0] == '#') continue;
+        said_anything = true;
         const eq = std.mem.indexOfScalar(u8, line, '=') orelse
             serial.fail(config_path ++ ": a line with no `=`");
         const key = std.mem.trim(u8, line[0..eq], " \t");
         const value = std.mem.trim(u8, line[eq + 1 ..], " \t");
-        if (!std.mem.eql(u8, key, "requests"))
-            serial.fail(config_path ++ ": the only key is `requests`");
-        return std.fmt.parseInt(u64, value, 10) catch
-            serial.fail(config_path ++ ": `requests` is not a number");
+        if (std.mem.eql(u8, key, "requests")) {
+            conf.requests = std.fmt.parseInt(u64, value, 10) catch
+                serial.fail(config_path ++ ": `requests` is not a number");
+        } else if (std.mem.eql(u8, key, "read_timeout_ms")) {
+            const ms = std.fmt.parseInt(u64, value, 10) catch
+                serial.fail(config_path ++ ": `read_timeout_ms` is not a number");
+            if (ms == 0) serial.fail(config_path ++ ": a read timeout of zero would answer nobody");
+            conf.read_ns = ms * std.time.ns_per_ms;
+        } else {
+            serial.fail(config_path ++ ": the keys are `requests` and `read_timeout_ms`");
+        }
     }
-    serial.fail(config_path ++ " is present but says nothing");
+    if (!said_anything) serial.fail(config_path ++ " is present but says nothing");
+    return conf;
 }
 
 pub const panic = std.debug.FullPanic(panicImpl);

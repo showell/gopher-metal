@@ -20,12 +20,29 @@
 //! again. That is what "blocking" means when there are no threads to block.
 
 const std = @import("std");
+const io = @import("io.zig");
 const net = @import("net.zig");
 const tcp = @import("tcp.zig");
 const arp = @import("arp.zig");
 
 const Reader = std.Io.Reader;
 const Writer = std.Io.Writer;
+
+/// **EVERY WAIT ON THIS MACHINE IS A MEASURED DURATION.** Both of these were
+/// spin counts — "two hundred million turns of the loop, then give up" — which
+/// is some unknown number of seconds that changes with the CPU, and which ended
+/// in a silent end-of-stream as though the client had politely hung up.
+///
+/// A client that connects and then says nothing is the case that matters: this
+/// server takes one connection at a time, so that client holds the whole site.
+/// Ten seconds is long for a peer that has already completed a TCP handshake
+/// and is behind Caddy on the same machine.
+pub const default_read_ns: u64 = 10 * std.time.ns_per_s;
+
+/// How long to wait for the peer to acknowledge our FIN before moving on. The
+/// answer has already been sent by then; this is politeness, and two seconds of
+/// it is plenty.
+pub const default_close_ns: u64 = 2 * std.time.ns_per_s;
 
 /// What one segment carries. Kept well under the 1500-byte ethernet MTU, and
 /// under the 536 bytes a peer assumes when we send no MSS option -- **we do
@@ -43,6 +60,17 @@ pub const Stream = struct {
     consumed: usize = 0,
     /// The peer has closed, or the connection ended.
     ended: bool = false,
+
+    /// How long a read waits for bytes, and how long a close waits for the FIN
+    /// to be acknowledged.
+    read_ns: u64 = default_read_ns,
+    close_ns: u64 = default_close_ns,
+
+    /// **WHY THE LAST READ FAILED.** `std.Io.Reader` says the detail behind
+    /// `ReadFailed` belongs to the implementation, and this is it: the host
+    /// logs "the client stopped sending" rather than an error name that could
+    /// equally mean the NIC fell over.
+    timed_out: bool = false,
 
     reader_iface: Reader,
     writer_iface: Writer,
@@ -96,18 +124,35 @@ pub const Stream = struct {
     }
 
     /// Bytes the peer has sent that we have not handed out, waiting for some
-    /// to arrive if there are none. Null once nothing more is coming.
+    /// to arrive if there are none. Null once nothing more is coming — either
+    /// because the peer closed, or because it stopped talking for `read_ns`,
+    /// which `timed_out` tells apart.
     fn waitForBytes(self: *Stream) ?[]u8 {
-        var spins: usize = 0;
-        while (spins < 200_000_000) : (spins += 1) {
+        self.timed_out = false;
+        const started = self.clock();
+        while (true) {
             if (self.consumed < self.conn.received_len) {
                 return self.conn.received[self.consumed..self.conn.received_len];
             }
             if (self.ended) return null;
+            if (self.clock() - started >= self.read_ns) {
+                self.timed_out = true;
+                return null;
+            }
             self.pump();
             asm volatile ("pause");
         }
-        return null;
+    }
+
+    /// **A STREAM NEEDS A CLOCK, AND SAYS SO.** Every wait here is a duration,
+    /// so a kernel that streams must have measured its timestamp counter
+    /// first — `pit.calibrate()` and `io.startClock()`, or `wallclock.start()`
+    /// which does both. Without it there is no way to bound a wait except by
+    /// counting spins, which is what this replaced.
+    fn clock(self: *Stream) i96 {
+        _ = self;
+        return io.awakeNs() orelse
+            @panic("a connection was read before the clock was started: this machine cannot bound a wait it cannot measure");
     }
 
     /// Sends bytes as TCP segments, a segment at a time.
@@ -126,8 +171,9 @@ pub const Stream = struct {
     /// TCP half of the same statement.
     pub fn finish(self: *Stream) void {
         self.conn.finish(self.nic);
-        var spins: usize = 0;
-        while (!self.ended and spins < 50_000_000) : (spins += 1) {
+        const started = self.clock();
+        while (!self.ended) {
+            if (self.clock() - started >= self.close_ns) return;
             self.pump();
             asm volatile ("pause");
         }
@@ -136,7 +182,8 @@ pub const Stream = struct {
 
 fn streamFn(r: *Reader, w: *Writer, limit: std.Io.Limit) Reader.StreamError!usize {
     const self: *Stream = @fieldParentPtr("reader_iface", r);
-    const bytes = self.waitForBytes() orelse return error.EndOfStream;
+    const bytes = self.waitForBytes() orelse
+        return if (self.timed_out) error.ReadFailed else error.EndOfStream;
     const n = try w.write(limit.slice(bytes));
     self.consumed += n;
     return n;
