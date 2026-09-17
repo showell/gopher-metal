@@ -266,6 +266,14 @@ fn serveOne(
         asm volatile ("pause");
     }
 
+    // **WHAT THIS MACHINE'S OWN CLOCK SAYS EACH REQUEST COST.** Timing from
+    // outside measures curl, slirp, the virtqueues and the emulator as well,
+    // and the first soak could only say "the whole thing got twelve times
+    // slower" without saying which part. These two are the server's own
+    // account of itself: how long the client took to finish asking, and how
+    // long the route table took to answer.
+    const asked_at = Io.awakeNs() orelse 0;
+
     var server = std.http.Server.init(s.reader(), s.writer());
     var req = server.receiveHead() catch |e| {
         // **A CLIENT THAT STOPPED TALKING IS NOT A BROKEN NIC.** std's reader
@@ -290,6 +298,8 @@ fn serveOne(
         req.head.target[0..@min(req.head.target.len, 256)],
     }) catch "(unprintable)";
 
+    const head_at = Io.awakeNs() orelse 0;
+
     var outcome: []const u8 = "ok";
     router.route(&req, io, request_alloc, bus) catch |e| {
         outcome = @errorName(e);
@@ -297,7 +307,13 @@ fn serveOne(
     s.writer().flush() catch {
         outcome = "the response would not flush";
     };
+    const done_at = Io.awakeNs() orelse 0;
     logRequest(number, what, outcome);
+    serial.put("    asked in ");
+    serial.putDec(@intCast(@divTrunc(head_at - asked_at, 1000)));
+    serial.put(" us, answered in ");
+    serial.putDec(@intCast(@divTrunc(done_at - head_at, 1000)));
+    serial.put(" us\n");
     close(&s, conn);
 }
 

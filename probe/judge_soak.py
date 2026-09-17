@@ -51,18 +51,21 @@ def mark(n: int) -> bytes:
 def plan(rounds: int) -> int:
     """How many requests the kernel will be asked for — it is told exactly, and
     stops when it has served them, so this has to be right."""
-    return 1 + rounds * 3 + rounds // EVERY
+    return 1 + rounds * 2 + rounds // EVERY
 
 
-# **THE READ ROTATES**, so the load is the site rather than one page: the index,
-# the activity page (which stats every conversation and document — the walk that
-# gets slower as the store grows), the 27 KB PDF off the volume, and a player's
-# game list. One per round, in turn, so the request count stays exact.
+# **CHAT, NOT THE GAME.** Lyn Rummy stays on the Linux droplet; what this
+# machine is a candidate for is chat. So the writes are chat's and the reads
+# rotate through what a chat client actually asks for: the index, the activity
+# page (which stats every conversation — the walk that gets slower as the store
+# grows), the conversation list, and the 27 KB PDF off the volume, which is the
+# one read whose cost should NOT move as the store grows and is therefore the
+# control.
 reads = [
     lambda n: J.step(f"index {n}", "GET", "/", J.JAR),
     lambda n: J.step(f"recent {n}", "GET", "/chat/recent", J.JAR),
+    lambda n: J.step(f"conversations {n}", "GET", "/chat/conversations", J.JAR),
     lambda n: J.step(f"the pdf {n}", "GET", "/steve-resume.pdf", J.JAR),
-    lambda n: J.step(f"game list {n}", "GET", "/game/sessions", J.P1),
 ]
 
 
@@ -99,6 +102,15 @@ def soak(elf: str, gopher_root: str, work: str) -> int:
     jar = {}
     last_len = 0
     asked = 0
+    # **WHAT EACH KIND OF REQUEST COSTS, AND HOW THAT MOVES.** A cumulative
+    # rate hides a curve: the first soak read 34 req/s at round 100 and 11 at
+    # round 1500, which is an average of a machine that had already fallen to
+    # four. So these are per window, and reset each time they are reported —
+    # and the PDF is in the list as a control, because its cost has no reason
+    # to move at all.
+    cost, seen_of = {}, {}
+    window_began = time.time()
+    window_asked = 0
 
     def send(s):
         nonlocal asked
@@ -114,13 +126,15 @@ def soak(elf: str, gopher_root: str, work: str) -> int:
 
     for n in range(1, ROUNDS + 1):
         tag = mark(n).decode()
-        for s in (
-            J.step(f"send {n}", "POST", "/chat/c/1_2/general/send", J.JAR,
-                   f"markdown={tag}&cid=s{n}", headers=["X-Chat-Async: 1"]),
-            J.step(f"move {n}", "POST", "/game/sessions/1/actions", J.P1, f"{n + 2}) draw {tag}"),
-            reads[n % len(reads)](n),
+        for kind, s in (
+            ("send", J.step(f"send {n}", "POST", "/chat/c/1_2/general/send", J.JAR,
+                            f"markdown={tag}&cid=s{n}", headers=["X-Chat-Async: 1"])),
+            (("index", "recent", "conversations", "pdf")[n % len(reads)], reads[n % len(reads)](n)),
         ):
+            began_step = time.time()
             a = send(s)
+            cost[kind] = cost.get(kind, 0.0) + (time.time() - began_step)
+            seen_of[kind] = seen_of.get(kind, 0) + 1
             jar = J.update_jar(a, jar)
             # 204 is what an async send answers, and 303 what a form post
             # answers. Anything else — including a 500 the machine survived —
@@ -134,7 +148,10 @@ def soak(elf: str, gopher_root: str, work: str) -> int:
                     break
 
         if n % EVERY == 0:
+            began_step = time.time()
             a = send(J.step(f"transcript {n}", "GET", "/chat/c/1_2/general/raw", J.JAR))
+            cost["transcript"] = cost.get("transcript", 0.0) + (time.time() - began_step)
+            seen_of["transcript"] = seen_of.get("transcript", 0) + 1
             body = a.get("body")
             if body is None:
                 failures += 1
@@ -159,11 +176,28 @@ def soak(elf: str, gopher_root: str, work: str) -> int:
             live = J.base_heap_trace(log)
             heaps = J.request_heap_trace(log)
             elapsed = time.time() - began
-            print(f"  round {n:>6}  {asked:>6} requests  {elapsed / 60:6.1f} min  "
-                  f"{asked / elapsed:5.1f} req/s  live {live[-1] if live else '?'}  "
-                  f"peak {peaks[-1] if peaks else '?'}  "
-                  f"request heap {max(heaps[-30:]) if heaps else '?'}  "
-                  f"transcript {last_len}", flush=True)
+            window = time.time() - window_began
+            each = "  ".join(
+                f"{k} {1000 * cost[k] / seen_of[k]:.0f}ms"
+                for k in ("send", "index", "recent", "conversations", "pdf", "transcript")
+                if seen_of.get(k))
+            # And what the KERNEL says, for the same window: the harness is on
+            # the other side of these numbers, so a gap between them is the
+            # cost of everything that is not the server.
+            timings = J.request_timings(log)[-(asked - window_asked):]
+            answered = sorted(t[1] for t in timings) or [0]
+            waited = sorted(t[0] for t in timings) or [0]
+            kernel = (f"kernel: answered median {answered[len(answered) // 2] / 1000:.1f}ms "
+                      f"worst {answered[-1] / 1000:.1f}ms; "
+                      f"waiting for the client median {waited[len(waited) // 2] / 1000:.1f}ms")
+            print(f"  round {n:>6}  {asked:>6} req  {elapsed / 60:6.1f} min  "
+                  f"{(asked - window_asked) / max(window, 0.001):5.1f} req/s now  "
+                  f"live {live[-1] if live else '?'}  peak {peaks[-1] if peaks else '?'}  "
+                  f"heap {max(heaps[-30:]) if heaps else '?'}  transcript {last_len}\n"
+                  f"          harness: {each}\n"
+                  f"          {kernel}", flush=True)
+            cost, seen_of = {}, {}
+            window_began, window_asked = time.time(), asked
         if failures > 5:
             break
 
