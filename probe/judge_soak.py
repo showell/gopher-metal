@@ -54,6 +54,18 @@ def plan(rounds: int) -> int:
     return 1 + rounds * 3 + rounds // EVERY
 
 
+# **THE READ ROTATES**, so the load is the site rather than one page: the index,
+# the activity page (which stats every conversation and document — the walk that
+# gets slower as the store grows), the 27 KB PDF off the volume, and a player's
+# game list. One per round, in turn, so the request count stays exact.
+reads = [
+    lambda n: J.step(f"index {n}", "GET", "/", J.JAR),
+    lambda n: J.step(f"recent {n}", "GET", "/chat/recent", J.JAR),
+    lambda n: J.step(f"the pdf {n}", "GET", "/steve-resume.pdf", J.JAR),
+    lambda n: J.step(f"game list {n}", "GET", "/game/sessions", J.P1),
+]
+
+
 def sample(n: int, rand) -> list:
     """Marks to look for in a transcript that has `n` of them: the newest few,
     the oldest few, and a handful from the middle. Checking all of them every
@@ -106,11 +118,14 @@ def soak(elf: str, gopher_root: str, work: str) -> int:
             J.step(f"send {n}", "POST", "/chat/c/1_2/general/send", J.JAR,
                    f"markdown={tag}&cid=s{n}", headers=["X-Chat-Async: 1"]),
             J.step(f"move {n}", "POST", "/game/sessions/1/actions", J.P1, f"{n + 2}) draw {tag}"),
-            J.step(f"index {n}", "GET", "/", J.JAR),
+            reads[n % len(reads)](n),
         ):
             a = send(s)
             jar = J.update_jar(a, jar)
-            if a.get("status") not in (200, 303):
+            # 204 is what an async send answers, and 303 what a form post
+            # answers. Anything else — including a 500 the machine survived —
+            # is a failure worth stopping for.
+            if a.get("status") not in (200, 201, 204, 303):
                 failures += 1
                 print(f"FAIL soak: round {n}: {s['name']} answered "
                       f"{a.get('status', a.get('error'))}", flush=True)
@@ -151,6 +166,24 @@ def soak(elf: str, gopher_root: str, work: str) -> int:
                   f"transcript {last_len}", flush=True)
         if failures > 5:
             break
+
+    # **THE KERNEL WAS TOLD EXACTLY HOW MANY REQUESTS TO SERVE**, and stops when
+    # it has. If it is short — a curl retry that never reached it, a connection
+    # it dropped — it would sit waiting for a caller that is not coming, and
+    # `finish_kernel` would kill it after a minute and call that a failure of
+    # the soak rather than of the arithmetic. So the tail is made up with
+    # requests that cost nothing, and a kernel needing more than a handful of
+    # them is itself worth seeing.
+    drained = 0
+    while drained < 100:
+        seen = len(J.base_heap_peak(open(serial, "rb").read().decode("latin-1", "replace")))
+        if seen >= total:
+            break
+        send(J.step("draining", "GET", "/nope", None))
+        drained += 1
+    if drained:
+        print(f"      soak: {drained} request(s) of tail to let the kernel reach its count",
+              flush=True)
 
     code, log = J.finish_kernel(qemu, serial)
     elapsed = time.time() - began
