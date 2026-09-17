@@ -246,6 +246,13 @@ if [ "$want" = all ] || [ "$want" = append ]; then
                 # a wide window still catches every one of them — and the
                 # directory this file is two levels inside was created by the
                 # same machine in the same second, so it is checked too.
+                #
+                # **THE LOW BOUND IS NEGATIVE ON PURPOSE.** A FAT16 entry holds
+                # seconds in TWOS, so a file written at an odd second is stamped
+                # with the even second BEFORE it: a stamp one second older than
+                # the clock that wrote it is the format, not a bug. Two seconds
+                # older is not, and neither is any of the years a wrong packing
+                # produces.
                 kernel_now="$(sed -n 's/^ *wall clock \([0-9]*\)$/\1/p' "$WORK/append.out" | head -1)"
                 : "${kernel_now:=0}"
                 skew=$(( stamp_small - kernel_now ))
@@ -270,10 +277,10 @@ if [ "$want" = all ] || [ "$want" = append ]; then
                 elif [ "$kernel_now" = 0 ]; then
                     echo "FAIL append | the probe never said what time its clock read"
                     failed=1
-                elif [ "$skew" -lt -4 ] || [ "$skew" -gt 120 ]; then
+                elif [ "$skew" -lt -2 ] || [ "$skew" -gt 120 ]; then
                     echo "FAIL append | Linux dates small.txt ${skew}s from the kernel's clock ($stamp_small vs $kernel_now)"
                     failed=1
-                elif [ "$skew_nested" -lt -4 ] || [ "$skew_nested" -gt 120 ]; then
+                elif [ "$skew_nested" -lt -2 ] || [ "$skew_nested" -gt 120 ]; then
                     echo "FAIL append | Linux dates the nested file ${skew_nested}s from the kernel's clock"
                     failed=1
                 else
