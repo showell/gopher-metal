@@ -21,6 +21,7 @@
 //! within the polling delay rather than within a second.
 
 const port = @import("port.zig");
+const tsc = @import("tsc.zig");
 const calendar = @import("civil.zig");
 
 const index_port: u16 = 0x70;
@@ -94,29 +95,87 @@ fn snapshot() Raw {
     };
 }
 
-pub const DeviceError = error{ NeverSettled, NoEdge };
+pub const DeviceError = error{ NoChip, NeverSettled, NoEdge, Stuck };
+
+/// **A PORT WITH NOTHING BEHIND IT READS 0xFF**, and 0xFF in register A has
+/// the update-in-progress bit set — so a missing chip used to look exactly like
+/// one forever mid-update. No real register A holds it (its divider field would
+/// be the invalid 111), so it is named for what it is.
+fn present() bool {
+    return readReg(reg_status_a) != 0xFF;
+}
+
+/// **EVERY WAIT ON THE CHIP IS A MEASURED DURATION.** These were spin counts —
+/// "two billion spins, just over a second, generously counted" — which is true
+/// only where a spin is cheap. Under KVM every register read is two port
+/// writes that exit to the emulator, a spin costs thousands of times more, and
+/// "a second" became hours: the machine hung at boot. The rate is known by the
+/// time anything here is called (the PIT measured it), so the bounds are in
+/// seconds of timestamp counter, and a host that has not said the rate panics.
+var ticks_per_second: u64 = 0;
+
+pub fn useClock(tsc_hz: u64) void {
+    ticks_per_second = tsc_hz;
+}
+
+fn deadline(ms: u64) u64 {
+    if (ticks_per_second == 0)
+        @panic("an RTC wait before rtc.useClock: a wait this machine cannot measure is a wait it cannot bound");
+    return tsc.read() +% ticks_per_second * ms / 1000;
+}
+
+fn past(when: u64) bool {
+    return tsc.read() > when;
+}
+
+/// **BETWEEN POLLS, TOUCH NOTHING.** A `pause` spin never leaves the guest; a
+/// port read always does. Under KVM, QEMU emulates this chip holding its one
+/// big lock, and it clears the update-in-progress bit from a timer that needs
+/// that same lock — so a guest polling the port flat out kept the bit set
+/// forever, and the machine hung at boot. Polling every quarter of a
+/// millisecond leaves the emulator room to run, and is also how a real chip
+/// wants to be treated. It costs the edge's anchor that much precision.
+const poll_us: u64 = 250;
+
+fn nap(us: u64) void {
+    const until = tsc.read() +% ticks_per_second * us / 1_000_000;
+    while (tsc.read() < until) asm volatile ("pause");
+}
+
+/// **WHAT A MISSED EDGE SAW**, for a host to print: a hang says nothing, and
+/// this says whether the seconds never moved, the chip never finished an
+/// update, or the polling was simply too slow to look.
+pub const Miss = struct {
+    polls: u64 = 0,
+    updating: u64 = 0,
+    first_seconds: u8 = 0,
+    last_seconds: u8 = 0,
+};
+pub var last_miss: Miss = .{};
 
 /// A consistent reading: wait out any update, then read until two consecutive
 /// readings agree. An update can begin between the check and the reads, and
 /// the only defence the chip offers is to read again.
 pub fn read() DeviceError!Raw {
-    var tries: u32 = 0;
-    while (tries < 1000) : (tries += 1) {
-        waitNotUpdating();
+    if (!present()) return error.NoChip;
+    const until = deadline(1000);
+    while (!past(until)) {
+        try waitNotUpdating();
         const a = snapshot();
-        waitNotUpdating();
+        try waitNotUpdating();
         const b = snapshot();
         if (a.eql(b)) return a;
     }
     return error.NeverSettled;
 }
 
-fn waitNotUpdating() void {
-    var spins: u32 = 0;
-    // An update takes about two milliseconds; this bound is far past that and
-    // exists only so a missing chip cannot hang the machine.
-    while (updating() and spins < 10_000_000) : (spins += 1) {
-        asm volatile ("pause");
+/// An update takes about two milliseconds. Half a second of it is a chip that
+/// is not updating but broken, and that is an answer rather than a hang.
+fn waitNotUpdating() DeviceError!void {
+    const until = deadline(500);
+    while (updating()) {
+        if (past(until)) return error.Stuck;
+        nap(poll_us);
     }
 }
 
@@ -126,15 +185,25 @@ fn waitNotUpdating() void {
 /// counter as close to the edge as the polling allows.
 pub fn readAtEdge(context: anytype, comptime onEdge: fn (@TypeOf(context)) void) DeviceError!Raw {
     const start = (try read()).seconds;
-    var spins: u64 = 0;
-    // Just over a second of polling, generously counted.
-    while (spins < 2_000_000_000) : (spins += 1) {
-        if (!updating() and readReg(reg_seconds) != start) {
-            onEdge(context);
-            return read();
+    // A second is the longest an edge can take; two and a half allows for
+    // arriving just after one.
+    const until = deadline(2500);
+    var miss = Miss{ .first_seconds = start, .last_seconds = start };
+    while (!past(until)) {
+        miss.polls += 1;
+        if (updating()) {
+            miss.updating += 1;
+        } else {
+            const now = readReg(reg_seconds);
+            miss.last_seconds = now;
+            if (now != start) {
+                onEdge(context);
+                return read();
+            }
         }
-        asm volatile ("pause");
+        nap(poll_us);
     }
+    last_miss = miss;
     return error.NoEdge;
 }
 

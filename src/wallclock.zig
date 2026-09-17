@@ -29,6 +29,7 @@ pub const Started = struct {
 pub fn start() Error!Started {
     const hz = try pit.calibrate();
     io.startClock(hz);
+    rtc.useClock(hz);
 
     var at: u64 = 0;
     const raw = try rtc.readAtEdge(&at, capture);

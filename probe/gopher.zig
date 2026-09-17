@@ -182,7 +182,16 @@ pub fn kmain() noreturn {
     const clock = metal.wallclock.start() catch |e| {
         serial.put("  wallclock: ");
         serial.put(@errorName(e));
-        serial.put("\n");
+        const m = metal.rtc.last_miss;
+        serial.put(" (rtc: ");
+        serial.putDec(m.polls);
+        serial.put(" polls, ");
+        serial.putDec(m.updating);
+        serial.put(" mid-update, seconds ");
+        serial.putDec(m.first_seconds);
+        serial.put(" -> ");
+        serial.putDec(m.last_seconds);
+        serial.put(")\n");
         serial.fail("the clocks would not come up");
     };
     serial.put("  clock: TSC at ");

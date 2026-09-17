@@ -8,9 +8,14 @@
 #
 # Three flags here are not obvious and all three were found the hard way:
 #
-#   -M microvm
-#       is what has virtio-mmio at all. The ordinary `pc` machine has PCI
-#       instead, which is a different discovery path.
+#   -M microvm,rtc=on,pit=on
+#       microvm is what has virtio-mmio at all. The ordinary `pc` machine has
+#       PCI instead, which is a different discovery path. And its RTC and PIT
+#       default to "auto" — which means ON under software emulation and, for
+#       the RTC, OFF under KVM, where microvm expects a guest to use kvmclock.
+#       This kernel reads the CMOS clock, so it asks for both by name: the
+#       first KVM boot hung at the clock, reading 0xFF from a chip that was not
+#       there.
 #
 #   -global virtio-mmio.force-legacy=false
 #       QEMU's virtio-mmio defaults to the LEGACY interface (version 1). These
@@ -53,7 +58,7 @@ boot() {
     fi
     local out="$WORK/$name.out"
     timeout 60 qemu-system-x86_64 \
-        -M microvm \
+        -M microvm,rtc=on,pit=on \
         -kernel "$HERE/$name.elf" \
         -nographic -no-reboot -m "${MEM:-512}" \
         -global virtio-mmio.force-legacy=false \
@@ -375,7 +380,7 @@ must_fail() {
         return
     fi
     local out="$WORK/$name.mustfail.out"
-    timeout 60 qemu-system-x86_64 -M microvm -kernel "$HERE/$name.elf" \
+    timeout 60 qemu-system-x86_64 -M microvm,rtc=on,pit=on -kernel "$HERE/$name.elf" \
         -nographic -no-reboot -m 512 \
         -device isa-debug-exit,iobase=0xf4,iosize=0x04 "$@" > "$out" 2>&1
     local code=$?
@@ -486,7 +491,7 @@ serve() {
     body="$WORK/$name.body"
 
     timeout 60 qemu-system-x86_64 \
-        -M microvm \
+        -M microvm,rtc=on,pit=on \
         -kernel "$HERE/$name.elf" \
         -nographic -no-reboot -m 512 \
         -global virtio-mmio.force-legacy=false \

@@ -21,7 +21,9 @@ So this one boots once and keeps going, and asks four things the whole way:
   4. **Is the filesystem still sound?** fsck.vfat at the end, and the answer
      bodies must keep growing as the transcript does.
 
-Run it through `probe/run.sh soak`. It takes as long as it takes — the point is
+**It runs under KVM**, because its numbers are about speed and a deployed
+machine would not be emulating its CPU in software. The correctness judges stay
+on TCG. Run it through `probe/run.sh soak`. It takes as long as it takes — the point is
 that it is longer than anything that could pass by accident.
 """
 
@@ -95,8 +97,8 @@ def soak(elf: str, gopher_root: str, work: str) -> int:
     os.makedirs(scratch)
     rand = random.Random(20260917)
 
-    print(f"soak: {ROUNDS} rounds, {total} requests, one boot", flush=True)
-    qemu, port, serial = J.start_kernel(elf, image, scratch)
+    print(f"soak: {ROUNDS} rounds, {total} requests, one boot, under KVM", flush=True)
+    qemu, port, serial = J.start_kernel(elf, image, scratch, kvm=True)
     began = time.time()
     failures = 0
     jar = {}

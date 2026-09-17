@@ -431,14 +431,30 @@ def silent_client(port: int, payload: bytes):
     return sock
 
 
-def start_kernel(elf: str, image: str, scratch: str):
+def kvm_usable() -> bool:
+    """Whether this user can open /dev/kvm right now."""
+    return os.access("/dev/kvm", os.R_OK | os.W_OK)
+
+
+def start_kernel(elf: str, image: str, scratch: str, kvm: bool = False):
     """Boots the kernel and returns (qemu, port, serial path) once it has said it
-    is listening."""
+    is listening.
+
+    **`kvm` IS FOR TIMING.** Without it the CPU is emulated in software (TCG),
+    which is what every correctness check here has always run on and still
+    does. A number meant to say how fast this machine is belongs on hardware
+    virtualization — what a deployed machine would run on — so the soak asks
+    for it, and refuses rather than quietly measuring TCG under KVM's name."""
+    if kvm and not kvm_usable():
+        raise RuntimeError("KVM was asked for and /dev/kvm is not usable by this user")
     port = free_port()
     serial = os.path.join(scratch, "serial")
     log = open(serial, "wb")
     qemu = subprocess.Popen([
-        "qemu-system-x86_64", "-M", "microvm", "-kernel", elf,
+        # rtc=on: under KVM microvm leaves the CMOS clock out unless asked,
+        # and this kernel reads it. See probe/run.sh.
+        "qemu-system-x86_64", "-M", "microvm,rtc=on,pit=on", "-kernel", elf,
+        *(["-enable-kvm"] if kvm else []),
         "-nographic", "-no-reboot", "-m", "512",
         "-global", "virtio-mmio.force-legacy=false",
         "-device", "isa-debug-exit,iobase=0xf4,iosize=0x04",

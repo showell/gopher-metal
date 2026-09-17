@@ -38,6 +38,24 @@ fn capture(at: *u64) void {
     at.* = tsc.read();
 }
 
+/// Says what the RTC wait saw, then stops: a missed edge is only useful with
+/// the reason attached.
+fn missed(e: rtc.DeviceError, why: []const u8) noreturn {
+    const m = rtc.last_miss;
+    serial.put("  rtc: ");
+    serial.put(@errorName(e));
+    serial.put(" after ");
+    serial.putDec(m.polls);
+    serial.put(" polls, ");
+    serial.putDec(m.updating);
+    serial.put(" mid-update, seconds ");
+    serial.putDec(m.first_seconds);
+    serial.put(" -> ");
+    serial.putDec(m.last_seconds);
+    serial.put("\n");
+    serial.fail(why);
+}
+
 fn decodeOrFail(raw: rtc.Raw) rtc.Civil {
     return rtc.decode(raw) catch |e| {
         serial.put("  decode: ");
@@ -63,6 +81,7 @@ pub fn kmain() noreturn {
         serial.fail("the PIT would not calibrate the TSC");
     };
     Io.startClock(hz);
+    rtc.useClock(hz);
     serial.put("tsc_hz ");
     serial.putDec(hz);
     serial.put("\n");
@@ -84,8 +103,8 @@ pub fn kmain() noreturn {
     // ── the rate, against a second device ───────────────────────────────────
     var e0: u64 = 0;
     var e1: u64 = 0;
-    _ = rtc.readAtEdge(&e0, capture) catch serial.fail("no first RTC edge");
-    const r1 = rtc.readAtEdge(&e1, capture) catch serial.fail("no second RTC edge");
+    _ = rtc.readAtEdge(&e0, capture) catch |e| missed(e, "no first RTC edge");
+    const r1 = rtc.readAtEdge(&e1, capture) catch |e| missed(e, "no second RTC edge");
     const edge_ns: i128 = @divTrunc(@as(i128, e1 - e0) * ns, hz);
     serial.put("  one RTC second measured as ");
     serial.putDec(@intCast(edge_ns));
@@ -125,7 +144,7 @@ pub fn kmain() noreturn {
     // setRealTimeAt exists to remove.
     {
         var edge: u64 = 0;
-        const r = rtc.readAtEdge(&edge, capture) catch serial.fail("no RTC edge for the anchor check");
+        const r = rtc.readAtEdge(&edge, capture) catch |e| missed(e, "no RTC edge for the anchor check");
         const at_edge = rtc.toUnix(decodeOrFail(r));
         const waited = Io.Clock.now(.awake, io).nanoseconds;
         while (Io.Clock.now(.awake, io).nanoseconds - waited < ns / 2) asm volatile ("pause");
@@ -139,7 +158,7 @@ pub fn kmain() noreturn {
     // ── the four register formats ────────────────────────────────────────────
     const original = rtc.format();
     var at: u64 = 0;
-    const base = rtc.readAtEdge(&at, capture) catch serial.fail("no RTC edge for the format check");
+    const base = rtc.readAtEdge(&at, capture) catch |e| missed(e, "no RTC edge for the format check");
     const want = rtc.toUnix(decodeOrFail(base));
     const formats = [_]rtc.Format{
         .{ .binary = false, .hour24 = true },

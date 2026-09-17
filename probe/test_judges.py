@@ -472,6 +472,48 @@ class Patience(unittest.TestCase):
         self.assertGreaterEqual(int(cmd[cmd.index("--retry") + 1]), 1)
 
 
+class Accelerator(unittest.TestCase):
+    """Timing runs ask for KVM; a request that cannot be met must fail loudly,
+    never fall back to software emulation under KVM's name."""
+
+    def qemu_args(self, kvm):
+        caught = {}
+        real = subprocess.Popen
+
+        class Stop(Exception):
+            pass
+
+        def fake(cmd, **kw):
+            caught["cmd"] = cmd
+            raise Stop()
+
+        subprocess.Popen = fake
+        try:
+            with tempfile.TemporaryDirectory() as d:
+                G.start_kernel("k.elf", "d.img", d, kvm=kvm)
+        except Stop:
+            pass
+        finally:
+            subprocess.Popen = real
+        return caught["cmd"]
+
+    def test_correctness_boots_stay_on_software_emulation(self):
+        self.assertNotIn("-enable-kvm", self.qemu_args(False))
+
+    @unittest.skipUnless(G.kvm_usable(), "no usable /dev/kvm here")
+    def test_a_timing_boot_asks_for_kvm(self):
+        self.assertIn("-enable-kvm", self.qemu_args(True))
+
+    def test_kvm_that_is_not_there_is_an_error_not_a_fallback(self):
+        real = G.kvm_usable
+        G.kvm_usable = lambda: False
+        try:
+            with self.assertRaises(RuntimeError):
+                G.start_kernel("k.elf", "d.img", "/nonexistent", kvm=True)
+        finally:
+            G.kvm_usable = real
+
+
 class SilentClient(unittest.TestCase):
     """The judge's worst client: connects, says half a request, and holds."""
 

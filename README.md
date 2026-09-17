@@ -614,6 +614,32 @@ only a sector the read starts or ends inside goes through the scratch sector.
   long they took, so a slow answer can be split into the device's share and
   ours.
 
+## Timing runs under KVM; the clock taught us two things getting there
+
+Every boot here ran with the CPU emulated in software (TCG) — nothing passed
+`-enable-kvm` — so every number was a number about the emulator. The soak now
+asks for KVM, because its numbers are about speed and a deployed machine would
+not be emulating its CPU; the correctness judges stay on TCG, and a timing run
+that cannot get KVM fails rather than quietly measuring TCG under its name.
+
+The first KVM boot hung at the clock, and it was two problems in one:
+
+- **`-M microvm` leaves the CMOS clock out under KVM** unless asked
+  (`rtc=auto` means on under TCG, off under KVM, where microvm expects the
+  guest to use kvmclock). A port with nothing behind it reads 0xFF, and 0xFF in
+  register A has the update-in-progress bit set — so a missing chip looked
+  exactly like one forever mid-update. Every boot now asks for
+  `rtc=on,pit=on` by name, and the kernel calls a 0xFF register A what it is:
+  `NoChip`.
+- **The RTC waits were spin counts** — "two billion spins, just over a second,
+  generously counted". Under KVM a register read is two port writes that exit
+  to the emulator, so a spin costs thousands of times more and "a second" is
+  hours. They are durations of the (already calibrated) timestamp counter now,
+  a missed edge reports how many polls it made and what the seconds register
+  said, and polls are a quarter of a millisecond apart with nothing touched in
+  between — how a real chip wants to be treated, at the cost of that much
+  anchor precision.
+
 ## Every wait is a measured duration
 
 A client that connects and then says nothing is this server's worst case,
