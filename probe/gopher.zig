@@ -298,20 +298,26 @@ pub fn kmain() noreturn {
     const request_heap = pages.allocator.alloc(u8, request_heap_bytes) catch
         serial.fail("the machine has not enough memory for a request heap");
     var request_fba = std.heap.FixedBufferAllocator.init(request_heap);
+    const scratch_heap = pages.allocator.alloc(u8, stream_scratch_bytes) catch
+        serial.fail("the machine has not enough memory for its streams' scratch");
+    stream_scratch = std.heap.FixedBufferAllocator.init(scratch_heap);
+    turning = .{ .wire = &wire, .table = &table, .hub = &hub, .conf = conf };
+    stream.after_arrivals = streamTurn;
 
     // ── the loop: talk to the network, serve whatever is ready ──────────────
     //
-    // **MANY CONNECTIONS, ONE REQUEST AT A TIME.** Every turn, the oldest
-    // connection whose whole request head has arrived is served, start to
-    // finish. One that has been quiet for `idle_timeout_ms` without sending a
-    // head is let go. Otherwise the network is polled, which moves every
-    // connection along at once — so a client that connects and says nothing
-    // waits in the table instead of holding the door.
+    // **MANY CONNECTIONS, ONE REQUEST AT A TIME.** Every turn moves the
+    // network — every connection, and every held stream — and then serves at
+    // most one thing: the oldest connection whose whole request head has
+    // arrived, start to finish, or else the oldest one that has been quiet for
+    // `idle_timeout_ms`, which is let go. A client that connects and says
+    // nothing waits in the table instead of holding the door.
     var served: u64 = 0;
     var deepest: usize = 0;
     var busiest: usize = 0;
     while (limit == null or served < limit.?) {
         busiest = @max(busiest, table.inUse());
+        const arrived = stream.pump(&wire, &table, lease.address);
         const now = Io.awakeNs() orelse 0;
         if (nextReady(&table)) |pick| {
             served += 1;
@@ -320,10 +326,7 @@ pub fn kmain() noreturn {
             served += 1;
             letGo(&wire, &table, pick, lease.address, served, conf.idle_ns);
         } else {
-            // Nothing to serve: keep the streams moving, then the network.
-            serviceStreams(&wire, &table, lease.address, &hub, request_fba.allocator(), now, conf);
-            request_fba.reset();
-            if (stream.pump(&wire, &table, lease.address) == null) asm volatile ("pause");
+            if (arrived == null) asm volatile ("pause");
             continue;
         }
         // What this request used of its heap, BEFORE the reset: the same
@@ -334,15 +337,17 @@ pub fn kmain() noreturn {
         serial.put(" bytes\n");
         request_fba.reset();
         deepest = reportStack(deepest);
-        // Right after a request, so what it published goes out without waiting
-        // for the loop to go idle. Only sooner: the idle pass would send it too.
-        serviceStreams(&wire, &table, lease.address, &hub, request_fba.allocator(), Io.awakeNs() orelse 0, conf);
-        request_fba.reset();
     }
 
-    // The boot is over: every stream still held ends with it.
+    // The boot is over: every stream still held ends with it, and the
+    // goodbyes are given a moment to be acknowledged.
+    stream.after_arrivals = null;
     for (&held) |*slot| {
-        if (slot.* != null) endStream(slot, &wire, &table, lease.address, &hub, .stopping);
+        if (slot.* != null) endStream(slot, &wire, &table, &hub, .stopping);
+    }
+    const stopping_at = Io.awakeNs() orelse 0;
+    while (closing(&table) and (Io.awakeNs() orelse 0) - stopping_at < 2 * std.time.ns_per_s) {
+        if (stream.pump(&wire, &table, lease.address) == null) asm volatile ("pause");
     }
     serial.put("  streams: at most ");
     serial.putDec(held_most);
@@ -480,6 +485,15 @@ fn serveOne(
     router.route(&req, io, request_alloc, &bus) catch |e| {
         outcome = @errorName(e);
     };
+    // **THE HEAD AND BACKLOG GO FIRST.** Every turn of the network may service
+    // the held streams, and this flush takes turns: a stream registered before
+    // it would have its live frames queued ahead of its own head.
+    const flushed = if (s.writer().flush()) |_| true else |_| false;
+    if (!flushed) outcome = "the response would not flush";
+    if (bus.kept) |kept| if (!flushed) {
+        streams.drop(hub, kept);
+        bus.kept = null;
+    };
     if (bus.kept) |kept| {
         // The handler wrote the stream's head and backlog; the live part is
         // this machine's now.
@@ -487,7 +501,7 @@ fn serveOne(
         // ends reconnects, and a conversation stream resumes from its last
         // event; a new tab that could not open at all would not.
         if (held_now >= max_streams) {
-            if (oldestHeld(table)) |slot| endStream(slot, wire, table, address, hub, .displaced);
+            if (oldestHeld(table)) |slot| endStream(slot, wire, table, hub, .displaced);
         }
         held[i] = .{ .conn = i, .kept = kept, .last_write = Io.awakeNs() orelse 0 };
         held_now += 1;
@@ -495,9 +509,6 @@ fn serveOne(
         kept_open = true;
         outcome = "ok, and its stream is kept";
     }
-    s.writer().flush() catch {
-        outcome = "the response would not flush";
-    };
     // A write that timed out fails wherever it happened — inside the route or
     // in this flush — and is the same event either way.
     if (s.timed_out) outcome = "the client stopped taking the response";
@@ -522,6 +533,27 @@ fn serveOne(
     } else close(&s, table, i);
 }
 
+/// What a turn of the held streams needs, set once the network is up.
+var turning: ?struct { wire: *stream.Wire, table: *tcp.Table, hub: *Hub, conf: Config } = null;
+/// The streams' own scratch: a turn can come in the middle of a request, whose
+/// heap is not the streams' to reset. Big enough for the largest frame chat
+/// renders, several times over.
+const stream_scratch_bytes = 4 * 1024 * 1024;
+var stream_scratch: std.heap.FixedBufferAllocator = undefined;
+var in_turn = false;
+
+/// Called by every turn of the network (`stream.after_arrivals`). A turn does
+/// not start another: ending a stream never waits, but it is simpler to know
+/// that than to prove it each time.
+fn streamTurn() void {
+    const t = turning orelse return;
+    if (in_turn) return;
+    in_turn = true;
+    defer in_turn = false;
+    serviceStreams(t.wire, t.table, t.hub, stream_scratch.allocator(), Io.awakeNs() orelse 0, t.conf);
+    stream_scratch.reset();
+}
+
 /// One pass over the held streams: end the ones whose client has gone, queue
 /// what has arrived for the rest, ping the quiet ones. `scratch` holds the
 /// rendered frames for this pass only.
@@ -529,13 +561,14 @@ fn serveOne(
 /// **NOTHING HERE WAITS.** A frame goes into its connection's send queue as far
 /// as there is room, and the rest is carried to the next turn. A stream whose
 /// carry has not moved for the idle time is ended: its tab is not reading, and
-/// its browser will reconnect and resume.
-fn serviceStreams(wire: *stream.Wire, table: *tcp.Table, address: [4]u8, hub: *Hub, scratch: std.mem.Allocator, now: i96, conf: Config) void {
+/// its browser will reconnect and resume. So is one whose mailbox overflowed —
+/// a stream with a gap in it is worse than one that starts again.
+fn serviceStreams(wire: *stream.Wire, table: *tcp.Table, hub: *Hub, scratch: std.mem.Allocator, now: i96, conf: Config) void {
     for (&held) |*slot| {
         const h = if (slot.*) |*h| h else continue;
         const c = &table.conns[h.conn];
         if (!c.open() or c.peer_done) {
-            endStream(slot, wire, table, address, hub, .client_left);
+            endStream(slot, wire, table, hub, .client_left);
             continue;
         }
         var wrote = false;
@@ -549,15 +582,16 @@ fn serviceStreams(wire: *stream.Wire, table: *tcp.Table, address: [4]u8, hub: *H
                 h.carry = &.{};
                 h.carry_at = 0;
             }
-            const frame = (streams.nextFrame(h.kept, scratch) catch {
-                endStream(slot, wire, table, address, hub, .no_room_to_render);
+            const next = streams.nextFrame(h.kept, scratch) catch |e| {
+                endStream(slot, wire, table, hub, if (e == error.EventsMissed) .missed_events else .no_room_to_render);
                 break;
-            }) orelse break;
+            };
+            const frame = next orelse break;
             const n = table.queue(h.conn, frame);
             wrote = wrote or n > 0;
             if (n == frame.len) continue;
             h.carry = hub.gpa.dupe(u8, frame[n..]) catch {
-                endStream(slot, wire, table, address, hub, .no_room_to_render);
+                endStream(slot, wire, table, hub, .no_room_to_render);
                 break;
             };
         }
@@ -575,9 +609,17 @@ fn serviceStreams(wire: *stream.Wire, table: *tcp.Table, address: [4]u8, hub: *H
             still.stuck_since = now;
             still.stuck_una = c.una;
         } else if (now - still.stuck_since.? >= conf.idle_ns) {
-            endStream(slot, wire, table, address, hub, .lagging);
+            endStream(slot, wire, table, hub, .lagging);
         }
     }
+}
+
+/// Whether any connection is still saying goodbye.
+fn closing(table: *tcp.Table) bool {
+    for (table.conns) |c| {
+        if (c.state == .closing) return true;
+    }
+    return false;
 }
 
 /// Why a stream ended, as the log says it.
@@ -588,6 +630,8 @@ const Ending = enum {
     /// closed: a goodbye would queue behind everything the client is not
     /// reading.
     lagging,
+    /// Its mailbox overflowed. Reset, like a lagging one.
+    missed_events,
     displaced,
     stopping,
 
@@ -596,6 +640,7 @@ const Ending = enum {
             .client_left => "its client went away",
             .no_room_to_render => "there was no room to render it",
             .lagging => "its client is not keeping up",
+            .missed_events => "it fell too far behind and missed events",
             .displaced => "to make room for a newer one",
             .stopping => "the machine is stopping",
         };
@@ -611,17 +656,18 @@ fn oldestHeld(table: *tcp.Table) ?*?Held {
     return best;
 }
 
-/// Ends a held stream: its subscriber leaves the bus, its connection closes,
-/// its slot is free again.
-fn endStream(slot: *?Held, wire: *stream.Wire, table: *tcp.Table, address: [4]u8, hub: *Hub, ending: Ending) void {
+/// Ends a held stream: its subscriber leaves the bus, its slot is free again,
+/// and its connection is closed — without waiting. The FIN is queued behind
+/// whatever the stream still had on its way, and the table finishes the close
+/// on later turns (or gives up on a peer that stops answering); a closing
+/// connection is not handed to anyone else meanwhile.
+fn endStream(slot: *?Held, wire: *stream.Wire, table: *tcp.Table, hub: *Hub, ending: Ending) void {
     const h = slot.*.?;
     streams.drop(hub, h.kept);
     if (h.carry.len > 0) hub.gpa.free(h.carry);
-    if (ending == .lagging) {
-        table.abandon(wire, h.conn);
-    } else {
-        var s = stream.Stream.init(wire, table, h.conn, address, &read_buf, &write_buf);
-        close(&s, table, h.conn);
+    switch (ending) {
+        .lagging, .missed_events => table.abandon(wire, h.conn),
+        else => table.finish(h.conn),
     }
     table.release(h.conn);
     slot.* = null;

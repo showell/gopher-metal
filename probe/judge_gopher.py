@@ -1524,9 +1524,10 @@ def bulk_name(n: int) -> bytes:
     return f"bulk-{n:02d}".encode()
 
 
-def bulk_text(n: int) -> str:
-    """About 40 KB of markdown, form-encoded, that names itself first."""
-    return bulk_name(n).decode() + "+" + "lorem+ipsum+dolor+" * 2200
+def bulk_text(n: int, repeats: int = 2200) -> str:
+    """About 40 KB of markdown (at the default), form-encoded, that names
+    itself first. 3300 repeats is about 60 KB, near chat's 64 KB limit."""
+    return bulk_name(n).decode() + "+" + "lorem+ipsum+dolor+" * repeats
 
 
 def bulk_steps() -> list:
@@ -1722,13 +1723,15 @@ def slow_reader_failures(elf, linux_bin, content, work, mnt, report) -> int:
 def lagging_stream_failures(elf, pristine, work, mnt, report) -> int:
     """**A TAB THAT STOPS READING LOSES ITS STREAM, NOT THE SITE.** Two streams
     on one conversation; one is read all along, the other is read once and then
-    ignored while 40 KB messages are published — each frame bigger than half a
-    send queue, so a reader with one frame in flight must not look lagging.
-    The ignored one must be ended as not keeping up once it has taken nothing
-    for the idle time, and the read one must get every message."""
+    ignored while 60 KB messages are published back to back — each frame about
+    120 KB, bigger than a whole send queue. The ignored one must be ended as
+    not keeping up once it has taken nothing for the idle time, and the read
+    one must get every message: a host that moved streams only between
+    requests fell behind by part of a frame per message, and its mailbox
+    dropped events once it held sixteen."""
     label = "a lagging stream"
-    most = 100  # far past what the host buffers; the loop stops once the kernel says so
-    requests = 1 + 1 + 2 + most + 1
+    sent_all = 60  # far past what the host buffers, and past sixteen behind
+    requests = 1 + 1 + 2 + sent_all + 1
     idle_ms = 3000
     scratch, qemu, port, serial = boot_with(elf, pristine, work, mnt, requests,
                                             idle_timeout_ms=idle_ms)
@@ -1769,13 +1772,11 @@ def lagging_stream_failures(elf, pristine, work, mnt, report) -> int:
 
         t = threading.Thread(target=keep_reading, daemon=True)
         t.start()
-        for n in range(1, most + 1):
-            answer = send_live(port, scratch, cookie, "lag", bulk_text(n), f"l{n}")
+        for n in range(1, sent_all + 1):
+            answer = send_live(port, scratch, cookie, "lag", bulk_text(n, 3300), f"l{n}")
             sent = n
             if answer.get("status") != 204:
                 fail(f"sending message {n} answered {answer.get('status') or answer.get('error')}")
-            if b"not keeping up" in open(serial, "rb").read():
-                break
         deadline = time.time() + 30
         while bulk_name(sent) not in got["reader"] and time.time() < deadline:
             time.sleep(0.1)
@@ -1804,8 +1805,8 @@ def lagging_stream_failures(elf, pristine, work, mnt, report) -> int:
         fail(f"the stream count reads {held.group(0) if held else 'nothing'}, "
              f"want 2 held, 2 ended, 0 still subscribed")
     if not failures:
-        report(f"ok    {label}: the stream nobody read was ended as not keeping up after {sent} "
-               f"40 KB messages; the one being read got all {sent}")
+        report(f"ok    {label}: of two streams sent {sent} 60 KB messages back to back, the one nobody "
+               f"read was ended as not keeping up, and the one being read got all {sent}")
         shutil.rmtree(scratch, ignore_errors=True)
     return failures
 

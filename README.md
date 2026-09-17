@@ -797,6 +797,17 @@ byte: the kernel kept its own config file's text in the long-lived heap, and
 `requests = 8` is one byte shorter than `requests = 28`. It frees the text now,
 and both boots end at 490 bytes.
 
+**Streams turn with the network.** Held streams are serviced on every turn of
+the network loop (`stream.after_arrivals`), including the turns taken inside a
+request's reads and writes — not only between requests. Serviced only between
+requests, a stream moved at most one send queue (64 KB) per request, and a
+reader sent 60 KB messages back to back fell behind by part of a frame each
+time until its mailbox, which holds sixteen events, dropped some. The lagging
+gate found it once it sent enough; it now sends sixty 60 KB messages and
+requires the reader to get every one. A mailbox that does overflow now ends
+its stream (angry-gopher's `missed` flag) rather than leaving a gap, and ending
+a stream never waits: its FIN is queued and the table finishes the close.
+
 **A tab that stops reading loses its stream, not the site.** The loop never
 waits on a stream. It takes the next event from a stream's mailbox only when
 it has somewhere to put it (angry-gopher's `nextFrame`), queues as much of the
@@ -807,8 +818,9 @@ The judge holds two streams on one conversation, reads one and ignores the
 other while 40 KB messages are published:
 
 ```
-ok    a lagging stream: the stream nobody read was ended as not keeping up
-      after 52 40 KB messages; the one being read got all 52
+ok    a lagging stream: of two streams sent 60 60 KB messages back to back,
+      the one nobody read was ended as not keeping up, and the one being read
+      got all 60
 ```
 
 The first version ended a stream whenever a new frame did not fit beside the

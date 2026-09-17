@@ -82,6 +82,12 @@ pub const Wire = struct {
 /// timers first would call those segments lost and send them again. A
 /// needless second SYN-ACK once left slirp sending nothing more on that
 /// connection for as long as the host would wait.
+/// **THE HOST'S OWN STATE MACHINES TURN HERE TOO**, after what arrived and
+/// before what is sent: a host that keeps live streams sets this, and they move
+/// on every turn — including the turns taken inside a request's reads and
+/// writes — rather than only between requests.
+pub var after_arrivals: ?*const fn () void = null;
+
 pub fn pump(wire: *Wire, table: *tcp.Table, ip: [4]u8) ?tcp.Result {
     const now = io.awakeNs() orelse 0;
     const nic = wire.nic;
@@ -102,6 +108,7 @@ pub fn pump(wire: *Wire, table: *tcp.Table, ip: [4]u8) ?tcp.Result {
         const r = table.handle(wire, got.frame, now);
         if (r.event != .nothing) last = r;
     }
+    if (after_arrivals) |turn| turn();
     table.transmit(wire, now);
     return last;
 }
