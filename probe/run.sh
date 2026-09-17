@@ -3,6 +3,9 @@
 #
 #   probe/run.sh            all of them
 #   probe/run.sh block      just one
+#   probe/run.sh quick      host tests, Debug kernels, every probe, and the
+#                           judge's quick tier: minutes, for iterating
+#   probe/run.sh gopher     the judge's full run, on whatever gopher.elf is
 #
 # Prints a line per probe and exits 1 if any failed.
 #
@@ -48,6 +51,28 @@ if ! python3 "$HERE/test_judges.py" > "$WORK/test_judges.out" 2>&1; then
 fi
 echo "PASS judges | $(grep -oE 'Ran [0-9]+ tests' "$WORK/test_judges.out") of the judges' own logic"
 failed=0
+
+# **THE QUICK TIER BUILDS WHAT IT JUDGES**, in Debug (`-Ddev`): a rebuild in
+# seconds rather than most of a minute. It leaves Debug kernels in probe/, so
+# every run says which build it judged — a commit is judged on ReleaseSafe.
+quick=0
+if [ "$want" = quick ]; then
+    quick=1
+    if ! ( cd "$HERE/.." && zig build test && zig build kernels -Ddev \
+           && ./port.sh && zig build gopher -Ddev ) > "$WORK/quick.build" 2>&1; then
+        echo "FAIL quick | the host tests or the Debug build failed; see $WORK/quick.build"
+        tail -5 "$WORK/quick.build"
+        exit 1
+    fi
+    echo "PASS quick | the host tests, and every kernel built in Debug"
+    want=all
+fi
+built="$(strings "$HERE/block.elf" 2>/dev/null | grep -o 'gopher-metal-build=[A-Za-z]*' | head -1)"
+if [ -n "$built" ]; then
+    echo "     build | ${built#gopher-metal-build=} kernels"
+else
+    echo "     build | kernels of unknown build"
+fi
 
 boot() {
     local name="$1"; shift
@@ -570,7 +595,7 @@ fi
 # over the same files: every request below must be answered identically. The
 # Linux build is made here from the checkout port.sh copied, so the two cannot
 # be different versions of the code.
-if [ "$want" = gopher ]; then
+if [ "$want" = gopher ] || [ $quick = 1 ]; then
     GOPHER_ROOT="${GOPHER_ROOT:-$HOME/showell_repos/angry-gopher}"
     if [ ! -f "$HERE/gopher.elf" ]; then
         echo "FAIL gopher | no gopher.elf; run: ./port.sh && zig build gopher"
@@ -579,17 +604,53 @@ if [ "$want" = gopher ]; then
         echo "FAIL gopher | the Linux build of the same source failed; see $WORK/gopher.linux-build"
         failed=1
     else
-        python3 "$HERE/judge_gopher.py" "$HERE/gopher.elf" \
+        JUDGE_QUICK=$([ $quick = 1 ] && echo 1) python3 "$HERE/judge_gopher.py" "$HERE/gopher.elf" \
             "$GOPHER_ROOT/zig-server/zig-out/bin/zig-server" "$GOPHER_ROOT" "$WORK/gopher" \
             > "$WORK/gopher.verdict" 2>&1
         code=$?
+        gmode="$(strings "$HERE/gopher.elf" | grep -o 'gopher-metal-build=[A-Za-z]*' | head -1)"
         case $code in
-            0) echo "PASS gopher | $(tail -1 "$WORK/gopher.verdict")" ;;
+            0) echo "PASS gopher | (${gmode#gopher-metal-build=}) $(tail -1 "$WORK/gopher.verdict")" ;;
             77) echo "     gopher | $(tail -1 "$WORK/gopher.verdict")" ;;
             *) echo "FAIL gopher | $(tail -1 "$WORK/gopher.verdict")"
                grep -A3 "^FAIL" "$WORK/gopher.verdict" | head -20 | sed 's/^/             /'
                failed=1 ;;
         esac
+    fi
+fi
+
+# **THE LADDER.** Not part of `all`: it measures rather than proves. Each rung
+# repeats one operation and must cost the same at the end as at the start;
+# `probe/judge_ladder.py` decides. LADDER_SCALE multiplies every rung's count,
+# so the same kernel answers in seconds first and at length once it has earned
+# it. The disk is a 32 MB FAT16 volume at the front of 64 MB, so the rungs that
+# write raw sectors have the back half.
+if [ "$want" = ladder ]; then
+    scale="${LADDER_SCALE:-1}"
+    img="$WORK/ladder.img"
+    rm -f "$img"
+    mkfs.vfat -F 16 -S 512 -n LADDER -C "$img" 32768 > /dev/null 2>&1
+    truncate -s 64M "$img"
+    if [ ! -f "$HERE/ladder.elf" ]; then
+        echo "FAIL ladder | no ladder.elf; run: zig build ladder"
+        failed=1
+    else
+        started=$(date +%s)
+        timeout $((120 + 60 * scale)) qemu-system-x86_64 -M microvm,rtc=on,pit=on \
+            -kernel "$HERE/ladder.elf" -append "scale=$scale" \
+            -nographic -no-reboot -m 512 \
+            -global virtio-mmio.force-legacy=false \
+            -device isa-debug-exit,iobase=0xf4,iosize=0x04 \
+            -drive id=d,file="$img",format=raw,if=none \
+            -device virtio-blk-device,drive=d \
+            -cpu max > "$WORK/ladder.out" 2>&1
+        code=$?
+        echo "     ladder | scale $scale, $(( $(date +%s) - started )) s, qemu exited $code"
+        python3 "$HERE/judge_ladder.py" "$WORK/ladder.out" | sed 's/^/     /' | sed 's/^     \(PASS\|FAIL\)/\1/'
+        if [ "${PIPESTATUS[0]}" != 0 ] || [ $code != 1 ]; then
+            [ $code != 1 ] && tail -5 "$WORK/ladder.out"
+            failed=1
+        fi
     fi
 fi
 

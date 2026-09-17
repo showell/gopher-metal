@@ -50,7 +50,19 @@ and its two load-bearing findings are worth repeating here:
     zig build kernels      # every kernel into probe/
     probe/run.sh           # boot each one under microvm (~45 s)
     probe/run.sh clock     # just one
-    ./port.sh && zig build gopher && probe/run.sh gopher   # the real server, judged against Linux
+    ./port.sh && zig build gopher && probe/run.sh gopher   # the real server, judged against Linux (~3 min)
+    probe/run.sh quick     # all of the above in Debug, with the judge's quick tier (~3 min)
+    probe/run.sh ladder    # one operation many times, at a flat cost (LADDER_SCALE=10 for more)
+
+**Two tiers.** `-Ddev` builds the kernels in Debug — a rebuild of the real
+server in 6.5 s instead of ReleaseSafe's 40 — and `run.sh quick` builds that
+way, runs every probe, and runs the judge with test-sized waits (a 3-second
+stream keepalive, sub-second silent-client timeouts), one boot for the single
+requests, and without the boots that exist to be long. A commit is judged on
+the full run with ReleaseSafe kernels; every run says which build it judged,
+read from a marker each kernel carries. The Debug kernel earned its place at
+once: it is slow enough that the loop fell behind its own timers, which
+exposed the SYN-ACK bug described under "the send side".
 
 ```
 PASS block |   wrote and read back sector 32767: 512 bytes match
@@ -861,6 +873,35 @@ belongs to the receive-side step.
 receive buffer still lets its sender queue 1.36 MB, and slirp holds more; with
 the 317 KB transcript the machine's window never shut, and the gate — which
 requires window probes — failed rather than passing on nothing.
+
+## The ladder: where does the slowdown live?
+
+Over a soak, the chat server's own answer time grows from about 7 ms to
+115 ms while the disk requests per route stay flat. `probe/ladder.zig` looks
+for the cause one layer at a time: each rung repeats ONE operation and prints
+the cost per operation of each tenth of the run, and `judge_ladder.py` fails a
+rung whose last fifth costs more than 1.5× its second and third tenths, or
+whose disk requests climb. `scale=N` on the kernel's command line
+(`LADDER_SCALE`) multiplies every count, so a rung is asked briefly first and
+at length once it has been flat.
+
+```
+PASS cpu          | 5000 ops,    122254 ns ->     90925 ns per op (x0.66)
+PASS alloc        | 200000 ops,   31615 ns ->     21737 ns per op (x0.83)
+PASS read_same    | 20000 ops,    38217 ns ->     38409 ns per op (x0.80), 1.00 disk requests per op
+PASS write_same   | 20000 ops,   183371 ns ->    215008 ns per op (x1.06), 1.00 disk requests per op
+PASS write_spread | 20000 ops,   230578 ns ->    235352 ns per op (x1.10), 1.00 disk requests per op
+PASS append       | 10000 ops,   770548 ns ->    920819 ns per op (x1.09), 7.00 disk requests per op
+PASS replace      | 10000 ops,  2137145 ns ->   2216114 ns per op (x0.99), 15.00 disk requests per op
+```
+
+At scale 10 (43 s, emulated CPU), everything below the network is flat: the
+processor and the clock, std's allocator on this machine's pages, a sector
+read and written in place, a sector written where the host's image file has to
+grow, a 5 MB file appended 512 bytes at a time, and a small file rewritten ten
+thousand times. Two numbers are worth a second look even though they do not
+climb: rewriting a file of a dozen bytes takes 15 device requests, and one
+append takes 7. The network rungs are next.
 
 ## What the TCP does not do
 

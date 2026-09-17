@@ -99,9 +99,20 @@ pub fn memoryMap() pvh.Error![]const pvh.MemmapEntry {
     return pvh.read(pvh_start_info);
 }
 
+/// The command line the machine was booted with.
+pub fn commandLine() []const u8 {
+    return pvh.commandLine(pvh_start_info);
+}
+
 export fn kmain_trampoline() callconv(.c) noreturn {
     root.kmain();
 }
+
+/// **WHICH BUILD THIS IS, READABLE FROM THE FILE.** `run.sh` prints it, so a
+/// verdict says whether it judged the Debug kernels `-Ddev` makes for
+/// iterating or the ReleaseSafe ones a commit is judged on.
+export const gopher_metal_build linksection(".rodata.gopher_metal_build") =
+    ("gopher-metal-build=" ++ @tagName(@import("builtin").mode)).*;
 
 /// **THE STACK IS PAINTED BEFORE IT IS USED**, in long mode and before %rsp
 /// points anywhere: `rep stosq` over the whole region, which nothing is running

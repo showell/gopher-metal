@@ -26,7 +26,9 @@ SECTIONS {
 
     .note.Xen : { KEEP(*(.note.Xen)) } :text :note
     .text     : { *(.text*) } :text
-    .rodata   : { *(.rodata*) } :text
+    /* Which build this is (boot.zig): KEPT for the same reason as the note,
+       so that run.sh can read it from the file. */
+    .rodata   : { KEEP(*(.rodata.gopher_metal_build)) *(.rodata*) } :text
     .data     : { *(.data*) } :text
 
     /* .bss is NOBITS: the loader does not write it, so nothing here may be

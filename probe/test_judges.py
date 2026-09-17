@@ -23,6 +23,7 @@ import unittest
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 import judge_gopher as G  # noqa: E402
+import judge_ladder as L  # noqa: E402
 
 
 class Normalize(unittest.TestCase):
@@ -466,6 +467,42 @@ class Bulk(unittest.TestCase):
         read = [s for s in G.BULK if s["path"].endswith("/raw")]
         self.assertEqual(len(read), 1)
         self.assertEqual(read[0]["expect"], [G.bulk_name(n) for n in range(1, G.BULK_MESSAGES + 1)])
+
+
+class Ladder(unittest.TestCase):
+    LOG = ("gopher-metal ladder\n"
+           "rung cpu: 500 ops; ns per op by tenth: 900 500 500 510 500 500 505 500 520 530; "
+           "disk requests by tenth: 0 0 0 0 0 0 0 0 0 0\n"
+           "rung append: 1000 ops; ns per op by tenth: 100 100 100 120 140 160 180 200 220 240; "
+           "disk requests by tenth: 300 300 300 300 300 300 300 300 300 300\n")
+
+    def test_every_rung_is_read(self):
+        rungs = L.parse(self.LOG)
+        self.assertEqual(sorted(rungs), ["append", "cpu"])
+        self.assertEqual(rungs["cpu"]["ops"], 500)
+        self.assertEqual(rungs["cpu"]["ns"][0], 900)
+
+    def test_a_slow_first_tenth_is_warm_up_not_growth(self):
+        flat, ratio, _ = L.verdict(L.parse(self.LOG)["cpu"])
+        self.assertTrue(flat)
+        self.assertAlmostEqual(ratio, 1.05)
+
+    def test_a_cost_that_more_than_doubles_climbs(self):
+        flat, ratio, _ = L.verdict(L.parse(self.LOG)["append"])
+        self.assertFalse(flat)
+        self.assertAlmostEqual(ratio, 2.3)
+
+    def test_flat_cost_with_climbing_requests_is_not_flat(self):
+        r = {"ops": 10, "ns": [5] * 10, "requests": [10, 10, 10, 10, 10, 10, 20, 30, 40, 50]}
+        flat, _, climbs = L.verdict(r)
+        self.assertTrue(climbs)
+        self.assertFalse(flat)
+
+    def test_a_line_the_kernel_prints_is_a_line_the_judge_reads(self):
+        # The format string in probe/ladder.zig, restated.
+        line = ("rung write_spread: 2000 ops; ns per op by tenth: 1 2 3 4 5 6 7 8 9 10; "
+                "disk requests by tenth: 200 200 200 200 200 200 200 200 200 200")
+        self.assertIn("write_spread", L.parse(line))
 
 
 class RawResponse(unittest.TestCase):

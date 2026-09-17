@@ -424,7 +424,8 @@ def ask(port: int, c: dict, scratch: str, patience: int = 400) -> dict:
 
 
 def set_request_limit(image: str, n: int, mnt: str, idle_timeout_ms: int = 10000,
-                      streams: int = None, lose_one_sent_in: int = None) -> None:
+                      streams: int = None, lose_one_sent_in: int = None,
+                      keepalive_ms: int = None) -> None:
     mount(image, mnt, writable=True)
     try:
         with open(os.path.join(mnt, "gopher-metal.conf"), "w") as f:
@@ -433,6 +434,8 @@ def set_request_limit(image: str, n: int, mnt: str, idle_timeout_ms: int = 10000
                 f.write(f"streams = {streams}\n")
             if lose_one_sent_in is not None:
                 f.write(f"lose_one_sent_in = {lose_one_sent_in}\n")
+            if keepalive_ms is not None:
+                f.write(f"keepalive_ms = {keepalive_ms}\n")
     finally:
         umount(mnt)
 
@@ -451,6 +454,12 @@ def silent_client(port: int, payload: bytes):
         sock.sendall(payload)
     return sock
 
+
+# **THE QUICK TIER.** With JUDGE_QUICK set, the machine's waits are
+# test-sized — a three-second stream keepalive, sub-second silent-client
+# timeouts — and the boots that exist to be long are left out. The full run
+# keeps the real values; both prove the configured number is what governs.
+QUICK = bool(os.environ.get("JUDGE_QUICK"))
 
 # **A PACKET CAPTURE, WHEN ASKED FOR.** With JUDGE_CAPTURE set, every boot
 # writes what crossed its NIC to `net.pcap` beside its serial log, for tcpdump.
@@ -912,7 +921,8 @@ def timeout_failures(elf, pristine, work, mnt, report) -> int:
     that is to change it and watch the close move."""
     failures = 0
     let_go_at = {}
-    for ms in (2000, 6000):
+    low, high = (500, 2000) if QUICK else (2000, 6000)
+    for ms in (low, high):
         answered, let_go, answer, rest, log = held_open(elf, pristine, work, mnt, ms)
         let_go_at[ms] = let_go
         if answer.get("status") != 200:
@@ -935,14 +945,14 @@ def timeout_failures(elf, pristine, work, mnt, report) -> int:
             failures += 1
             report(f"FAIL  timeout: with idle_timeout_ms={ms} the kernel never said it let the "
                    f"silent client go: {' | '.join(log.splitlines()[-3:])}")
-    moved = let_go_at[6000] - let_go_at[2000]
-    if moved < 3.2:
+    moved = let_go_at[high] - let_go_at[low]
+    if moved < 0.8 * (high - low) / 1000:
         failures += 1
-        report(f"FAIL  timeout: raising the setting by 4s moved the close by only {moved:.1f}s — "
-               f"the setting does not govern it")
+        report(f"FAIL  timeout: raising the setting by {(high - low) / 1000:g}s moved the close by only "
+               f"{moved:.1f}s — the setting does not govern it")
     if not failures:
         report(f"ok    a silent client holds nobody up and is still let go when the volume says: "
-               f"closed after {let_go_at[2000]:.1f}s at 2000 ms and {let_go_at[6000]:.1f}s at 6000 ms, "
+               f"closed after {let_go_at[low]:.1f}s at {low} ms and {let_go_at[high]:.1f}s at {high} ms, "
                f"with the caller beside it answered first both times")
     return failures
 
@@ -1137,7 +1147,7 @@ def open_stream(port: int, path: str, cookie: str):
     return sock
 
 
-def tab_story(port: int, scratch: str, report, label: str) -> int:
+def tab_story(port: int, scratch: str, report, label: str, keepalive: float = 25) -> int:
     """**A CHAT TAB, AS A BROWSER HOLDS IT: THREE STREAMS AT ONCE**, fed by
     another user. Eight requests:
 
@@ -1149,8 +1159,9 @@ def tab_story(port: int, scratch: str, report, label: str) -> int:
            and her notifications say he sent it
       8.   Steve starts a NEW topic: her sidebar is told it was added
 
-    Then 27 quiet seconds, in which every one of the three must be pinged: the
-    application's keepalive is 25. Presence also pushes "came online" events at
+    Then `keepalive` + 2 quiet seconds, in which every one of the three must be
+    pinged: the application's keepalive is 25, and the machine's can be set
+    shorter. Presence also pushes "came online" events at
     moments nobody controls, so each check looks for its own event rather than
     for silence."""
     failures = 0
@@ -1214,13 +1225,13 @@ def tab_story(port: int, scratch: str, report, label: str) -> int:
         # **A PING IS RARE.** A host that pinged every turn would flood the
         # network and still deliver a ping; so none may have come before the
         # keepalive was due…
-        if time.time() - opened < 20:
+        if time.time() - opened < 0.8 * keepalive:
             for name, s in (("conversation", conv), ("notifications", notify), ("sidebar", sidebar)):
                 if b": ping" in got[s]:
                     fail(f"her {name} stream was pinged within {time.time() - opened:.0f}s of opening")
-        # …and after 25 quiet seconds, each is pinged — once, or at most twice.
+        # …and after the keepalive, each is pinged — once, or at most twice.
         marks = {s: len(got[s]) for s in socks}
-        deadline = time.time() + 27
+        deadline = time.time() + keepalive + 2
         for s in socks:
             got[s] = read_until(s, b": ping", deadline, got[s])
         for s in socks:
@@ -1228,16 +1239,17 @@ def tab_story(port: int, scratch: str, report, label: str) -> int:
         for name, s in (("conversation", conv), ("notifications", notify), ("sidebar", sidebar)):
             pings = got[s][marks[s]:].count(b": ping")
             if pings == 0:
-                fail(f"her {name} stream was not pinged in 27 quiet seconds")
+                fail(f"her {name} stream was not pinged in {keepalive + 2:g} quiet seconds")
             elif pings > 2:
-                fail(f"her {name} stream was pinged {pings} times in 28 seconds, with a 25-second keepalive")
+                fail(f"her {name} stream was pinged {pings} times in {keepalive + 3:g} seconds, "
+                     f"with a {keepalive:g}-second keepalive")
     finally:
         for s in socks:
             s.close()
     if not failures:
         report(f"ok    {label}: one tab's three streams at once — his message on her conversation "
                f"(not hers), in her notifications, his new topic in her sidebar, and all three "
-               f"pinged after 25 quiet seconds")
+               f"pinged after {keepalive:g} quiet seconds")
     return failures
 
 
@@ -1247,8 +1259,11 @@ def linux_sse_failures(linux_bin, content, work, report) -> int:
     shutil.copytree(content, root)
     server = LinuxServer(linux_bin, root, os.path.join(scratch, "linux.log"))
     try:
-        return (sse_story(server.port, scratch, report, "live stream on Linux")
-                + tab_story(server.port, scratch, report, "a chat tab on Linux"))
+        failures = sse_story(server.port, scratch, report, "live stream on Linux")
+        # Linux's keepalive is the application's 25 seconds, and cannot be set.
+        if not QUICK:
+            failures += tab_story(server.port, scratch, report, "a chat tab on Linux")
+        return failures
     finally:
         server.stop()
         shutil.rmtree(scratch, ignore_errors=True)
@@ -1293,10 +1308,12 @@ def metal_tab_failures(elf, pristine, work, mnt, report) -> int:
     scratch = tempfile.mkdtemp(dir=work)
     image = os.path.join(scratch, "disk.img")
     shutil.copy(pristine, image)
-    set_request_limit(image, 9, mnt)  # the tab's eight, and one to finish on
+    keepalive = 3 if QUICK else 25
+    set_request_limit(image, 9, mnt,  # the tab's eight, and one to finish on
+                      keepalive_ms=None if keepalive == 25 else keepalive * 1000)
     qemu, port, serial = start_kernel(elf, image, scratch)
     try:
-        failures = tab_story(port, scratch, report, "a chat tab on the machine")
+        failures = tab_story(port, scratch, report, "a chat tab on the machine", keepalive)
         ask(port, step("the last request", "GET", "/nope"), scratch, patience=60)
     finally:
         code, log = finish_kernel(qemu, serial)
@@ -1435,20 +1452,21 @@ def churn_failures(elf, pristine, work, mnt, report) -> int:
     """**NOTHING IS KEPT PER STREAM.** The same boot with 5 streams churned and
     with 25 must end holding the same number of live bytes: anything a stream
     left behind would show up 20 times over."""
-    f5, heap5 = churn(elf, pristine, work, mnt, 5, report)
-    f25, heap25 = churn(elf, pristine, work, mnt, 25, report)
-    failures = f5 + f25
-    if heap5 is None or heap25 is None:
+    few, many = (3, 9) if QUICK else (5, 25)
+    f_few, heap_few = churn(elf, pristine, work, mnt, few, report)
+    f_many, heap_many = churn(elf, pristine, work, mnt, many, report)
+    failures = f_few + f_many
+    if heap_few is None or heap_many is None:
         failures += 1
         report("FAIL  stream churn: a boot did not report its heap")
-    elif heap5 != heap25:
+    elif heap_few != heap_many:
         failures += 1
-        report(f"FAIL  stream churn: {heap5} live bytes after 5 streams, {heap25} after 25 — "
-               f"{(heap25 - heap5) / 20:.1f} bytes kept per stream")
+        report(f"FAIL  stream churn: {heap_few} live bytes after {few} streams, {heap_many} after "
+               f"{many} — {(heap_many - heap_few) / (many - few):.1f} bytes kept per stream")
     if not failures:
-        report(f"ok    stream churn: 5 and then 25 streams opened and closed (half by reset), every "
+        report(f"ok    stream churn: {few} and then {many} streams opened and closed (half by reset), every "
                f"one ended because its client went away, nothing left subscribed, and both boots "
-               f"end holding {heap5} live bytes")
+               f"end holding {heap_few} live bytes")
     return failures
 
 
@@ -1537,7 +1555,10 @@ def bulk_failures(elf, linux_bin, content, pristine, work, mnt, report) -> int:
     """The bulk story twice: once as it comes, and once with every seventh TCP
     frame in each direction thrown away. Both must answer as Linux answered."""
     failures = 0
-    for label, conf in (("bulk", None), ("bulk, losing one frame sent in seven", {"lose_one_sent_in": 7})):
+    runs = [("bulk", None)]
+    if not QUICK:
+        runs.append(("bulk, losing one frame sent in seven", {"lose_one_sent_in": 7}))
+    for label, conf in runs:
         started = time.time()
         f, log, answers, files = run_story(elf, linux_bin, content, pristine, work, mnt,
                                            BULK, label, report, conf=conf)
@@ -1592,22 +1613,50 @@ def read_all(sock, pause_after: int = None, pause: float = 0.0) -> bytes:
         got += chunk
 
 
-def slow_reader_failures(elf, pristine, work, mnt, report) -> int:
+def linux_writes_bulk(linux_bin, content, work, mnt, messages: int) -> str:
+    """**THE LINUX BUILD WRITES THE BIG TRANSCRIPT; THE MACHINE SERVES IT.**
+    A hundred 40 KB messages posted to the machine take most of a minute;
+    posted to Linux, a second. The result is a disk image holding the site with
+    that conversation already in it."""
+    root = tempfile.mkdtemp(dir=work)
+    tree_root = os.path.join(root, "content")
+    shutil.copytree(content, tree_root)
+    server = LinuxServer(linux_bin, tree_root, os.path.join(root, "linux.log"))
+    try:
+        cookie = login_cookie(server.port, root)
+        for n in range(1, messages + 1):
+            a = send_live(server.port, root, cookie, "bulk", bulk_text(n), f"b{n}")
+            if a.get("status") != 204:
+                raise RuntimeError(f"Linux would not take bulk message {n}: {a}")
+    finally:
+        server.stop()
+    os.remove(os.path.join(tree_root, "gopher.conf"))
+    image = os.path.join(root, "bulk.img")
+    build_disk(image, tree_root, mnt)
+    return image
+
+
+def slow_reader_failures(elf, linux_bin, content, work, mnt, report) -> int:
     """**A CLIENT THAT READS SLOWLY GETS EVERY BYTE; ONE THAT STOPS IS LET GO.**
     The transcript is fetched three ways from one boot: at full speed; by a
-    client that stops for two seconds twice along the way; and by one that
+    client that stops twice along the way; and by one that
     never reads at all. The second must get exactly what the first got, with
     the machine probing a shut window while it waited. The third must be let
     go after the idle timeout, and the site must go on answering."""
     label = "slow readers"
-    idle_ms = 5000
+    # A pause must outlast the first retransmission timeout (a second) for the
+    # window to be probed. The idle time must outlast the SECOND probe, which
+    # comes three seconds after the window shut: at three seconds, a reader
+    # that had only paused was let go.
+    idle_ms, pause = 5000, 2.0
     # **BIG ENOUGH TO GET PAST THE HOST'S BUFFERS.** A loopback socket with a
     # 2 KB receive buffer still lets its sender queue over a megabyte, and
     # slirp holds more; a smaller answer never shuts the machine's window, and
     # the gate below says so rather than passing.
     messages = 100
-    requests = 1 + messages + 3 + 1
-    scratch, qemu, port, serial = boot_with(elf, pristine, work, mnt, requests,
+    requests = 1 + 3 + 1
+    bulk_image = linux_writes_bulk(linux_bin, content, work, mnt, messages)
+    scratch, qemu, port, serial = boot_with(elf, bulk_image, work, mnt, requests,
                                             idle_timeout_ms=idle_ms)
     failures = 0
 
@@ -1621,8 +1670,6 @@ def slow_reader_failures(elf, pristine, work, mnt, report) -> int:
     after = {}
     try:
         cookie = login_cookie(port, scratch)
-        for n in range(1, messages + 1):
-            send_live(port, scratch, cookie, "bulk", bulk_text(n), f"b{n}")
         fast = socket.create_connection(("127.0.0.1", port), timeout=60)
         get_on_socket(fast, path, cookie)
         quick = parse_raw_response(read_all(fast))
@@ -1630,8 +1677,8 @@ def slow_reader_failures(elf, pristine, work, mnt, report) -> int:
 
         slow = small_socket(port)
         get_on_socket(slow, path, cookie)
-        time.sleep(2.0)
-        patient = parse_raw_response(read_all(slow, pause_after=2_000_000, pause=2.0))
+        time.sleep(pause)
+        patient = parse_raw_response(read_all(slow, pause_after=2_000_000, pause=pause))
         slow.close()
 
         if quick.get("status") != 200 or len(quick.get("body", b"")) < messages * 30_000:
@@ -1763,6 +1810,22 @@ def lagging_stream_failures(elf, pristine, work, mnt, report) -> int:
     return failures
 
 
+class Laps:
+    """How long each part of the run took, said as each ends: the judge is
+    worth running only as often as it is quick."""
+
+    def __init__(self):
+        self.start = self.at = time.time()
+
+    def __call__(self, name: str) -> None:
+        now = time.time()
+        print(f"      ({name}: {now - self.at:.0f} s)", flush=True)
+        self.at = now
+
+    def total(self) -> float:
+        return time.time() - self.start
+
+
 def main() -> int:
     if len(sys.argv) != 5:
         print(__doc__.strip())
@@ -1786,9 +1849,22 @@ def main() -> int:
     # The kernel serves until stopped unless its volume says otherwise. One
     # request per boot for the cases; run_story rewrites this for longer boots.
     set_request_limit(pristine, 1, mnt)
+    lap = Laps()
+    lap("staging")
 
     failures = 0
-    for c in CASES:
+    # **ONE BOOT FOR ALL OF THEM, IN THE QUICK TIER.** A boot per request is
+    # what proves each answer owes nothing to an earlier one; the quick tier
+    # asks them all of one machine instead, still against Linux.
+    cases = [] if QUICK else CASES
+    if QUICK:
+        steps = [step(c["name"], c["method"], c["path"], c["cookie"], c["body"]) for c in CASES]
+        f, _, answers, _ = run_story(elf, linux_bin, content, pristine, work, mnt,
+                                     steps, "single requests, one boot", print)
+        failures += f
+        if not f:
+            print(f"ok    {len(CASES)} single requests to one boot, each answered as Linux answered")
+    for c in cases:
         scratch = tempfile.mkdtemp(dir=work)
         image = os.path.join(scratch, "disk.img")
         shutil.copy(pristine, image)
@@ -1809,6 +1885,7 @@ def main() -> int:
         shutil.rmtree(scratch, ignore_errors=True)
 
     per_case = failures
+    lap("single requests")
 
     # ── the member story ─────────────────────────────────────────────────────
     now = int(time.time())
@@ -1851,22 +1928,38 @@ def main() -> int:
               f"a fresh minted session honored, a stale and a forged one refused, "
               f"and the kernel's own session honored by Linux")
 
+    lap("member story")
+
     # ── a live stream, on both ───────────────────────────────────────────────
     failures += linux_sse_failures(linux_bin, content, work, print)
+    lap("streams on Linux")
     failures += metal_sse_failures(elf, pristine, work, mnt, print)
+    lap("streams on the machine")
     failures += budget_failures(elf, pristine, work, mnt, print)
+    lap("stream budget")
     failures += churn_failures(elf, pristine, work, mnt, print)
+    lap("stream churn")
 
     # ── the send side ────────────────────────────────────────────────────────
     failures += bulk_failures(elf, linux_bin, content, pristine, work, mnt, print)
-    failures += slow_reader_failures(elf, pristine, work, mnt, print)
+    lap("bulk")
+    failures += slow_reader_failures(elf, linux_bin, content, work, mnt, print)
+    lap("slow readers")
     failures += lagging_stream_failures(elf, pristine, work, mnt, print)
+    lap("a lagging stream")
 
     # ── many clients at once ─────────────────────────────────────────────────
     failures += concurrent_failures(elf, linux_bin, content, pristine, work, mnt, print)
+    lap("many clients")
 
     # ── the client that says nothing ─────────────────────────────────────────
     failures += timeout_failures(elf, pristine, work, mnt, print)
+    lap("silent clients")
+    if QUICK:
+        print(f"{len(CASES) - per_case} of {len(CASES)} single requests, and "
+              f"{'every' if failures == per_case else 'not every'} quick boot, answered as Linux "
+              f"answered ({lap.total():.0f} s; the long boots are left to the full run)")
+        return 1 if failures else 0
 
     # ── endurance: the writes, read back every round ─────────────────────────
     f, log, answers, files = run_story(elf, linux_bin, content, pristine, work, mnt,
@@ -1896,6 +1989,8 @@ def main() -> int:
         print(f"ok    endurance: {ENDURANCE_ROUNDS} rounds of write-then-read-it-all-back to ONE boot "
               f"({len(ENDURANCE)} requests) — every one of the {reads} read-backs held every mark "
               f"written before it, each answered as Linux answered, and all {files} files agree")
+
+    lap("endurance")
 
     # ── stamina ──────────────────────────────────────────────────────────────
     rounds = STAMINA * STAMINA_ROUNDS
@@ -1949,9 +2044,10 @@ def main() -> int:
                   + ("unchanged: every request's memory is reclaimed and reused"
                      if peaks[-1] == at else f"{peaks[-1] - at} bytes of growth"))
 
+    lap("stamina")
     print(f"{len(CASES) - per_case} of {len(CASES)} single requests, and "
           f"{'all three' if failures == per_case else 'not all three'} long-running boots, "
-          f"answered as Linux answered")
+          f"answered as Linux answered ({lap.total():.0f} s)")
     return 1 if failures else 0
 
 

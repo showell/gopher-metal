@@ -118,6 +118,16 @@ pub fn read(start_info: u64) Error![]const MemmapEntry {
     return table[0..info.memmap_entries];
 }
 
+/// The command line the loader was given (QEMU's `-append`), or "" when
+/// there is none. It is a C string somewhere in low memory.
+pub fn commandLine(start_info: u64) []const u8 {
+    if (start_info == 0) return "";
+    const info: *const StartInfo = @ptrFromInt(@as(usize, @intCast(start_info)));
+    if (info.magic != magic or info.cmdline_paddr == 0) return "";
+    const text: [*:0]const u8 = @ptrFromInt(@as(usize, @intCast(info.cmdline_paddr)));
+    return std.mem.span(text);
+}
+
 // ══ TESTS ════════════════════════════════════════════════════════════════════
 //
 // `cut` and `largestFree` are the whole decision, and they run on a slice that

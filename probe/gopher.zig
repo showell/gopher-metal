@@ -160,7 +160,6 @@ var held: [max_connections]?Held = @splat(null);
 var held_now: usize = 0;
 var held_most: usize = 0;
 var streams_ended: u64 = 0;
-const keepalive_ns: i96 = streams.Subscriber.keepalive_s * std.time.ns_per_s;
 var read_buf: [16 * 1024]u8 align(16) = undefined;
 var write_buf: [64 * 1024]u8 align(16) = undefined;
 
@@ -322,7 +321,7 @@ pub fn kmain() noreturn {
             letGo(&wire, &table, pick, lease.address, served, conf.idle_ns);
         } else {
             // Nothing to serve: keep the streams moving, then the network.
-            serviceStreams(&wire, &table, lease.address, &hub, request_fba.allocator(), now, conf.idle_ns);
+            serviceStreams(&wire, &table, lease.address, &hub, request_fba.allocator(), now, conf);
             request_fba.reset();
             if (stream.pump(&wire, &table, lease.address) == null) asm volatile ("pause");
             continue;
@@ -337,7 +336,7 @@ pub fn kmain() noreturn {
         deepest = reportStack(deepest);
         // Right after a request, so what it published goes out without waiting
         // for the loop to go idle. Only sooner: the idle pass would send it too.
-        serviceStreams(&wire, &table, lease.address, &hub, request_fba.allocator(), Io.awakeNs() orelse 0, conf.idle_ns);
+        serviceStreams(&wire, &table, lease.address, &hub, request_fba.allocator(), Io.awakeNs() orelse 0, conf);
         request_fba.reset();
     }
 
@@ -531,7 +530,7 @@ fn serveOne(
 /// as there is room, and the rest is carried to the next turn. A stream whose
 /// carry has not moved for the idle time is ended: its tab is not reading, and
 /// its browser will reconnect and resume.
-fn serviceStreams(wire: *stream.Wire, table: *tcp.Table, address: [4]u8, hub: *Hub, scratch: std.mem.Allocator, now: i96, idle_ns: u64) void {
+fn serviceStreams(wire: *stream.Wire, table: *tcp.Table, address: [4]u8, hub: *Hub, scratch: std.mem.Allocator, now: i96, conf: Config) void {
     for (&held) |*slot| {
         const h = if (slot.*) |*h| h else continue;
         const c = &table.conns[h.conn];
@@ -566,7 +565,7 @@ fn serviceStreams(wire: *stream.Wire, table: *tcp.Table, address: [4]u8, hub: *H
         if (wrote) still.last_write = now;
         if (still.carry.len == 0) {
             still.stuck_since = null;
-            if (!wrote and now - still.last_write >= keepalive_ns and c.queueRoom() >= streams.ping.len) {
+            if (!wrote and now - still.last_write >= conf.keepalive_ns and c.queueRoom() >= streams.ping.len) {
                 _ = table.queue(still.conn, streams.ping);
                 still.last_write = now;
             }
@@ -575,7 +574,7 @@ fn serviceStreams(wire: *stream.Wire, table: *tcp.Table, address: [4]u8, hub: *H
         if (still.stuck_since == null or c.una != still.stuck_una or wrote) {
             still.stuck_since = now;
             still.stuck_una = c.una;
-        } else if (now - still.stuck_since.? >= idle_ns) {
+        } else if (now - still.stuck_since.? >= conf.idle_ns) {
             endStream(slot, wire, table, address, hub, .lagging);
         }
     }
@@ -692,6 +691,8 @@ fn logRequest(number: u64, what: []const u8, outcome: []const u8) void {
 ///     requests = N            serve N and stop; absent, serve until stopped
 ///     idle_timeout_ms = N     how long a connection may make no progress
 ///     streams = N             how many live streams may be held at once
+///     keepalive_ms = N        how long a stream may be quiet before a ping;
+///                             absent, the application's own keepalive
 ///     lose_one_sent_in = N    lose every Nth TCP frame sent, to prove that
 ///                             what is lost is sent again
 ///
@@ -701,6 +702,7 @@ fn logRequest(number: u64, what: []const u8, outcome: []const u8) void {
 const Config = struct {
     requests: ?u64 = null,
     idle_ns: u64 = stream.default_idle_ns,
+    keepalive_ns: u64 = streams.Subscriber.keepalive_s * std.time.ns_per_s,
     lose_one_sent_in: u32 = 0,
     /// **HOW MANY STREAMS MAY BE HELD AT ONCE.** A held stream occupies a
     /// connection slot for as long as its tab is open, so without a budget the
@@ -739,6 +741,11 @@ fn readConfig(io: Io, alloc: std.mem.Allocator) Config {
                 serial.fail(config_path ++ ": `idle_timeout_ms` is not a number");
             if (ms == 0) serial.fail(config_path ++ ": an idle timeout of zero would answer nobody");
             conf.idle_ns = ms * std.time.ns_per_ms;
+        } else if (std.mem.eql(u8, key, "keepalive_ms")) {
+            const ms = std.fmt.parseInt(u64, value, 10) catch
+                serial.fail(config_path ++ ": `keepalive_ms` is not a number");
+            if (ms == 0) serial.fail(config_path ++ ": a keepalive of zero would ping on every turn");
+            conf.keepalive_ns = ms * std.time.ns_per_ms;
         } else if (std.mem.eql(u8, key, "lose_one_sent_in")) {
             conf.lose_one_sent_in = std.fmt.parseInt(u32, value, 10) catch
                 serial.fail(config_path ++ ": `lose_one_sent_in` is not a number");
@@ -750,7 +757,7 @@ fn readConfig(io: Io, alloc: std.mem.Allocator) Config {
                 serial.fail(config_path ++ ": `streams` must leave room for requests");
             conf.streams = n;
         } else {
-            serial.fail(config_path ++ ": the keys are `requests`, `idle_timeout_ms`, `streams` and `lose_one_sent_in`");
+            serial.fail(config_path ++ ": the keys are `requests`, `idle_timeout_ms`, `streams`, `keepalive_ms` and `lose_one_sent_in`");
         }
     }
     if (!said_anything) serial.fail(config_path ++ " is present but says nothing");
