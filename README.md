@@ -28,7 +28,7 @@ and its two load-bearing findings are worth repeating here:
 | virtio-net over MMIO | **works** |
 | DHCP | **works** — leases 10.0.2.15 from QEMU's server |
 | ARP | **works** — answers, which is what makes the address reachable |
-| TCP | **works** — one connection, in-order, no retransmit |
+| TCP | **works** — 256 connections; the peer's window and segment size respected, lost segments sent again, silent peers given up on; received in order only |
 | HTTP, ours | **works** — `curl` gets a 200 from it |
 | **`std.http.Server`, unmodified** | **works** — see below |
 | GPT and FAT16, read side | **works** — against Cobblestone's own fixtures |
@@ -42,7 +42,9 @@ and its two load-bearing findings are worth repeating here:
 | the wall clock | **works** — the CMOS RTC, anchored at a seconds edge; pinned leap-day, noon and 4 PM boots |
 | **angry-gopher's whole route table** | **works** — 38 requests, each answered the same as the Linux build over the same files |
 | many requests per boot | **works** — a 22-step story and 300 requests to one boot, judged against Linux; heaps steady |
-| parallel connections, SSE | next: a scheduler |
+| many connections, one loop | **works** — a request is served once its head has arrived |
+| chat's live streams | **works** — held by the loop, pinged, budgeted, and ended when their tab leaves or stops reading |
+| whole requests, uploads | next |
 
     zig build test         # host unit tests for the pure parts of src/
     zig build kernels      # every kernel into probe/
@@ -654,10 +656,14 @@ durations, and the one that matters is host configuration on the volume
 alongside `requests`:
 
     requests = N            serve N and stop; absent, serve until stopped
-    read_timeout_ms = N     how long a connection may say nothing
+    idle_timeout_ms = N     how long a connection may make no progress
+    streams = N             how many live streams may be held at once
+    lose_one_sent_in = N    lose every Nth TCP frame sent (a test switch)
 
-A key that is neither stops the machine, because a timeout that was silently
-not applied is exactly how a server ends up held open by one client. And
+"No progress" is the same measure in every direction: a read that gets no
+bytes, a write whose peer acknowledges nothing, a close whose FIN is not
+acknowledged. An unknown key stops the machine, because a timeout that was
+silently not applied is exactly how a server ends up held open by one client. And
 `std.Io.Reader` reports both a dead NIC and a quiet client as `ReadFailed`,
 leaving the detail to the implementation — so the stream keeps it, and the log
 can say which:
@@ -687,8 +693,9 @@ using chat. The design decision (Steve, after
 **state machines, and one loop over them**: talk to the devices, move every
 connection along, and serve whatever is ready. No threads, no fibers.
 
-`src/tcp.zig` is now a **table of connections**, each with its own state and
-its own receive buffer. A SYN takes a free slot; a full table drops it, as Linux
+`src/tcp.zig` is now a **table of connections** — 256 of them, room for about
+sixty tabs — each with its own state, its own receive buffer and its own send
+queue, about 20 MB in all. A SYN takes a free slot; a full table drops it, as Linux
 does when its accept queue is full, and counts it. The buffer is consumed as the
 request is read, and the window advertises the room actually left, so a body
 bigger than the buffer arrives in pieces instead of being cut short. A slot the
@@ -697,8 +704,8 @@ otherwise a reader part-way through a request could find a stranger's bytes.
 
 The state machine is **pure**: frames go out through whatever "wire" the caller
 supplies, and the initial sequence number and the time are passed in. So it is
-tested on the host — sixteen tests with a recording wire and a fake peer that
-checks sequence numbers as a real client would — and nine mutations of it
+tested on the host (`src/tcp_test.zig`) with a recording wire and a fake peer
+that checks sequence numbers as a real client would, and nine mutations of it
 (finding a connection by port alone, handing out a held slot, a constant window,
 acknowledging more than was taken, never compacting, throwing away what arrived
 with a FIN, accepting out-of-order data, a repeated SYN as a new connection, not
@@ -708,7 +715,7 @@ counting a full table) each fail one.
 (`src/ready.zig`, which asks `std.http.HeadParser` — the parser `receiveHead`
 itself runs — so "ready" and "a whole head" cannot disagree). The oldest ready
 connection is served start to finish; one that has been quiet for
-`read_timeout_ms` is let go; otherwise the network is polled, which moves every
+`idle_timeout_ms` is let go; otherwise the network is polled, which moves every
 connection at once. The next step makes "ready" mean the whole request, body
 included, so a handler only ever reads memory.
 
@@ -764,8 +771,8 @@ mutant sent 15,339 in 28 seconds — so the gate also requires that none came
 before the 25-second keepalive was due.
 
 **Streams cannot starve requests.** A held stream occupies a connection slot
-for as long as its tab is open, so `gopher-metal.conf` gets a third key,
-`streams = N` (by default all but 16 of the 64 slots). When the budget is full,
+for as long as its tab is open, so `gopher-metal.conf` has a key for it,
+`streams = N` (by default all but 64 of the 256 slots). When the budget is full,
 a new stream ends the OLDEST: its browser reconnects, and a conversation stream
 resumes from its last event. With a budget of two, the judge opens three,
 checks the first was closed and the other two still receive.
@@ -778,26 +785,84 @@ byte: the kernel kept its own config file's text in the long-lived heap, and
 `requests = 8` is one byte shorter than `requests = 28`. It frees the text now,
 and both boots end at 490 bytes.
 
-Not yet: a client that vanishes without a FIN or reset is never noticed (there
-is no retransmit timer to give up), and frames go out without regard to the
-peer's window. Those are the send side.
+**A tab that stops reading loses its stream, not the site.** The loop never
+waits on a stream. It takes the next event from a stream's mailbox only when
+it has somewhere to put it (angry-gopher's `nextFrame`), queues as much of the
+frame as the connection's send queue takes, and carries the rest to the next
+turn; the events behind it wait in the mailbox, as they do on Linux while a
+write blocks. A stream whose carry has not moved for the idle time is reset.
+The judge holds two streams on one conversation, reads one and ignores the
+other while 40 KB messages are published:
+
+```
+ok    a lagging stream: the stream nobody read was ended as not keeping up
+      after 52 40 KB messages; the one being read got all 52
+```
+
+The first version ended a stream whenever a new frame did not fit beside the
+last one, and the gate ended the reader too: a 40 KB frame still in flight is
+not a lagging tab.
+
+## The send side
+
+Until this step, a response went onto the wire in 512-byte segments as fast as
+the loop could write them, whatever the peer had room for, and nothing was
+ever sent twice. On an emulated network that never loses anything and buffers
+everything, that passed every gate. Now every connection has a **send queue**,
+and `Table.transmit` — called on every turn of the loop — is a state machine
+like the receive side:
+
+- **The window.** Nothing goes past what the peer last said it has room for.
+  A shut window is probed with one byte when the timer runs out.
+- **The segment size.** The SYN-ACK says ours (1460); a peer's SYN says its,
+  and a peer that says nothing is sent 536-byte segments.
+- **Retransmission.** Bytes leave the queue only when acknowledged. The oldest
+  unacknowledged byte not acknowledged within 200 ms is sent again with
+  everything after it, and the wait doubles, up to 5 s.
+- **Giving up.** Eight timeouts with no progress — about 26 s — and the
+  connection is reset. That is how a peer that vanished without a FIN is
+  noticed.
+- **The FIN goes last**, and only its own acknowledgement closes the
+  connection; the host's close waits for as long as the peer keeps
+  acknowledging, not a fixed two seconds.
+- **An abandoned connection is reset**, so a client still waiting for the rest
+  of an answer is told.
+
+The state machine is tested on the host with a peer that sends windows and
+acknowledgements. On QEMU, three gates exercise what the others never could:
+
+```
+ok    bulk: 8 messages of 40 KB in, a 317376-byte transcript and a 4895-byte
+      page out, all answered as Linux answered
+ok    bulk, losing one frame sent in seven: (the same), 122 frames lost,
+      19 timeouts resent
+ok    slow readers: a reader that paused twice got all 3967477 bytes, with 10
+      window probes sent while it paused; one that never read was let go and
+      the next request answered 5.3 s later
+```
+
+**The loss switch loses only what this machine sends**
+(`lose_one_sent_in`). Losing what arrives as well made each 40 KB request take
+20 s and two of them time out — measured, and not the send side's doing: this
+TCP takes received segments in order only, so one lost segment throws away
+every one behind it, and the peer recovers each hole on its own timer. That
+belongs to the receive-side step.
+
+**The slow-reader gate needs a 4 MB answer.** A loopback client with a 2 KB
+receive buffer still lets its sender queue 1.36 MB, and slirp holds more; with
+the 317 KB transcript the machine's window never shut, and the gate — which
+requires window probes — failed rather than passing on nothing.
 
 ## What the TCP does not do
 
-No congestion control, no retransmission, no out-of-order reassembly, no
-keep-alive. That is not laziness about the general
-case — it is the shape the thing above it already has. `zig-server`'s own
-comment says keep-alive is deliberately off and its accept loop is
-single-threaded.
-
-Two of those are real assumptions about the wire, and both are only allowed
-because this box sits behind Caddy on a private network:
+No congestion control, no fast retransmit, no selective acknowledgement, no
+window scaling, no out-of-order reassembly, no keep-alive. `zig-server`'s own
+comment says keep-alive is deliberately off. The rest are allowed because this
+box sits behind Caddy on a private network, and one of them is a measured cost:
 
 - **In-order only.** A segment whose sequence is not exactly what we expect is
-  dropped and re-acknowledged, which asks the peer to send it again.
-- **No retransmit timer.** If something we send is lost the connection stalls
-  rather than recovering. The day that stops being acceptable is the day this
-  file grows a clock.
+  dropped and re-acknowledged, which asks the peer to send it again — and
+  under loss, that makes the peer resend everything after the hole.
 
 ## What lives elsewhere
 

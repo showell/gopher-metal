@@ -1,23 +1,39 @@
 //! TCP for a server that holds many connections and answers one request on each.
 //!
-//! **A TABLE OF CONNECTIONS, NOT ONE.** This file used to hold exactly one: a
-//! SYN that arrived while a connection was open was ignored, so one client that
-//! connected and said nothing held the whole site until a timer let it go. Chat
-//! makes that the normal case — every conversation tab holds three connections
-//! open for as long as it is open — so the machine has to hold many at once.
-//! It still ANSWERS one request at a time; what changed is that the others wait
-//! in a table instead of at the door.
+//! **A TABLE OF CONNECTIONS, NOT ONE.** Chat holds connections open for as long
+//! as a tab is open, so the machine holds many at once. It still ANSWERS one
+//! request at a time; the others wait in the table instead of at the door.
 //!
-//! **STILL THE SMALL TCP.** No congestion control, no retransmission, no
-//! out-of-order reassembly, no keep-alive. Each is a real assumption about the
-//! wire, and each is allowed only because this box sits behind Caddy on a
-//! private network:
+//! **BOTH DIRECTIONS ARE STATE MACHINES THE LOOP TURNS.** Arriving frames are
+//! fed to `handle`; what we have to say is put in each connection's send queue
+//! with `queue`, and `transmit` — called on every turn of the loop — puts on
+//! the wire whatever the peer has room for, sends again whatever was not
+//! acknowledged in time, and gives up on a peer that has stopped answering.
+//! Nothing here waits.
 //!
-//! - **In-order only.** A segment whose sequence is not exactly the next one
-//!   expected is dropped and re-acknowledged, which asks the peer to send it
-//!   again.
-//! - **No retransmit timer.** If something we send is lost, that connection
-//!   stalls rather than recovering.
+//! **THE SEND SIDE KEEPS ITS PROMISES TO THE PEER.**
+//!
+//! - **The window.** Nothing is sent beyond what the peer last said it has
+//!   room for. A peer that says zero is probed with one byte when the timer
+//!   runs out, so a window that reopens is noticed even if its announcement
+//!   was lost.
+//! - **The segment size.** The SYN-ACK says ours, and the peer's SYN says its;
+//!   a peer that says nothing is sent 536-byte segments, as the RFC requires.
+//! - **Retransmission.** Bytes stay in the queue until they are acknowledged.
+//!   If the oldest is not acknowledged within the timeout, everything from it
+//!   on is sent again and the timeout doubles.
+//! - **Giving up.** After `max_retries` timeouts with no progress the
+//!   connection is reset. That is how a peer that vanished without a FIN is
+//!   noticed, and also how one that stops reading is let go: its window stays
+//!   shut, the probes make no progress, and the count runs out.
+//! - **The FIN goes last**, after every queued byte, and only an
+//!   acknowledgement of the FIN itself closes the connection.
+//!
+//! **STILL THE SMALL TCP**, allowed because this box sits behind Caddy on a
+//! private network: no congestion control, no fast retransmit, no selective
+//! acknowledgement, no window scaling, and received segments are taken in
+//! order only — anything else is dropped and re-acknowledged, which asks the
+//! peer to send it again.
 //!
 //! **PURE, SO IT IS TESTED ON THE HOST.** Nothing here reaches for a device.
 //! Frames go out through whatever `wire` the caller hands in (anything with a
@@ -29,22 +45,43 @@
 const proto = @import("proto.zig");
 
 pub const header_len: usize = 20;
-const payload_at: usize = proto.eth_header_len + proto.ip_header_len + header_len;
+pub const segment_at: usize = proto.eth_header_len + proto.ip_header_len;
 
-const flag_fin: u8 = 0x01;
-const flag_syn: u8 = 0x02;
-const flag_rst: u8 = 0x04;
-const flag_psh: u8 = 0x08;
-const flag_ack: u8 = 0x10;
+pub const flag_fin: u8 = 0x01;
+pub const flag_syn: u8 = 0x02;
+pub const flag_rst: u8 = 0x04;
+pub const flag_psh: u8 = 0x08;
+pub const flag_ack: u8 = 0x10;
+
+/// What a peer that says nothing about segment size may be sent (RFC 9293).
+pub const default_mss: u16 = 536;
+/// What we say we can take: an ethernet frame's worth, which the NIC's receive
+/// buffers hold with room to spare.
+pub const our_mss: u16 = 1460;
+pub const mss_option = [4]u8{ 2, 4, our_mss >> 8, our_mss & 0xFF };
+
+/// **THE RETRANSMISSION CLOCK.** The first wait is Linux's minimum; each
+/// timeout doubles it up to the ceiling, and the connection is reset once
+/// `max_retries` have passed with nothing acknowledged — about 26 seconds of
+/// silence in all.
+pub const first_rto_ns: u64 = 200 * ns_per_ms;
+pub const max_rto_ns: u64 = 5 * ns_per_s;
+pub const max_retries: u8 = 8;
+pub const ns_per_ms = 1_000_000;
+pub const ns_per_s = 1_000_000_000;
 
 pub const State = enum {
     /// The slot is free — unless the host still holds it (`claimed`).
     closed,
     syn_received,
     established,
-    /// We have sent our FIN and are waiting for the peer to finish.
+    /// We have said we are done: the queue drains, then our FIN goes, and the
+    /// connection ends when the FIN is acknowledged.
     closing,
 };
+
+/// Where our FIN is.
+pub const Fin = enum { none, queued, sent, acknowledged };
 
 /// One connection.
 pub const Conn = struct {
@@ -53,17 +90,38 @@ pub const Conn = struct {
     peer_mac: [6]u8 = proto.mac_broadcast,
     peer_port: u16 = 0,
 
-    /// The next sequence number we will send, and the next we expect.
-    snd_nxt: u32 = 0,
+    /// The next sequence number we expect from the peer.
     rcv_nxt: u32 = 0,
 
     /// **WHAT THE PEER HAS SENT AND NOBODY HAS READ YET: `rx[start..end]`.**
     /// The reader consumes from the front, and the space it frees is what the
-    /// window advertises. This used to be a buffer that only ever filled, so a
-    /// request larger than it was silently cut short.
+    /// window advertises.
     rx: []u8,
     start: usize = 0,
     end: usize = 0,
+
+    /// **WHAT WE HAVE TO SAY AND THE PEER HAS NOT ACKNOWLEDGED:
+    /// `tx[tx_start..tx_end]`.** The first `sent` of those bytes are on the
+    /// wire; the rest wait for room in the peer's window. `tx[tx_start]` is
+    /// the byte numbered `una`.
+    tx: []u8,
+    tx_start: usize = 0,
+    tx_end: usize = 0,
+    sent: usize = 0,
+    /// The oldest sequence number the peer has not acknowledged. Before the
+    /// handshake completes it is our SYN's.
+    una: u32 = 0,
+    fin: Fin = .none,
+    /// How many bytes past `una` the peer last said it has room for.
+    wnd: u32 = 0,
+    /// The largest segment the peer said it takes.
+    mss: u16 = default_mss,
+    /// When the oldest unacknowledged thing is sent again, or a shut window
+    /// probed. Null when nothing is waiting on the peer.
+    rto_at: ?i96 = null,
+    rto_ns: u64 = first_rto_ns,
+    /// Timeouts since the peer last acknowledged anything.
+    retries: u8 = 0,
 
     /// The peer has sent its FIN: nothing more is coming, but what already
     /// arrived is still there to be read.
@@ -104,10 +162,20 @@ pub const Conn = struct {
         }
     }
 
-    /// Free space at the end of the buffer, which is what arriving bytes can
-    /// be put into and what the window advertises.
+    /// Free space at the end of the receive buffer, which is what arriving
+    /// bytes can be put into and what the window advertises.
     pub fn room(self: *const Conn) usize {
         return self.rx.len - self.end;
+    }
+
+    /// Bytes we have queued that the peer has not acknowledged.
+    pub fn queued(self: *const Conn) usize {
+        return self.tx_end - self.tx_start;
+    }
+
+    /// How much more can be queued.
+    pub fn queueRoom(self: *const Conn) usize {
+        return self.tx.len - self.queued();
     }
 
     /// Is this connection still one we can talk to?
@@ -115,10 +183,20 @@ pub const Conn = struct {
         return self.state == .established or self.state == .syn_received;
     }
 
+    /// The sequence number of the next thing we would send for the first
+    /// time: after the SYN, the bytes on the wire, and the FIN if it is out.
+    fn nxt(self: *const Conn) u32 {
+        var n = self.una +% @as(u32, @intCast(self.sent));
+        if (self.state == .syn_received) n +%= 1;
+        if (self.fin == .sent) n +%= 1;
+        return n;
+    }
+
     fn reset(self: *Conn) void {
         const rx = self.rx;
+        const tx = self.tx;
         const claimed = self.claimed;
-        self.* = .{ .rx = rx, .claimed = claimed };
+        self.* = .{ .rx = rx, .tx = tx, .claimed = claimed };
     }
 
     fn window(self: *const Conn) u16 {
@@ -163,6 +241,12 @@ pub const Table = struct {
     /// SYNs dropped because every slot was taken — what Linux does when its
     /// accept queue is full. The peer retries; the count says it happened.
     refused: u64 = 0,
+    /// Timeouts that sent something again.
+    retransmits: u64 = 0,
+    /// Bytes sent past a shut window to ask whether it has opened.
+    probes: u64 = 0,
+    /// Connections reset because the peer stopped acknowledging.
+    given_up: u64 = 0,
 
     pub fn init(ip: [4]u8, mac: [6]u8, port: u16, conns: []Conn, out: []u8, isn: *const fn () u32) Table {
         return .{ .local_ip = ip, .local_mac = mac, .port = port, .conns = conns, .out = out, .isn = isn };
@@ -191,10 +275,12 @@ pub const Table = struct {
         return null;
     }
 
-    /// Builds and sends one segment on connection `i`. A payload is already at
-    /// `payload_at` in `self.out` when `payload_len` is nonzero.
-    fn emit(self: *Table, wire: anytype, i: usize, flags: u8, payload_len: usize) void {
+    /// Builds and sends one segment on connection `i`, numbered `seq`. A SYN
+    /// carries our segment size.
+    fn emit(self: *Table, wire: anytype, i: usize, flags: u8, seq: u32, payload: []const u8) void {
         const c = &self.conns[i];
+        const options: []const u8 = if (flags & flag_syn != 0) &mss_option else &.{};
+        const len = header_len + options.len;
         const frame_len = proto.writeIpv4(
             self.out,
             self.local_mac,
@@ -202,55 +288,71 @@ pub const Table = struct {
             self.local_ip,
             c.peer_ip,
             proto.proto_tcp,
-            header_len + payload_len,
+            len + payload.len,
         );
 
-        const t = self.out[proto.eth_header_len + proto.ip_header_len ..][0 .. header_len + payload_len];
+        const t = self.out[segment_at..][0 .. len + payload.len];
         @memcpy(t[0..2], &proto.be16(self.port));
         @memcpy(t[2..4], &proto.be16(c.peer_port));
-        @memcpy(t[4..8], &proto.be32(c.snd_nxt));
+        @memcpy(t[4..8], &proto.be32(seq));
         @memcpy(t[8..12], &proto.be32(c.rcv_nxt));
-        t[12] = (header_len / 4) << 4; // data offset, no options
+        t[12] = @intCast((len / 4) << 4);
         t[13] = flags;
         @memcpy(t[14..16], &proto.be16(c.window()));
         @memcpy(t[16..18], &proto.be16(0)); // the checksum, over a zeroed checksum
         @memcpy(t[18..20], &proto.be16(0)); // no urgent pointer
+        @memcpy(t[header_len..len], options);
+        @memcpy(t[len..], payload);
         @memcpy(t[16..18], &proto.be16(proto.pseudoChecksum(self.local_ip, c.peer_ip, proto.proto_tcp, t)));
 
         wire.send(self.out[0..frame_len]);
-
-        // SYN and FIN each take one sequence number, as if they were a byte.
-        if (flags & (flag_syn | flag_fin) != 0) c.snd_nxt +%= 1;
-        c.snd_nxt +%= @intCast(payload_len);
     }
 
-    /// Sends `bytes` on connection `i`. The caller keeps it under one
-    /// segment's worth; there is no segmentation here.
-    pub fn send(self: *Table, wire: anytype, i: usize, bytes: []const u8) void {
-        if (self.conns[i].state != .established) return;
-        @memcpy(self.out[payload_at..][0..bytes.len], bytes);
-        self.emit(wire, i, flag_psh | flag_ack, bytes.len);
+    /// Puts as much of `bytes` in connection `i`'s send queue as fits, and says
+    /// how much that was. Nothing is sent until `transmit`. Nothing is taken
+    /// on a connection that is not established, or once our FIN is queued.
+    pub fn queue(self: *Table, i: usize, bytes: []const u8) usize {
+        const c = &self.conns[i];
+        if (c.state != .established or c.fin != .none) return 0;
+        if (c.tx_end + bytes.len > c.tx.len and c.tx_start > 0) {
+            const len = c.queued();
+            std.mem.copyForwards(u8, c.tx[0..len], c.tx[c.tx_start..c.tx_end]);
+            c.tx_start = 0;
+            c.tx_end = len;
+        }
+        const n = @min(bytes.len, c.tx.len - c.tx_end);
+        @memcpy(c.tx[c.tx_end..][0..n], bytes[0..n]);
+        c.tx_end += n;
+        return n;
     }
 
     /// Tells the peer how much room there is now. The reader calls it after
     /// consuming, so a peer that had filled the window learns it can go on
     /// without waiting for its own probe.
     pub fn ack(self: *Table, wire: anytype, i: usize) void {
-        if (self.conns[i].state != .established) return;
-        self.emit(wire, i, flag_ack, 0);
+        const c = &self.conns[i];
+        if (c.state != .established and c.state != .closing) return;
+        self.emit(wire, i, flag_ack, c.nxt(), "");
     }
 
-    /// Says we are done sending. The connection closes when the peer agrees,
-    /// or when the host stops waiting and abandons it.
-    pub fn finish(self: *Table, wire: anytype, i: usize) void {
-        if (self.conns[i].state != .established) return;
-        self.emit(wire, i, flag_fin | flag_ack, 0);
-        self.conns[i].state = .closing;
+    /// Says we are done sending. The FIN follows the last queued byte; the
+    /// connection closes when the peer acknowledges it, or when the host stops
+    /// waiting and abandons it.
+    pub fn finish(self: *Table, i: usize) void {
+        const c = &self.conns[i];
+        if (c.state != .established) return;
+        c.fin = .queued;
+        c.state = .closing;
     }
 
-    /// Gives up on connection `i` without a word to the peer.
-    pub fn abandon(self: *Table, i: usize) void {
-        self.conns[i].reset();
+    /// Gives up on connection `i`, telling the peer with a reset: a peer still
+    /// waiting for the rest of an answer should not wait forever.
+    pub fn abandon(self: *Table, wire: anytype, i: usize) void {
+        const c = &self.conns[i];
+        if (c.state == .established or c.state == .closing) {
+            self.emit(wire, i, flag_rst | flag_ack, c.nxt(), "");
+        }
+        c.reset();
     }
 
     /// The host is serving connection `i`: its slot is not to be reused.
@@ -262,6 +364,105 @@ pub const Table = struct {
     /// is free once it is closed.
     pub fn release(self: *Table, i: usize) void {
         self.conns[i].claimed = false;
+    }
+
+    /// One turn of the send side for every connection.
+    pub fn transmit(self: *Table, wire: anytype, now: i96) void {
+        for (self.conns, 0..) |c, i| {
+            if (c.state == .closed) continue;
+            self.transmitOne(wire, i, now);
+        }
+    }
+
+    fn transmitOne(self: *Table, wire: anytype, i: usize, now: i96) void {
+        const c = &self.conns[i];
+        const expired = if (c.rto_at) |at| now >= at else false;
+
+        if (c.state == .syn_received) {
+            // The SYN-ACK was lost, or its answer was.
+            if (!expired) return;
+            if (!backoff(c, now)) return self.giveUp(wire, i);
+            self.retransmits += 1;
+            self.emit(wire, i, flag_syn | flag_ack, c.una, "");
+            return;
+        }
+
+        var probe = false;
+        if (expired) {
+            if (!backoff(c, now)) return self.giveUp(wire, i);
+            // **GO BACK.** Everything from the oldest unacknowledged byte on is
+            // sent again; the peer drops what it already has.
+            c.sent = 0;
+            if (c.fin == .sent) c.fin = .queued;
+            self.retransmits += 1;
+            probe = true;
+        }
+
+        while (c.queued() > c.sent) {
+            const usable = if (c.wnd > c.sent) c.wnd - c.sent else 0;
+            var n = @min(c.queued() - c.sent, usable, c.mss);
+            if (n == 0) {
+                // **A SHUT WINDOW IS PROBED WHEN THE TIMER RUNS OUT.** One byte
+                // past the window: the peer's answer carries its window again.
+                if (!probe) {
+                    if (c.rto_at == null) c.rto_at = now + c.rto_ns;
+                    break;
+                }
+                self.probes += 1;
+                n = 1;
+            }
+            probe = false;
+            self.emit(wire, i, flag_psh | flag_ack, c.una +% @as(u32, @intCast(c.sent)), c.tx[c.tx_start + c.sent ..][0..n]);
+            c.sent += n;
+            if (c.rto_at == null) c.rto_at = now + c.rto_ns;
+        }
+
+        if (c.fin == .queued and c.sent == c.queued()) {
+            self.emit(wire, i, flag_fin | flag_ack, c.una +% @as(u32, @intCast(c.sent)), "");
+            c.fin = .sent;
+            if (c.rto_at == null) c.rto_at = now + c.rto_ns;
+        }
+    }
+
+    /// One more timeout: false once they have run out.
+    fn backoff(c: *Conn, now: i96) bool {
+        if (c.retries >= max_retries) return false;
+        c.retries += 1;
+        c.rto_ns = @min(c.rto_ns * 2, max_rto_ns);
+        c.rto_at = now + c.rto_ns;
+        return true;
+    }
+
+    fn giveUp(self: *Table, wire: anytype, i: usize) void {
+        self.given_up += 1;
+        self.abandon(wire, i);
+    }
+
+    /// Takes in the peer's acknowledgement and window. True once our FIN is
+    /// acknowledged.
+    fn acknowledge(c: *Conn, number: u32, window: u16, now: i96) bool {
+        const flight = c.nxt() -% c.una;
+        const advance = number -% c.una;
+        // An acknowledgement of something never sent, or an old one (which
+        // wraps to a huge advance): neither says anything current.
+        if (advance > flight) return false;
+        c.wnd = window;
+        if (advance == 0) return false;
+
+        const bytes = @min(advance, c.sent);
+        c.tx_start += bytes;
+        c.sent -= bytes;
+        if (c.tx_start == c.tx_end) {
+            c.tx_start = 0;
+            c.tx_end = 0;
+        }
+        c.una +%= advance;
+        if (advance > bytes) c.fin = .acknowledged;
+
+        c.retries = 0;
+        c.rto_ns = first_rto_ns;
+        c.rto_at = if (c.nxt() != c.una) now + c.rto_ns else null;
+        return c.fin == .acknowledged;
     }
 
     /// Feeds one received frame in. `now` is the caller's clock.
@@ -276,7 +477,9 @@ pub const Table = struct {
 
         const src_port = proto.readBe16(t[0..2]);
         const seq = proto.readBe32(t[4..8]);
+        const number = proto.readBe32(t[8..12]);
         const flags = t[13];
+        const window = proto.readBe16(t[14..16]);
         const offset = @as(usize, t[12] >> 4) * 4;
         if (offset < header_len or offset > t.len) return .{ .event = .nothing };
         const data = t[offset..];
@@ -303,13 +506,16 @@ pub const Table = struct {
             c.peer_mac = pkt.src_mac;
             c.peer_port = src_port;
             c.rcv_nxt = seq +% 1; // their SYN takes one
-            c.snd_nxt = self.isn();
+            c.una = self.isn();
+            c.mss = @min(parseMss(t[header_len..offset]) orelse default_mss, our_mss);
+            c.wnd = window;
             c.state = .syn_received;
             c.opened_at = now;
             c.heard_at = now;
+            c.rto_at = now + c.rto_ns;
             self.arrivals += 1;
             c.serial = self.arrivals;
-            self.emit(wire, slot, flag_syn | flag_ack, 0);
+            self.emit(wire, slot, flag_syn | flag_ack, c.una, "");
             return .{ .event = .nothing };
         };
 
@@ -319,27 +525,35 @@ pub const Table = struct {
         // A repeated SYN for a connection we already answered: the SYN-ACK was
         // lost or is late. Say it again, from the same starting number.
         if (flags & flag_syn != 0) {
-            if (c.state == .syn_received) {
-                c.snd_nxt -%= 1;
-                self.emit(wire, i, flag_syn | flag_ack, 0);
-            }
+            if (c.state == .syn_received) self.emit(wire, i, flag_syn | flag_ack, c.una, "");
             return .{ .event = .nothing };
         }
 
+        // Every segment after the SYN acknowledges something.
+        if (flags & flag_ack == 0) return .{ .event = .nothing };
+
         var event: Event = .nothing;
+        var fin_acknowledged = false;
         if (c.state == .syn_received) {
-            if (flags & flag_ack == 0) return .{ .event = .nothing };
+            if (number != c.una +% 1) return .{ .event = .nothing };
+            c.una = number;
+            c.wnd = window;
+            c.rto_at = null;
+            c.retries = 0;
+            c.rto_ns = first_rto_ns;
             c.state = .established;
             event = .opened;
             // Their ACK may carry the first data, so fall through.
+        } else {
+            fin_acknowledged = acknowledge(c, number, window, now);
         }
 
         // **IN-ORDER ONLY.** Anything else is dropped and re-acknowledged,
         // which asks for it again.
         if (data.len > 0) {
             if (seq != c.rcv_nxt or c.peer_done) {
-                self.emit(wire, i, flag_ack, 0);
-                return .{ .event = event, .index = i };
+                self.emit(wire, i, flag_ack, c.nxt(), "");
+                return self.settle(i, event, fin_acknowledged);
             }
             // **WHAT FITS IS TAKEN, AND ONLY THAT IS ACKNOWLEDGED.** A peer
             // that sent past the window will send the rest again, once the
@@ -348,34 +562,48 @@ pub const Table = struct {
             @memcpy(c.rx[c.end..][0..n], data[0..n]);
             c.end += n;
             c.rcv_nxt +%= @intCast(n);
-            self.emit(wire, i, flag_ack, 0);
+            self.emit(wire, i, flag_ack, c.nxt(), "");
             if (n > 0 and event == .nothing) event = .data;
-            if (n < data.len) return .{ .event = event, .index = i };
+            if (n < data.len) return self.settle(i, event, fin_acknowledged);
         }
 
         if (flags & flag_fin != 0 and seq +% @as(u32, @intCast(data.len)) == c.rcv_nxt) {
             c.rcv_nxt +%= 1; // their FIN takes one
-            if (c.state == .closing) {
-                // We had already said we were done: this completes it.
-                self.emit(wire, i, flag_ack, 0);
-                c.reset();
-                return .{ .event = .closed, .index = i };
-            }
             c.peer_done = true;
-            self.emit(wire, i, flag_ack, 0);
-            return .{ .event = .peer_done, .index = i };
+            self.emit(wire, i, flag_ack, c.nxt(), "");
+            if (!fin_acknowledged) return .{ .event = .peer_done, .index = i };
         }
 
-        if (c.state == .closing and flags & flag_ack != 0 and data.len == 0) {
-            // They acknowledged our FIN. Nothing more is coming on this
-            // connection that we care about.
-            c.reset();
-            return .{ .event = .closed, .index = i };
-        }
+        return self.settle(i, event, fin_acknowledged);
+    }
 
-        return .{ .event = event, .index = i };
+    /// A connection whose FIN the peer has acknowledged is over; any other
+    /// reports what the frame did.
+    fn settle(self: *Table, i: usize, event: Event, fin_acknowledged: bool) Result {
+        if (!fin_acknowledged) return .{ .event = event, .index = i };
+        self.conns[i].reset();
+        return .{ .event = .closed, .index = i };
     }
 };
+
+/// The maximum segment size a SYN's options carry, if they carry one.
+pub fn parseMss(options: []const u8) ?u16 {
+    var k: usize = 0;
+    while (k < options.len) {
+        switch (options[k]) {
+            0 => return null, // end of options
+            1 => k += 1, // padding
+            else => {
+                if (k + 1 >= options.len) return null;
+                const len = options[k + 1];
+                if (len < 2 or k + len > options.len) return null;
+                if (options[k] == 2 and len == 4) return proto.readBe16(options[k + 2 .. k + 4]);
+                k += len;
+            },
+        }
+    }
+    return null;
+}
 
 const std = @import("std");
 
@@ -383,368 +611,4 @@ fn eql(a: []const u8, b: []const u8) bool {
     if (a.len != b.len) return false;
     for (a, b) |x, y| if (x != y) return false;
     return true;
-}
-
-// ══ TESTS ════════════════════════════════════════════════════════════════════
-//
-// A fake peer on the other end of a recording wire. Every test drives the
-// table with the frames a real client would send and reads back the frames the
-// table sent, checking the sequence numbers a real client would check.
-
-const testing = std.testing;
-
-const server_ip = [4]u8{ 10, 0, 2, 15 };
-const server_mac = [6]u8{ 0x52, 0x54, 0, 0x12, 0x34, 0x56 };
-const client_mac = [6]u8{ 0x52, 0x55, 0x0a, 0, 2, 2 };
-
-/// The wire, recording what the table sent.
-const Wire = struct {
-    frames: [64][1600]u8 = undefined,
-    lens: [64]usize = undefined,
-    count: usize = 0,
-
-    pub fn send(self: *Wire, frame: []const u8) void {
-        @memcpy(self.frames[self.count][0..frame.len], frame);
-        self.lens[self.count] = frame.len;
-        self.count += 1;
-    }
-
-    const Seg = struct { dst_port: u16, seq: u32, ack: u32, flags: u8, window: u16, payload: []const u8 };
-
-    fn last(self: *Wire) Seg {
-        return self.at(self.count - 1);
-    }
-
-    fn at(self: *Wire, k: usize) Seg {
-        const pkt = proto.parseIpv4(self.frames[k][0..self.lens[k]]).?;
-        const t = pkt.payload;
-        return .{
-            .dst_port = proto.readBe16(t[2..4]),
-            .seq = proto.readBe32(t[4..8]),
-            .ack = proto.readBe32(t[8..12]),
-            .flags = t[13],
-            .window = proto.readBe16(t[14..16]),
-            .payload = t[header_len..],
-        };
-    }
-
-    /// The checksum a real peer would verify, recomputed.
-    fn checksumOk(self: *Wire, k: usize) bool {
-        const pkt = proto.parseIpv4(self.frames[k][0..self.lens[k]]).?;
-        return proto.pseudoChecksum(pkt.src_ip, pkt.dst_ip, proto.proto_tcp, pkt.payload) == 0;
-    }
-};
-
-var next_isn: u32 = 1000;
-fn fakeIsn() u32 {
-    next_isn +%= 1000;
-    return next_isn;
-}
-
-/// One client: an address, a port, and the sequence numbers it keeps.
-const Peer = struct {
-    ip: [4]u8,
-    port: u16,
-    seq: u32 = 5000,
-    ack: u32 = 0,
-
-    fn frame(self: *const Peer, buf: []u8, flags: u8, seq: u32, data: []const u8) []const u8 {
-        const len = proto.writeIpv4(buf, client_mac, server_mac, self.ip, server_ip, proto.proto_tcp, header_len + data.len);
-        const t = buf[proto.eth_header_len + proto.ip_header_len ..][0 .. header_len + data.len];
-        @memcpy(t[0..2], &proto.be16(self.port));
-        @memcpy(t[2..4], &proto.be16(80));
-        @memcpy(t[4..8], &proto.be32(seq));
-        @memcpy(t[8..12], &proto.be32(self.ack));
-        t[12] = (header_len / 4) << 4;
-        t[13] = flags;
-        @memcpy(t[14..16], &proto.be16(8192));
-        @memcpy(t[16..20], &[_]u8{ 0, 0, 0, 0 });
-        @memcpy(t[header_len..], data);
-        @memcpy(t[16..18], &proto.be16(proto.pseudoChecksum(self.ip, server_ip, proto.proto_tcp, t)));
-        return buf[0..len];
-    }
-
-    /// SYN, then the ACK of the server's SYN-ACK. Returns the slot.
-    fn connect(self: *Peer, table: *Table, wire: *Wire, now: i96) !usize {
-        var buf: [1600]u8 = undefined;
-        _ = table.handle(wire, self.frame(&buf, flag_syn, self.seq, ""), now);
-        const synack = wire.last();
-        try testing.expectEqual(flag_syn | flag_ack, synack.flags);
-        try testing.expectEqual(self.seq +% 1, synack.ack);
-        self.seq +%= 1;
-        self.ack = synack.seq +% 1;
-        const r = table.handle(wire, self.frame(&buf, flag_ack, self.seq, ""), now);
-        try testing.expectEqual(Event.opened, r.event);
-        return r.index;
-    }
-
-    fn write(self: *Peer, table: *Table, wire: *Wire, bytes: []const u8, now: i96) Result {
-        var buf: [1600]u8 = undefined;
-        const r = table.handle(wire, self.frame(&buf, flag_psh | flag_ack, self.seq, bytes), now);
-        const reply = wire.last();
-        self.seq = reply.ack; // what the server says it has
-        return r;
-    }
-
-    fn fin(self: *Peer, table: *Table, wire: *Wire, now: i96) Result {
-        var buf: [1600]u8 = undefined;
-        return table.handle(wire, self.frame(&buf, flag_fin | flag_ack, self.seq, ""), now);
-    }
-};
-
-const Fixture = struct {
-    conns: [4]Conn = undefined,
-    bufs: [4][64]u8 = undefined,
-    out: [1600]u8 = undefined,
-    wire: Wire = .{},
-    table: Table = undefined,
-
-    fn init(self: *Fixture) void {
-        for (&self.conns, &self.bufs) |*c, *b| c.* = .{ .rx = b };
-        self.table = Table.init(server_ip, server_mac, 80, &self.conns, &self.out, fakeIsn);
-    }
-};
-
-test "a handshake, a request, and the bytes are there to read" {
-    var f: Fixture = .{};
-    f.init();
-    var p = Peer{ .ip = .{ 10, 0, 2, 2 }, .port = 40000 };
-    const i = try p.connect(&f.table, &f.wire, 1);
-    const r = p.write(&f.table, &f.wire, "GET / HTTP/1.1\r\n\r\n", 2);
-    try testing.expectEqual(Event.data, r.event);
-    try testing.expectEqual(i, r.index);
-    try testing.expectEqualStrings("GET / HTTP/1.1\r\n\r\n", f.table.conns[i].pending());
-    try testing.expect(f.wire.checksumOk(f.wire.count - 1));
-    try testing.expectEqual(@as(i96, 1), f.table.conns[i].opened_at);
-    try testing.expectEqual(@as(i96, 2), f.table.conns[i].heard_at);
-}
-
-test "two connections at once each keep their own bytes" {
-    var f: Fixture = .{};
-    f.init();
-    var a = Peer{ .ip = .{ 10, 0, 2, 2 }, .port = 40000 };
-    var b = Peer{ .ip = .{ 10, 0, 2, 2 }, .port = 40001 };
-    const ia = try a.connect(&f.table, &f.wire, 1);
-    const ib = try b.connect(&f.table, &f.wire, 2);
-    try testing.expect(ia != ib);
-    _ = a.write(&f.table, &f.wire, "from a ", 3);
-    _ = b.write(&f.table, &f.wire, "from b", 4);
-    _ = a.write(&f.table, &f.wire, "again", 5);
-    try testing.expectEqualStrings("from a again", f.table.conns[ia].pending());
-    try testing.expectEqualStrings("from b", f.table.conns[ib].pending());
-    // Arrival order is kept, for serving the oldest first.
-    try testing.expect(f.table.conns[ia].serial < f.table.conns[ib].serial);
-}
-
-test "the same port from another address is another connection" {
-    var f: Fixture = .{};
-    f.init();
-    var a = Peer{ .ip = .{ 10, 0, 2, 2 }, .port = 40000 };
-    var b = Peer{ .ip = .{ 10, 0, 2, 3 }, .port = 40000 };
-    const ia = try a.connect(&f.table, &f.wire, 1);
-    const ib = try b.connect(&f.table, &f.wire, 1);
-    try testing.expect(ia != ib);
-}
-
-test "a full table drops the SYN and counts it, and a freed slot is used again" {
-    var f: Fixture = .{};
-    f.init();
-    var peers: [5]Peer = undefined;
-    for (&peers, 0..) |*p, k| p.* = .{ .ip = .{ 10, 0, 2, 2 }, .port = @intCast(41000 + k) };
-    var slots: [4]usize = undefined;
-    for (peers[0..4], &slots) |*p, *s| s.* = try p.connect(&f.table, &f.wire, 1);
-
-    var buf: [1600]u8 = undefined;
-    const sent = f.wire.count;
-    _ = f.table.handle(&f.wire, peers[4].frame(&buf, flag_syn, peers[4].seq, ""), 2);
-    try testing.expectEqual(sent, f.wire.count); // nothing answered
-    try testing.expectEqual(@as(u64, 1), f.table.refused);
-
-    f.table.abandon(slots[2]);
-    const again = try peers[4].connect(&f.table, &f.wire, 3);
-    try testing.expectEqual(slots[2], again);
-}
-
-test "a slot the host holds is not given to a stranger, even after it closes" {
-    var f: Fixture = .{};
-    f.init();
-    var peers: [5]Peer = undefined;
-    for (&peers, 0..) |*p, k| p.* = .{ .ip = .{ 10, 0, 2, 2 }, .port = @intCast(42000 + k) };
-    var slots: [4]usize = undefined;
-    for (peers[0..4], &slots) |*p, *s| s.* = try p.connect(&f.table, &f.wire, 1);
-
-    f.table.claim(slots[0]);
-    // The peer resets the connection the host is part-way through serving.
-    var buf: [1600]u8 = undefined;
-    const r = f.table.handle(&f.wire, peers[0].frame(&buf, flag_rst, peers[0].seq, ""), 2);
-    try testing.expectEqual(Event.closed, r.event);
-    try testing.expectEqual(State.closed, f.table.conns[slots[0]].state);
-
-    // A new SYN finds no free slot: the closed one is still the host's.
-    _ = f.table.handle(&f.wire, peers[4].frame(&buf, flag_syn, peers[4].seq, ""), 3);
-    try testing.expectEqual(@as(u64, 1), f.table.refused);
-
-    f.table.release(slots[0]);
-    try testing.expectEqual(slots[0], try peers[4].connect(&f.table, &f.wire, 4));
-}
-
-test "the window is the room left, and reading gives it back" {
-    var f: Fixture = .{};
-    f.init();
-    var p = Peer{ .ip = .{ 10, 0, 2, 2 }, .port = 40000 };
-    const i = try p.connect(&f.table, &f.wire, 1);
-    try testing.expectEqual(@as(u16, 64), f.wire.last().window);
-
-    _ = p.write(&f.table, &f.wire, "0123456789" ** 4, 2);
-    try testing.expectEqual(@as(u16, 24), f.wire.last().window);
-
-    f.table.conns[i].consume(40);
-    f.table.ack(&f.wire, i);
-    try testing.expectEqual(@as(u16, 64), f.wire.last().window);
-}
-
-test "a segment bigger than the room is taken in part, and the rest arrives after a read" {
-    var f: Fixture = .{};
-    f.init();
-    var p = Peer{ .ip = .{ 10, 0, 2, 2 }, .port = 40000 };
-    const i = try p.connect(&f.table, &f.wire, 1);
-    const body = "abcdefghij" ** 10; // 100 bytes into a 64-byte buffer
-
-    var buf: [1600]u8 = undefined;
-    const start = p.seq;
-    _ = f.table.handle(&f.wire, p.frame(&buf, flag_psh | flag_ack, start, body), 2);
-    try testing.expectEqual(start +% 64, f.wire.last().ack); // only what fitted
-    try testing.expectEqualStrings(body[0..64], f.table.conns[i].pending());
-
-    // The peer sends the rest again from where the ACK said.
-    f.table.conns[i].consume(64);
-    _ = f.table.handle(&f.wire, p.frame(&buf, flag_psh | flag_ack, start +% 64, body[64..]), 3);
-    try testing.expectEqual(start +% 100, f.wire.last().ack);
-    try testing.expectEqualStrings(body[64..], f.table.conns[i].pending());
-}
-
-test "consuming part of a request compacts the buffer once the front is half gone" {
-    var c = Conn{ .rx = undefined };
-    var b: [16]u8 = undefined;
-    c.rx = &b;
-    @memcpy(b[0..12], "abcdefghijkl");
-    c.end = 12;
-    c.consume(3);
-    try testing.expectEqual(@as(usize, 3), c.start); // not yet past half
-    try testing.expectEqualStrings("defghijkl", c.pending());
-    c.consume(6);
-    try testing.expectEqual(@as(usize, 0), c.start); // compacted
-    try testing.expectEqualStrings("jkl", c.pending());
-    try testing.expectEqual(@as(usize, 13), c.room());
-    c.consume(3);
-    try testing.expectEqual(@as(usize, 16), c.room());
-    c.consume(5); // more than there is is just all of it
-    try testing.expectEqual(@as(usize, 0), c.pending().len);
-}
-
-test "a segment out of order is dropped and the right one asked for again" {
-    var f: Fixture = .{};
-    f.init();
-    var p = Peer{ .ip = .{ 10, 0, 2, 2 }, .port = 40000 };
-    const i = try p.connect(&f.table, &f.wire, 1);
-    var buf: [1600]u8 = undefined;
-    _ = f.table.handle(&f.wire, p.frame(&buf, flag_psh | flag_ack, p.seq +% 5, "later"), 2);
-    try testing.expectEqual(p.seq, f.wire.last().ack);
-    try testing.expectEqual(@as(usize, 0), f.table.conns[i].pending().len);
-}
-
-test "the peer's FIN leaves what it sent to be read" {
-    var f: Fixture = .{};
-    f.init();
-    var p = Peer{ .ip = .{ 10, 0, 2, 2 }, .port = 40000 };
-    const i = try p.connect(&f.table, &f.wire, 1);
-    _ = p.write(&f.table, &f.wire, "GET / HTTP/1.1\r\n\r\n", 2);
-    const r = p.fin(&f.table, &f.wire, 3);
-    try testing.expectEqual(Event.peer_done, r.event);
-    try testing.expect(f.table.conns[i].peer_done);
-    try testing.expectEqualStrings("GET / HTTP/1.1\r\n\r\n", f.table.conns[i].pending());
-    try testing.expectEqual(p.seq +% 1, f.wire.last().ack); // their FIN acknowledged
-    // We can still answer, and then close.
-    f.table.send(&f.wire, i, "HTTP/1.1 200 OK\r\n\r\n");
-    try testing.expectEqualStrings("HTTP/1.1 200 OK\r\n\r\n", f.wire.last().payload);
-}
-
-test "our FIN, then theirs, closes it and frees the slot" {
-    var f: Fixture = .{};
-    f.init();
-    var p = Peer{ .ip = .{ 10, 0, 2, 2 }, .port = 40000 };
-    const i = try p.connect(&f.table, &f.wire, 1);
-    f.table.finish(&f.wire, i);
-    try testing.expectEqual(flag_fin | flag_ack, f.wire.last().flags);
-    try testing.expectEqual(State.closing, f.table.conns[i].state);
-    const r = p.fin(&f.table, &f.wire, 2);
-    try testing.expectEqual(Event.closed, r.event);
-    try testing.expectEqual(State.closed, f.table.conns[i].state);
-    try testing.expectEqual(@as(usize, 0), f.table.inUse());
-}
-
-test "our FIN, then just their ACK, also closes it" {
-    var f: Fixture = .{};
-    f.init();
-    var p = Peer{ .ip = .{ 10, 0, 2, 2 }, .port = 40000 };
-    const i = try p.connect(&f.table, &f.wire, 1);
-    f.table.finish(&f.wire, i);
-    p.ack = f.wire.last().seq +% 1;
-    var buf: [1600]u8 = undefined;
-    const r = f.table.handle(&f.wire, p.frame(&buf, flag_ack, p.seq, ""), 2);
-    try testing.expectEqual(Event.closed, r.event);
-}
-
-test "a segment for no connection, and a stray RST, are ignored" {
-    var f: Fixture = .{};
-    f.init();
-    var p = Peer{ .ip = .{ 10, 0, 2, 2 }, .port = 40000 };
-    var buf: [1600]u8 = undefined;
-    try testing.expectEqual(Event.nothing, f.table.handle(&f.wire, p.frame(&buf, flag_ack, 1, "hello"), 1).event);
-    try testing.expectEqual(Event.nothing, f.table.handle(&f.wire, p.frame(&buf, flag_rst, 1, ""), 1).event);
-    try testing.expectEqual(@as(usize, 0), f.wire.count);
-    try testing.expectEqual(@as(usize, 0), f.table.inUse());
-}
-
-test "a repeated SYN is answered again, from the same starting number" {
-    var f: Fixture = .{};
-    f.init();
-    var p = Peer{ .ip = .{ 10, 0, 2, 2 }, .port = 40000 };
-    var buf: [1600]u8 = undefined;
-    _ = f.table.handle(&f.wire, p.frame(&buf, flag_syn, p.seq, ""), 1);
-    const first = f.wire.last();
-    _ = f.table.handle(&f.wire, p.frame(&buf, flag_syn, p.seq, ""), 2);
-    const second = f.wire.last();
-    try testing.expectEqual(first.seq, second.seq);
-    try testing.expectEqual(flag_syn | flag_ack, second.flags);
-    try testing.expectEqual(@as(usize, 1), f.table.inUse()); // not a second connection
-}
-
-test "every initial sequence number comes from the supplied source" {
-    var f: Fixture = .{};
-    f.init();
-    var a = Peer{ .ip = .{ 10, 0, 2, 2 }, .port = 40000 };
-    var b = Peer{ .ip = .{ 10, 0, 2, 2 }, .port = 40001 };
-    _ = try a.connect(&f.table, &f.wire, 1);
-    const first = a.ack -% 1;
-    _ = try b.connect(&f.table, &f.wire, 1);
-    const second = b.ack -% 1;
-    try testing.expectEqual(first +% 1000, second);
-}
-
-test "a frame that is not ours changes nothing" {
-    var f: Fixture = .{};
-    f.init();
-    var p = Peer{ .ip = .{ 10, 0, 2, 2 }, .port = 40000 };
-    var buf: [1600]u8 = undefined;
-    const frame = p.frame(&buf, flag_syn, 1, "");
-    // Another port.
-    var other: [1600]u8 = undefined;
-    @memcpy(other[0..frame.len], frame);
-    const tcp_at = proto.eth_header_len + proto.ip_header_len;
-    @memcpy(other[tcp_at + 2 .. tcp_at + 4], &proto.be16(8080));
-    try testing.expectEqual(Event.nothing, f.table.handle(&f.wire, other[0..frame.len], 1).event);
-    // Garbage.
-    try testing.expectEqual(Event.nothing, f.table.handle(&f.wire, "not a frame", 1).event);
-    try testing.expectEqual(@as(usize, 0), f.table.inUse());
 }

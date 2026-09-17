@@ -406,14 +406,14 @@ class Conf(unittest.TestCase):
             real_mount, real_umount = G.mount, G.umount
             G.mount, G.umount = fake_mount, lambda m: None
             try:
-                G.set_request_limit("unused.img", 7, d, read_timeout_ms=1234)
+                G.set_request_limit("unused.img", 7, d, idle_timeout_ms=1234)
                 text = open(os.path.join(d, "gopher-metal.conf")).read()
             finally:
                 G.mount, G.umount = real_mount, real_umount
-        self.assertEqual(text, "requests = 7\nread_timeout_ms = 1234\n")
+        self.assertEqual(text, "requests = 7\nidle_timeout_ms = 1234\n")
         # The kernel's parser: `key = value`, one per line, nothing else.
         for line in text.strip().splitlines():
-            self.assertRegex(line, _re.compile(r"^(requests|read_timeout_ms) = \d+$"))
+            self.assertRegex(line, _re.compile(r"^(requests|idle_timeout_ms) = \d+$"))
 
     def test_a_default_timeout_is_written_when_none_is_asked_for(self):
         with tempfile.TemporaryDirectory() as d:
@@ -424,7 +424,45 @@ class Conf(unittest.TestCase):
                 text = open(os.path.join(d, "gopher-metal.conf")).read()
             finally:
                 G.mount, G.umount = real_mount, real_umount
-        self.assertIn("read_timeout_ms = 10000", text)
+        self.assertIn("idle_timeout_ms = 10000", text)
+
+
+    def test_the_optional_keys_are_written_as_the_kernel_reads_them(self):
+        with tempfile.TemporaryDirectory() as d:
+            real_mount, real_umount = G.mount, G.umount
+            G.mount, G.umount = lambda *a, **k: None, lambda m: None
+            try:
+                G.set_request_limit("unused.img", 3, d, streams=2, lose_one_sent_in=7)
+                text = open(os.path.join(d, "gopher-metal.conf")).read()
+            finally:
+                G.mount, G.umount = real_mount, real_umount
+        self.assertEqual(text, "requests = 3\nidle_timeout_ms = 10000\nstreams = 2\nlose_one_sent_in = 7\n")
+
+
+class TcpCounts(unittest.TestCase):
+    LINE = ("  tcp: 12 timeouts sent something again, 3 window probes, "
+            "0 peers given up on, 41 frames lost on purpose\n")
+
+    def test_the_kernels_line_is_read(self):
+        self.assertEqual(G.tcp_counts("x\n" + self.LINE),
+                         {"retransmits": 12, "probes": 3, "given_up": 0, "lost": 41})
+
+    def test_no_line_is_none_not_zeros(self):
+        self.assertIsNone(G.tcp_counts("  connections: at most 3 at once, 0 turned away\n"))
+
+
+class Bulk(unittest.TestCase):
+    def test_each_message_names_itself_first_and_is_about_40_kb(self):
+        text = G.bulk_text(3)
+        self.assertTrue(text.startswith("bulk-03+"))
+        self.assertLess(len(text), 64 * 1024)  # chat's limit on one message
+        self.assertGreater(len(text), 35 * 1024)
+        self.assertNotIn(" ", text)  # form-encoded: curl sends it as is
+
+    def test_the_transcript_read_expects_every_message(self):
+        read = [s for s in G.BULK if s["path"].endswith("/raw")]
+        self.assertEqual(len(read), 1)
+        self.assertEqual(read[0]["expect"], [G.bulk_name(n) for n in range(1, G.BULK_MESSAGES + 1)])
 
 
 class RawResponse(unittest.TestCase):

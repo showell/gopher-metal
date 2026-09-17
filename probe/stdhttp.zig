@@ -32,6 +32,7 @@ var dhcp_frame: [net.buffer_size]u8 align(16) = undefined;
 var dhcp_reply: [1024]u8 align(16) = undefined;
 var tcp_out: [net.buffer_size]u8 align(16) = undefined;
 var tcp_received: [8192]u8 align(16) = undefined;
+var tcp_queue: [16 * 1024]u8 align(16) = undefined;
 var read_buf: [4096]u8 align(16) = undefined;
 var write_buf: [4096]u8 align(16) = undefined;
 
@@ -63,8 +64,9 @@ pub fn kmain() noreturn {
     serial.putIp(lease.address);
     serial.put("\n  listening on port 80, with zig's own HTTP\n");
 
-    var slots = [_]tcp.Conn{.{ .rx = &tcp_received }};
+    var slots = [_]tcp.Conn{.{ .rx = &tcp_received, .tx = &tcp_queue }};
     var table = tcp.Table.init(lease.address, nic.mac, 80, &slots, &tcp_out, isn);
+    var wire = stream.Wire{ .nic = &nic };
 
     // Wait for a request to arrive before handing the stream to std.http:
     // the host only ever serves a connection whose request head is here.
@@ -72,12 +74,12 @@ pub fn kmain() noreturn {
     while (spins < 200_000_000) : (spins += 1) {
         const c = &table.conns[0];
         if (c.state == .established and metal.ready.check(c.pending(), c.peer_done) != .waiting) break;
-        if (stream.pump(&nic, &table, lease.address) == null) asm volatile ("pause");
+        if (stream.pump(&wire, &table, lease.address) == null) asm volatile ("pause");
     }
     if (table.conns[0].state != .established) serial.fail("nothing connected before the spin budget ran out");
     serial.put("  connected\n");
     table.claim(0);
-    var s = stream.Stream.init(&nic, &table, 0, lease.address, &read_buf, &write_buf);
+    var s = stream.Stream.init(&wire, &table, 0, lease.address, &read_buf, &write_buf);
 
     var server = std.http.Server.init(s.reader(), s.writer());
 

@@ -25,6 +25,7 @@ var frame: [net.buffer_size]u8 align(16) = undefined;
 var reply: [1024]u8 align(16) = undefined;
 var out: [net.buffer_size]u8 align(16) = undefined;
 var request: [4096]u8 align(16) = undefined;
+var response_queue: [4096]u8 align(16) = undefined;
 
 const body = "hello from no Linux\n";
 
@@ -86,7 +87,7 @@ pub fn kmain() noreturn {
     serial.putIp(lease.address);
     serial.put("\n  listening on port 80\n");
 
-    var slots = [_]tcp.Conn{.{ .rx = &request }};
+    var slots = [_]tcp.Conn{.{ .rx = &request, .tx = &response_queue }};
     var server = tcp.Table.init(lease.address, nic.mac, 80, &slots, &out, isn);
 
     // Bounded rather than forever: a probe that hangs is worse than one that
@@ -94,6 +95,8 @@ pub fn kmain() noreturn {
     var spins: usize = 0;
     var answered = false;
     while (spins < 200_000_000) : (spins += 1) {
+        const now = metal.io.awakeNs() orelse 0;
+        server.transmit(&nic, now);
         const got = nic.poll() orelse {
             asm volatile ("pause");
             continue;
@@ -110,7 +113,7 @@ pub fn kmain() noreturn {
             continue;
         }
 
-        const r = server.handle(&nic, got.frame, 0);
+        const r = server.handle(&nic, got.frame, now);
         switch (r.event) {
             .data, .peer_done => {
                 const pending = server.conns[r.index].pending();
@@ -118,8 +121,9 @@ pub fn kmain() noreturn {
                 serial.put("  request: ");
                 serial.put(firstLine(pending));
                 serial.put("\n");
-                server.send(&nic, r.index, response);
-                server.finish(&nic, r.index);
+                if (server.queue(r.index, response) != response.len)
+                    serial.fail("the response did not fit in the send queue");
+                server.finish(r.index);
                 answered = true;
             },
             .closed => {

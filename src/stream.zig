@@ -24,37 +24,62 @@ const io = @import("io.zig");
 const net = @import("net.zig");
 const tcp = @import("tcp.zig");
 const arp = @import("arp.zig");
+const proto = @import("proto.zig");
 
 const Reader = std.Io.Reader;
 const Writer = std.Io.Writer;
 
-/// **EVERY WAIT ON THIS MACHINE IS A MEASURED DURATION.** Both of these were
-/// spin counts — "two hundred million turns of the loop, then give up" — which
-/// is some unknown number of seconds that changes with the CPU, and which ended
-/// in a silent end-of-stream as though the client had politely hung up.
+/// **EVERY WAIT ON THIS MACHINE IS A MEASURED DURATION.** These were spin
+/// counts once — some unknown number of seconds that changed with the CPU.
 ///
-/// A client that connects and then says nothing is the case that matters: this
-/// server takes one connection at a time, so that client holds the whole site.
-/// Ten seconds is long for a peer that has already completed a TCP handshake
-/// and is behind Caddy on the same machine.
-pub const default_read_ns: u64 = 10 * std.time.ns_per_s;
+/// **HOW LONG A CONNECTION MAY MAKE NO PROGRESS**, in either direction: a
+/// read that gets no bytes, a write whose peer takes none, a close whose FIN
+/// is not acknowledged. A client that connects and then says nothing is the
+/// case that matters most, and ten seconds is long for a peer that has already
+/// completed a TCP handshake and is behind Caddy on the same machine.
+pub const default_idle_ns: u64 = 10 * std.time.ns_per_s;
 
-/// How long to wait for the peer to acknowledge our FIN before moving on. The
-/// answer has already been sent by then; this is politeness, and two seconds of
-/// it is plenty.
-pub const default_close_ns: u64 = 2 * std.time.ns_per_s;
+/// **THE NIC, AS THE TABLE SEES IT, WITH A WAY TO LOSE FRAMES ON PURPOSE.**
+/// Retransmission is invisible on an emulated network that never drops
+/// anything, so it cannot be judged there. With `lose_one_sent_in` set, every
+/// Nth TCP frame this machine sends is thrown away instead of delivered, and
+/// the count says how many — the same path a lossy link would take, chosen by
+/// the host's configuration rather than by luck. Zero loses nothing.
+///
+/// **ONLY WHAT WE SEND.** Losing what arrives would judge the peer's recovery,
+/// and our in-order-only receiving, rather than our retransmission.
+pub const Wire = struct {
+    nic: *net.Net,
+    lose_one_sent_in: u32 = 0,
+    tcp_sent: u64 = 0,
+    lost: u64 = 0,
 
-/// What one segment carries. Kept well under the 1500-byte ethernet MTU, and
-/// under the 536 bytes a peer assumes when we send no MSS option -- **we do
-/// not advertise one**, so a peer is entitled to assume the smaller number,
-/// and sending more than it expects is how a connection mysteriously stalls.
-const segment_max: usize = 512;
+    pub fn send(self: *Wire, frame: []const u8) void {
+        if (self.lose_one_sent_in != 0 and isTcp(frame)) {
+            self.tcp_sent += 1;
+            if (self.tcp_sent % self.lose_one_sent_in == 0) {
+                self.lost += 1;
+                return;
+            }
+        }
+        self.nic.send(frame);
+    }
+
+    fn isTcp(frame: []const u8) bool {
+        const pkt = proto.parseIpv4(frame) orelse return false;
+        return pkt.protocol == proto.proto_tcp;
+    }
+};
 
 /// One turn of the loop for every connection at once: take a frame if there is
-/// one, answer ARP, and let the table see the rest. Null when there was no
-/// frame. The host calls this while nothing is ready to serve; a Stream calls
-/// it while it waits, so the other connections keep moving either way.
-pub fn pump(nic: *net.Net, table: *tcp.Table, ip: [4]u8) ?tcp.Result {
+/// one, answer ARP, let the table see the rest, and let the table send what it
+/// has to. Null when there was no frame. The host calls this while nothing is
+/// ready to serve; a Stream calls it while it waits, so the other connections
+/// keep moving either way.
+pub fn pump(wire: *Wire, table: *tcp.Table, ip: [4]u8) ?tcp.Result {
+    const now = io.awakeNs() orelse 0;
+    defer table.transmit(wire, now);
+    const nic = wire.nic;
     const got = nic.poll() orelse return null;
     defer nic.recycle(got.id);
 
@@ -66,34 +91,32 @@ pub fn pump(nic: *net.Net, table: *tcp.Table, ip: [4]u8) ?tcp.Result {
         }
         return .{ .event = .nothing };
     }
-    return table.handle(nic, got.frame, io.awakeNs() orelse 0);
+    return table.handle(wire, got.frame, now);
 }
 
 /// One connection of the table, as a reader and a writer.
 pub const Stream = struct {
-    nic: *net.Net,
+    wire: *Wire,
     table: *tcp.Table,
     index: usize,
     /// Our own address, for answering ARP while a read is waiting.
     ip: [4]u8,
 
-    /// How long a read waits for bytes, and how long a close waits for the FIN
-    /// to be acknowledged.
-    read_ns: u64 = default_read_ns,
-    close_ns: u64 = default_close_ns,
+    /// How long a read, a write or a close may go without progress.
+    idle_ns: u64 = default_idle_ns,
 
-    /// **WHY THE LAST READ FAILED.** `std.Io.Reader` says the detail behind
-    /// `ReadFailed` belongs to the implementation, and this is it: the host
-    /// logs "the client stopped sending" rather than an error name that could
-    /// equally mean the NIC fell over.
+    /// **WHY THE LAST READ OR WRITE FAILED.** `std.Io.Reader` says the detail
+    /// behind `ReadFailed` belongs to the implementation, and this is it: the
+    /// host logs "the client stopped sending" rather than an error name that
+    /// could equally mean the NIC fell over.
     timed_out: bool = false,
 
     reader_iface: Reader,
     writer_iface: Writer,
 
-    pub fn init(nic: *net.Net, table: *tcp.Table, index: usize, ip: [4]u8, read_buf: []u8, write_buf: []u8) Stream {
+    pub fn init(wire: *Wire, table: *tcp.Table, index: usize, ip: [4]u8, read_buf: []u8, write_buf: []u8) Stream {
         return .{
-            .nic = nic,
+            .wire = wire,
             .table = table,
             .index = index,
             .ip = ip,
@@ -124,12 +147,12 @@ pub const Stream = struct {
     }
 
     pub fn pumpOnce(self: *Stream) void {
-        _ = pump(self.nic, self.table, self.ip);
+        _ = pump(self.wire, self.table, self.ip);
     }
 
     /// Bytes the peer has sent that we have not handed out, waiting for some
     /// to arrive if there are none. Null once nothing more is coming — either
-    /// because the peer closed, or because it stopped talking for `read_ns`,
+    /// because the peer closed, or because it stopped talking for `idle_ns`,
     /// which `timed_out` tells apart.
     fn waitForBytes(self: *Stream) ?[]u8 {
         self.timed_out = false;
@@ -139,7 +162,7 @@ pub const Stream = struct {
             if (c.pending().len > 0) return c.pending();
             // Closed, or the peer has said it is done: nothing more is coming.
             if (!c.open() or c.peer_done) return null;
-            if (self.clock() - started >= self.read_ns) {
+            if (self.clock() - started >= self.idle_ns) {
                 self.timed_out = true;
                 return null;
             }
@@ -159,25 +182,50 @@ pub const Stream = struct {
             @panic("a connection was read before the clock was started: this machine cannot bound a wait it cannot measure");
     }
 
-    /// Sends bytes as TCP segments, a segment at a time.
+    /// **HANDS BYTES TO THE CONNECTION'S SEND QUEUE, WAITING FOR ROOM.** The
+    /// table puts them on the wire as the peer's window allows. A queue that
+    /// stays full is a peer taking nothing; after `idle_ns` of that the write
+    /// fails, and the table's own retransmission count ends a peer that has
+    /// gone altogether.
     fn sendAll(self: *Stream, bytes: []const u8) error{WriteFailed}!void {
-        if (self.conn().state != .established) return error.WriteFailed;
+        self.timed_out = false;
         var at: usize = 0;
+        var since = self.clock();
+        var una = self.conn().una;
         while (at < bytes.len) {
-            const n = @min(segment_max, bytes.len - at);
-            self.table.send(self.nic, self.index, bytes[at..][0..n]);
+            const c = self.conn();
+            if (c.state != .established) return error.WriteFailed;
+            const n = self.table.queue(self.index, bytes[at..]);
             at += n;
+            if (n > 0 or c.una != una) {
+                since = self.clock();
+                una = c.una;
+            }
+            if (at == bytes.len) break;
+            if (self.clock() - since >= self.idle_ns) {
+                self.timed_out = true;
+                return error.WriteFailed;
+            }
+            self.pumpOnce();
+            asm volatile ("pause");
         }
     }
 
-    /// Says we are done sending, which closes the connection once the peer
-    /// agrees. `std.http.Server` writes `connection: close` for us; this is the
-    /// TCP half of the same statement.
+    /// Says we are done sending, and waits for everything queued to be
+    /// delivered and our FIN acknowledged — for as long as the peer keeps
+    /// acknowledging something. `std.http.Server` writes `connection: close`
+    /// for us; this is the TCP half of the same statement.
     pub fn finish(self: *Stream) void {
-        self.table.finish(self.nic, self.index);
-        const started = self.clock();
+        self.table.finish(self.index);
+        var since = self.clock();
+        var una = self.conn().una;
         while (self.conn().state != .closed) {
-            if (self.clock() - started >= self.close_ns) return;
+            const c = self.conn();
+            if (c.una != una) {
+                since = self.clock();
+                una = c.una;
+            }
+            if (self.clock() - since >= self.idle_ns) return;
             self.pumpOnce();
             asm volatile ("pause");
         }
@@ -192,9 +240,9 @@ fn streamFn(r: *Reader, w: *Writer, limit: std.Io.Limit) Reader.StreamError!usiz
     const c = self.conn();
     // A window that had shrunk below a segment is announced when it reopens,
     // so a peer that filled it does not sit waiting for its own probe.
-    const was_tight = c.room() < segment_max;
+    const was_tight = c.room() < tcp.our_mss;
     c.consume(n);
-    if (was_tight and c.room() >= segment_max) self.table.ack(self.nic, self.index);
+    if (was_tight and c.room() >= tcp.our_mss) self.table.ack(self.wire, self.index);
     return n;
 }
 

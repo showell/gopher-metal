@@ -119,11 +119,16 @@ var dhcp_reply: [1024]u8 align(16) = undefined;
 var tcp_out: [net.buffer_size]u8 align(16) = undefined;
 
 /// **HOW MANY CONNECTIONS THE MACHINE HOLDS AT ONCE.** A chat tab holds three
-/// open for as long as it is open, so this is about twenty tabs — a guess,
-/// until the question of how many to size for is answered. Each connection
-/// has its own receive buffer, taken from the machine's pages at boot.
-const max_connections = 64;
+/// or four open for as long as it is open, so this is room for about sixty
+/// tabs — more than chat has ever had, on purpose. Each connection has its own
+/// receive buffer and send queue, taken from the machine's pages at boot:
+/// about 20 MB for all of them.
+const max_connections = 256;
 const rx_bytes = 16 * 1024;
+/// A send queue holds what the peer has not yet acknowledged. A response
+/// larger than this waits for acknowledgements as it goes; a held stream whose
+/// next frames do not fit is a client that is not keeping up.
+const tx_bytes = 64 * 1024;
 var conn_slots: [max_connections]tcp.Conn = undefined;
 
 fn isn() u32 {
@@ -140,6 +145,16 @@ const Held = struct {
     conn: usize,
     kept: streams.Kept,
     last_write: i96,
+    /// **THE REST OF A FRAME THE SEND QUEUE HAD NO ROOM FOR**, on the base heap,
+    /// and how much of it has been queued. While it is here no further event
+    /// is taken: they wait in the stream's mailbox.
+    carry: []u8 = &.{},
+    carry_at: usize = 0,
+    /// Since when the carry has not moved, and where the peer's
+    /// acknowledgements stood then: a stream stuck for the idle time is a
+    /// client that is not keeping up.
+    stuck_since: ?i96 = null,
+    stuck_una: u32 = 0,
 };
 var held: [max_connections]?Held = @splat(null);
 var held_now: usize = 0;
@@ -242,8 +257,8 @@ pub fn kmain() noreturn {
 
     const conf = readConfig(io, base);
     const limit = conf.requests;
-    serial.put("  a connection may say nothing for ");
-    serial.putDec(conf.read_ns / std.time.ns_per_ms);
+    serial.put("  a connection may make no progress for ");
+    serial.putDec(conf.idle_ns / std.time.ns_per_ms);
     serial.put(" ms\n");
     if (limit) |n| {
         serial.put("  serving ");
@@ -264,8 +279,19 @@ pub fn kmain() noreturn {
 
     const rx_all = pages.allocator.alloc(u8, max_connections * rx_bytes) catch
         serial.fail("the machine has not enough memory for its connections");
-    for (&conn_slots, 0..) |*c, k| c.* = .{ .rx = rx_all[k * rx_bytes ..][0..rx_bytes] };
+    const tx_all = pages.allocator.alloc(u8, max_connections * tx_bytes) catch
+        serial.fail("the machine has not enough memory for its connections");
+    for (&conn_slots, 0..) |*c, k| c.* = .{
+        .rx = rx_all[k * rx_bytes ..][0..rx_bytes],
+        .tx = tx_all[k * tx_bytes ..][0..tx_bytes],
+    };
     var table = tcp.Table.init(lease.address, nic.mac, 80, &conn_slots, &tcp_out, isn);
+    var wire = stream.Wire{ .nic = &nic, .lose_one_sent_in = conf.lose_one_sent_in };
+    if (conf.lose_one_sent_in != 0) {
+        serial.put("  losing one TCP frame in ");
+        serial.putDec(conf.lose_one_sent_in);
+        serial.put(" of those sent, as " ++ config_path ++ " says\n");
+    }
     serial.put("  holding up to ");
     serial.putDec(max_connections);
     serial.put(" connections at once\n");
@@ -278,7 +304,7 @@ pub fn kmain() noreturn {
     //
     // **MANY CONNECTIONS, ONE REQUEST AT A TIME.** Every turn, the oldest
     // connection whose whole request head has arrived is served, start to
-    // finish. One that has been quiet for `read_timeout_ms` without sending a
+    // finish. One that has been quiet for `idle_timeout_ms` without sending a
     // head is let go. Otherwise the network is polled, which moves every
     // connection along at once — so a client that connects and says nothing
     // waits in the table instead of holding the door.
@@ -290,15 +316,15 @@ pub fn kmain() noreturn {
         const now = Io.awakeNs() orelse 0;
         if (nextReady(&table)) |pick| {
             served += 1;
-            serveOne(io, &nic, &table, pick, lease.address, request_fba.allocator(), &hub, served, conf.read_ns, conf.streams);
-        } else if (quiet(&table, now, conf.read_ns)) |pick| {
+            serveOne(io, &wire, &table, pick, lease.address, request_fba.allocator(), &hub, served, conf.idle_ns, conf.streams);
+        } else if (quiet(&table, now, conf.idle_ns)) |pick| {
             served += 1;
-            letGo(&nic, &table, pick, lease.address, served);
+            letGo(&wire, &table, pick, lease.address, served, conf.idle_ns);
         } else {
             // Nothing to serve: keep the streams moving, then the network.
-            serviceStreams(&nic, &table, lease.address, &hub, request_fba.allocator(), now);
+            serviceStreams(&wire, &table, lease.address, &hub, request_fba.allocator(), now, conf.idle_ns);
             request_fba.reset();
-            if (stream.pump(&nic, &table, lease.address) == null) asm volatile ("pause");
+            if (stream.pump(&wire, &table, lease.address) == null) asm volatile ("pause");
             continue;
         }
         // What this request used of its heap, BEFORE the reset: the same
@@ -311,13 +337,13 @@ pub fn kmain() noreturn {
         deepest = reportStack(deepest);
         // Right after a request, so what it published goes out without waiting
         // for the loop to go idle. Only sooner: the idle pass would send it too.
-        serviceStreams(&nic, &table, lease.address, &hub, request_fba.allocator(), Io.awakeNs() orelse 0);
+        serviceStreams(&wire, &table, lease.address, &hub, request_fba.allocator(), Io.awakeNs() orelse 0, conf.idle_ns);
         request_fba.reset();
     }
 
     // The boot is over: every stream still held ends with it.
     for (&held) |*slot| {
-        if (slot.* != null) endStream(slot, &nic, &table, lease.address, &hub, "the machine is stopping");
+        if (slot.* != null) endStream(slot, &wire, &table, lease.address, &hub, .stopping);
     }
     serial.put("  streams: at most ");
     serial.putDec(held_most);
@@ -334,6 +360,15 @@ pub fn kmain() noreturn {
     serial.put(" at once, ");
     serial.putDec(table.refused);
     serial.put(" turned away for want of a slot\n");
+    serial.put("  tcp: ");
+    serial.putDec(table.retransmits);
+    serial.put(" timeouts sent something again, ");
+    serial.putDec(table.probes);
+    serial.put(" window probes, ");
+    serial.putDec(table.given_up);
+    serial.put(" peers given up on, ");
+    serial.putDec(wire.lost);
+    serial.put(" frames lost on purpose\n");
     const mem = router.mem_meter.snapshot();
     const page_stats = pages.stats();
     serial.put("  pages: ");
@@ -368,13 +403,13 @@ fn nextReady(table: *tcp.Table) ?usize {
     return best;
 }
 
-/// The oldest connection that has gone quiet for `read_ns` without sending a
+/// The oldest connection that has gone quiet for `idle_ns` without sending a
 /// whole request, or null.
-fn quiet(table: *tcp.Table, now: i96, read_ns: u64) ?usize {
+fn quiet(table: *tcp.Table, now: i96, idle_ns: u64) ?usize {
     var best: ?usize = null;
     for (table.conns, 0..) |*c, i| {
         if (c.claimed or !c.open()) continue;
-        if (now - c.heard_at < read_ns) continue;
+        if (now - c.heard_at < idle_ns) continue;
         if (best == null or c.serial < table.conns[best.?].serial) best = i;
     }
     return best;
@@ -382,10 +417,11 @@ fn quiet(table: *tcp.Table, now: i96, read_ns: u64) ?usize {
 
 /// **A CLIENT THAT STOPPED TALKING IS NOT A BROKEN NIC.** It is logged as a
 /// request that never came, the way it always has been, and closed.
-fn letGo(nic: *net.Net, table: *tcp.Table, i: usize, address: [4]u8, number: u64) void {
+fn letGo(wire: *stream.Wire, table: *tcp.Table, i: usize, address: [4]u8, number: u64, idle_ns: u64) void {
     table.claim(i);
     defer table.release(i);
-    var s = stream.Stream.init(nic, table, i, address, &read_buf, &write_buf);
+    var s = stream.Stream.init(wire, table, i, address, &read_buf, &write_buf);
+    s.idle_ns = idle_ns;
     logRequest(number, "(no request)", "the client stopped sending, and was let go");
     close(&s, table, i);
 }
@@ -394,22 +430,22 @@ fn letGo(nic: *net.Net, table: *tcp.Table, i: usize, address: [4]u8, number: u64
 /// short of a panic is logged and survived.
 fn serveOne(
     io: Io,
-    nic: *net.Net,
+    wire: *stream.Wire,
     table: *tcp.Table,
     i: usize,
     address: [4]u8,
     request_alloc: std.mem.Allocator,
     hub: *Hub,
     number: u64,
-    read_ns: u64,
+    idle_ns: u64,
     max_streams: usize,
 ) void {
     table.claim(i);
     // A connection that now carries a kept stream stays claimed and open.
     var kept_open = false;
     defer if (!kept_open) table.release(i);
-    var s = stream.Stream.init(nic, table, i, address, &read_buf, &write_buf);
-    s.read_ns = read_ns;
+    var s = stream.Stream.init(wire, table, i, address, &read_buf, &write_buf);
+    s.idle_ns = idle_ns;
 
     // **WHAT THIS MACHINE'S OWN CLOCK SAYS EACH REQUEST COST.** How long the
     // connection had been open before its turn came — the client finishing
@@ -452,7 +488,7 @@ fn serveOne(
         // ends reconnects, and a conversation stream resumes from its last
         // event; a new tab that could not open at all would not.
         if (held_now >= max_streams) {
-            if (oldestHeld(table)) |slot| endStream(slot, nic, table, address, hub, "to make room for a newer one");
+            if (oldestHeld(table)) |slot| endStream(slot, wire, table, address, hub, .displaced);
         }
         held[i] = .{ .conn = i, .kept = kept, .last_write = Io.awakeNs() orelse 0 };
         held_now += 1;
@@ -463,6 +499,9 @@ fn serveOne(
     s.writer().flush() catch {
         outcome = "the response would not flush";
     };
+    // A write that timed out fails wherever it happened — inside the route or
+    // in this flush — and is the same event either way.
+    if (s.timed_out) outcome = "the client stopped taking the response";
     const done_at = Io.awakeNs() orelse 0;
     logRequest(number, what, outcome);
     serial.put("    waited ");
@@ -476,41 +515,93 @@ fn serveOne(
         serial.putDec(@intCast(@divTrunc(Io.ticksToNs(d.busy_ticks -% disk_ticks), 1000)));
         serial.put(" us\n");
     } else serial.put("no disk\n");
-    if (!kept_open) close(&s, table, i);
+    if (kept_open) return;
+    // A client that stopped taking the response has had its idle time
+    // already: it is reset rather than waited on again for a goodbye.
+    if (s.timed_out) {
+        table.abandon(wire, i);
+    } else close(&s, table, i);
 }
 
-/// One pass over the held streams: end the ones whose client has gone, write
+/// One pass over the held streams: end the ones whose client has gone, queue
 /// what has arrived for the rest, ping the quiet ones. `scratch` holds the
 /// rendered frames for this pass only.
-fn serviceStreams(nic: *net.Net, table: *tcp.Table, address: [4]u8, hub: *Hub, scratch: std.mem.Allocator, now: i96) void {
+///
+/// **NOTHING HERE WAITS.** A frame goes into its connection's send queue as far
+/// as there is room, and the rest is carried to the next turn. A stream whose
+/// carry has not moved for the idle time is ended: its tab is not reading, and
+/// its browser will reconnect and resume.
+fn serviceStreams(wire: *stream.Wire, table: *tcp.Table, address: [4]u8, hub: *Hub, scratch: std.mem.Allocator, now: i96, idle_ns: u64) void {
     for (&held) |*slot| {
         const h = if (slot.*) |*h| h else continue;
         const c = &table.conns[h.conn];
         if (!c.open() or c.peer_done) {
-            endStream(slot, nic, table, address, hub, "its client went away");
+            endStream(slot, wire, table, address, hub, .client_left);
             continue;
         }
-        var out: std.ArrayList(u8) = .empty;
-        const frames = streams.drainKept(h.kept, scratch, &out) catch {
-            endStream(slot, nic, table, address, hub, "there was no room to render it");
-            continue;
-        };
-        if (frames == 0 and now - h.last_write >= keepalive_ns) {
-            out.appendSlice(scratch, streams.ping) catch {};
+        var wrote = false;
+        while (true) {
+            if (h.carry_at < h.carry.len) {
+                const n = table.queue(h.conn, h.carry[h.carry_at..]);
+                h.carry_at += n;
+                wrote = wrote or n > 0;
+                if (h.carry_at < h.carry.len) break;
+                hub.gpa.free(h.carry);
+                h.carry = &.{};
+                h.carry_at = 0;
+            }
+            const frame = (streams.nextFrame(h.kept, scratch) catch {
+                endStream(slot, wire, table, address, hub, .no_room_to_render);
+                break;
+            }) orelse break;
+            const n = table.queue(h.conn, frame);
+            wrote = wrote or n > 0;
+            if (n == frame.len) continue;
+            h.carry = hub.gpa.dupe(u8, frame[n..]) catch {
+                endStream(slot, wire, table, address, hub, .no_room_to_render);
+                break;
+            };
         }
-        if (out.items.len == 0) continue;
-        var s = stream.Stream.init(nic, table, h.conn, address, &read_buf, &write_buf);
-        s.writer().writeAll(out.items) catch {
-            endStream(slot, nic, table, address, hub, "a write to it failed");
+        const still = if (slot.*) |*left| left else continue;
+        if (wrote) still.last_write = now;
+        if (still.carry.len == 0) {
+            still.stuck_since = null;
+            if (!wrote and now - still.last_write >= keepalive_ns and c.queueRoom() >= streams.ping.len) {
+                _ = table.queue(still.conn, streams.ping);
+                still.last_write = now;
+            }
             continue;
-        };
-        s.writer().flush() catch {
-            endStream(slot, nic, table, address, hub, "a write to it failed");
-            continue;
-        };
-        h.last_write = now;
+        }
+        if (still.stuck_since == null or c.una != still.stuck_una or wrote) {
+            still.stuck_since = now;
+            still.stuck_una = c.una;
+        } else if (now - still.stuck_since.? >= idle_ns) {
+            endStream(slot, wire, table, address, hub, .lagging);
+        }
     }
 }
+
+/// Why a stream ended, as the log says it.
+const Ending = enum {
+    client_left,
+    no_room_to_render,
+    /// Its client has not taken what it was sent. Such a stream is reset, not
+    /// closed: a goodbye would queue behind everything the client is not
+    /// reading.
+    lagging,
+    displaced,
+    stopping,
+
+    fn why(self: Ending) []const u8 {
+        return switch (self) {
+            .client_left => "its client went away",
+            .no_room_to_render => "there was no room to render it",
+            .lagging => "its client is not keeping up",
+            .displaced => "to make room for a newer one",
+            .stopping => "the machine is stopping",
+        };
+    }
+};
 
 fn oldestHeld(table: *tcp.Table) ?*?Held {
     var best: ?*?Held = null;
@@ -523,17 +614,22 @@ fn oldestHeld(table: *tcp.Table) ?*?Held {
 
 /// Ends a held stream: its subscriber leaves the bus, its connection closes,
 /// its slot is free again.
-fn endStream(slot: *?Held, nic: *net.Net, table: *tcp.Table, address: [4]u8, hub: *Hub, why: []const u8) void {
+fn endStream(slot: *?Held, wire: *stream.Wire, table: *tcp.Table, address: [4]u8, hub: *Hub, ending: Ending) void {
     const h = slot.*.?;
     streams.drop(hub, h.kept);
-    var s = stream.Stream.init(nic, table, h.conn, address, &read_buf, &write_buf);
-    close(&s, table, h.conn);
+    if (h.carry.len > 0) hub.gpa.free(h.carry);
+    if (ending == .lagging) {
+        table.abandon(wire, h.conn);
+    } else {
+        var s = stream.Stream.init(wire, table, h.conn, address, &read_buf, &write_buf);
+        close(&s, table, h.conn);
+    }
     table.release(h.conn);
     slot.* = null;
     held_now -= 1;
     streams_ended += 1;
     serial.put("  stream ended: ");
-    serial.put(why);
+    serial.put(ending.why());
     serial.put("\n");
 }
 
@@ -566,9 +662,9 @@ fn reportStack(deepest: usize) usize {
 
 fn close(s: *stream.Stream, table: *tcp.Table, i: usize) void {
     s.finish();
-    // A peer that never acknowledged our FIN would otherwise hold its slot in
-    // `closing` for good.
-    if (table.conns[i].state != .closed) table.abandon(i);
+    // A peer that stopped acknowledging would otherwise hold its slot in
+    // `closing` until the table's retransmissions ran out.
+    if (table.conns[i].state != .closed) table.abandon(s.wire, i);
 }
 
 fn logRequest(number: u64, what: []const u8, outcome: []const u8) void {
@@ -594,15 +690,18 @@ fn logRequest(number: u64, what: []const u8, outcome: []const u8) void {
 /// about the site:
 ///
 ///     requests = N            serve N and stop; absent, serve until stopped
-///     read_timeout_ms = N     how long a connection may say nothing
+///     idle_timeout_ms = N     how long a connection may make no progress
 ///     streams = N             how many live streams may be held at once
+///     lose_one_sent_in = N    lose every Nth TCP frame sent, to prove that
+///                             what is lost is sent again
 ///
 /// A key that is not one of those is a misconfiguration, and stops the machine
 /// rather than being ignored: a timeout that was silently not applied is how a
 /// server ends up held open by one client.
 const Config = struct {
     requests: ?u64 = null,
-    read_ns: u64 = stream.default_read_ns,
+    idle_ns: u64 = stream.default_idle_ns,
+    lose_one_sent_in: u32 = 0,
     /// **HOW MANY STREAMS MAY BE HELD AT ONCE.** A held stream occupies a
     /// connection slot for as long as its tab is open, so without a budget the
     /// streams alone could fill the table and every new page load would be
@@ -610,8 +709,9 @@ const Config = struct {
     streams: usize = max_connections - reserved_for_requests,
 };
 
-/// Connection slots no stream may take.
-const reserved_for_requests = 16;
+/// Connection slots no stream may take: room for a burst of page loads while
+/// every stream slot is held.
+const reserved_for_requests = 64;
 
 fn readConfig(io: Io, alloc: std.mem.Allocator) Config {
     var conf = Config{};
@@ -634,11 +734,15 @@ fn readConfig(io: Io, alloc: std.mem.Allocator) Config {
         if (std.mem.eql(u8, key, "requests")) {
             conf.requests = std.fmt.parseInt(u64, value, 10) catch
                 serial.fail(config_path ++ ": `requests` is not a number");
-        } else if (std.mem.eql(u8, key, "read_timeout_ms")) {
+        } else if (std.mem.eql(u8, key, "idle_timeout_ms")) {
             const ms = std.fmt.parseInt(u64, value, 10) catch
-                serial.fail(config_path ++ ": `read_timeout_ms` is not a number");
-            if (ms == 0) serial.fail(config_path ++ ": a read timeout of zero would answer nobody");
-            conf.read_ns = ms * std.time.ns_per_ms;
+                serial.fail(config_path ++ ": `idle_timeout_ms` is not a number");
+            if (ms == 0) serial.fail(config_path ++ ": an idle timeout of zero would answer nobody");
+            conf.idle_ns = ms * std.time.ns_per_ms;
+        } else if (std.mem.eql(u8, key, "lose_one_sent_in")) {
+            conf.lose_one_sent_in = std.fmt.parseInt(u32, value, 10) catch
+                serial.fail(config_path ++ ": `lose_one_sent_in` is not a number");
+            if (conf.lose_one_sent_in == 1) serial.fail(config_path ++ ": losing every frame would answer nobody");
         } else if (std.mem.eql(u8, key, "streams")) {
             const n = std.fmt.parseInt(usize, value, 10) catch
                 serial.fail(config_path ++ ": `streams` is not a number");
@@ -646,7 +750,7 @@ fn readConfig(io: Io, alloc: std.mem.Allocator) Config {
                 serial.fail(config_path ++ ": `streams` must leave room for requests");
             conf.streams = n;
         } else {
-            serial.fail(config_path ++ ": the keys are `requests`, `read_timeout_ms` and `streams`");
+            serial.fail(config_path ++ ": the keys are `requests`, `idle_timeout_ms`, `streams` and `lose_one_sent_in`");
         }
     }
     if (!said_anything) serial.fail(config_path ++ " is present but says nothing");

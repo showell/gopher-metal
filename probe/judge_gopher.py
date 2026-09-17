@@ -49,6 +49,7 @@ import struct
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import datetime
 import zoneinfo
@@ -408,14 +409,16 @@ def ask(port: int, c: dict, scratch: str, patience: int = 400) -> dict:
     return {"status": int(p.stdout), "headers": headers, "body": payload}
 
 
-def set_request_limit(image: str, n: int, mnt: str, read_timeout_ms: int = 10000,
-                      streams: int = None) -> None:
+def set_request_limit(image: str, n: int, mnt: str, idle_timeout_ms: int = 10000,
+                      streams: int = None, lose_one_sent_in: int = None) -> None:
     mount(image, mnt, writable=True)
     try:
         with open(os.path.join(mnt, "gopher-metal.conf"), "w") as f:
-            f.write(f"requests = {n}\nread_timeout_ms = {read_timeout_ms}\n")
+            f.write(f"requests = {n}\nidle_timeout_ms = {idle_timeout_ms}\n")
             if streams is not None:
                 f.write(f"streams = {streams}\n")
+            if lose_one_sent_in is not None:
+                f.write(f"lose_one_sent_in = {lose_one_sent_in}\n")
     finally:
         umount(mnt)
 
@@ -732,13 +735,15 @@ def tree(root: str) -> dict:
     return out
 
 
-def run_story(elf, linux_bin, content, pristine, work, mnt, steps, label, report, minted=None):
+def run_story(elf, linux_bin, content, pristine, work, mnt, steps, label, report, minted=None,
+              conf=None):
     """Tells `steps` to one kernel and one Linux server. Returns (failures,
-    kernel serial log, per-step kernel answers)."""
+    kernel serial log, per-step kernel answers). `conf` is more of the
+    kernel's configuration."""
     scratch = tempfile.mkdtemp(dir=work)
     image = os.path.join(scratch, "disk.img")
     shutil.copy(pristine, image)
-    set_request_limit(image, len(steps), mnt)
+    set_request_limit(image, len(steps), mnt, **(conf or {}))
 
     before = time.time()
     qemu, port, serial = start_kernel(elf, image, scratch)
@@ -852,7 +857,7 @@ def held_open(elf, pristine, work, mnt, ms: int):
     scratch = tempfile.mkdtemp(dir=work)
     image = os.path.join(scratch, "disk.img")
     shutil.copy(pristine, image)
-    set_request_limit(image, 2, mnt, read_timeout_ms=ms)
+    set_request_limit(image, 2, mnt, idle_timeout_ms=ms)
     qemu, port, serial = start_kernel(elf, image, scratch)
     held = silent_client(port, b"GET / HTTP/1.1\r\n")  # half a request, then silence
     began = time.time()
@@ -881,7 +886,7 @@ def timeout_failures(elf, pristine, work, mnt, report) -> int:
     NOT wait: it is answered while the silent one sits in the table. The silent
     one is still closed by the kernel once it has been quiet for the setting.
 
-    Two boots with two `read_timeout_ms`, because "it was let go" is not the
+    Two boots with two `idle_timeout_ms`, because "it was let go" is not the
     claim: the claim is that the setting decides WHEN, and the only way to show
     that is to change it and watch the close move."""
     failures = 0
@@ -891,23 +896,23 @@ def timeout_failures(elf, pristine, work, mnt, report) -> int:
         let_go_at[ms] = let_go
         if answer.get("status") != 200:
             failures += 1
-            report(f"FAIL  timeout: with read_timeout_ms={ms} the caller beside a silent client "
+            report(f"FAIL  timeout: with idle_timeout_ms={ms} the caller beside a silent client "
                    f"got {answer.get('status', answer.get('error'))}, not 200")
         if answered >= ms / 1000:
             failures += 1
-            report(f"FAIL  timeout: with read_timeout_ms={ms} the caller waited {answered:.1f}s — "
+            report(f"FAIL  timeout: with idle_timeout_ms={ms} the caller waited {answered:.1f}s — "
                    f"as long as the silent client was allowed; it was held up behind it")
         if rest != b"":
             failures += 1
-            report(f"FAIL  timeout: with read_timeout_ms={ms} the silent client was never closed "
+            report(f"FAIL  timeout: with idle_timeout_ms={ms} the silent client was never closed "
                    f"by the kernel (its socket read {rest!r})")
         elif not (0.8 * ms / 1000 <= let_go <= ms / 1000 + 5):
             failures += 1
-            report(f"FAIL  timeout: with read_timeout_ms={ms} the silent client was let go after "
+            report(f"FAIL  timeout: with idle_timeout_ms={ms} the silent client was let go after "
                    f"{let_go:.1f}s")
         if "the client stopped sending" not in log:
             failures += 1
-            report(f"FAIL  timeout: with read_timeout_ms={ms} the kernel never said it let the "
+            report(f"FAIL  timeout: with idle_timeout_ms={ms} the kernel never said it let the "
                    f"silent client go: {' | '.join(log.splitlines()[-3:])}")
     moved = let_go_at[6000] - let_go_at[2000]
     if moved < 3.2:
@@ -1465,6 +1470,272 @@ def request_heap_trace(log: str) -> list:
     return [int(m.group(1)) for m in re.finditer(r"request heap: (\d+) bytes", log)]
 
 
+# ── the send side ────────────────────────────────────────────────────────────
+#
+# Everything above fits in a few segments and in the emulator's buffers, so
+# none of it can tell a TCP that respects the peer's window from one that
+# ignores it, or one that retransmits from one that doesn't. These can.
+
+BULK_MESSAGES = 8
+TCP_LINE = re.compile(r"tcp: (\d+) timeouts sent something again, (\d+) window probes, "
+                      r"(\d+) peers given up on, (\d+) frames lost on purpose")
+
+
+def bulk_name(n: int) -> bytes:
+    return f"bulk-{n:02d}".encode()
+
+
+def bulk_text(n: int) -> str:
+    """About 40 KB of markdown, form-encoded, that names itself first."""
+    return bulk_name(n).decode() + "+" + "lorem+ipsum+dolor+" * 2200
+
+
+def bulk_steps() -> list:
+    """Large requests and large answers: eight 40 KB messages in, then the
+    whole 320 KB transcript and the conversation's page out."""
+    steps = [step("log in", "POST", "/login/full", None, LOGIN_BODY)]
+    for n in range(1, BULK_MESSAGES + 1):
+        steps.append(step(f"a 40 KB message, {n}", "POST", "/chat/c/1_2/bulk/send", JAR,
+                          f"markdown={bulk_text(n)}&cid=b{n}", headers=["X-Chat-Async: 1"]))
+    names = [bulk_name(n) for n in range(1, BULK_MESSAGES + 1)]
+    steps.append(step("the whole transcript", "GET", "/chat/c/1_2/bulk/raw", JAR, expect=names))
+    steps.append(step("the conversation's page", "GET", "/chat/c/1_2/bulk", JAR))
+    return steps
+
+
+BULK = bulk_steps()
+
+
+def tcp_counts(log: str):
+    m = TCP_LINE.search(log)
+    return None if m is None else dict(zip(("retransmits", "probes", "given_up", "lost"),
+                                           map(int, m.groups())))
+
+
+def bulk_failures(elf, linux_bin, content, pristine, work, mnt, report) -> int:
+    """The bulk story twice: once as it comes, and once with every seventh TCP
+    frame in each direction thrown away. Both must answer as Linux answered."""
+    failures = 0
+    for label, conf in (("bulk", None), ("bulk, losing one frame sent in seven", {"lose_one_sent_in": 7})):
+        started = time.time()
+        f, log, answers, files = run_story(elf, linux_bin, content, pristine, work, mnt,
+                                           BULK, label, report, conf=conf)
+        f += missing_marks(BULK, answers, report, label)
+        counts = tcp_counts(log)
+        if counts is None:
+            f += 1
+            report(f"FAIL  {label}: the kernel never gave its TCP counts")
+        elif conf:
+            if counts["lost"] == 0 or counts["retransmits"] == 0:
+                f += 1
+                report(f"FAIL  {label}: {counts['lost']} frames lost and {counts['retransmits']} "
+                       f"retransmissions — the loss was not exercised")
+        if counts and counts["given_up"]:
+            f += 1
+            report(f"FAIL  {label}: the kernel gave up on {counts['given_up']} peers")
+        if not f:
+            sizes = [len(a.get("body", b"")) for a in answers[-2:]]
+            report(f"ok    {label}: {BULK_MESSAGES} messages of 40 KB in, a {sizes[0]}-byte transcript "
+                   f"and a {sizes[1]}-byte page out, all answered as Linux answered, {files} files agree "
+                   f"({counts['lost']} frames lost, {counts['retransmits']} timeouts resent, "
+                   f"{time.time() - started:.0f} s)")
+        failures += f
+    return failures
+
+
+def get_on_socket(sock, path: str, cookie: str) -> None:
+    sock.sendall((f"GET {path} HTTP/1.1\r\nHost: judge\r\nCookie: {cookie}\r\n"
+                  f"Connection: close\r\n\r\n").encode())
+
+
+def small_socket(port: int):
+    """A client whose receive buffer is as small as the host allows, so that
+    not reading shows up at the machine as a shut window."""
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    sock.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 2048)
+    sock.settimeout(60)
+    sock.connect(("127.0.0.1", port))
+    return sock
+
+
+def read_all(sock, pause_after: int = None, pause: float = 0.0) -> bytes:
+    got = b""
+    paused = pause_after is None
+    while True:
+        if not paused and len(got) >= pause_after:
+            time.sleep(pause)
+            paused = True
+        chunk = sock.recv(4096)
+        if not chunk:
+            return got
+        got += chunk
+
+
+def slow_reader_failures(elf, pristine, work, mnt, report) -> int:
+    """**A CLIENT THAT READS SLOWLY GETS EVERY BYTE; ONE THAT STOPS IS LET GO.**
+    The transcript is fetched three ways from one boot: at full speed; by a
+    client that stops for two seconds twice along the way; and by one that
+    never reads at all. The second must get exactly what the first got, with
+    the machine probing a shut window while it waited. The third must be let
+    go after the idle timeout, and the site must go on answering."""
+    label = "slow readers"
+    idle_ms = 5000
+    # **BIG ENOUGH TO GET PAST THE HOST'S BUFFERS.** A loopback socket with a
+    # 2 KB receive buffer still lets its sender queue over a megabyte, and
+    # slirp holds more; a smaller answer never shuts the machine's window, and
+    # the gate below says so rather than passing.
+    messages = 100
+    requests = 1 + messages + 3 + 1
+    scratch, qemu, port, serial = boot_with(elf, pristine, work, mnt, requests,
+                                            idle_timeout_ms=idle_ms)
+    failures = 0
+
+    def fail(msg):
+        nonlocal failures
+        failures += 1
+        report(f"FAIL  {label}: {msg}")
+
+    path = "/chat/c/1_2/bulk/raw"
+    stalled = None
+    after = {}
+    try:
+        cookie = login_cookie(port, scratch)
+        for n in range(1, messages + 1):
+            send_live(port, scratch, cookie, "bulk", bulk_text(n), f"b{n}")
+        fast = socket.create_connection(("127.0.0.1", port), timeout=60)
+        get_on_socket(fast, path, cookie)
+        quick = parse_raw_response(read_all(fast))
+        fast.close()
+
+        slow = small_socket(port)
+        get_on_socket(slow, path, cookie)
+        time.sleep(2.0)
+        patient = parse_raw_response(read_all(slow, pause_after=2_000_000, pause=2.0))
+        slow.close()
+
+        if quick.get("status") != 200 or len(quick.get("body", b"")) < messages * 30_000:
+            fail(f"the transcript at full speed was {quick.get('status')} with "
+                 f"{len(quick.get('body', b''))} bytes")
+        elif patient.get("body") != quick["body"]:
+            fail(f"the slow reader got {len(patient.get('body', b''))} bytes "
+                 f"({patient.get('error', 'status ' + str(patient.get('status')))}), "
+                 f"the fast one {len(quick['body'])}, and they differ")
+
+        stalled = small_socket(port)
+        get_on_socket(stalled, path, cookie)
+        started = time.time()
+        after = ask(port, step("the request after", "GET", "/nope"), scratch, patience=60)
+        waited = time.time() - started
+    finally:
+        if stalled is not None:
+            stalled.close()
+        code, log = finish_kernel(qemu, serial)
+    if after.get("status") != 404:
+        fail(f"the request after the stalled reader answered {after.get('status') or after.get('error')}")
+    elif waited < idle_ms / 1000:
+        fail(f"the request after the stalled reader was answered in {waited:.1f} s, before the "
+             f"{idle_ms} ms idle timeout — the stalled reader was never stalled")
+    if code != 1:
+        fail(f"the kernel exited {code}")
+    if "the client stopped taking the response" not in log:
+        fail("the kernel never said it let the stalled reader go")
+    counts = tcp_counts(log)
+    if counts is None or counts["probes"] == 0:
+        fail(f"the machine sent no window probes ({counts}) — the slow reader's window never shut, "
+             f"so this proved nothing")
+    if not failures:
+        report(f"ok    {label}: a reader that paused twice got all {len(quick['body'])} bytes, "
+               f"with {counts['probes']} window probes sent while it paused; one that never read "
+               f"was let go and the next request answered {waited:.1f} s later")
+    shutil.rmtree(scratch, ignore_errors=True)
+    return failures
+
+
+def lagging_stream_failures(elf, pristine, work, mnt, report) -> int:
+    """**A TAB THAT STOPS READING LOSES ITS STREAM, NOT THE SITE.** Two streams
+    on one conversation; one is read all along, the other is read once and then
+    ignored while 40 KB messages are published — each frame bigger than half a
+    send queue, so a reader with one frame in flight must not look lagging.
+    The ignored one must be ended as not keeping up once it has taken nothing
+    for the idle time, and the read one must get every message."""
+    label = "a lagging stream"
+    most = 100  # far past what the host buffers; the loop stops once the kernel says so
+    requests = 1 + 1 + 2 + most + 1
+    idle_ms = 3000
+    scratch, qemu, port, serial = boot_with(elf, pristine, work, mnt, requests,
+                                            idle_timeout_ms=idle_ms)
+    failures = 0
+
+    def fail(msg):
+        nonlocal failures
+        failures += 1
+        report(f"FAIL  {label}: {msg}")
+
+    stream_path = "/chat/c/1_2/lag/stream?since=0"
+    got = {"reader": b""}
+    stop = threading.Event()
+    sent = 0
+    socks = []
+    try:
+        cookie = login_cookie(port, scratch)
+        send_live(port, scratch, cookie, "lag", "lag-opener", "l0")
+        reader = open_stream(port, stream_path, cookie)
+        socks.append(reader)
+        got["reader"] = read_until(reader, b"lag-opener", time.time() + 30)
+        lagger = small_socket(port)
+        socks.append(lagger)
+        lagger.sendall((f"GET {stream_path} HTTP/1.1\r\nHost: judge\r\nCookie: {cookie}\r\n"
+                        f"Accept: text/event-stream\r\n\r\n").encode())
+        read_until(lagger, b"lag-opener", time.time() + 30)
+
+        def keep_reading():
+            reader.settimeout(0.2)
+            while not stop.is_set():
+                try:
+                    chunk = reader.recv(65536)
+                except OSError:
+                    continue
+                if not chunk:
+                    return
+                got["reader"] += chunk
+
+        t = threading.Thread(target=keep_reading, daemon=True)
+        t.start()
+        for n in range(1, most + 1):
+            send_live(port, scratch, cookie, "lag", bulk_text(n), f"l{n}")
+            sent = n
+            if b"not keeping up" in open(serial, "rb").read():
+                break
+        deadline = time.time() + 30
+        while bulk_name(sent) not in got["reader"] and time.time() < deadline:
+            time.sleep(0.1)
+        stop.set()
+        t.join()
+    finally:
+        for sock in socks:
+            sock.close()
+        for _ in range(requests - 2 - 2 - sent):
+            ask(port, step("to the end", "GET", "/nope"), scratch, patience=60)
+        code, log = finish_kernel(qemu, serial)
+    if code != 1:
+        fail(f"the kernel exited {code}")
+    if log.count("stream ended: its client is not keeping up") != 1:
+        fail(f"{log.count('stream ended: its client is not keeping up')} streams ended as not keeping "
+             f"up after {sent} messages, want 1")
+    missing = [n for n in range(1, sent + 1) if bulk_name(n) not in got["reader"]]
+    if missing:
+        fail(f"the stream that kept reading is missing messages {missing}")
+    held = STREAMS_LINE.search(log)
+    if held is None or held.groups() != ("2", "2", "0"):
+        fail(f"the stream count reads {held.group(0) if held else 'nothing'}, "
+             f"want 2 held, 2 ended, 0 still subscribed")
+    if not failures:
+        report(f"ok    {label}: the stream nobody read was ended as not keeping up after {sent} "
+               f"40 KB messages; the one being read got all {sent}")
+    shutil.rmtree(scratch, ignore_errors=True)
+    return failures
+
+
 def main() -> int:
     if len(sys.argv) != 5:
         print(__doc__.strip())
@@ -1558,6 +1829,11 @@ def main() -> int:
     failures += metal_sse_failures(elf, pristine, work, mnt, print)
     failures += budget_failures(elf, pristine, work, mnt, print)
     failures += churn_failures(elf, pristine, work, mnt, print)
+
+    # ── the send side ────────────────────────────────────────────────────────
+    failures += bulk_failures(elf, linux_bin, content, pristine, work, mnt, print)
+    failures += slow_reader_failures(elf, pristine, work, mnt, print)
+    failures += lagging_stream_failures(elf, pristine, work, mnt, print)
 
     # ── many clients at once ─────────────────────────────────────────────────
     failures += concurrent_failures(elf, linux_bin, content, pristine, work, mnt, print)
