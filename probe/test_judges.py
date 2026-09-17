@@ -10,11 +10,14 @@ that lies, so its rules are tested here, on the host, before any kernel boots.
 
     python3 probe/test_judges.py
 """
+import http.server
 import os
 import socket
 import subprocess
 import sys
 import tempfile
+import threading
+import time
 import unittest
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -457,7 +460,7 @@ class Bulk(unittest.TestCase):
         self.assertTrue(text.startswith("bulk-03+"))
         self.assertLess(len(text), 64 * 1024)  # chat's limit on one message
         self.assertGreater(len(text), 35 * 1024)
-        self.assertNotIn(" ", text)  # form-encoded: curl sends it as is
+        self.assertNotIn(" ", text)  # form-encoded: sent as is
 
     def test_the_transcript_read_expects_every_message(self):
         read = [s for s in G.BULK if s["path"].endswith("/raw")]
@@ -495,49 +498,77 @@ class RawResponse(unittest.TestCase):
 
 
 class Patience(unittest.TestCase):
-    """How long the judge itself will wait. The retries exist for a guest coming
-    up, where slirp drops the first SYN; a caller waiting on a BUSY kernel needs
-    a bound instead, or a machine that never lets go takes twenty minutes to
-    become a failure."""
+    """How the judge's client waits. A refused connection is a guest still
+    coming up, and is tried again until `patience` runs out; a request that was
+    sent is never sent again."""
 
-    class Caught(Exception):
-        def __init__(self, cmd):
-            self.cmd = cmd
+    def test_a_refused_connection_is_tried_until_patience_runs_out(self):
+        probe = socket.socket()
+        probe.bind(("127.0.0.1", 0))
+        port = probe.getsockname()[1]
+        probe.close()  # nothing listens there now
+        started = time.time()
+        a = G.ask(port, G.step("x", "GET", "/"), "unused", patience=2)
+        took = time.time() - started
+        self.assertIn("refused", a.get("error", ""))
+        self.assertGreaterEqual(took, 1.0)
+        self.assertLess(took, 4.0)
 
-    def curl(self, patience):
-        """The command ask() would have run, caught before it runs."""
-        with tempfile.TemporaryDirectory() as d:
-            real_run = subprocess.run
+    def test_a_request_that_was_sent_is_never_sent_again(self):
+        listener = socket.socket()
+        listener.bind(("127.0.0.1", 0))
+        listener.listen(4)
+        port = listener.getsockname()[1]
+        accepted = []
 
-            def fake(cmd, **kw):
-                raise Patience.Caught(cmd)
-
-            subprocess.run = fake
+        def serve():
+            listener.settimeout(3)
             try:
-                G.ask(1, G.step("x", "GET", "/"), d, patience=patience)
-            except Patience.Caught as c:
-                return c.cmd
-            finally:
-                subprocess.run = real_run
-            self.fail("ask() did not run curl")
+                while True:
+                    conn, _ = listener.accept()
+                    accepted.append(conn.recv(4096))
+                    conn.close()  # no answer at all
+            except OSError:
+                pass
 
-    def worst_case(self, cmd):
-        max_time = int(cmd[cmd.index("--max-time") + 1])
-        tries = int(cmd[cmd.index("--retry") + 1])
-        delay = int(cmd[cmd.index("--retry-delay") + 1])
-        return tries * (max_time + delay) + max_time
+        t = threading.Thread(target=serve)
+        t.start()
+        a = G.ask(port, G.step("x", "POST", "/send", None, "a=1"), "unused", patience=30)
+        t.join()
+        listener.close()
+        self.assertIn("error", a)
+        self.assertEqual(len(accepted), 1)
+        self.assertTrue(accepted[0].startswith(b"POST /send HTTP/1.1"))
 
-    def test_a_short_patience_really_is_short(self):
-        self.assertLessEqual(self.worst_case(self.curl(60)), 120)
+    def test_an_answer_keeps_its_status_every_cookie_and_its_body(self):
+        class H(http.server.BaseHTTPRequestHandler):
+            def do_POST(self):
+                body = self.rfile.read(int(self.headers["Content-Length"]))
+                self.send_response(303)
+                self.send_header("Location", "/there")
+                self.send_header("Set-Cookie", "a=1")
+                self.send_header("Set-Cookie", "b=2")
+                reply = b"got " + body + b" with " + self.headers["Cookie"].encode() \
+                    + b" and " + self.headers["X-Chat-Async"].encode()
+                self.send_header("Content-Length", str(len(reply)))
+                self.end_headers()
+                self.wfile.write(reply)
 
-    def test_the_default_still_outlasts_a_guest_coming_up(self):
-        # Bring-up needs about six seconds of retrying, and a slow boot more.
-        cmd = self.curl(400)
-        self.assertGreaterEqual(int(cmd[cmd.index("--retry") + 1]), 10)
+            def log_message(self, *a):
+                pass
 
-    def test_it_never_asks_for_zero_tries(self):
-        cmd = self.curl(1)
-        self.assertGreaterEqual(int(cmd[cmd.index("--retry") + 1]), 1)
+        srv = http.server.HTTPServer(("127.0.0.1", 0), H)
+        t = threading.Thread(target=srv.handle_request)
+        t.start()
+        a = G.ask(srv.server_address[1],
+                  G.step("x", "POST", "/go", "k=v", "m=hi", headers=["X-Chat-Async: 1"]),
+                  "unused", patience=5)
+        t.join()
+        srv.server_close()
+        self.assertEqual(a["status"], 303)
+        self.assertEqual(a["headers"]["location"], "/there")
+        self.assertEqual(a["headers"]["set-cookie"], "a=1\nb=2")
+        self.assertEqual(a["body"], b"got m=hi with k=v and 1")
 
 
 class Accelerator(unittest.TestCase):

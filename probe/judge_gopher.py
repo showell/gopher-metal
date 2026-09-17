@@ -40,6 +40,7 @@ import base64
 import calendar
 import hashlib
 import hmac
+import http.client
 import json
 import os
 import re
@@ -369,44 +370,57 @@ def with_jar(c: dict, jar, minted=None):
 
 
 def ask(port: int, c: dict, scratch: str, patience: int = 400) -> dict:
-    """One request by curl, which does the waiting while a guest boots. It never
-    follows a redirect: the redirect IS the answer being compared."""
+    """One request by Python's own HTTP client. It never follows a redirect:
+    the redirect IS the answer being compared.
+
+    **ONLY A REFUSED CONNECTION IS TRIED AGAIN**, once a second, for up to
+    `patience` seconds — a guest still coming up. A request that was sent is
+    never sent twice: a POST retried after a reset would write twice, and a
+    failure that retrying hides is a failure the judge should report. (This
+    was curl, whose process cost nine milliseconds a request and whose
+    `--retry-all-errors` resent anything.) `scratch` is kept for callers that
+    pass one."""
     if c.get("raw") is not None:
         return ask_raw(port, c["raw"])
-    os.makedirs(scratch, exist_ok=True)
-    hdr, out = os.path.join(scratch, "hdr"), os.path.join(scratch, "body")
-    # **THE RETRIES ARE FOR A GUEST COMING UP**, where slirp drops the first SYN
-    # and the next attempt is six seconds later. A caller that is waiting on a
-    # BUSY kernel needs the opposite: a bound, so that a machine which never
-    # lets go becomes a failure in a minute rather than in twenty. `patience`
-    # is that bound, in seconds, and the retries are scaled to fit inside it.
-    tries = max(1, patience // 30)
-    cmd = ["curl", "-sS", "--max-time", str(min(30, patience)),
-           "--retry", str(tries), "--retry-delay", "1",
-           "--retry-connrefused", "--retry-all-errors", "-D", hdr, "-o", out,
-           "-w", "%{http_code}", "-X", c["method"]]
+    headers = {"Host": f"127.0.0.1:{port}", "User-Agent": "gopher-metal-judge", "Accept": "*/*"}
     if c["cookie"]:
-        cmd += ["-b", c["cookie"]]
+        headers["Cookie"] = c["cookie"]
+    body = None
     if c["body"] is not None:
-        cmd += ["--data-raw", c["body"]]
+        body = c["body"].encode()
+        headers["Content-Type"] = "application/x-www-form-urlencoded"
     for h in c.get("headers", ()):
-        cmd += ["-H", h]
-    cmd.append(f"http://127.0.0.1:{port}{c['path']}")
-    p = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-    if p.returncode != 0:
-        return {"error": f"curl exited {p.returncode}: {p.stderr.strip()}"}
-    headers = {}
-    with open(hdr, "rb") as f:
-        for line in f.read().decode("latin-1").splitlines()[1:]:
-            if ":" in line:
-                k, v = line.split(":", 1)
-                k, v = k.strip().lower(), v.strip()
-                # Several Set-Cookie headers are several cookies; keep them all,
-                # in order, rather than the last.
-                headers[k] = headers[k] + "\n" + v if k == "set-cookie" and k in headers else v
-    with open(out, "rb") as f:
-        payload = f.read()
-    return {"status": int(p.stdout), "headers": headers, "body": payload}
+        k, v = h.split(":", 1)
+        headers[k.strip()] = v.strip()
+    deadline = time.time() + patience
+    while True:
+        conn = http.client.HTTPConnection("127.0.0.1", port, timeout=min(30, patience))
+        try:
+            conn.connect()
+            break
+        except ConnectionRefusedError as e:
+            conn.close()
+            if time.time() + 1 > deadline:
+                return {"error": f"connection refused for {patience} s: {e}"}
+            time.sleep(1)
+        except OSError as e:
+            conn.close()
+            return {"error": f"connect: {e}"}
+    try:
+        conn.request(c["method"], c["path"], body=body, headers=headers)
+        resp = conn.getresponse()
+        payload = resp.read()
+    except (OSError, http.client.HTTPException) as e:
+        return {"error": f"{type(e).__name__}: {e}"}
+    finally:
+        conn.close()
+    answer_headers = {}
+    for k, v in resp.getheaders():
+        k, v = k.strip().lower(), v.strip()
+        # Several Set-Cookie headers are several cookies; keep them all, in
+        # order, rather than the last.
+        answer_headers[k] = answer_headers[k] + "\n" + v if k == "set-cookie" and k in answer_headers else v
+    return {"status": resp.status, "headers": answer_headers, "body": payload}
 
 
 def set_request_limit(image: str, n: int, mnt: str, idle_timeout_ms: int = 10000,
@@ -436,6 +450,11 @@ def silent_client(port: int, payload: bytes):
     if payload:
         sock.sendall(payload)
     return sock
+
+
+# **A PACKET CAPTURE, WHEN ASKED FOR.** With JUDGE_CAPTURE set, every boot
+# writes what crossed its NIC to `net.pcap` beside its serial log, for tcpdump.
+CAPTURE = bool(os.environ.get("JUDGE_CAPTURE"))
 
 
 def kvm_usable() -> bool:
@@ -470,6 +489,8 @@ def start_kernel(elf: str, image: str, scratch: str, kvm: bool = False):
         "-cpu", "max", "-device", "virtio-rng-device",
         "-netdev", f"user,id=n0,hostfwd=tcp:127.0.0.1:{port}-:80",
         "-device", "virtio-net-device,netdev=n0",
+        *(["-object", f"filter-dump,id=cap,netdev=n0,file={os.path.join(scratch, 'net.pcap')}"]
+          if CAPTURE else []),
     ], stdout=log, stderr=subprocess.STDOUT)
     log.close()
     deadline = time.time() + 30
@@ -753,7 +774,7 @@ def run_story(elf, linux_bin, content, pristine, work, mnt, steps, label, report
             time.sleep(s["settle"])
         if qemu.poll() is not None:
             # The kernel is gone. Every later step is a failure, and asking
-            # would only wait out curl's retries.
+            # would only wait for a connection that will never come.
             metal_answers.append({"error": f"the kernel had already exited ({qemu.returncode})"})
             continue
         a = ask(port, with_jar(s, jar, minted), os.path.join(scratch, f"k{i}"))
@@ -1702,8 +1723,10 @@ def lagging_stream_failures(elf, pristine, work, mnt, report) -> int:
         t = threading.Thread(target=keep_reading, daemon=True)
         t.start()
         for n in range(1, most + 1):
-            send_live(port, scratch, cookie, "lag", bulk_text(n), f"l{n}")
+            answer = send_live(port, scratch, cookie, "lag", bulk_text(n), f"l{n}")
             sent = n
+            if answer.get("status") != 204:
+                fail(f"sending message {n} answered {answer.get('status') or answer.get('error')}")
             if b"not keeping up" in open(serial, "rb").read():
                 break
         deadline = time.time() + 30
@@ -1724,7 +1747,11 @@ def lagging_stream_failures(elf, pristine, work, mnt, report) -> int:
              f"up after {sent} messages, want 1")
     missing = [n for n in range(1, sent + 1) if bulk_name(n) not in got["reader"]]
     if missing:
-        fail(f"the stream that kept reading is missing messages {missing}")
+        # The evidence stays: what the reader got, beside the kernel's log.
+        with open(os.path.join(scratch, "reader.bytes"), "wb") as f:
+            f.write(got["reader"])
+        fail(f"the stream that kept reading is missing messages {missing}; "
+             f"its bytes and the kernel's log are in {scratch}")
     held = STREAMS_LINE.search(log)
     if held is None or held.groups() != ("2", "2", "0"):
         fail(f"the stream count reads {held.group(0) if held else 'nothing'}, "
@@ -1732,7 +1759,7 @@ def lagging_stream_failures(elf, pristine, work, mnt, report) -> int:
     if not failures:
         report(f"ok    {label}: the stream nobody read was ended as not keeping up after {sent} "
                f"40 KB messages; the one being read got all {sent}")
-    shutil.rmtree(scratch, ignore_errors=True)
+        shutil.rmtree(scratch, ignore_errors=True)
     return failures
 
 
@@ -1744,7 +1771,7 @@ def main() -> int:
     if subprocess.run(["sudo", "-n", "true"], capture_output=True).returncode != 0:
         print("SKIPPED: populating and reading the disk needs `sudo -n` for a loop mount")
         return 77
-    for tool in ("sgdisk", "mkfs.vfat", "fsck.vfat", "qemu-system-x86_64", "curl"):
+    for tool in ("sgdisk", "mkfs.vfat", "fsck.vfat", "qemu-system-x86_64"):
         if shutil.which(tool) is None:
             print(f"SKIPPED: {tool} is not installed")
             return 77

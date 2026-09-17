@@ -71,27 +71,39 @@ pub const Wire = struct {
     }
 };
 
-/// One turn of the loop for every connection at once: take a frame if there is
-/// one, answer ARP, let the table see the rest, and let the table send what it
-/// has to. Null when there was no frame. The host calls this while nothing is
-/// ready to serve; a Stream calls it while it waits, so the other connections
-/// keep moving either way.
+/// One turn of the loop for every connection at once: take every frame that
+/// has arrived, answer ARP, let the table see the rest, and then let the table
+/// send what it has to. Null when no frame had arrived. The host calls this
+/// while nothing is ready to serve; a Stream calls it while it waits, so the
+/// other connections keep moving either way.
+///
+/// **EVERY WAITING FRAME BEFORE ANY TIMER.** A loop that has been busy for a
+/// while finds acknowledgements queued in the NIC's ring; looking at the
+/// timers first would call those segments lost and send them again. A
+/// needless second SYN-ACK once left slirp sending nothing more on that
+/// connection for as long as the host would wait.
 pub fn pump(wire: *Wire, table: *tcp.Table, ip: [4]u8) ?tcp.Result {
     const now = io.awakeNs() orelse 0;
-    defer table.transmit(wire, now);
     const nic = wire.nic;
-    const got = nic.poll() orelse return null;
-    defer nic.recycle(got.id);
-
-    if (arp.parseRequest(got.frame)) |req| {
-        if (eql(&req.target_ip, &ip)) {
-            var out: [64]u8 = undefined;
-            const n = arp.writeReply(&out, nic.mac, ip, req);
-            nic.send(out[0..n]);
+    var last: ?tcp.Result = null;
+    var taken: usize = 0;
+    while (taken < net.rx_buffers) : (taken += 1) {
+        const got = nic.poll() orelse break;
+        defer nic.recycle(got.id);
+        last = .{ .event = .nothing };
+        if (arp.parseRequest(got.frame)) |req| {
+            if (eql(&req.target_ip, &ip)) {
+                var out: [64]u8 = undefined;
+                const n = arp.writeReply(&out, nic.mac, ip, req);
+                nic.send(out[0..n]);
+            }
+            continue;
         }
-        return .{ .event = .nothing };
+        const r = table.handle(wire, got.frame, now);
+        if (r.event != .nothing) last = r;
     }
-    return table.handle(wire, got.frame, now);
+    table.transmit(wire, now);
+    return last;
 }
 
 /// One connection of the table, as a reader and a writer.

@@ -816,12 +816,21 @@ like the receive side:
   A shut window is probed with one byte when the timer runs out.
 - **The segment size.** The SYN-ACK says ours (1460); a peer's SYN says its,
   and a peer that says nothing is sent 536-byte segments.
-- **Retransmission.** Bytes leave the queue only when acknowledged. The oldest
-  unacknowledged byte not acknowledged within 200 ms is sent again with
-  everything after it, and the wait doubles, up to 5 s.
-- **Giving up.** Eight timeouts with no progress — about 26 s — and the
+- **Retransmission.** Bytes leave the queue only when acknowledged. What is
+  not acknowledged within a second is sent again with everything after it,
+  and the wait doubles, up to 5 s. A second is RFC 6298's starting value for a
+  sender that measures no round trips; it began at Linux's 200 ms, which is a
+  floor under a measured estimate, and raced slirp's delayed acknowledgements.
+- **Giving up.** Six timeouts with no progress — about 27 s — and the
   connection is reset. That is how a peer that vanished without a FIN is
   noticed.
+- **Every waiting frame before any timer.** A busy loop finds
+  acknowledgements queued in the NIC's ring, and looking at the timers first
+  calls those segments lost. It once sent a second SYN-ACK for a connection
+  whose ACK was already waiting, and slirp sent nothing more on it until the
+  request timed out — one POST in about thirty, seen only once a Debug kernel
+  made the loop slow enough, and found with a packet capture
+  (`JUDGE_CAPTURE=1` writes one per boot).
 - **The FIN goes last**, and only its own acknowledgement closes the
   connection; the host's close waits for as long as the peer keeps
   acknowledging, not a fixed two seconds.

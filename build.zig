@@ -24,7 +24,12 @@ pub fn build(b: *std.Build) void {
     // **NOT Debug.** A Debug build pulls in zig's UBSan runtime, which wants
     // 128-bit float conversions and therefore the SSE registers this target has
     // switched off. ReleaseSafe keeps the bounds checks and leaves that out.
-    const optimize: std.builtin.OptimizeMode = .ReleaseSafe;
+    //
+    // **`-Ddev` IS FOR ITERATING.** Debug with the C sanitizer off — nothing
+    // here is C — builds in a fraction of ReleaseSafe's time, with Debug's
+    // safety checks. Commits are judged on ReleaseSafe.
+    const dev = b.option(bool, "dev", "Debug kernels, for a fast rebuild while iterating") orelse false;
+    const optimize: std.builtin.OptimizeMode = if (dev) .Debug else .ReleaseSafe;
     const copy = b.addUpdateSourceFiles();
 
     // One module for everything under src/, so a type from virtio.zig is the
@@ -69,6 +74,7 @@ pub fn build(b: *std.Build) void {
                 .root_source_file = b.path(k.root),
                 .target = bareTarget(b),
                 .optimize = optimize,
+                .sanitize_c = .off,
                 .pic = false,
                 .code_model = .kernel,
                 // **THERE IS ONE THREAD AND THERE WILL NOT BE ANOTHER.** A
@@ -84,6 +90,7 @@ pub fn build(b: *std.Build) void {
                 },
             }),
         });
+        exe.use_llvm = true;
         exe.setLinkerScript(b.path("probe/link.ld"));
         exe.entry = .{ .symbol_name = "_start" };
 
@@ -137,6 +144,7 @@ pub fn build(b: *std.Build) void {
             .root_source_file = b.path("probe/gopher.zig"),
             .target = bareTarget(b),
             .optimize = optimize,
+            .sanitize_c = .off,
             .pic = false,
             .code_model = .kernel,
             .single_threaded = true,
@@ -146,6 +154,9 @@ pub fn build(b: *std.Build) void {
             },
         }),
     });
+    // Zig's own x86 backend, which Debug would otherwise pick, cannot yet
+    // assemble this kernel's AT&T or its soft-float.
+    gopher.use_llvm = true;
     gopher.setLinkerScript(b.path("probe/link.ld"));
     gopher.entry = .{ .symbol_name = "_start" };
     const gopher_copy = b.addUpdateSourceFiles();

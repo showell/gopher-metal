@@ -172,6 +172,8 @@ const Fixture = struct {
 };
 
 const ms: i96 = ns_per_ms;
+/// The first wait before sending again, whatever it is set to.
+const rto: i96 = first_rto_ns;
 
 /// A payload whose every byte says where it is.
 fn pattern(buf: []u8) []u8 {
@@ -531,9 +533,9 @@ test "what is not acknowledged in time is sent again, oldest first, and the wait
     _ = p.ackUpTo(&f.table, &f.wire, p.ack +% 100, 50 * ms); // the timer restarts from here
 
     var from = f.wire.count;
-    f.table.transmit(&f.wire, 249 * ms);
+    f.table.transmit(&f.wire, 50 * ms + rto - 1);
     try testing.expectEqual(from, f.wire.count); // not yet
-    f.table.transmit(&f.wire, 250 * ms);
+    f.table.transmit(&f.wire, 50 * ms + rto);
     var sizes: [8]usize = undefined;
     try testing.expectEqualSlices(usize, &.{ 536, 64 }, f.wire.sizesSince(from, &sizes));
     try testing.expectEqualSlices(u8, body[100..636], f.wire.at(from).payload);
@@ -541,13 +543,13 @@ test "what is not acknowledged in time is sent again, oldest first, and the wait
     try testing.expectEqual(@as(u64, 1), f.table.retransmits);
 
     from = f.wire.count;
-    f.table.transmit(&f.wire, 649 * ms);
-    try testing.expectEqual(from, f.wire.count); // the wait is 400 ms now
-    f.table.transmit(&f.wire, 650 * ms);
+    f.table.transmit(&f.wire, 50 * ms + 3 * rto - 1);
+    try testing.expectEqual(from, f.wire.count); // the wait is twice as long now
+    f.table.transmit(&f.wire, 50 * ms + 3 * rto);
     try testing.expectEqual(from + 2, f.wire.count);
 
     // Progress resets the wait.
-    _ = p.ackUpTo(&f.table, &f.wire, p.ack +% 600, 700 * ms);
+    _ = p.ackUpTo(&f.table, &f.wire, p.ack +% 600, 100 * ms + 3 * rto);
     try testing.expectEqual(@as(usize, 0), f.table.conns[i].queued());
     try testing.expectEqual(@as(u8, 0), f.table.conns[i].retries);
     try testing.expectEqual(first_rto_ns, f.table.conns[i].rto_ns);
@@ -567,13 +569,19 @@ test "a peer that never answers is reset after the last timeout" {
         const before = f.wire.count;
         f.table.transmit(&f.wire, now);
         if (f.wire.count > before and f.table.conns[i].state != .closed) sends += 1;
-        try testing.expect(now < 60 * ns_per_s);
+        try testing.expect(now < 120 * ns_per_s);
     }
     try testing.expectEqual(@as(usize, 1 + max_retries), sends);
     try testing.expectEqual(flag_rst | flag_ack, f.wire.last().flags);
     try testing.expectEqual(@as(u64, 1), f.table.given_up);
-    // 0.2 + 0.4 + 0.8 + 1.6 + 3.2 + 5 × 4 seconds.
-    try testing.expectEqual(@as(i96, 26_200 * ms), now);
+    // Each wait doubles up to the ceiling, and the last one runs out too.
+    var total: i96 = 0;
+    var wait: i96 = rto;
+    for (0..max_retries + 1) |_| {
+        total += wait;
+        wait = @min(wait * 2, tcp.max_rto_ns);
+    }
+    try testing.expectEqual(total, now);
 }
 
 test "a shut window is probed, and the rest goes when it opens" {
@@ -585,15 +593,15 @@ test "a shut window is probed, and the rest goes when it opens" {
     var from = f.wire.count;
     f.table.transmit(&f.wire, 0);
     try testing.expectEqual(from, f.wire.count); // no room
-    f.table.transmit(&f.wire, 200 * ms);
+    f.table.transmit(&f.wire, rto);
     try testing.expectEqualStrings("0", f.wire.last().payload); // the probe
     try testing.expectEqual(@as(u64, 1), f.table.probes);
 
     // The peer took the byte and has room now.
     p.window = 100;
-    _ = p.ackUpTo(&f.table, &f.wire, p.ack +% 1, 210 * ms);
+    _ = p.ackUpTo(&f.table, &f.wire, p.ack +% 1, rto + 10 * ms);
     from = f.wire.count;
-    f.table.transmit(&f.wire, 210 * ms);
+    f.table.transmit(&f.wire, rto + 10 * ms);
     try testing.expectEqualStrings("123456789", f.wire.last().payload);
     try testing.expectEqual(from + 1, f.wire.count);
 }
@@ -646,10 +654,10 @@ test "a lost FIN is sent again" {
     f.table.finish(i);
     f.table.transmit(&f.wire, 0);
     const fin = f.wire.last();
-    f.table.transmit(&f.wire, 200 * ms);
+    f.table.transmit(&f.wire, rto);
     try testing.expectEqual(flag_fin | flag_ack, f.wire.last().flags);
     try testing.expectEqual(fin.seq, f.wire.last().seq);
-    try testing.expectEqual(Event.closed, p.ackAll(&f.table, &f.wire, 210 * ms).event);
+    try testing.expectEqual(Event.closed, p.ackAll(&f.table, &f.wire, rto + 10 * ms).event);
 }
 
 test "a lost SYN-ACK is sent again by the timer" {
@@ -659,9 +667,9 @@ test "a lost SYN-ACK is sent again by the timer" {
     var buf: [1600]u8 = undefined;
     _ = f.table.handle(&f.wire, p.frame(&buf, flag_syn, p.seq, ""), 0);
     const first = f.wire.last();
-    f.table.transmit(&f.wire, 199 * ms);
+    f.table.transmit(&f.wire, rto - 1);
     try testing.expectEqual(@as(usize, 1), f.wire.count);
-    f.table.transmit(&f.wire, 200 * ms);
+    f.table.transmit(&f.wire, rto);
     try testing.expectEqual(first.seq, f.wire.last().seq);
     try testing.expectEqual(flag_syn | flag_ack, f.wire.last().flags);
 }

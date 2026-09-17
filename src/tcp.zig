@@ -60,13 +60,16 @@ pub const default_mss: u16 = 536;
 pub const our_mss: u16 = 1460;
 pub const mss_option = [4]u8{ 2, 4, our_mss >> 8, our_mss & 0xFF };
 
-/// **THE RETRANSMISSION CLOCK.** The first wait is Linux's minimum; each
-/// timeout doubles it up to the ceiling, and the connection is reset once
-/// `max_retries` have passed with nothing acknowledged — about 26 seconds of
-/// silence in all.
-pub const first_rto_ns: u64 = 200 * ns_per_ms;
+/// **THE RETRANSMISSION CLOCK.** Nothing here measures round-trip times, so
+/// the first wait is the one RFC 6298 gives a sender that has not measured:
+/// one second. (Linux's 200 ms is a floor under a measured estimate, and a
+/// peer that delays its acknowledgements by up to 200 ms — slirp does — makes
+/// it a race.) Each timeout doubles the wait up to the ceiling, and the
+/// connection is reset once `max_retries` have passed with nothing
+/// acknowledged — about 27 seconds of silence in all.
+pub const first_rto_ns: u64 = 1 * ns_per_s;
 pub const max_rto_ns: u64 = 5 * ns_per_s;
-pub const max_retries: u8 = 8;
+pub const max_retries: u8 = 6;
 pub const ns_per_ms = 1_000_000;
 pub const ns_per_s = 1_000_000_000;
 
