@@ -772,20 +772,20 @@ class Gates(unittest.TestCase):
         self.tree = ast.parse(textwrap.dedent(inspect.getsource(G.main)))
 
     @staticmethod
-    def asks_want(test) -> bool:
-        return any(isinstance(n, ast.Call) and getattr(n.func, "id", "") == "want"
+    def asks_running(test) -> bool:
+        return any(isinstance(n, ast.Call) and getattr(n.func, "id", "") == "running"
                    for n in ast.walk(test))
 
     def guarded_nodes(self) -> set:
         out = set()
         for node in ast.walk(self.tree):
-            if isinstance(node, ast.If) and self.asks_want(node.test):
+            if isinstance(node, ast.If) and self.asks_running(node.test):
                 out |= {id(n) for n in ast.walk(node)}
         return out
 
     def named_gates(self) -> set:
         return {n.args[0].value for n in ast.walk(self.tree)
-                if isinstance(n, ast.Call) and getattr(n.func, "id", "") == "want"
+                if isinstance(n, ast.Call) and getattr(n.func, "id", "") == "running"
                 and n.args and isinstance(n.args[0], ast.Constant)}
 
     def test_every_gate_in_the_list_is_asked_for_somewhere(self):

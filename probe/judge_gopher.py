@@ -2011,7 +2011,9 @@ def main() -> int:
         return 2
     chosen = set(asked) if asked else set(GATES) - (LONG if QUICK else set())
 
-    def want(gate: str) -> bool:
+    # **NOT `want`**: the member story below binds `want` as a loop variable for
+    # the status a minted cookie must get, and shadowed this into an int.
+    def running(gate: str) -> bool:
         return gate in chosen
 
     shutil.rmtree(work, ignore_errors=True)
@@ -2029,7 +2031,7 @@ def main() -> int:
 
     failures = 0
     per_case = 0
-    if want("cases") and not ISOLATED:
+    if running("cases") and not ISOLATED:
         steps = [step(c["name"], c["method"], c["path"], c["cookie"], c["body"]) for c in CASES]
         f, _, answers, _ = run_story(elf, linux_bin, content, pristine, work, mnt,
                                      steps, "single requests, one boot", print)
@@ -2037,7 +2039,7 @@ def main() -> int:
         per_case = f
         if not f:
             print(f"ok    {len(CASES)} single requests to one boot, each answered as Linux answered")
-    for c in (CASES if want("cases") and ISOLATED else []):
+    for c in (CASES if running("cases") and ISOLATED else []):
         scratch = tempfile.mkdtemp(dir=work)
         image = os.path.join(scratch, "disk.img")
         shutil.copy(pristine, image)
@@ -2058,11 +2060,11 @@ def main() -> int:
             print(f"ok    {label} -> {metal['status']}, {len(metal['body'])} bytes{extra}")
         shutil.rmtree(scratch, ignore_errors=True)
 
-    if want("cases"):
+    if running("cases"):
         lap("single requests, a boot each" if ISOLATED else "single requests, one boot")
 
     # ── the member story ─────────────────────────────────────────────────────
-    if want("members"):
+    if running("members"):
         now = int(time.time())
         minted = {
             FRESH: mint_session("1", now),
@@ -2106,44 +2108,44 @@ def main() -> int:
         lap("member story")
 
     # ── a live stream, on both ───────────────────────────────────────────────
-    if want("streams-linux"):
+    if running("streams-linux"):
         failures += linux_sse_failures(linux_bin, content, work, print)
         lap("streams on Linux")
-    if want("streams-metal"):
+    if running("streams-metal"):
         failures += metal_sse_failures(elf, pristine, work, mnt, print)
         lap("streams on the machine")
-    if want("budget"):
+    if running("budget"):
         failures += budget_failures(elf, pristine, work, mnt, print)
         lap("stream budget")
-    if want("churn"):
+    if running("churn"):
         failures += churn_failures(elf, pristine, work, mnt, print)
         lap("stream churn")
 
     # ── the send side ────────────────────────────────────────────────────────
-    if want("bulk"):
+    if running("bulk"):
         failures += bulk_failures(elf, linux_bin, content, pristine, work, mnt, print)
         lap("bulk")
-    if want("uploads"):
+    if running("uploads"):
         failures += upload_failures(elf, linux_bin, content, pristine, work, mnt, print)
         lap("uploads")
-    if want("slow"):
+    if running("slow"):
         failures += slow_reader_failures(elf, linux_bin, content, work, mnt, print)
         lap("slow readers")
-    if want("lagging"):
+    if running("lagging"):
         failures += lagging_stream_failures(elf, pristine, work, mnt, print)
         lap("a lagging stream")
 
     # ── many clients at once ─────────────────────────────────────────────────
-    if want("concurrent"):
+    if running("concurrent"):
         failures += concurrent_failures(elf, linux_bin, content, pristine, work, mnt, print)
         lap("many clients")
 
     # ── the client that says nothing ─────────────────────────────────────────
-    if want("timeouts"):
+    if running("timeouts"):
         failures += timeout_failures(elf, pristine, work, mnt, print)
         lap("silent clients")
     # ── endurance: the writes, read back every round ─────────────────────────
-    if want("endurance"):
+    if running("endurance"):
         f, log, answers, files = run_story(elf, linux_bin, content, pristine, work, mnt,
                                            ENDURANCE, "endurance", print)
         marks = missing_marks(ENDURANCE, answers, print, "endurance")
@@ -2175,7 +2177,7 @@ def main() -> int:
         lap("endurance")
 
     # ── stamina ──────────────────────────────────────────────────────────────
-    if want("stamina"):
+    if running("stamina"):
         rounds = STAMINA * STAMINA_ROUNDS
         f, log, answers, _ = run_story(elf, linux_bin, content, pristine, work, mnt,
                                        rounds, "stamina", print)
