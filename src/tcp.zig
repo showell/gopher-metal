@@ -129,6 +129,16 @@ pub const Listener = struct {
         self.emit(nic, flag_psh | flag_ack, bytes.len);
     }
 
+    /// Gives up on the current connection without a word to the peer.
+    ///
+    /// A server that takes one connection at a time is only as available as
+    /// its slowest peer: a connection stuck in `closing` because the peer never
+    /// acknowledged our FIN would make this listener ignore every later SYN,
+    /// forever. The caller decides when waiting has gone on long enough.
+    pub fn abandon(self: *Listener) void {
+        self.reset();
+    }
+
     /// Says we are done sending. The connection closes when the peer agrees.
     pub fn finish(self: *Listener, nic: *net.Net) void {
         if (self.state != .established) return;

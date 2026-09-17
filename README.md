@@ -41,7 +41,8 @@ and its two load-bearing findings are worth repeating here:
 | the TSC's rate | **works** — measured against the PIT, 0.001% from the host kernel's own figure |
 | the wall clock | **works** — the CMOS RTC, anchored at a seconds edge; pinned leap-day, noon and 4 PM boots |
 | **angry-gopher's whole route table** | **works** — 38 requests, each answered the same as the Linux build over the same files |
-| more than one request per boot, SSE | next: a loop, then a scheduler |
+| many requests per boot | **works** — a 22-step story and 300 requests to one boot, judged against Linux; heaps steady |
+| parallel connections, SSE | next: a scheduler |
 
     zig build test         # host unit tests for the pure parts of src/
     zig build kernels      # every kernel into probe/
@@ -239,26 +240,39 @@ the contract any host meets before calling the route table:
 
 — with the site on a GPT disk whose first partition is FAT16, and clocks from
 its own hardware. Then it calls `router.route`: the application's real
-dispatch, every page.
+dispatch, every page — one connection at a time, in a loop, each request with
+its own heap that is reset afterwards. `gopher-metal.conf` on the volume says
+how many requests to serve (`requests = N`); without it, forever. A request
+that fails is logged and survived, as it is on Linux.
 
 **It is judged against Linux.** `probe/judge_gopher.py` sends each request to
-this kernel (one boot each, since it serves one and stops) and to the ordinary
-Linux build of the same source over the same files, each case starting from the
-same state on both sides. Status, Location, Set-Cookie, Content-Type and body
+this kernel and to the ordinary Linux build of the same source over the same
+files, each case starting from the same state on both sides. Status, Location, Set-Cookie, Content-Type and body
 must match; files a request writes are read back through the Linux VFAT driver
 and must match too; and a Unix time is only forgiven if it falls inside the
 window in which that side handled the request.
 
 ```
-38 of 38 requests answered the same on bare metal as on Linux
+ok    the story: 22 requests to ONE boot, each answered as Linux answered, and all 18 data files agree
+ok    stamina: 300 requests to one boot, every answer the same, base heap steady at 72 live bytes, each request's heap the same every round (58498, 26768, 1807 bytes)
+38 of 38 single requests, and both long-running boots, answered as Linux answered
 ```
+
+Then two boots that serve many requests. **The story** is one visitor's
+afternoon, told to one kernel and one Linux server — the name page, a game,
+moves, a second game, a second visitor, the puzzles — with garbage and a silent
+connection in the middle that must not stop it; afterwards the whole data tree
+is compared. **Stamina** is 300 requests to one boot: every answer must equal
+the first answer to the same request, the base heap must not grow, and each
+request must use the same amount of its own heap every round.
 
 The index read off the volume, the résumé and its 27 KB PDF, both admin
 screens refusing a stranger, the name page, the player store, a staged game
 session rendered in Eastern time, new game and puzzle sessions stamped with the
 wall clock, a move appended to an action log, a new player's counter and row.
 
-What it does not do yet is serve a second request. That, then SSE.
+What it does not do yet is take two connections at once — a browser loading
+`/game` opens three — or hold one open for SSE. Both want a scheduler.
 
 ## The seam we first got wrong
 

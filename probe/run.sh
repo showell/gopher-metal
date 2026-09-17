@@ -31,6 +31,17 @@ WORK="$HOME/build/gopher-metal/probe"
 mkdir -p "$WORK"
 
 want="${1:-all}"
+
+# **THE JUDGES ARE TESTED FIRST.** Several checks below are decided by Python
+# that compares, normalizes and parses; a judge that is wrong is a gate that
+# lies, and two of them have been. If their own tests fail, nothing below is
+# believable, so nothing below runs.
+if ! python3 "$HERE/test_judges.py" > "$WORK/test_judges.out" 2>&1; then
+    echo "FAIL judges | the judges' own tests fail; see $WORK/test_judges.out"
+    tail -5 "$WORK/test_judges.out"
+    exit 1
+fi
+echo "PASS judges | $(grep -oE 'Ran [0-9]+ tests' "$WORK/test_judges.out") of the judges' own logic"
 failed=0
 
 boot() {
