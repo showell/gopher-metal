@@ -22,6 +22,7 @@ const flag_ack = tcp.flag_ack;
 const mss_option = tcp.mss_option;
 const parseMss = tcp.parseMss;
 const first_rto_ns = tcp.first_rto_ns;
+const min_rto_ns = tcp.min_rto_ns;
 const max_retries = tcp.max_retries;
 const ns_per_ms = tcp.ns_per_ms;
 const ns_per_s = tcp.ns_per_s;
@@ -1064,4 +1065,120 @@ test "giving up on a handshake tells the peer, instead of leaving it on a timer"
     try testing.expectEqual(synack.seq +% 1, rst.seq);
     try testing.expectEqual(State.closed, f.table.conns[0].state);
     try testing.expect(f.table.given_up == 1);
+}
+
+test "the handshake is the first measurement, and the estimate is RFC 6298's" {
+    var f: Fixture = .{};
+    f.init();
+    var p = Peer{ .ip = .{ 10, 0, 2, 2 }, .port = 40000 };
+    var buf: [1600]u8 = undefined;
+    _ = f.table.handle(&f.wire, p.frame(&buf, flag_syn, p.seq, ""), 0);
+    const synack = f.wire.last();
+    p.seq +%= 1;
+    p.ack = synack.seq +% 1;
+    // Their acknowledgement comes back 100 ms later: that is the round trip.
+    _ = f.table.handle(&f.wire, p.frame(&buf, flag_ack, p.seq, ""), 100 * ms);
+    const c = &f.table.conns[0];
+    try testing.expectEqual(@as(u64, 100 * ns_per_ms), c.srtt_ns);
+    try testing.expectEqual(@as(u64, 50 * ns_per_ms), c.rttvar_ns); // half, for the first
+    try testing.expectEqual(@as(u64, 300 * ns_per_ms), c.rto_ns); // srtt + 4 * rttvar
+
+    // A second sample, 60 ms: the estimate moves an eighth, the variation a
+    // quarter.
+    _ = f.table.queue(0, "a response");
+    f.table.transmit(&f.wire, 200 * ms);
+    _ = p.ackAll(&f.table, &f.wire, 260 * ms);
+    try testing.expectEqual(@as(u64, 95 * ns_per_ms), c.srtt_ns);
+    try testing.expectEqual(@as(u64, 47_500_000), c.rttvar_ns);
+    try testing.expectEqual(@as(u64, 285 * ns_per_ms), c.rto_ns);
+}
+
+test "a fast path waits the floor, not a second" {
+    // **THE FLOOR IS THE PEER'S DELAYED ACKNOWLEDGEMENTS, NOT THE PATH.** On a
+    // private network the round trip is microseconds; nothing should wait a
+    // second for it.
+    var f: Fixture = .{};
+    f.init();
+    var p = Peer{ .ip = .{ 10, 0, 2, 2 }, .port = 40000 };
+    var buf: [1600]u8 = undefined;
+    _ = f.table.handle(&f.wire, p.frame(&buf, flag_syn, p.seq, ""), 0);
+    p.seq +%= 1;
+    p.ack = f.wire.last().seq +% 1;
+    _ = f.table.handle(&f.wire, p.frame(&buf, flag_ack, p.seq, ""), 200_000); // 0.2 ms
+    try testing.expectEqual(@as(u64, 200_000), f.table.conns[0].srtt_ns);
+    try testing.expectEqual(min_rto_ns, f.table.conns[0].rto_ns);
+}
+
+test "a segment that was sent twice is not timed" {
+    // Karn's algorithm: there is no telling which copy the acknowledgement
+    // answers, so the sample would be wrong either way.
+    var f: Fixture = .{};
+    f.init();
+    var p = Peer{ .ip = .{ 10, 0, 2, 2 }, .port = 40000 };
+    var buf: [1600]u8 = undefined;
+    _ = f.table.handle(&f.wire, p.frame(&buf, flag_syn, p.seq, ""), 0);
+    p.seq +%= 1;
+    p.ack = f.wire.last().seq +% 1;
+    _ = f.table.handle(&f.wire, p.frame(&buf, flag_ack, p.seq, ""), 100 * ms);
+    const c = &f.table.conns[0];
+    const settled = c.srtt_ns;
+
+    _ = f.table.queue(0, "a response");
+    f.table.transmit(&f.wire, 200 * ms);
+    // Nothing comes back, so it goes again — and then the acknowledgement
+    // arrives a long time after the FIRST copy went out.
+    f.table.transmit(&f.wire, 200 * ms + @as(i96, @intCast(c.rto_ns)));
+    try testing.expectEqual(@as(u64, 1), f.table.retransmits);
+    _ = p.ackAll(&f.table, &f.wire, 900 * ms);
+    try testing.expectEqual(settled, c.srtt_ns);
+}
+
+test "three duplicate acknowledgements send it again at once" {
+    var f: Fixture = .{};
+    f.init();
+    var p = Peer{ .ip = .{ 10, 0, 2, 2 }, .port = 40000, .window = 8192 };
+    const i = try p.connect(&f.table, &f.wire, ms);
+    var body: [3000]u8 = undefined;
+    _ = f.table.queue(i, pattern(&body));
+    f.table.transmit(&f.wire, 2 * ms);
+    const una = f.table.conns[i].una;
+    const sent = f.wire.count;
+
+    // The peer received what came after the first segment, and says so three
+    // times. It is nowhere near the retransmission timer.
+    for (0..3) |_| _ = p.ackUpTo(&f.table, &f.wire, una, 3 * ms);
+    try testing.expectEqual(@as(u64, 1), f.table.fast_retransmits);
+    try testing.expect(f.wire.count > sent);
+    try testing.expectEqual(una, f.wire.at(sent).seq); // from the oldest byte on
+    try testing.expectEqual(@as(u8, 0), f.table.conns[i].dupacks);
+}
+
+test "a peer that repeats itself forever gets one answer, not one each time" {
+    var f: Fixture = .{};
+    f.init();
+    var p = Peer{ .ip = .{ 10, 0, 2, 2 }, .port = 40000, .window = 8192 };
+    const i = try p.connect(&f.table, &f.wire, ms);
+    var body: [3000]u8 = undefined;
+    _ = f.table.queue(i, pattern(&body));
+    f.table.transmit(&f.wire, 2 * ms);
+    const una = f.table.conns[i].una;
+    for (0..30) |_| _ = p.ackUpTo(&f.table, &f.wire, una, 3 * ms);
+    try testing.expectEqual(@as(u64, 1), f.table.fast_retransmits);
+}
+
+test "a shut window's probes are answered without being mistaken for loss" {
+    // The peer has no room, so it acknowledges every probe with the same
+    // number: the same shape as a duplicate acknowledgement, and not loss.
+    var f: Fixture = .{};
+    f.init();
+    var p = Peer{ .ip = .{ 10, 0, 2, 2 }, .port = 40000, .window = 0 };
+    const i = try p.connect(&f.table, &f.wire, 0);
+    _ = f.table.queue(i, "nobody is reading");
+    var now: i96 = 0;
+    while (f.table.conns[i].state != .closed) : (now += 10 * ms) {
+        f.table.transmit(&f.wire, now);
+        if (f.wire.count > 0 and f.wire.last().payload.len > 0) _ = p.ackUpTo(&f.table, &f.wire, p.ack, now);
+    }
+    try testing.expectEqual(@as(u64, 0), f.table.fast_retransmits);
+    try testing.expectEqual(@as(u64, 1), f.table.given_up);
 }

@@ -159,8 +159,13 @@ def check_connections(server, count=5000):
     st = server.stats()
     detail = (f"{count} one after another, {means[1] * 1e6:.0f} -> {means[9] * 1e6:.0f} us each "
               f"(x{late / early:.2f}); {lingering} left half-closed on Linux's side; "
-              f"table: {st['strays']} strays reset, {st['retransmits']} retransmits")
-    report(late <= 1.5 * early and lingering == 0 and st["in_use"] == 0, "connections", detail, started)
+              f"table: {st['strays']} strays reset, {st['retransmits']} retransmits; "
+              f"the path measured at {st['measured_us']} us over {st['samples']} round trips")
+    # **THE PATH IS MEASURED, NOT ASSUMED.** A table that never took a sample
+    # would fall back to the floor and wait tens of milliseconds for a peer
+    # that answers in tens of microseconds.
+    report(late <= 1.5 * early and lingering == 0 and st["in_use"] == 0
+           and st["samples"] >= count, "connections", detail, started)
 
 
 def check_lazy_close(server, count=30):
@@ -282,9 +287,13 @@ def check_loss():
             server.stop()
     finally:
         netem(None)
-    report(wrong == 0 and big, "loss",
+    # **THE PEER'S DUPLICATE ACKNOWLEDGEMENTS DO THE WORK A TIMER WOULD.** With
+    # a bulk answer in flight, Linux says what is missing at once, and this
+    # check fails if the table waited for its own clock every time instead.
+    report(wrong == 0 and big and st["fast_retransmits"] > 0, "loss",
            f"5% lost toward the table and 1 in 13 from it: 100 small answers ({wrong} wrong) and "
-           f"300 KB {'exact' if big else 'WRONG'}; {st['retransmits']} retransmits", started)
+           f"300 KB {'exact' if big else 'WRONG'}; {st['retransmits']} retransmits, "
+           f"{st['fast_retransmits']} of them asked for by the peer", started)
 
 
 def main() -> int:

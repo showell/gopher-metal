@@ -64,16 +64,32 @@ pub const default_mss: u16 = 536;
 pub const our_mss: u16 = 1460;
 pub const mss_option = [4]u8{ 2, 4, our_mss >> 8, our_mss & 0xFF };
 
-/// **THE RETRANSMISSION CLOCK.** Nothing here measures round-trip times, so
-/// the first wait is the one RFC 6298 gives a sender that has not measured:
-/// one second. (Linux's 200 ms is a floor under a measured estimate, and a
-/// peer that delays its acknowledgements by up to 200 ms — slirp does — makes
-/// it a race.) Each timeout doubles the wait up to the ceiling, and the
-/// connection is reset once `max_retries` have passed with nothing
-/// acknowledged — about 27 seconds of silence in all.
-pub const first_rto_ns: u64 = 1 * ns_per_s;
+/// **THE RETRANSMISSION CLOCK, MEASURED.** How long to wait before sending
+/// something again is a fact about the path, and the path is measured: every
+/// connection times one segment at a time and keeps RFC 6298's smoothed
+/// estimate, `srtt + 4 * rttvar`. The handshake is the first sample, so even
+/// the first byte of a response is sent under a measured clock.
+///
+/// **THE FLOOR IS NOT ABOUT THE PATH; IT IS ABOUT THE PEER'S DELAYED
+/// ACKNOWLEDGEMENTS.** A peer may sit on an acknowledgement for tens of
+/// milliseconds (Linux) or up to 200 (slirp, in front of QEMU). Waiting less
+/// than that turns a delay into a "loss" and makes us re-send a whole window
+/// for nothing, so the floor is Linux's own `TCP_RTO_MIN`. It is also the
+/// first wait, before anything is measured: this machine answers Caddy over a
+/// private network, not the open internet, and RFC 6298's unmeasured second is
+/// a thousand times the round trip we will actually see.
+///
+/// Each timeout doubles the wait up to the ceiling, and the connection is
+/// reset once `max_retries` have passed with nothing acknowledged.
+pub const min_rto_ns: u64 = 200 * ns_per_ms;
+pub const first_rto_ns: u64 = min_rto_ns;
 pub const max_rto_ns: u64 = 5 * ns_per_s;
 pub const max_retries: u8 = 6;
+/// **HOW MANY DUPLICATE ACKNOWLEDGEMENTS MEAN A SEGMENT IS GONE** (RFC 5681).
+/// A peer that receives what came after a lost segment says so at once, by
+/// acknowledging the same byte again for each one. Three of those are the
+/// peer telling us what the timer would only guess at a round trip later.
+pub const dupacks_before_resend: u8 = 3;
 /// How long a connection whose FIN was acknowledged waits for the peer's.
 pub const fin_wait_ns: u64 = 30 * ns_per_s;
 pub const ns_per_ms = 1_000_000;
@@ -142,6 +158,22 @@ pub const Conn = struct {
     rto_ns: u64 = first_rto_ns,
     /// Timeouts since the peer last acknowledged anything.
     retries: u8 = 0,
+    /// **THE PATH, AS MEASURED** (RFC 6298's SRTT and RTTVAR). Zero until the
+    /// first sample, which the handshake provides.
+    srtt_ns: u64 = 0,
+    rttvar_ns: u64 = 0,
+    /// The one segment being timed: when it went out, and the sequence number
+    /// just past it. Null when nothing is being timed — including after a
+    /// re-send, because there is then no telling which copy was answered
+    /// (Karn's algorithm), so that sample is thrown away.
+    timed_at: ?i96 = null,
+    timed_seq: u32 = 0,
+    /// Acknowledgements of the same byte in a row: the peer saying it is
+    /// receiving what came after something that never arrived.
+    dupacks: u8 = 0,
+    /// Whether this run of duplicates has already been answered. Cleared when
+    /// the peer acknowledges something new.
+    resent_early: bool = false,
     /// Our FIN is acknowledged and the peer's has not come: until when to
     /// wait for it.
     fin_wait_until: ?i96 = null,
@@ -219,6 +251,14 @@ pub const Conn = struct {
         return n;
     }
 
+    /// Starts timing a segment, if nothing is being timed already. One sample
+    /// at a time is all RFC 6298 asks for without timestamps.
+    fn time(self: *Conn, now: i96, past_it: u32) void {
+        if (self.timed_at != null) return;
+        self.timed_at = now;
+        self.timed_seq = past_it;
+    }
+
     /// Whether `seq` is past `rcv_nxt` but inside the window we advertise.
     fn ahead(self: *const Conn, seq: u32) bool {
         const off = seq -% self.rcv_nxt;
@@ -274,8 +314,12 @@ pub const Table = struct {
     /// SYNs dropped because every slot was taken — what Linux does when its
     /// accept queue is full. The peer retries; the count says it happened.
     refused: u64 = 0,
-    /// Timeouts that sent something again.
+    /// Segments sent again, whether a timer or the peer's duplicate
+    /// acknowledgements asked for it.
     retransmits: u64 = 0,
+    /// How many of those the peer asked for, a round trip sooner than the
+    /// timer would have.
+    fast_retransmits: u64 = 0,
     /// Bytes sent past a shut window to ask whether it has opened.
     probes: u64 = 0,
     /// Connections reset because the peer stopped acknowledging.
@@ -286,6 +330,10 @@ pub const Table = struct {
     strays: u64 = 0,
     /// Segments whose checksum was wrong, dropped.
     damaged: u64 = 0,
+    /// Round trips measured, and the newest smoothed estimate — what this
+    /// machine believes the path to its peers costs.
+    samples: u64 = 0,
+    measured_ns: u64 = 0,
 
     pub fn init(ip: [4]u8, mac: [6]u8, port: u16, conns: []Conn, out: []u8, isn: *const fn () u32) Table {
         return .{ .local_ip = ip, .local_mac = mac, .port = port, .conns = conns, .out = out, .isn = isn };
@@ -470,6 +518,7 @@ pub const Table = struct {
             // sent again; the peer drops what it already has.
             c.sent = 0;
             if (c.fin == .sent) c.fin = .queued;
+            c.timed_at = null; // Karn: no telling which copy is answered
             self.retransmits += 1;
             probe = true;
         }
@@ -488,8 +537,10 @@ pub const Table = struct {
                 n = 1;
             }
             probe = false;
+            const first_time = c.sent + n > c.high;
             self.emit(wire, i, flag_psh | flag_ack, c.una +% @as(u32, @intCast(c.sent)), c.tx[c.tx_start + c.sent ..][0..n]);
             c.sent += n;
+            if (first_time) c.time(now, c.una +% @as(u32, @intCast(c.sent)));
             c.high = @max(c.high, c.sent);
             if (c.rto_at == null) c.rto_at = now + c.rto_ns;
         }
@@ -500,6 +551,44 @@ pub const Table = struct {
             c.fin_ever_sent = true;
             if (c.rto_at == null) c.rto_at = now + c.rto_ns;
         }
+    }
+
+    /// Sends everything unacknowledged again, now, without touching the
+    /// backoff: the peer told us it is missing something, which is news about
+    /// this connection, not evidence that the path has slowed down.
+    fn resend(self: *Table, wire: anytype, i: usize, now: i96) void {
+        const c = &self.conns[i];
+        c.dupacks = 0;
+        c.resent_early = true;
+        c.sent = 0;
+        if (c.fin == .sent) c.fin = .queued;
+        c.timed_at = null; // Karn, the same as after a timeout
+        c.rto_at = now + c.rto_ns;
+        self.retransmits += 1;
+        self.fast_retransmits += 1;
+        self.transmitOne(wire, i, now);
+    }
+
+    /// **TAKES THE SAMPLE IF THIS ACKNOWLEDGEMENT COVERS WHAT IS BEING TIMED**,
+    /// and folds it into the estimate exactly as RFC 6298 §2 says: the first
+    /// sample IS the estimate, and later ones move it an eighth at a time,
+    /// with the variation moving a quarter at a time.
+    fn measure(self: *Table, c: *Conn, number: u32, now: i96) void {
+        const at = c.timed_at orelse return;
+        if (number -% c.timed_seq >= 1 << 31) return; // not there yet
+        c.timed_at = null;
+        const rtt: u64 = @intCast(@max(0, now - at));
+        if (c.srtt_ns == 0) {
+            c.srtt_ns = rtt;
+            c.rttvar_ns = rtt / 2;
+        } else {
+            const off = if (c.srtt_ns > rtt) c.srtt_ns - rtt else rtt - c.srtt_ns;
+            c.rttvar_ns = (3 * c.rttvar_ns + off) / 4;
+            c.srtt_ns = (7 * c.srtt_ns + rtt) / 8;
+        }
+        c.rto_ns = @min(@max(c.srtt_ns + 4 * c.rttvar_ns, min_rto_ns), max_rto_ns);
+        self.samples += 1;
+        self.measured_ns = c.srtt_ns;
     }
 
     /// One more timeout: false once they have run out.
@@ -518,7 +607,7 @@ pub const Table = struct {
 
     /// Takes in the peer's acknowledgement and window, from a segment numbered
     /// `seq`. True once our FIN is acknowledged.
-    fn acknowledge(c: *Conn, seq: u32, number: u32, window: u16, now: i96) bool {
+    fn acknowledge(self: *Table, c: *Conn, seq: u32, number: u32, window: u16, now: i96) bool {
         const flight = c.highest() -% c.una;
         const advance = number -% c.una;
         // An acknowledgement of something never sent, or an old one (which
@@ -554,7 +643,8 @@ pub const Table = struct {
         }
 
         c.retries = 0;
-        c.rto_ns = first_rto_ns;
+        self.measure(c, number, now);
+        if (c.srtt_ns == 0) c.rto_ns = first_rto_ns;
         c.rto_at = if (c.highest() != c.una) now + c.rto_ns else null;
         return c.fin == .acknowledged;
     }
@@ -625,6 +715,10 @@ pub const Table = struct {
             self.arrivals += 1;
             c.serial = self.arrivals;
             self.emit(wire, slot, flag_syn | flag_ack, c.una, "");
+            // **THE HANDSHAKE IS A ROUND TRIP**, and the only one that happens
+            // before we have anything to send: timing it means the first byte
+            // of the first answer already goes out under a measured clock.
+            c.time(now, c.una +% 1);
             return .{ .event = .nothing };
         };
 
@@ -664,7 +758,7 @@ pub const Table = struct {
             // believe in never changes again.
             const behind = (c.rcv_nxt -% seq) < (1 << 31);
             const done = behind and c.state != .syn_received and
-                acknowledge(c, seq, number, window, now);
+                self.acknowledge(c, seq, number, window, now);
             self.emit(wire, i, flag_ack, c.highest(), "");
             if (done) return self.settle(i, .nothing, true, now);
             return .{ .event = .nothing };
@@ -689,12 +783,36 @@ pub const Table = struct {
             c.wl2 = number;
             c.rto_at = null;
             c.retries = 0;
-            c.rto_ns = first_rto_ns;
+            self.measure(c, number, now);
+            if (c.srtt_ns == 0) c.rto_ns = first_rto_ns;
             c.state = .established;
             event = .opened;
             // Their ACK may carry the first data, so fall through.
         } else {
-            fin_acknowledged = acknowledge(c, seq, number, window, now);
+            const was = c.una;
+            const held = c.wnd;
+            fin_acknowledged = self.acknowledge(c, seq, number, window, now);
+            // **THE PEER SAYS WHAT IS MISSING; WE DO NOT WAIT TO GUESS IT.**
+            // A segment that carries nothing, acknowledges nothing new and
+            // does not move the window, while something of ours is
+            // unacknowledged, is the peer telling us it received what came
+            // after a hole (RFC 5681). Three of them and we send again at
+            // once, rather than a round trip later when the timer runs out.
+            //
+            // **NOT WHILE THE WINDOW IS SHUT, AND ONCE PER LOSS.** A peer with
+            // no room answers every window probe with the same
+            // acknowledgement, which is not news about a lost segment; and a
+            // peer that repeats itself forever must not be able to hold the
+            // connection open by pushing the timer out, so the next one waits
+            // until something new has been acknowledged.
+            const bare = data.len == 0 and flags & flag_fin == 0 and flags & flag_syn == 0;
+            if (c.una != was) {
+                c.dupacks = 0;
+                c.resent_early = false;
+            } else if (bare and c.wnd == held and c.wnd != 0 and c.highest() != c.una) {
+                c.dupacks += 1;
+                if (c.dupacks == dupacks_before_resend and !c.resent_early) self.resend(wire, i, now);
+            }
         }
 
         if (early) {
