@@ -103,6 +103,9 @@ var gpa: std.heap.DebugAllocator(.{
 }) = .{};
 
 var blk_mem: virtio.BlockMemory align(4096) = .{};
+/// The block device, for the per-request log: how many requests it served and
+/// how long they took. Set once the device is up.
+var disk: ?*virtio.Block = null;
 var nic_mem: net.Memory align(4096) = .{};
 var rng_mem: rng.Memory align(4096) = .{};
 var sector: [fat16.sector_size]u8 align(4096) = undefined;
@@ -126,32 +129,6 @@ pub fn kmain() noreturn {
     serial.init();
     serial.put("gopher-metal: angry-gopher's route table, with no Linux under it\n");
 
-    // ── the volume. This host serves from it, so no disk is a failure. ──────
-    const blk_base = virtio.find(virtio.device_id_block) orelse
-        serial.fail("no disk: this kernel serves the site from a FAT16 volume");
-    var blk = blk_mem.bring(blk_base) catch serial.fail("the block device would not come up");
-    const part = gpt.firstPartition(&blk, &sector) catch
-        serial.fail("the disk has no GPT partition to serve from");
-    const vol = fat16.Volume.mount(&blk, &sector, part.first_lba) catch
-        serial.fail("the first partition is not FAT16");
-    Io.mount(vol);
-    serial.put("  volume mounted at LBA ");
-    serial.putDec(part.first_lba);
-    serial.put("\n");
-
-    const clock = metal.wallclock.start() catch |e| {
-        serial.put("  wallclock: ");
-        serial.put(@errorName(e));
-        serial.put("\n");
-        serial.fail("the clocks would not come up");
-    };
-    serial.put("  clock: TSC at ");
-    serial.putDec(clock.tsc_hz);
-    serial.put(" Hz, wall clock ");
-    serial.putDec(@intCast(clock.unix));
-    serial.put("\n");
-    const io = Io.io();
-
     // ── the machine's memory ────────────────────────────────────────────────
     // What RAM there is, where it is, and which of it this kernel is sitting
     // in. Everything below — the site's heap and each request's — comes out of
@@ -174,6 +151,46 @@ pub fn kmain() noreturn {
     serial.put(" in ");
     serial.putDec(carved.pages_total);
     serial.put(" pages\n");
+
+    // ── the volume. This host serves from it, so no disk is a failure. ──────
+    const blk_base = virtio.find(virtio.device_id_block) orelse
+        serial.fail("no disk: this kernel serves the site from a FAT16 volume");
+    var blk = blk_mem.bring(blk_base) catch serial.fail("the block device would not come up");
+    disk = &blk;
+    const part = gpt.firstPartition(&blk, &sector) catch
+        serial.fail("the disk has no GPT partition to serve from");
+    var vol = fat16.Volume.mount(&blk, &sector, part.first_lba) catch
+        serial.fail("the first partition is not FAT16");
+    // The FAT, in memory: without it every lookup is a device read, and the
+    // free-cluster search re-reads its way past every cluster in use on each
+    // small file the application replaces.
+    const fat_cache = pages.allocator.alloc(u8, vol.fatBytes()) catch
+        serial.fail("no memory to hold the FAT");
+    vol.cacheFat(fat_cache) catch |e| {
+        serial.put("  fat cache: ");
+        serial.put(@errorName(e));
+        serial.put("\n");
+        serial.fail("the FAT could not be held in memory");
+    };
+    Io.mount(vol);
+    serial.put("  volume mounted at LBA ");
+    serial.putDec(part.first_lba);
+    serial.put(", FAT held in memory (");
+    serial.putDec(vol.fatBytes());
+    serial.put(" bytes)\n");
+
+    const clock = metal.wallclock.start() catch |e| {
+        serial.put("  wallclock: ");
+        serial.put(@errorName(e));
+        serial.put("\n");
+        serial.fail("the clocks would not come up");
+    };
+    serial.put("  clock: TSC at ");
+    serial.putDec(clock.tsc_hz);
+    serial.put(" Hz, wall clock ");
+    serial.putDec(@intCast(clock.unix));
+    serial.put("\n");
+    const io = Io.io();
 
     // ── the host contract ───────────────────────────────────────────────────
     const base = router.mem_meter.init(gpa.allocator());
@@ -299,6 +316,8 @@ fn serveOne(
     }) catch "(unprintable)";
 
     const head_at = Io.awakeNs() orelse 0;
+    const disk_requests = if (disk) |d| d.requests else 0;
+    const disk_ticks = if (disk) |d| d.busy_ticks else 0;
 
     var outcome: []const u8 = "ok";
     router.route(&req, io, request_alloc, bus) catch |e| {
@@ -313,7 +332,13 @@ fn serveOne(
     serial.putDec(@intCast(@divTrunc(head_at - asked_at, 1000)));
     serial.put(" us, answered in ");
     serial.putDec(@intCast(@divTrunc(done_at - head_at, 1000)));
-    serial.put(" us\n");
+    serial.put(" us, ");
+    if (disk) |d| {
+        serial.putDec(d.requests - disk_requests);
+        serial.put(" disk requests taking ");
+        serial.putDec(@intCast(@divTrunc(Io.ticksToNs(d.busy_ticks -% disk_ticks), 1000)));
+        serial.put(" us\n");
+    } else serial.put("no disk\n");
     close(&s, conn);
 }
 

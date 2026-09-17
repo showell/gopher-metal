@@ -17,6 +17,7 @@
 //! numbers, not ours.
 
 const std = @import("std");
+const tsc = @import("tsc.zig");
 
 // ---- the mmio register window --------------------------------------------
 
@@ -319,6 +320,13 @@ pub const Block = struct {
     /// The device's size in 512-byte sectors, from its config space.
     capacity: u64,
 
+    /// **WHAT THE DEVICE COST.** Every request counted, and the timestamp-counter
+    /// ticks spent between offering it and seeing it done — so a host can say
+    /// how much of a slow HTTP request was the disk, rather than guessing. The
+    /// soak could only see the whole machine slowing down; these split it.
+    requests: u64 = 0,
+    busy_ticks: u64 = 0,
+
     /// `mem` is memory the caller owns and keeps for as long as the device is
     /// up; it must be identity-mapped, since what goes in a descriptor is a
     /// PHYSICAL address.
@@ -356,16 +364,36 @@ pub const Block = struct {
         };
         d[2] = .{ .addr = @intFromPtr(self.status), .len = 1, .flags = desc_flag_write, .next = 0 };
 
+        const began = tsc.read();
         self.q.offer(0);
         self.q.notify();
         _ = self.q.wait();
         ack(self.base);
+        self.busy_ticks +%= tsc.read() -% began;
+        self.requests +%= 1;
         return self.status.*;
     }
 
     /// The sector at `lba` into the 512 bytes at `addr`.
     pub fn read(self: *Block, lba: u64, addr: u64) u8 {
         return self.transfer(blk_t_in, lba, addr, 512);
+    }
+
+    /// The most sectors one request asks for. virtio-blk lets a device state
+    /// its own limit only through features this driver does not negotiate, so
+    /// the number is ours: 64 KB, well inside what any device accepts in a
+    /// single segment, and enough that a file's run of clusters is one request
+    /// rather than one per sector.
+    pub const max_sectors: u32 = 128;
+
+    /// `count` sectors from `lba` into the `count` × 512 bytes at `addr`, as ONE
+    /// request. **This is what makes reading a file cost a request per run of
+    /// clusters rather than a request per 512 bytes** — the soak read a 200 KB
+    /// transcript on every chat send, and at a sector per request that was four
+    /// hundred round trips through the emulator.
+    pub fn readMany(self: *Block, lba: u64, addr: u64, count: u32) u8 {
+        if (count == 0 or count > max_sectors) return blk_s_unsupp;
+        return self.transfer(blk_t_in, lba, addr, count * 512);
     }
 
     /// The 512 bytes at `addr` become the sector at `lba`.

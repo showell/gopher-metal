@@ -209,7 +209,11 @@ if [ "$want" = all ] || [ "$want" = append ]; then
         echo "FAIL append | mkfs.vfat is not installed, and the check needs it"
         failed=1
     else
-        mkfs.vfat -F 16 -S 512 -n GOPHER -C "$img" 32768 > /dev/null 2>&1
+        # **512-BYTE CLUSTERS**, where everything else here uses 2 KB: a second
+        # geometry, and a FAT of 130 KB — bigger than one 64 KB device request,
+        # so holding it in memory takes the path that splits a read. No other
+        # volume in these probes reaches that path.
+        mkfs.vfat -F 16 -S 512 -s 1 -n GOPHER -C "$img" 32768 > /dev/null 2>&1
         boot append \
             -drive id=d,file="$img",format=raw,if=none \
             -device virtio-blk-device,drive=d
@@ -299,40 +303,63 @@ fi
 # probe/judge_replace.py, which reads the files through the Linux driver and
 # checks from the raw image that the dangerous shapes were really produced.
 if [ "$want" = all ] || [ "$want" = replace ]; then
-    img="$WORK/replace.img"
-    rm -f "$img"
     if ! command -v mkfs.vfat > /dev/null; then
         echo "FAIL replace | mkfs.vfat is not installed, and the check needs it"
         failed=1
     else
-        mkfs.vfat -F 16 -S 512 -n GOPHER -C "$img" 32768 > /dev/null 2>&1
-        boot replace \
-            -drive id=d,file="$img",format=raw,if=none \
-            -device virtio-blk-device,drive=d
-        if [ -f "$WORK/replace.out" ] && grep -aq PASS "$WORK/replace.out"; then
-            if fsck.vfat -n -v "$img" > "$WORK/replace.fsck" 2>&1 \
-                && ! grep -qiE "reclaim|orphan|bad |wrong|truncat|lost" "$WORK/replace.fsck"; then
-                echo "     replace | fsck.vfat finds nothing, and reclaims nothing"
-            else
-                echo "FAIL replace | fsck.vfat rejects the volume:"
-                grep -aiE "reclaim|orphan|bad |wrong|truncat|lost|error" "$WORK/replace.fsck" | head -8
-                failed=1
-            fi
-
-            if ! sudo -n true 2>/dev/null; then
-                echo "     replace | SKIPPED the Linux read-back: it needs root"
-            else
-                mnt="$WORK/rmnt"
-                mkdir -p "$mnt"
-                sudo mount -o loop,ro,noexec,nosuid,nodev,uid="$(id -u)" "$img" "$mnt"
-                if verdict="$(python3 "$HERE/judge_replace.py" "$img" "$mnt")"; then
-                    echo "     replace | $verdict"
+        # **TWICE: THE FAT ON DISK, AND THE FAT IN MEMORY.** The cache changes
+        # exactly the code this probe exists for — the first bug here was
+        # freeChain clobbering a shared scratch sector with FAT reads — so both
+        # paths face the same gate.
+        #
+        # **ONE FORMAT, COPIED**, so the two volumes can be compared byte for
+        # byte afterwards: mkfs stamps the volume label with the time it ran,
+        # and the first version of this comparison was two formats a few
+        # seconds apart that differed in exactly those two bytes.
+        blank="$WORK/replace.blank.img"
+        rm -f "$blank"
+        mkfs.vfat -F 16 -S 512 -n GOPHER -C "$blank" 32768 > /dev/null 2>&1
+        for k in replace replace_cached; do
+            img="$WORK/$k.img"
+            cp "$blank" "$img"
+            boot "$k" \
+                -drive id=d,file="$img",format=raw,if=none \
+                -device virtio-blk-device,drive=d
+            if [ -f "$WORK/$k.out" ] && grep -aq PASS "$WORK/$k.out"; then
+                if fsck.vfat -n -v "$img" > "$WORK/$k.fsck" 2>&1 \
+                    && ! grep -qiE "reclaim|orphan|bad |wrong|truncat|lost" "$WORK/$k.fsck"; then
+                    echo "     $k | fsck.vfat finds nothing, and reclaims nothing"
                 else
-                    echo "FAIL replace | $(echo "$verdict" | head -1)"
-                    echo "$verdict" | tail -n +2 | sed 's/^/             /'
+                    echo "FAIL $k | fsck.vfat rejects the volume:"
+                    grep -aiE "reclaim|orphan|bad |wrong|truncat|lost|error" "$WORK/$k.fsck" | head -8
                     failed=1
                 fi
-                sudo umount "$mnt"
+
+                if ! sudo -n true 2>/dev/null; then
+                    echo "     $k | SKIPPED the Linux read-back: it needs root"
+                else
+                    mnt="$WORK/rmnt"
+                    mkdir -p "$mnt"
+                    sudo mount -o loop,ro,noexec,nosuid,nodev,uid="$(id -u)" "$img" "$mnt"
+                    if verdict="$(python3 "$HERE/judge_replace.py" "$img" "$mnt")"; then
+                        echo "     $k | $verdict"
+                    else
+                        echo "FAIL $k | $(echo "$verdict" | head -1)"
+                        echo "$verdict" | tail -n +2 | sed 's/^/             /'
+                        failed=1
+                    fi
+                    sudo umount "$mnt"
+                fi
+            fi
+        done
+
+        # The cache must change NOTHING that reaches the disk.
+        if [ -f "$WORK/replace.img" ] && [ -f "$WORK/replace_cached.img" ]; then
+            if cmp -s "$WORK/replace.img" "$WORK/replace_cached.img"; then
+                echo "     replace | the FAT on disk and the FAT in memory leave byte-identical volumes"
+            else
+                echo "FAIL replace | the cached kernel left a different volume: $(cmp "$WORK/replace.img" "$WORK/replace_cached.img" | head -1)"
+                failed=1
             fi
         fi
     fi

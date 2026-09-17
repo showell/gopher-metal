@@ -259,6 +259,23 @@ class Traces(unittest.TestCase):
             self.assertEqual(G.base_heap_peak(old), [])
 
 
+class Timings(unittest.TestCase):
+    """The kernel's own account of each request: waiting, answering, and the
+    disk's share of the answering."""
+
+    LINE = ("  request 7: GET / -> ok (base: 70 live bytes, 4096 in pages, peak 8192)\n"
+            "    asked in 94 us, answered in 11600 us, 12 disk requests taking 3400 us\n")
+
+    def test_all_four_numbers_are_read(self):
+        self.assertEqual(G.request_timings(self.LINE), [(94, 11600, 12, 3400)])
+
+    def test_a_line_without_the_disk_is_not_half_read(self):
+        # The format before the block device was counted. Reading it as "zero
+        # disk requests" would report a machine whose disk costs nothing.
+        old = "    asked in 94 us, answered in 11600 us\n"
+        self.assertEqual(G.request_timings(old), [])
+
+
 class ClockJudge(unittest.TestCase):
     def verdict(self, text, *args):
         with tempfile.NamedTemporaryFile("w", suffix=".out", delete=False) as f:

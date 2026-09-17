@@ -31,7 +31,10 @@ pub fn build(b: *std.Build) void {
     // same type wherever it is used.
     const metal = b.createModule(.{ .root_source_file = b.path("src/metal.zig") });
 
-    const kernels = [_]struct { name: []const u8, root: []const u8, step: []const u8, help: []const u8 }{
+    // `cache_fat` builds the same probe with the FAT held in memory, so one
+    // source judges both paths — and run.sh can require the two to leave
+    // byte-identical volumes.
+    const kernels = [_]struct { name: []const u8, root: []const u8, step: []const u8, help: []const u8, cache_fat: bool = false }{
         .{ .name = "block.elf", .root = "probe/block.zig", .step = "block", .help = "the virtio-blk probe kernel" },
         .{ .name = "fat16.elf", .root = "probe/fat16.zig", .step = "fat16", .help = "the FAT16 probe kernel" },
         .{ .name = "fat16write.elf", .root = "probe/fat16write.zig", .step = "fat16write", .help = "fat16-write, reproducing the ladder verdict" },
@@ -39,6 +42,7 @@ pub fn build(b: *std.Build) void {
         .{ .name = "vfat.elf", .root = "probe/vfat.zig", .step = "vfat", .help = "long names and subdirectories, judged by fsck.vfat" },
         .{ .name = "append.elf", .root = "probe/append.zig", .step = "append", .help = "the append the application makes, judged by fsck.vfat and Linux" },
         .{ .name = "replace.elf", .root = "probe/replace.zig", .step = "replace", .help = "replace, delete and delete-tree, in a fragmented directory" },
+        .{ .name = "replace_cached.elf", .root = "probe/replace.zig", .step = "replace_cached", .help = "the same, with the FAT held in memory", .cache_fat = true },
         .{ .name = "restore.elf", .root = "probe/restore.zig", .step = "restore", .help = "reading a volume Linux wrote" },
         .{ .name = "clock.elf", .root = "probe/clock.zig", .step = "clock", .help = "the clocks, and .real once it is told" },
         .{ .name = "realunset.elf", .root = "probe/realunset.zig", .step = "realunset", .help = "MUST PANIC: .real before anyone set it" },
@@ -57,6 +61,8 @@ pub fn build(b: *std.Build) void {
 
     const all = b.step("kernels", "every kernel");
     for (kernels) |k| {
+        const probe_opts = b.addOptions();
+        probe_opts.addOption(bool, "cache_fat", k.cache_fat);
         const exe = b.addExecutable(.{
             .name = k.name,
             .root_module = b.createModule(.{
@@ -72,7 +78,10 @@ pub fn build(b: *std.Build) void {
                 // one core, no preemption and no scheduler. Saying so is what
                 // entitles src/io.zig to stub the whole concurrency family.
                 .single_threaded = true,
-                .imports = &.{.{ .name = "metal", .module = metal }},
+                .imports = &.{
+                    .{ .name = "metal", .module = metal },
+                    .{ .name = "probe_options", .module = probe_opts.createModule() },
+                },
             }),
         });
         exe.setLinkerScript(b.path("probe/link.ld"));

@@ -530,8 +530,9 @@ pub fn awakeNs() ?i96 {
     return sinceBoot();
 }
 
-/// Nanoseconds between two TSC readings, at the measured rate.
-fn ticksToNs(ticks: u64) i96 {
+/// Nanoseconds between two TSC readings, at the measured rate. Public so a host
+/// can turn a tick count it kept — the block device's, say — into a duration.
+pub fn ticksToNs(ticks: u64) i96 {
     if (tsc_hz == 0) @panic(clock_unset_msg);
     return @intCast(@divTrunc(@as(i128, ticks) * 1_000_000_000, @as(i128, tsc_hz)));
 }

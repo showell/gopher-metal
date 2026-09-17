@@ -30,11 +30,12 @@
 //!
 //! What is still missing: FAT12/FAT32, and renaming.
 
+const std = @import("std");
 const virtio = @import("virtio.zig");
 const civil = @import("civil.zig");
 
 pub const sector_size: u32 = 512;
-pub const Error = error{ NotFat16, BadBootSector, ReadFailed, WriteFailed, NotFound, TooBig, BadChain, BadName, Full, DirectoryFull };
+pub const Error = error{ NotFat16, BadBootSector, ReadFailed, WriteFailed, NotFound, TooBig, BadChain, BadName, Full, DirectoryFull, FatsDisagree };
 
 /// A directory entry as it sits on disk.
 const dirent_size: u32 = 32;
@@ -190,6 +191,52 @@ pub const Volume = struct {
     /// The highest cluster number the data region holds.
     max_cluster: u16,
 
+    /// **THE FAT, HELD IN MEMORY**, once the host has given it somewhere to
+    /// live. Without it every FAT lookup is a device read — and a soak of
+    /// five thousand chat requests showed what that costs: the free-cluster
+    /// search starts at cluster 2 every time, so every small file replaced
+    /// walked past every cluster the growing transcript held, one block read
+    /// apiece, and the machine's own time to answer rose from 10 ms to over
+    /// 150 ms while nothing about the request changed. Held here, a lookup is a
+    /// memory read and a set is a memory write plus one sector per FAT copy.
+    ///
+    /// Null is still a working volume: the probes that judge the uncached path
+    /// leave it that way.
+    fat: ?[]u8 = null,
+
+    /// How much memory `cacheFat` needs: one copy of the FAT.
+    pub fn fatBytes(self: *const Volume) usize {
+        return @as(usize, self.sectors_per_fat) * sector_size;
+    }
+
+    /// Reads the FAT into `buf` and uses it from then on.
+    ///
+    /// **EVERY COPY MUST AGREE FIRST.** From here a change is written to each
+    /// copy as the whole cached sector, so a second FAT that disagreed anywhere
+    /// in a sector would be silently overwritten with the first — a repair
+    /// nobody asked for, on a volume some other tool may have its own opinion
+    /// about. A volume whose copies disagree is refused instead, and stays
+    /// uncached.
+    ///
+    /// `buf` must be identity-mapped, because the device writes FAT sectors
+    /// straight out of it.
+    pub fn cacheFat(self: *Volume, buf: []u8) Error!void {
+        if (buf.len < self.fatBytes()) return Error.TooBig;
+        const fat = buf[0..self.fatBytes()];
+        try self.readSectors(self.fat_start, self.sectors_per_fat, fat.ptr);
+        var s: u32 = 0;
+        var copy: u32 = 1;
+        while (copy < self.num_fats) : (copy += 1) {
+            s = 0;
+            while (s < self.sectors_per_fat) : (s += 1) {
+                try self.readSector(self.fat_start + copy * self.sectors_per_fat + s, self.scratch);
+                if (!std.mem.eql(u8, self.scratch, fat[s * sector_size ..][0..sector_size]))
+                    return Error.FatsDisagree;
+            }
+        }
+        self.fat = fat;
+    }
+
     /// Reads the boot sector and works out where everything is.
     ///
     /// **A BOOT SECTOR IS NOT TRUSTED.** Every field it names is checked before
@@ -245,6 +292,19 @@ pub const Volume = struct {
         if (self.blk.read(self.start_lba + lba, @intFromPtr(into)) != virtio.blk_s_ok) return Error.ReadFailed;
     }
 
+    /// `count` whole sectors straight into `into`, in as few requests as the
+    /// driver allows. `into` must be identity-mapped, which on this machine
+    /// everything is: the device writes it directly.
+    fn readSectors(self: *Volume, lba: u32, count: u32, into: [*]u8) Error!void {
+        var done: u32 = 0;
+        while (done < count) {
+            const n = @min(count - done, virtio.Block.max_sectors);
+            const status = self.blk.readMany(self.start_lba + lba + done, @intFromPtr(into + done * sector_size), n);
+            if (status != virtio.blk_s_ok) return Error.ReadFailed;
+            done += n;
+        }
+    }
+
     /// The sector a cluster starts at. Cluster numbering starts at 2, which is
     /// the oldest off-by-two in computing.
     fn clusterSector(self: *Volume, cluster: u16) u32 {
@@ -253,9 +313,7 @@ pub const Volume = struct {
 
     /// The next cluster in a chain, or null at its end.
     fn nextCluster(self: *Volume, cluster: u16) Error!?u16 {
-        const at = @as(u32, cluster) * 2;
-        try self.readSector(self.fat_start + at / sector_size, self.scratch);
-        const v = le16(self.scratch[at % sector_size ..][0..2]);
+        const v = try self.fatGet(cluster);
         if (v >= chain_end) return null;
         if (v < 2) return Error.BadChain;
         return v;
@@ -398,6 +456,7 @@ pub const Volume = struct {
     /// The FAT entry for a cluster.
     fn fatGet(self: *Volume, cluster: u16) Error!u16 {
         const at = @as(u32, cluster) * 2;
+        if (self.fat) |fat| return le16(fat[at..][0..2]);
         try self.readSector(self.fat_start + at / sector_size, self.scratch);
         return le16(self.scratch[at % sector_size ..][0..2]);
     }
@@ -408,6 +467,19 @@ pub const Volume = struct {
     fn fatSet(self: *Volume, cluster: u16, value: u16) Error!void {
         const at = @as(u32, cluster) * 2;
         const in_sector = at / sector_size;
+        if (self.fat) |fat| {
+            // The cached sector is the truth — cacheFat checked every copy
+            // agreed with it — so it is written to each copy whole, and no
+            // copy is read back first.
+            fat[at] = @truncate(value);
+            fat[at + 1] = @truncate(value >> 8);
+            const sector = fat[in_sector * sector_size ..][0..sector_size];
+            var c: u32 = 0;
+            while (c < self.num_fats) : (c += 1) {
+                try self.writeSector(self.fat_start + c * self.sectors_per_fat + in_sector, sector);
+            }
+            return;
+        }
         var copy: u32 = 0;
         while (copy < self.num_fats) : (copy += 1) {
             const lba = self.fat_start + copy * self.sectors_per_fat + in_sector;
@@ -1125,6 +1197,40 @@ pub const Volume = struct {
     /// answer an HTTP Range request — a browser seeking in an image, or resuming
     /// one. It walks the chain to the cluster `offset` falls in rather than
     /// reading the file from the start and discarding.
+    /// How a file sits on the disk.
+    pub const Layout = struct {
+        clusters: u32,
+        /// Stretches of consecutive clusters. One is a contiguous file.
+        runs: u32,
+        /// The most clusters in any one run.
+        longest: u32,
+    };
+
+    /// **FOR A PROBE TO CHECK ITS OWN COVERAGE**, and for telemetry: readAt
+    /// takes a different path at every break in a chain, and a probe whose
+    /// files happen to be contiguous is not testing that path at all.
+    pub fn layout(self: *Volume, entry: Entry) Error!Layout {
+        var out = Layout{ .clusters = 0, .runs = 0, .longest = 0 };
+        var cluster = entry.first_cluster;
+        if (cluster < 2) return out;
+        var previous: u16 = 0;
+        var run: u32 = 0;
+        while (true) {
+            out.clusters += 1;
+            if (previous != 0 and cluster == previous + 1) {
+                run += 1;
+            } else {
+                out.runs += 1;
+                run = 1;
+            }
+            out.longest = @max(out.longest, run);
+            previous = cluster;
+            cluster = (try self.nextCluster(cluster)) orelse break;
+            if (cluster < 2 or out.clusters > self.max_cluster) return Error.BadChain;
+        }
+        return out;
+    }
+
     pub fn readAt(self: *Volume, entry: Entry, offset: u32, out: []u8) Error!usize {
         if (entry.isDirectory()) return Error.NotFound;
         if (offset >= entry.size or out.len == 0) return 0;
@@ -1139,22 +1245,65 @@ pub const Volume = struct {
             if (cluster < 2) return Error.BadChain;
         }
 
-        var within = offset % cluster_bytes;
+        // **A FILE IS READ AS RUNS.** A run is a cluster and every cluster
+        // after it whose number is one more than the last — the stretch of
+        // disk the file occupies without a gap. Whole sectors in a run go
+        // straight into `out` as one request; only a sector the read starts or
+        // ends inside goes through the scratch sector, because the device
+        // cannot deliver part of one.
+        var sector_in_cluster: u32 = (offset % cluster_bytes) / sector_size;
+        var skip_in_sector: u32 = (offset % cluster_bytes) % sector_size;
         var got: usize = 0;
+        const max_run = @max(1, virtio.Block.max_sectors / self.sectors_per_cluster);
         while (got < want) {
-            var s: u32 = within / sector_size;
-            var in_sector: u32 = within % sector_size;
-            while (s < self.sectors_per_cluster and got < want) : (s += 1) {
-                try self.readSector(self.clusterSector(cluster) + s, self.scratch);
-                const n = @min(want - got, @as(usize, sector_size - in_sector));
-                @memcpy(out[got..][0..n], self.scratch[in_sector..][0..n]);
-                got += n;
-                in_sector = 0;
+            // How far this run goes, stopping once it holds all that is wanted.
+            var run: u32 = 1;
+            var last = cluster;
+            var after: ?u16 = null;
+            while (true) {
+                const have = run * cluster_bytes - sector_in_cluster * sector_size - skip_in_sector;
+                const next = try self.nextCluster(last);
+                if (next == null) break;
+                if (got + have >= want or run >= max_run or next.? != last + 1) {
+                    after = next;
+                    break;
+                }
+                last = next.?;
+                run += 1;
             }
+
+            var lba = self.clusterSector(cluster) + sector_in_cluster;
+            var sectors_left = run * self.sectors_per_cluster - sector_in_cluster;
+
+            if (skip_in_sector != 0) {
+                try self.readSector(lba, self.scratch);
+                const n = @min(want - got, @as(usize, sector_size - skip_in_sector));
+                @memcpy(out[got..][0..n], self.scratch[skip_in_sector..][0..n]);
+                got += n;
+                lba += 1;
+                sectors_left -= 1;
+                skip_in_sector = 0;
+            }
+
+            const whole: u32 = @intCast(@min(@as(usize, sectors_left), (want - got) / sector_size));
+            if (whole > 0) {
+                try self.readSectors(lba, whole, out[got..].ptr);
+                got += @as(usize, whole) * sector_size;
+                lba += whole;
+                sectors_left -= whole;
+            }
+
+            if (got < want and sectors_left > 0) {
+                try self.readSector(lba, self.scratch);
+                const n = @min(want - got, @as(usize, sector_size));
+                @memcpy(out[got..][0..n], self.scratch[0..n]);
+                got += n;
+            }
+
             if (got >= want) break;
-            within = 0;
-            cluster = (try self.nextCluster(cluster)) orelse return Error.BadChain;
+            cluster = after orelse return Error.BadChain;
             if (cluster < 2) return Error.BadChain;
+            sector_in_cluster = 0;
         }
         return got;
     }
@@ -1340,7 +1489,7 @@ fn eqlFold(a: []const u8, b: []const u8) bool {
 // oracle**: probe/run.sh writes a volume on the machine and asks the Linux
 // VFAT driver what time it thinks those files were written.
 
-const testing = @import("std").testing;
+const testing = std.testing;
 
 test "the fields are packed the way the format says" {
     // 2026-09-17T10:38:52Z: year 46 since 1980, month 9, day 17; hour 10,

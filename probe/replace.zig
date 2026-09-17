@@ -39,6 +39,12 @@ const virtio = metal.virtio;
 const fat16 = metal.fat16;
 const Io = metal.io;
 
+/// Built twice: once as it always was, and once with the FAT held in memory.
+/// Both are judged by the same gate in run.sh, and their final volumes must be
+/// byte-identical — a cache that changed anything on disk is a bug.
+const cache_fat = @import("probe_options").cache_fat;
+var fat_cache: [512 * 1024]u8 align(4096) = undefined;
+
 comptime {
     _ = metal.boot;
 }
@@ -128,8 +134,17 @@ pub fn kmain() noreturn {
     const base = virtio.find(virtio.device_id_block) orelse
         serial.fail("no virtio-blk device in any mmio slot");
     var blk = blk_mem.bring(base) catch serial.fail("the block device would not come up");
-    const vol = fat16.Volume.mount(&blk, &scratch, 0) catch
+    var vol = fat16.Volume.mount(&blk, &scratch, 0) catch
         serial.fail("this is not the FAT16 volume the probe expects");
+    if (cache_fat) {
+        vol.cacheFat(&fat_cache) catch |e| {
+            serial.put("  fat cache: ");
+            serial.put(@errorName(e));
+            serial.put("\n");
+            serial.fail("the FAT could not be held in memory");
+        };
+        serial.put("  the FAT is held in memory\n");
+    }
     Io.mount(vol);
     const io = Io.io();
     var fba = std.heap.FixedBufferAllocator.init(&heap);

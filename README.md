@@ -573,6 +573,47 @@ partition at LBA 2048, which is why its `Fat16` cites a `Gpt` chapter — and wh
 a reader that mounts sector 0 finds a boot sector of zeros and concludes,
 correctly and uselessly, that the volume is not FAT16.
 
+## The disk, read a run at a time, with the FAT in memory
+
+A soak of 5,251 chat requests passed every correctness check — and the machine's
+own time to answer rose from 10 ms to 160 ms as the conversation grew, while
+even a fixed 27 KB PDF got slower. Reading the code found two costs that grew
+with the disk, not with the request:
+
+- **No FAT in memory.** Every FAT lookup was a block read, and the free-cluster
+  search started at cluster 2 on every allocation. A chat request replaces four
+  tiny files (`last-seen`, `last-conv`, `lastauthor`, the session cursor), so
+  each walked past every cluster the growing transcript held, one device round
+  trip apiece.
+- **One sector per request.** A 200 KB file was four hundred round trips
+  through the emulator. And chat's `appendMessage` reads the whole transcript
+  on every send, to count the messages and number the next one — cheap out of
+  Linux's page cache, expensive here.
+
+So `Volume.cacheFat` holds the FAT (64 KB for this volume, 130 KB at most for
+FAT16), written through to every copy on each change — after checking that
+every copy agreed with it, so it never silently "repairs" a second FAT. And
+`readAt` reads a file as **runs** of consecutive clusters: whole sectors go
+straight into the caller's buffer as one request per run, capped at 64 KB, and
+only a sector the read starts or ends inside goes through the scratch sector.
+
+**Judged three ways:**
+
+- `replace` and `replace_cached` are one probe built twice, run from one
+  formatted image, and must leave **byte-identical** volumes: the cache may
+  change nothing that reaches the disk. (The first comparison failed on two
+  bytes — mkfs's own timestamp on the volume label, from two formats a few
+  seconds apart.) Writing only the first FAT copy is caught by fsck and by the
+  comparison.
+- `append` sweeps fifteen offsets against eleven lengths over a file whose chain
+  breaks at every cluster and one that is a single run longer than a request
+  may carry, and checks its own files have those shapes first. Its volume uses
+  512-byte clusters, so its FAT is too big for one request — the only path that
+  splits a read, which a mutation showed nothing else reached.
+- Every HTTP request's log line now says how many disk requests it made and how
+  long they took, so a slow answer can be split into the device's share and
+  ours.
+
 ## Every wait is a measured duration
 
 A client that connects and then says nothing is this server's worst case,

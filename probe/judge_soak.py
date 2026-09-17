@@ -187,8 +187,12 @@ def soak(elf: str, gopher_root: str, work: str) -> int:
             timings = J.request_timings(log)[-(asked - window_asked):]
             answered = sorted(t[1] for t in timings) or [0]
             waited = sorted(t[0] for t in timings) or [0]
+            disk_n = sorted(t[2] for t in timings) or [0]
+            disk_us = sorted(t[3] for t in timings) or [0]
             kernel = (f"kernel: answered median {answered[len(answered) // 2] / 1000:.1f}ms "
                       f"worst {answered[-1] / 1000:.1f}ms; "
+                      f"disk median {disk_n[len(disk_n) // 2]} requests "
+                      f"{disk_us[len(disk_us) // 2] / 1000:.1f}ms; "
                       f"waiting for the client median {waited[len(waited) // 2] / 1000:.1f}ms")
             print(f"  round {n:>6}  {asked:>6} req  {elapsed / 60:6.1f} min  "
                   f"{(asked - window_asked) / max(window, 0.001):5.1f} req/s now  "

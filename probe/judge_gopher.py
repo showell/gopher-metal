@@ -893,15 +893,18 @@ def base_heap_taken(log: str) -> list:
     return [int(m.group(2)) for m in BASE_HEAP.finditer(log)]
 
 
-TIMING = re.compile(r"asked in (\d+) us, answered in (\d+) us")
+TIMING = re.compile(
+    r"asked in (\d+) us, answered in (\d+) us, (\d+) disk requests taking (\d+) us")
 
 
 def request_timings(log: str) -> list:
     """**WHAT THE MACHINE SAYS EACH REQUEST COST**, in microseconds, as
-    (waiting for the client to finish asking, answering it). Its own clock, so
-    curl, slirp, the virtqueues and the emulator are all on the other side of
-    the measurement."""
-    return [(int(m.group(1)), int(m.group(2))) for m in TIMING.finditer(log)]
+    (waiting for the client to finish asking, answering it, disk requests made
+    while answering, the time those took). Its own clock, so curl, slirp and the
+    emulator's network are all on the other side of the measurement — and the
+    disk's share of the answer is its own number."""
+    return [(int(m.group(1)), int(m.group(2)), int(m.group(3)), int(m.group(4)))
+            for m in TIMING.finditer(log)]
 
 
 def base_heap_peak(log: str) -> list:

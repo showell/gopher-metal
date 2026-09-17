@@ -71,7 +71,7 @@ pub fn kmain() noreturn {
     const base = virtio.find(virtio.device_id_block) orelse
         serial.fail("no virtio-blk device in any mmio slot");
     var blk = blk_mem.bring(base) catch serial.fail("the block device would not come up");
-    const vol = fat16.Volume.mount(&blk, &scratch, 0) catch
+    var vol = fat16.Volume.mount(&blk, &scratch, 0) catch
         serial.fail("this is not the FAT16 volume the probe expects");
     Io.mount(vol);
 
@@ -194,9 +194,167 @@ pub fn kmain() noreturn {
     serial.put("  createDirPath: five levels, then two appends into it\n");
 
     readWindows(io);
+    readSweep(io, &vol);
+    readThroughCachedFat(&vol);
     createDefaults(io, alloc);
 
     serial.pass();
+}
+
+/// A byte that is a function of its position in a file and of which file it
+/// is: so no two files, and no two places in one file, look alike — a read
+/// from the wrong cluster cannot pass by accident.
+fn patternByte(seed: u8, pos: usize) u8 {
+    return @as(u8, @truncate((pos *% 2654435761) >> 13)) ^ seed;
+}
+
+fn appendPattern(io: anytype, path: []const u8, seed: u8, from: usize, len: usize) void {
+    var chunk: [16 * 1024]u8 = undefined;
+    var done: usize = 0;
+    while (done < len) {
+        const n = @min(chunk.len, len - done);
+        for (chunk[0..n], 0..) |*b, i| b.* = patternByte(seed, from + done + i);
+        append(io, path, chunk[0..n]) catch serial.fail("an append for the read sweep failed");
+        done += n;
+    }
+}
+
+var sweep_buf: [128 * 1024]u8 = undefined;
+var fat_cache: [256 * 1024]u8 align(4096) = undefined;
+
+/// **THE FAT IN MEMORY, ON A FAT TOO BIG FOR ONE REQUEST.** On this volume's
+/// 512-byte clusters the FAT is 130 KB, so reading it in takes more than one
+/// device request — the only path that splits a read, since a file read never
+/// asks for more than one request's worth at a time. cacheFat compares what it
+/// read against the second FAT sector by sector, so a split that put its pieces
+/// in the wrong place fails there. Then the sweep files are read again through
+/// the cached FAT, which must answer exactly as the one on disk did.
+fn readThroughCachedFat(vol: *fat16.Volume) void {
+    const fat_sectors = vol.fatBytes() / fat16.sector_size;
+    if (fat_sectors <= metal.virtio.Block.max_sectors) {
+        serial.put("  the FAT is only ");
+        serial.putDec(fat_sectors);
+        serial.put(" sectors\n");
+        serial.fail("this volume no longer tests a FAT read split across requests: use smaller clusters");
+    }
+    vol.cacheFat(&fat_cache) catch |e| {
+        serial.put("  fat cache: ");
+        serial.put(@errorName(e));
+        serial.put("\n");
+        serial.fail("a FAT larger than one request could not be read into memory");
+    };
+    Io.mount(vol.*);
+
+    const entry = vol.open("big.txt") catch serial.fail("big.txt is gone");
+    const n = vol.readAt(entry, 0, sweep_buf[0 .. 100 * 1024]) catch
+        serial.fail("big.txt would not read through the cached FAT");
+    if (n != 100 * 1024) serial.fail("big.txt read short through the cached FAT");
+    for (sweep_buf[0..n], 0..) |b, i| {
+        if (b != patternByte(0x33, i)) serial.fail("big.txt read wrong through the cached FAT");
+    }
+    const frag = vol.open("frag.txt") catch serial.fail("frag.txt is gone");
+    const m = vol.readAt(frag, 0, sweep_buf[0..60000]) catch
+        serial.fail("frag.txt would not read through the cached FAT");
+    for (sweep_buf[0..m], 0..) |b, i| {
+        if (b != patternByte(0x11, i)) serial.fail("frag.txt read wrong through the cached FAT");
+    }
+    serial.put("  a ");
+    serial.putDec(fat_sectors);
+    serial.put("-sector FAT held in memory, and both sweep files read back through it\n");
+}
+
+/// **EVERY WAY A READ CAN START AND END.** fat16.readAt reads a file as runs of
+/// consecutive clusters: whole sectors straight into the caller's buffer, one
+/// request per run, and only a sector the read starts or ends inside through the
+/// scratch sector. So its paths are: a partial first sector, whole sectors, a
+/// partial last sector, a break in the chain, and a run longer than one request
+/// may carry. Two files are built to have all of those, and the probe checks
+/// that they do before trusting what it reads from them:
+///
+///   frag.txt  60 KB, grown in turns with wedge.txt, so their clusters
+///             interleave and frag.txt's chain breaks over and over.
+///   big.txt   100 KB, grown alone, so it is one long run — longer than the
+///             64 KB a single request may carry.
+///
+/// Fifteen offsets against eleven lengths, on each: sector edges, cluster
+/// edges, the middle, the last bytes, and lengths past the end.
+fn readSweep(io: anytype, vol: *fat16.Volume) void {
+    var round: usize = 0;
+    while (round < 40) : (round += 1) {
+        appendPattern(io, "frag.txt", 0x11, round * 1500, 1500);
+        appendPattern(io, "wedge.txt", 0x77, round * 1500, 1500);
+    }
+    appendPattern(io, "big.txt", 0x33, 0, 100 * 1024);
+
+    const Case = struct { path: []const u8, seed: u8, size: usize, min_runs: u32, min_longest: u32 };
+    const max_run = metal.virtio.Block.max_sectors / vol.sectors_per_cluster;
+    const cases = [_]Case{
+        .{ .path = "frag.txt", .seed = 0x11, .size = 60000, .min_runs = 8, .min_longest = 1 },
+        .{ .path = "big.txt", .seed = 0x33, .size = 100 * 1024, .min_runs = 1, .min_longest = max_run + 1 },
+    };
+
+    var reads: usize = 0;
+    for (cases) |c| {
+        const entry = vol.open(c.path) catch serial.fail("a sweep file is missing");
+        const shape = vol.layout(entry) catch serial.fail("a sweep file's chain is broken");
+        serial.put("  ");
+        serial.put(c.path);
+        serial.put(": ");
+        serial.putDec(shape.clusters);
+        serial.put(" clusters in ");
+        serial.putDec(shape.runs);
+        serial.put(" run(s), the longest ");
+        serial.putDec(shape.longest);
+        serial.put("\n");
+        if (shape.runs < c.min_runs)
+            serial.fail("the fragmented file is not fragmented enough to test a break in a run");
+        if (shape.longest < c.min_longest)
+            serial.fail("the long file has no run longer than one request can carry");
+
+        const size = c.size;
+        const offsets = [_]usize{ 0, 1, 511, 512, 513, 2047, 2048, 2049, 4095, 4096, 4097, size / 2, size - 2049, size - 513, size - 1 };
+        const lengths = [_]usize{ 1, 2, 511, 512, 513, 2047, 2048, 2049, 4096, 70000, size };
+        var file = Io.Dir.cwd().openFile(io, c.path, .{}) catch serial.fail("a sweep file would not open");
+        for (offsets) |off| {
+            for (lengths) |len| {
+                const n = file.readPositionalAll(io, sweep_buf[0..len], off) catch
+                    serial.fail("a positional read in the sweep failed");
+                const expected = @min(len, size - off);
+                if (n != expected) {
+                    serial.put("  ");
+                    serial.put(c.path);
+                    serial.put(" at ");
+                    serial.putDec(off);
+                    serial.put(" for ");
+                    serial.putDec(len);
+                    serial.put(": ");
+                    serial.putDec(n);
+                    serial.put(" bytes, want ");
+                    serial.putDec(expected);
+                    serial.put("\n");
+                    serial.fail("a read in the sweep returned the wrong length");
+                }
+                for (sweep_buf[0..n], 0..) |b, i| {
+                    if (b != patternByte(c.seed, off + i)) {
+                        serial.put("  ");
+                        serial.put(c.path);
+                        serial.put(" at ");
+                        serial.putDec(off);
+                        serial.put(" for ");
+                        serial.putDec(len);
+                        serial.put(": wrong byte at +");
+                        serial.putDec(i);
+                        serial.put("\n");
+                        serial.fail("a read in the sweep returned the wrong bytes");
+                    }
+                }
+                reads += 1;
+            }
+        }
+    }
+    serial.put("  read sweep: ");
+    serial.putDec(reads);
+    serial.put(" reads across sector edges, cluster edges, chain breaks and the request cap\n");
 }
 
 /// **POSITIONAL READS, AGAINST THE BYTES WE KNOW WERE WRITTEN.** The application
