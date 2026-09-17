@@ -964,3 +964,104 @@ test "their FIN first, then again with ours acknowledged, closes at once" {
     try testing.expectEqual(Event.closed, p.fin(&f.table, &f.wire, 3).event);
     try testing.expectEqual(State.closed, f.table.conns[i].state);
 }
+
+test "what we send after going back is still numbered at the furthest we sent" {
+    // **SND.NXT IS NOT THE RETRANSMISSION POINTER.** A timeout rewinds what to
+    // send next; it does not un-send anything. A peer whose window shut can
+    // only be probed one byte at a time, so the rewound pointer stays near
+    // `una` — and a reset numbered there is behind the peer's window, which
+    // discards it and leaves the peer waiting forever on a connection we have
+    // already thrown away.
+    var f: Fixture = .{};
+    f.init();
+    var p = Peer{ .ip = .{ 10, 0, 2, 2 }, .port = 40000 };
+    const i = try p.connect(&f.table, &f.wire, 0);
+    var body: [100]u8 = undefined;
+    _ = f.table.queue(i, pattern(&body));
+    f.table.transmit(&f.wire, 1);
+    try testing.expectEqual(@as(usize, 100), f.wire.last().payload.len);
+    const una = f.table.conns[i].una;
+
+    // The peer stops reading: it acknowledges nothing new and shuts its window.
+    p.window = 0;
+    _ = p.ackUpTo(&f.table, &f.wire, una, 2);
+
+    var t: i96 = 2;
+    var k: usize = 0;
+    while (k <= max_retries) : (k += 1) {
+        t += 6 * ns_per_s;
+        f.table.transmit(&f.wire, t);
+    }
+    try testing.expect(f.table.given_up == 1);
+    try testing.expectEqual(State.closed, f.table.conns[i].state);
+    const rst = f.wire.last();
+    try testing.expectEqual(flag_rst | flag_ack, rst.flags);
+    try testing.expectEqual(una +% 100, rst.seq); // where the peer's window begins
+}
+
+test "a segment beyond the window carries nothing, not even its acknowledgement" {
+    // Taking the acknowledgement of a segment the peer cannot have sent yet
+    // would set SND.WL1 past anything it will ever send, and then the window
+    // rule refuses every real update that follows.
+    var f: Fixture = .{};
+    f.init();
+    var p = Peer{ .ip = .{ 10, 0, 2, 2 }, .port = 40000 };
+    const i = try p.connect(&f.table, &f.wire, 0);
+    _ = f.table.queue(i, "ten bytes!");
+    f.table.transmit(&f.wire, 1);
+    const una = f.table.conns[i].una;
+    const wl1 = f.table.conns[i].wl1;
+
+    p.ack = una +% 10; // it claims to have the lot
+    var buf: [1600]u8 = undefined;
+    _ = f.table.handle(&f.wire, p.frame(&buf, flag_ack, p.seq +% 100_000, ""), 2);
+
+    try testing.expectEqual(una, f.table.conns[i].una);
+    try testing.expectEqual(wl1, f.table.conns[i].wl1);
+    try testing.expectEqual(@as(usize, 10), f.table.conns[i].queued());
+    try testing.expectEqual(flag_ack, f.wire.last().flags);
+}
+
+test "an older segment with a newer acknowledgement moves the window's edge too" {
+    // The window rule keeps the old segment from setting the window, but its
+    // acknowledgement still moves `una` — and the window is measured from
+    // `una`, so the edge has to come back by as much.
+    var f: Fixture = .{};
+    f.init();
+    var p = Peer{ .ip = .{ 10, 0, 2, 2 }, .port = 40000 };
+    const i = try p.connect(&f.table, &f.wire, 0);
+    _ = p.write(&f.table, &f.wire, "GET /\r\n\r\n", 1);
+    var body: [50]u8 = undefined;
+    _ = f.table.queue(i, pattern(&body));
+    f.table.transmit(&f.wire, 2);
+    const before = f.table.conns[i].wnd;
+
+    p.ack = f.table.conns[i].una +% 50;
+    var buf: [1600]u8 = undefined;
+    _ = f.table.handle(&f.wire, p.frame(&buf, flag_ack, p.seq -% 20, ""), 3);
+
+    try testing.expectEqual(@as(usize, 0), f.table.conns[i].queued());
+    try testing.expectEqual(before - 50, f.table.conns[i].wnd);
+}
+
+test "giving up on a handshake tells the peer, instead of leaving it on a timer" {
+    var f: Fixture = .{};
+    f.init();
+    var p = Peer{ .ip = .{ 10, 0, 2, 2 }, .port = 40000 };
+    var buf: [1600]u8 = undefined;
+    _ = f.table.handle(&f.wire, p.frame(&buf, flag_syn, p.seq, ""), 0);
+    const synack = f.wire.last();
+    try testing.expectEqual(flag_syn | flag_ack, synack.flags);
+
+    var t: i96 = 0;
+    var k: usize = 0;
+    while (k <= max_retries) : (k += 1) {
+        t += 6 * ns_per_s;
+        f.table.transmit(&f.wire, t);
+    }
+    const rst = f.wire.last();
+    try testing.expect(rst.flags & flag_rst != 0);
+    try testing.expectEqual(synack.seq +% 1, rst.seq);
+    try testing.expectEqual(State.closed, f.table.conns[0].state);
+    try testing.expect(f.table.given_up == 1);
+}

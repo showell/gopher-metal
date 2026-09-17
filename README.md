@@ -889,8 +889,8 @@ requires window probes — failed rather than passing on nothing.
 
 ## The ladder: where does the slowdown live?
 
-Over a soak, the chat server's own answer time grows from about 7 ms to
-115 ms while the disk requests per route stay flat. `probe/ladder.zig` looks
+Over a soak, the chat server's own answer time grew from about 7 ms to
+115 ms while the disk requests per route stayed flat. `probe/ladder.zig` looks
 for the cause one layer at a time: each rung repeats ONE operation and prints
 the cost per operation of each tenth of the run, and `judge_ladder.py` fails a
 rung whose last fifth costs more than 1.5× its second and third tenths, or
@@ -914,7 +914,17 @@ read and written in place, a sector written where the host's image file has to
 grow, a 5 MB file appended 512 bytes at a time, and a small file rewritten ten
 thousand times. Two numbers are worth a second look even though they do not
 climb: rewriting a file of a dozen bytes takes 15 device requests, and one
-append takes 7. The network rungs are next.
+append takes 7.
+
+**The one rung that climbed was ours**, and it was the close bug: a connection
+whose FIN had been acknowledged was forgotten before the peer's own FIN
+arrived, so QEMU's network kept it in LAST-ACK and walked a list that grew all
+day. With that fixed, a soak of 4,201 requests holds 39 req/s from the first
+window to the last, the time waiting for the network before a request's turn
+stays at 3.3 ms throughout, and the machine's own answer time rises only from
+6.6 ms to 15.8 ms — while the transcript it reads and appends to grows from
+16 KB to 167 KB. Ten times the bytes for 2.4 times the time is the shape of
+work, not of drift.
 
 ## The TCP table, on Linux, against Linux's TCP
 

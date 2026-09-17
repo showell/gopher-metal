@@ -206,16 +206,12 @@ pub const Conn = struct {
         return self.state == .established or self.state == .syn_received;
     }
 
-    /// The sequence number of the next thing we would send for the first
-    /// time: after the SYN, the bytes on the wire, and the FIN if it is out.
-    fn nxt(self: *const Conn) u32 {
-        var n = self.una +% @as(u32, @intCast(self.sent));
-        if (self.state == .syn_received) n +%= 1;
-        if (self.fin == .sent) n +%= 1;
-        return n;
-    }
-
-    /// The sequence number just past the furthest thing we have ever sent.
+    /// **SND.NXT: just past the furthest thing we have ever sent.** Every
+    /// segment that carries nothing — an acknowledgement, a reset — is
+    /// numbered here, because that is the only number the peer is expecting.
+    /// `sent` is not it: a timeout rewinds `sent` to re-send from `una`, and a
+    /// segment numbered back there is behind the peer's window and is
+    /// discarded (a reset) or answered with a duplicate acknowledgement.
     fn highest(self: *const Conn) u32 {
         var n = self.una +% @as(u32, @intCast(self.high));
         if (self.state == .syn_received) n +%= 1;
@@ -401,7 +397,7 @@ pub const Table = struct {
     pub fn ack(self: *Table, wire: anytype, i: usize) void {
         const c = &self.conns[i];
         if (c.state != .established and c.state != .closing) return;
-        self.emit(wire, i, flag_ack, c.nxt(), "");
+        self.emit(wire, i, flag_ack, c.highest(), "");
     }
 
     /// Says we are done sending. The FIN follows the last queued byte; the
@@ -418,8 +414,10 @@ pub const Table = struct {
     /// waiting for the rest of an answer should not wait forever.
     pub fn abandon(self: *Table, wire: anytype, i: usize) void {
         const c = &self.conns[i];
-        if (c.state == .established or c.state == .closing) {
-            self.emit(wire, i, flag_rst | flag_ack, c.nxt(), "");
+        // A half-open connection is told too: a peer whose handshake we have
+        // stopped answering would otherwise wait out its own SYN timer.
+        if (c.state != .closed) {
+            self.emit(wire, i, flag_rst | flag_ack, c.highest(), "");
         }
         c.reset();
     }
@@ -526,7 +524,8 @@ pub const Table = struct {
         // An acknowledgement of something never sent, or an old one (which
         // wraps to a huge advance): neither says anything current.
         if (advance > flight) return false;
-        if (after(seq, c.wl1) or (seq == c.wl1 and !after(c.wl2, number))) {
+        const updated = after(seq, c.wl1) or (seq == c.wl1 and !after(c.wl2, number));
+        if (updated) {
             c.wnd = window;
             c.wl1 = seq;
             c.wl2 = number;
@@ -542,6 +541,12 @@ pub const Table = struct {
             c.tx_end = 0;
         }
         c.una +%= advance;
+        // **THE WINDOW IS MEASURED FROM `una`.** When the peer's own window
+        // came with this segment it is measured from here already; when an
+        // older segment carried a newer acknowledgement, the window rule
+        // skipped the update, and the right edge would move forward with
+        // `una` unless it is brought back by as much.
+        if (!updated) c.wnd -= @min(c.wnd, advance);
         if (advance > bytes) {
             c.fin = .acknowledged;
             c.high = 0;
@@ -588,7 +593,7 @@ pub const Table = struct {
             const i = found orelse return .{ .event = .nothing };
             const c = &self.conns[i];
             if (seq == c.rcv_nxt) return self.close(i);
-            if (c.ahead(seq)) self.emit(wire, i, flag_ack, c.nxt(), "");
+            if (c.ahead(seq)) self.emit(wire, i, flag_ack, c.highest(), "");
             return .{ .event = .nothing };
         }
 
@@ -631,7 +636,7 @@ pub const Table = struct {
         if (flags & flag_syn != 0) {
             if (c.state == .syn_received) {
                 self.emit(wire, i, flag_syn | flag_ack, c.una, "");
-            } else self.emit(wire, i, flag_ack, c.nxt(), "");
+            } else self.emit(wire, i, flag_ack, c.highest(), "");
             return .{ .event = .nothing };
         }
 
@@ -651,8 +656,16 @@ pub const Table = struct {
         // segment from setting the window.)
         const early = c.ahead(seq);
         if (seq != c.rcv_nxt and !early) {
-            const done = c.state != .syn_received and acknowledge(c, seq, number, window, now);
-            self.emit(wire, i, flag_ack, c.nxt(), "");
+            // **ONLY FROM BEHIND.** A segment numbered past the window we
+            // advertise is not one the peer can have sent yet: taking its
+            // acknowledgement would let a forged or wildly reordered segment
+            // set SND.WL1 to a sequence the peer will never reach, after which
+            // the window rule rejects every genuine update and the window we
+            // believe in never changes again.
+            const behind = (c.rcv_nxt -% seq) < (1 << 31);
+            const done = behind and c.state != .syn_received and
+                acknowledge(c, seq, number, window, now);
+            self.emit(wire, i, flag_ack, c.highest(), "");
             if (done) return self.settle(i, .nothing, true, now);
             return .{ .event = .nothing };
         }
@@ -662,7 +675,7 @@ pub const Table = struct {
         var fin_acknowledged = false;
         if (c.state == .syn_received) {
             if (early) {
-                self.emit(wire, i, flag_ack, c.nxt(), "");
+                self.emit(wire, i, flag_ack, c.highest(), "");
                 return .{ .event = .nothing };
             }
             if (number != c.una +% 1) {
@@ -686,7 +699,7 @@ pub const Table = struct {
 
         if (early) {
             // Its data and FIN are not the next thing; ask for what is.
-            if (data.len > 0 or flags & flag_fin != 0) self.emit(wire, i, flag_ack, c.nxt(), "");
+            if (data.len > 0 or flags & flag_fin != 0) self.emit(wire, i, flag_ack, c.highest(), "");
             return self.settle(i, event, fin_acknowledged, now);
         }
 
@@ -694,7 +707,7 @@ pub const Table = struct {
         // which asks for it again.
         if (data.len > 0) {
             if (c.peer_done) {
-                self.emit(wire, i, flag_ack, c.nxt(), "");
+                self.emit(wire, i, flag_ack, c.highest(), "");
                 return self.settle(i, event, fin_acknowledged, now);
             }
             // **WHAT FITS IS TAKEN, AND ONLY THAT IS ACKNOWLEDGED.** A peer
@@ -704,7 +717,7 @@ pub const Table = struct {
             @memcpy(c.rx[c.end..][0..n], data[0..n]);
             c.end += n;
             c.rcv_nxt +%= @intCast(n);
-            self.emit(wire, i, flag_ack, c.nxt(), "");
+            self.emit(wire, i, flag_ack, c.highest(), "");
             if (n > 0 and event == .nothing) event = .data;
             if (n < data.len) return self.settle(i, event, fin_acknowledged, now);
         }
@@ -712,7 +725,7 @@ pub const Table = struct {
         if (flags & flag_fin != 0 and !c.peer_done and seq +% @as(u32, @intCast(data.len)) == c.rcv_nxt) {
             c.rcv_nxt +%= 1; // their FIN takes one
             c.peer_done = true;
-            self.emit(wire, i, flag_ack, c.nxt(), "");
+            self.emit(wire, i, flag_ack, c.highest(), "");
             if (c.fin == .acknowledged) return self.close(i);
             return .{ .event = .peer_done, .index = i };
         }

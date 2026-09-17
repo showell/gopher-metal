@@ -108,6 +108,11 @@ fn openTap(name: []const u8) i32 {
 fn begin(i: usize, request: []const u8, table: *tcp.Table) void {
     const a = &answers[i];
     a.* = .{ .active = true };
+    // **THE SLOT IS OURS WHILE WE ANSWER.** `table.transmit` can give up on a
+    // connection without anything coming in to report it; without this the
+    // slot could be taken by the next client and handed the rest of this
+    // answer.
+    table.claim(i);
     const line_end = std.mem.indexOfScalar(u8, request, '\r') orelse request.len;
     var words = std.mem.tokenizeScalar(u8, request[0..line_end], ' ');
     _ = words.next();
@@ -163,6 +168,12 @@ fn begin(i: usize, request: []const u8, table: *tcp.Table) void {
 fn progress(i: usize, table: *tcp.Table) void {
     const a = &answers[i];
     if (!a.active) return;
+    if (!table.conns[i].open() and table.conns[i].state != .closing) {
+        // Given up on, or reset by the client, part-way through the answer.
+        a.active = false;
+        table.release(i);
+        return;
+    }
     if (a.head_at < a.head_len) {
         a.head_at += table.queue(i, a.head[a.head_at..a.head_len]);
         if (a.head_at < a.head_len) return;
@@ -176,6 +187,7 @@ fn progress(i: usize, table: *tcp.Table) void {
     }
     table.finish(i);
     a.active = false;
+    table.release(i);
 }
 
 pub fn main(init: std.process.Init.Minimal) !void {
@@ -212,6 +224,7 @@ pub fn main(init: std.process.Init.Minimal) !void {
                 .closed => {
                     closes += 1;
                     answers[r.index].active = false;
+                    table.release(r.index);
                 },
                 else => {},
             }
