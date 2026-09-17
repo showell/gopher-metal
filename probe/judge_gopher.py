@@ -135,7 +135,7 @@ CASES = [
 JAR = "$JAR"
 
 
-def step(name, method, path, cookie=None, body=None, raw=None, headers=(), settle=0.0):
+def step(name, method, path, cookie=None, body=None, raw=None, headers=(), settle=0.0, expect=()):
     """One request in a story. `settle` waits before sending it.
 
     **A WAIT IS NOT A WORKAROUND HERE; IT IS THE RESOLUTION OF A FAT16 DATE.**
@@ -146,7 +146,8 @@ def step(name, method, path, cookie=None, body=None, raw=None, headers=(), settl
     about the order of two events, it makes them far enough apart that the
     coarser clock can tell them apart, and then demands exact agreement."""
     return {"name": name, "method": method, "path": path, "cookie": cookie, "body": body,
-            "raw": raw, "files": [], "headers": list(headers), "settle": settle}
+            "raw": raw, "files": [], "headers": list(headers), "settle": settle,
+            "expect": list(expect)}
 
 
 SEQUENCE = [
@@ -235,6 +236,46 @@ MEMBER_STORY = [
     step("logging out", "POST", "/logout", JAR, "release=no"),
     step("chat, after logging out", "GET", "/chat", JAR),
 ]
+
+
+# ENDURANCE: the writes, over and over, READ BACK EVERY ROUND.
+#
+# **STAMINA BELOW ONLY READS, AND A READ CANNOT LOSE ANYTHING.** Three GETs
+# repeated 100 times prove the heaps hold steady, and prove nothing at all about
+# whether what was written is still there. These rounds write to the two stores
+# that matter — chat's transcript (a message appended to a conversation) and the
+# game store (a move appended to a session) — and then ask for the whole thing
+# back and require EVERY mark from EVERY earlier round to still be in it.
+#
+# So a write that lands in the wrong place, an append that truncates, a chain
+# that breaks at a cluster edge, or an allocator that hands out memory twice
+# shows up as a mark that has gone missing, at the round it went missing.
+ENDURANCE_ROUNDS = 25
+
+
+def mark(n: int) -> bytes:
+    return f"mark-{n:04d}".encode()
+
+
+def endurance_steps(rounds: int) -> list:
+    steps = [step("log in", "POST", "/login/full", None,
+                  "name=Steve&password=correct+horse+battery+staple&action=login&next=%2Fchat")]
+    for n in range(1, rounds + 1):
+        marks = [mark(i) for i in range(1, n + 1)]
+        steps += [
+            step(f"a message, round {n}", "POST", "/chat/c/1_2/general/send", JAR,
+                 f"markdown={mark(n).decode()}&cid=e{n}", headers=["X-Chat-Async: 1"]),
+            step(f"the whole transcript, round {n}", "GET", "/chat/c/1_2/general/raw", JAR,
+                 expect=marks),
+            step(f"a move, round {n}", "POST", "/game/sessions/1/actions", P1,
+                 f"{n + 2}) draw {mark(n).decode()}"),
+            step(f"every move, round {n}", "GET", "/game/sessions/1/actions", P1,
+                 expect=marks),
+        ]
+    return steps
+
+
+ENDURANCE = endurance_steps(ENDURANCE_ROUNDS)
 
 
 # STAMINA: the same few requests, many times, to one boot. Every answer must
@@ -779,8 +820,51 @@ def run_story(elf, linux_bin, content, pristine, work, mnt, steps, label, report
     return failures, log, metal_answers, len(metal_tree)
 
 
+BASE_HEAP = re.compile(
+    r"request \d+: .*\(base: (\d+) live bytes, (\d+) in pages, peak (\d+)\)")
+
+
+def missing_marks(steps, answers, report, label) -> int:
+    """**WHAT WAS WRITTEN MUST STILL BE THERE.** Every step that carries
+    `expect` is a read-back, and every mark from every earlier round must be in
+    the body it returned. This is the check that does not go through Linux: two
+    servers agreeing on a transcript that lost round 7 would still be wrong."""
+    failures = 0
+    for s, a in zip(steps, answers):
+        if not s["expect"]:
+            continue
+        body = a.get("body")
+        if body is None:
+            failures += 1
+            report(f"FAIL  {label}: {s['name']}: no body to read the marks out of "
+                   f"({a.get('error', a.get('status'))})")
+            continue
+        gone = [m for m in s["expect"] if m not in body]
+        if gone:
+            failures += 1
+            report(f"FAIL  {label}: {s['name']}: {len(gone)} of {len(s['expect'])} marks are not in "
+                   f"the {len(body)}-byte body it returned, first {gone[0].decode()}")
+    return failures
+
+
 def base_heap_trace(log: str) -> list:
-    return [int(m.group(1)) for m in re.finditer(r"request \d+: .*\(base: (\d+) live bytes\)", log)]
+    """What the base heap holds after each request: LIVE bytes."""
+    return [int(m.group(1)) for m in BASE_HEAP.finditer(log)]
+
+
+def base_heap_taken(log: str) -> list:
+    """What the machine has handed out in whole pages to hold that — always
+    more, because a page is 4096 bytes and an allocator keeps slack."""
+    return [int(m.group(2)) for m in BASE_HEAP.finditer(log)]
+
+
+def base_heap_peak(log: str) -> list:
+    """**THE NUMBER THAT DECIDES WHETHER THIS CAN BE DEPLOYED.** The most memory
+    ever held at once. Live bytes can sit flat forever while this climbs — which
+    is exactly what a bump allocator does, since its free() reclaims only the
+    block it handed out last. A peak that stops rising is a machine that can
+    stay up."""
+    return [int(m.group(3)) for m in BASE_HEAP.finditer(log)]
 
 
 def request_heap_trace(log: str) -> list:
@@ -883,6 +967,35 @@ def main() -> int:
               f"a fresh minted session honored, a stale and a forged one refused, "
               f"and the kernel's own session honored by Linux")
 
+    # ── endurance: the writes, read back every round ─────────────────────────
+    f, log, answers, files = run_story(elf, linux_bin, content, pristine, work, mnt,
+                                       ENDURANCE, "endurance", print)
+    marks = missing_marks(ENDURANCE, answers, print, "endurance")
+    failures += f + marks
+    # **THE WRITES ARE WHERE THE HEAP IS ACTUALLY CHURNED.** Reads allocate and
+    # free in order, and a bump allocator gives back a free that was the last
+    # thing it handed out — so a read-only run can look perfectly frugal while
+    # the machine has no way to reclaim anything. These numbers are the honest
+    # ones, and they are reported whether or not anything failed.
+    live, taken, peak = base_heap_trace(log), base_heap_taken(log), base_heap_peak(log)
+    if live and peak:
+        at = min(6, len(peak) - 1)
+        grew = peak[-1] - peak[at]
+        print(f"      endurance: {live[-1]} live bytes in {taken[-1]} bytes of pages; peak "
+              f"{peak[at]} after {at + 1} requests, {peak[-1]} after {len(peak)} "
+              f"({grew} bytes of growth over the writes)")
+        # A peak that climbs with every request is a machine with a clock on it.
+        # Early rise is caches filling; a bump allocator would never stop.
+        if grew > 256 * 1024:
+            failures += 1
+            print(f"FAIL  endurance: the peak grew {grew} bytes over {len(peak)} requests — "
+                  f"this machine is not reusing what it frees")
+    if not f and not marks:
+        reads = sum(1 for s in ENDURANCE if s["expect"])
+        print(f"ok    endurance: {ENDURANCE_ROUNDS} rounds of write-then-read-it-all-back to ONE boot "
+              f"({len(ENDURANCE)} requests) — every one of the {reads} read-backs held every mark "
+              f"written before it, each answered as Linux answered, and all {files} files agree")
+
     # ── stamina ──────────────────────────────────────────────────────────────
     rounds = STAMINA * STAMINA_ROUNDS
     f, log, answers, _ = run_story(elf, linux_bin, content, pristine, work, mnt,
@@ -927,6 +1040,13 @@ def main() -> int:
         print(f"ok    stamina: {len(rounds)} requests to one boot, every answer the same, "
               f"base heap steady at {trace[-1]} live bytes, each request's heap the same every round "
               f"({', '.join(str(u) for u in used[:per])} bytes)")
+        peaks = base_heap_peak(log)
+        if peaks:
+            at = peaks[min(6, len(peaks) - 1)]
+            print(f"      stamina: peak memory {at} bytes after seven requests, "
+                  f"{peaks[-1]} after {len(peaks)} — "
+                  + ("unchanged: every request's memory is reclaimed and reused"
+                     if peaks[-1] == at else f"{peaks[-1] - at} bytes of growth"))
 
     print(f"{len(CASES) - per_case} of {len(CASES)} single requests, and "
           f"{'all three' if failures == per_case else 'not all three'} long-running boots, "

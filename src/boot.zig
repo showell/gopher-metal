@@ -14,6 +14,7 @@
 const std = @import("std");
 const root = @import("root");
 const stack = @import("stack.zig");
+const pvh = @import("pvh.zig");
 
 comptime {
     // The stack region and the telemetry that reads it are declared there; the
@@ -73,6 +74,31 @@ const GdtPointer = extern struct { limit: u16, base: u32 };
 /// Three entries of eight bytes, so the limit is 23.
 export var gdt_pointer linksection(".data") = GdtPointer{ .limit = 0, .base = 0 };
 
+/// **WHAT THE LOADER PUT IN %ebx**, saved before anything can clobber it: a
+/// pointer to the PVH start_info, which carries the machine's memory map. It
+/// was thrown away for the whole life of this kernel, which is why every heap
+/// here used to be a fixed array.
+export var pvh_start_info: u32 linksection(".data") = 0;
+
+/// The linker's marks: where this kernel's image begins and ends. `.bss` is
+/// inside it — memory the kernel owns that the file does not carry — so a page
+/// allocator that handed out `_kernel_end`-minus-a-bit would be handing out
+/// this kernel's own variables.
+extern var _kernel_start: u8;
+extern var _kernel_end: u8;
+
+/// The memory this kernel occupies, which nothing else may be given.
+pub fn image() pvh.Region {
+    const start = @intFromPtr(&_kernel_start);
+    const end = @intFromPtr(&_kernel_end);
+    return .{ .start = start, .len = end - start };
+}
+
+/// The machine's memory map, as the loader described it.
+pub fn memoryMap() pvh.Error![]const pvh.MemmapEntry {
+    return pvh.read(pvh_start_info);
+}
+
 export fn kmain_trampoline() callconv(.c) noreturn {
     root.kmain();
 }
@@ -91,6 +117,7 @@ export fn _start() callconv(.naked) noreturn {
     asm volatile (std.fmt.comptimePrint(
             \\.code32
             \\  cli
+            \\  movl %ebx, pvh_start_info
             \\  movl $pdpt, %eax
             \\  orl $3, %eax
             \\  movl %eax, pml4

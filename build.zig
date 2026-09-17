@@ -42,6 +42,7 @@ pub fn build(b: *std.Build) void {
         .{ .name = "restore.elf", .root = "probe/restore.zig", .step = "restore", .help = "reading a volume Linux wrote" },
         .{ .name = "clock.elf", .root = "probe/clock.zig", .step = "clock", .help = "the clocks, and .real once it is told" },
         .{ .name = "realunset.elf", .root = "probe/realunset.zig", .step = "realunset", .help = "MUST PANIC: .real before anyone set it" },
+        .{ .name = "memory.elf", .root = "probe/memory.zig", .step = "memory", .help = "the machine's RAM, discovered and handed out" },
         .{ .name = "rng.elf", .root = "probe/rng.zig", .step = "rng", .help = "entropy from virtio-rng and RDRAND" },
         .{ .name = "net.elf", .root = "probe/net.zig", .step = "net", .help = "the virtio-net and DHCP probe kernel" },
         .{ .name = "http.elf", .root = "probe/http.zig", .step = "http", .help = "the one-request web server probe kernel" },
@@ -149,7 +150,7 @@ pub fn build(b: *std.Build) void {
     // device can report in is a way to be silently wrong, and those modes are
     // cheaper to enumerate on the host than to provoke in QEMU.
     const test_step = b.step("test", "host unit tests for the pure parts of src/");
-    for ([_][]const u8{ "src/rtc.zig", "src/stack.zig", "src/civil.zig", "src/fat16.zig" }) |path| {
+    for ([_][]const u8{ "src/rtc.zig", "src/stack.zig", "src/civil.zig", "src/fat16.zig", "src/pvh.zig", "src/pages.zig" }) |path| {
         const unit = b.addTest(.{ .root_module = b.createModule(.{
             .root_source_file = b.path(path),
             .target = b.graph.host,

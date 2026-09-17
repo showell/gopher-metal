@@ -42,6 +42,8 @@ const stream = metal.stream;
 const gpt = metal.gpt;
 const fat16 = metal.fat16;
 const stack = metal.stack;
+const pages = metal.pages;
+const pvh = metal.pvh;
 const Io = metal.io;
 
 /// The application, as it is.
@@ -59,9 +61,46 @@ comptime {
     if (!@import("builtin").single_threaded) @compileError("this host serves one connection at a time; std.Io's concurrency here is stubbed for a single thread");
 }
 
+/// **THE SEAM.** `std.heap.page_allocator` is defined as
+/// `root.os.heap.page_allocator` when the root file declares one — zig's own
+/// hook for a target that must supply its own. So this one line puts every
+/// allocator in std on this machine's RAM, and std's general-purpose allocator
+/// below needs nothing passed to it. It is the same arrangement as on Linux,
+/// where `page_allocator` is mmap and the allocator above it is std's either
+/// way; what this machine has to supply is exactly what Linux supplies.
+pub const os = struct {
+    pub const heap = struct {
+        pub const page_allocator = pages.allocator;
+    };
+};
+
 /// std.heap asks a freestanding target for its page size rather than assuming
-/// one. Nothing here maps pages, but the allocators want the number.
-pub const std_options: std.Options = .{ .page_size_max = 4096, .page_size_min = 4096 };
+/// one. **No stack traces**: this machine has no unwinder and no debug info, and
+/// saying so is what keeps std's allocator from reaching for `std.Io.Threaded`
+/// to capture a trace of zero frames.
+pub const std_options: std.Options = .{
+    .page_size_max = 4096,
+    .page_size_min = 4096,
+    .allow_stack_tracing = false,
+};
+
+/// **THE SITE'S LONG-LIVED HEAP IS std's GENERAL-PURPOSE ALLOCATOR**, over this
+/// machine's pages. It used to be a bump allocator over a fixed array, which
+/// reclaims a free only when the block being freed was the last one handed out;
+/// everything else it handed out was gone for the life of the boot. That is a
+/// clock on the machine, whatever leaks or does not.
+///
+/// `safety` off, because the safety this config buys is use-after-free
+/// detection by NOT reusing a freed slot — which is the opposite of what a
+/// server needs. The double-free check that matters is still there, one layer
+/// down, where pages.zig panics rather than handing the same memory out twice.
+var gpa: std.heap.DebugAllocator(.{
+    .backing_allocator_zeroes = false,
+    .stack_trace_frames = 0,
+    .thread_safe = false,
+    .safety = false,
+    .page_size = pages.page_size,
+}) = .{};
 
 var blk_mem: virtio.BlockMemory align(4096) = .{};
 var nic_mem: net.Memory align(4096) = .{};
@@ -74,15 +113,12 @@ var tcp_received: [16384]u8 align(16) = undefined;
 var read_buf: [16 * 1024]u8 align(16) = undefined;
 var write_buf: [64 * 1024]u8 align(16) = undefined;
 
-/// The process-lifetime heap: what the application keeps between requests
-/// (presence, the reading-list cache, the bus). A bump allocator, so what it
-/// frees is not reused — which the per-request log makes visible, and which a
-/// real free-list will have to fix before this serves anything for long.
-var base_heap: [8 * 1024 * 1024]u8 align(16) = undefined;
-
 /// Each request's heap, reset after the response: the equivalent of the arena
-/// server.zig gives each request and frees wholesale.
-var request_heap: [32 * 1024 * 1024]u8 align(16) = undefined;
+/// server.zig gives each request and frees wholesale. A bump allocator is the
+/// right shape for it — nothing in a request outlives the request — and the
+/// memory under it is asked for once, from the machine's pages, rather than
+/// being a fixed array inside the kernel image.
+const request_heap_bytes = 32 * 1024 * 1024;
 
 const config_path = "gopher-metal.conf";
 
@@ -116,9 +152,31 @@ pub fn kmain() noreturn {
     serial.put("\n");
     const io = Io.io();
 
+    // ── the machine's memory ────────────────────────────────────────────────
+    // What RAM there is, where it is, and which of it this kernel is sitting
+    // in. Everything below — the site's heap and each request's — comes out of
+    // what is left, so this machine serves as much as it was booted with.
+    const entries = metal.boot.memoryMap() catch |e| {
+        serial.put("  memory map: ");
+        serial.put(@errorName(e));
+        serial.put("\n");
+        serial.fail("the loader described no memory, so there is nothing to serve from");
+    };
+    const image = metal.boot.image();
+    const carved = pages.bring(pvh.largestFree(entries, image));
+    if (carved.pages_total == 0) serial.fail("no usable region of RAM to serve from");
+    serial.put("  ram: ");
+    serial.putDec(pvh.totalRam(entries));
+    serial.put(" bytes, kernel image ");
+    serial.putDec(image.len);
+    serial.put(", heap ");
+    serial.putDec(carved.bytes_total);
+    serial.put(" in ");
+    serial.putDec(carved.pages_total);
+    serial.put(" pages\n");
+
     // ── the host contract ───────────────────────────────────────────────────
-    var base_fba = std.heap.FixedBufferAllocator.init(&base_heap);
-    const base = router.mem_meter.init(base_fba.allocator());
+    const base = router.mem_meter.init(gpa.allocator());
     router.roots.point(base, .{ .data_dir = "data", .auth_dir = "auth" }) catch
         serial.fail("roots.point could not allocate the store paths");
     var bus = Bus.init(io, base);
@@ -142,7 +200,9 @@ pub fn kmain() noreturn {
     serial.put("\n  listening on port 80\n");
 
     var conn = tcp.Listener.init(lease.address, nic.mac, 80, &tcp_received, &tcp_out);
-    var request_fba = std.heap.FixedBufferAllocator.init(&request_heap);
+    const request_heap = pages.allocator.alloc(u8, request_heap_bytes) catch
+        serial.fail("the machine has not enough memory for a request heap");
+    var request_fba = std.heap.FixedBufferAllocator.init(request_heap);
 
     // ── one connection at a time ────────────────────────────────────────────
     var served: u64 = 0;
@@ -161,7 +221,14 @@ pub fn kmain() noreturn {
     }
 
     const mem = router.mem_meter.snapshot();
-    serial.put("  served ");
+    const page_stats = pages.stats();
+    serial.put("  pages: ");
+    serial.putDec(page_stats.bytes_taken);
+    serial.put(" bytes held of ");
+    serial.putDec(page_stats.bytes_total);
+    serial.put(", peak ");
+    serial.putDec(page_stats.pages_high_water * pages.page_size);
+    serial.put("\n  served ");
     serial.putDec(served);
     serial.put(" request(s); base heap holds ");
     serial.putDec(mem.live_bytes);
@@ -264,7 +331,11 @@ fn logRequest(number: u64, what: []const u8, outcome: []const u8) void {
     serial.put(outcome);
     serial.put(" (base: ");
     serial.putDec(mem.live_bytes);
-    serial.put(" live bytes)\n");
+    serial.put(" live bytes, ");
+    serial.putDec(pages.stats().bytes_taken);
+    serial.put(" in pages, peak ");
+    serial.putDec(pages.stats().pages_high_water * pages.page_size);
+    serial.put(")\n");
 }
 
 /// `requests = N` from the volume's gopher-metal.conf, or null to serve until

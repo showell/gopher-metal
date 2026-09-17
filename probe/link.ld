@@ -17,6 +17,12 @@ PHDRS {
 
 SECTIONS {
     . = 1M;
+    /* Where this kernel's image begins and ends. The page allocator hands out
+       the machine's RAM, and the machine's RAM includes the bytes this kernel
+       is sitting in — so it has to know which those are. `_kernel_end` is after
+       .bss, because .bss is memory the kernel owns even though the file does
+       not carry it. */
+    _kernel_start = .;
 
     .note.Xen : { KEEP(*(.note.Xen)) } :text :note
     .text     : { *(.text*) } :text
@@ -26,6 +32,7 @@ SECTIONS {
     /* .bss is NOBITS: the loader does not write it, so nothing here may be
        assumed zero. The page tables live in .data for exactly that reason. */
     .bss      : { *(.bss*) *(COMMON) } :text
+    _kernel_end = .;
 
     /DISCARD/ : { *(.eh_frame) *(.comment) *(.note.GNU-stack) }
 }

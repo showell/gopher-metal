@@ -233,14 +233,30 @@ class RawSocket(unittest.TestCase):
 
 
 class Traces(unittest.TestCase):
-    LOG = ("  request 1: GET / -> ok (base: 70 live bytes)\n"
+    LOG = ("  request 1: GET / -> ok (base: 70 live bytes, 4096 in pages, peak 8192)\n"
            "    request heap: 58498 bytes\n"
-           "  request 2: GET /nope -> ok (base: 72 live bytes)\n"
+           "  request 2: GET /nope -> ok (base: 72 live bytes, 8192 in pages, peak 12288)\n"
            "    request heap: 1200 bytes\n")
 
     def test_the_heaps_are_read_from_the_serial_log(self):
         self.assertEqual(G.base_heap_trace(self.LOG), [70, 72])
         self.assertEqual(G.request_heap_trace(self.LOG), [58498, 1200])
+
+    def test_what_is_live_what_is_held_and_the_peak_are_three_numbers(self):
+        # The distinction the whole allocator question turns on: 72 bytes live
+        # inside 8192 bytes of pages, having at some point held 12288. A peak
+        # that climbs while live sits still is memory that cannot be had again.
+        self.assertEqual(G.base_heap_taken(self.LOG), [4096, 8192])
+        self.assertEqual(G.base_heap_peak(self.LOG), [8192, 12288])
+
+    def test_a_line_in_the_old_format_is_not_silently_half_read(self):
+        # The log used to say only the live bytes. Reading that as "taken 0"
+        # would report a machine that reclaims everything.
+        for old in ("  request 1: GET / -> ok (base: 70 live bytes)\n",
+                    "  request 1: GET / -> ok (base: 70 live bytes, 4096 taken)\n"):
+            self.assertEqual(G.base_heap_trace(old), [])
+            self.assertEqual(G.base_heap_taken(old), [])
+            self.assertEqual(G.base_heap_peak(old), [])
 
 
 class ClockJudge(unittest.TestCase):
@@ -287,6 +303,75 @@ class ClockJudge(unittest.TestCase):
     def test_a_missing_line_fails(self):
         code, out = self.verdict("tsc_hz 2494000000\n", "0", "0")
         self.assertNotEqual(code, 0)
+
+
+class Marks(unittest.TestCase):
+    """missing_marks is the endurance story's own judge: it is the only check
+    that does not go through Linux, so it has to be right on its own."""
+
+    def check(self, steps, answers):
+        said = []
+        n = G.missing_marks(steps, answers, said.append, "endurance")
+        return n, said
+
+    def test_a_read_back_holding_every_mark_passes(self):
+        steps = [G.step("read", "GET", "/x", expect=[b"mark-0001", b"mark-0002"])]
+        n, said = self.check(steps, [{"body": b"...mark-0001...mark-0002..."}])
+        self.assertEqual((n, said), (0, []))
+
+    def test_one_lost_mark_is_a_failure_that_names_it(self):
+        steps = [G.step("read", "GET", "/x", expect=[b"mark-0001", b"mark-0002"])]
+        n, said = self.check(steps, [{"body": b"only mark-0002 survived"}])
+        self.assertEqual(n, 1)
+        self.assertIn("mark-0001", said[0])
+        self.assertIn("1 of 2", said[0])
+
+    def test_a_step_that_never_answered_is_a_failure_not_a_pass(self):
+        steps = [G.step("read", "GET", "/x", expect=[b"mark-0001"])]
+        n, said = self.check(steps, [{"error": "the kernel had already exited (0)"}])
+        self.assertEqual(n, 1)
+        self.assertIn("no body", said[0])
+
+    def test_an_empty_body_does_not_read_as_holding_the_marks(self):
+        steps = [G.step("read", "GET", "/x", expect=[b"mark-0001"])]
+        n, _ = self.check(steps, [{"body": b""}])
+        self.assertEqual(n, 1)
+
+    def test_steps_with_nothing_to_expect_are_not_judged(self):
+        steps = [G.step("write", "POST", "/x", body="mark-0001")]
+        self.assertEqual(self.check(steps, [{"body": None}]), (0, []))
+
+
+class Endurance(unittest.TestCase):
+    """The story's shape: every round writes a mark and then demands it, and
+    every earlier one, back."""
+
+    def test_each_read_back_demands_one_more_mark_than_the_last(self):
+        expects = [s["expect"] for s in G.ENDURANCE if s["expect"]]
+        # Two read-backs per round (the transcript and the moves).
+        self.assertEqual(len(expects), G.ENDURANCE_ROUNDS * 2)
+        for n in range(G.ENDURANCE_ROUNDS):
+            self.assertEqual(len(expects[2 * n]), n + 1)
+            self.assertEqual(len(expects[2 * n + 1]), n + 1)
+        self.assertEqual(expects[-1][-1], G.mark(G.ENDURANCE_ROUNDS))
+
+    def test_every_mark_written_is_demanded_back(self):
+        written = {G.mark(n) for n in range(1, G.ENDURANCE_ROUNDS + 1)}
+        demanded = set()
+        for s in G.ENDURANCE:
+            demanded |= set(s["expect"])
+        self.assertEqual(written, demanded)
+
+    def test_it_writes_to_both_stores(self):
+        paths = {s["path"] for s in G.ENDURANCE if s["method"] == "POST"}
+        self.assertIn("/chat/c/1_2/general/send", paths)
+        self.assertIn("/game/sessions/1/actions", paths)
+
+    def test_the_moves_continue_the_staged_game_rather_than_renumbering_it(self):
+        # The fixture leaves two moves on disk; round 1 is move 3.
+        first = next(s for s in G.ENDURANCE if s["path"] == "/game/sessions/1/actions"
+                     and s["method"] == "POST")
+        self.assertTrue(first["body"].startswith("3) "), first["body"])
 
 
 class Resolution(unittest.TestCase):

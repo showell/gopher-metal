@@ -233,7 +233,8 @@ opens with `const Io = std.Io;`. Nothing else is touched.
 `probe/gopher.zig` is a HOST in the sense angry-gopher's `router.zig` defines —
 the contract any host meets before calling the route table:
 
-    mem_meter.init(base)        base: a bump allocator over a 16 MB static block
+    mem_meter.init(base)        base: std's general-purpose allocator, on this
+                                machine's pages
     roots.point(base, …)        data/ and auth/, on the volume
     a Bus over base
     an arena per request
@@ -367,6 +368,74 @@ a frame that runs off the end corrupts whatever it lands on and the machine
 carries on lying. One blind spot, stated: a stack word that legitimately holds
 the paint value reads as untouched, so the mark can only come out shallower than
 the truth, never deeper.
+
+## The memory seam: the kernel owns RAM, std does the rest
+
+Every heap here used to be a fixed array in `.bss` — `var base_heap: [8 MB]u8`
+— handed to a `FixedBufferAllocator`. That is a bump allocator: `free` reclaims
+only the block it handed out last, so under any other order the memory is gone
+for the life of the boot. A server that cannot reuse what it frees has a clock
+on it, however little it leaks, and this one also ignored `-m` entirely: the
+heap was the size somebody typed.
+
+**The seam is the one zig already documents.** `std.heap.page_allocator` is
+defined as `root.os.heap.page_allocator` when the root file declares one:
+
+```zig
+pub const os = struct {
+    pub const heap = struct {
+        pub const page_allocator = metal.pages.allocator;
+    };
+};
+```
+
+That is the whole arrangement. From there, `std.heap.DebugAllocator` — std's
+own general-purpose allocator, with its size-class buckets and its reuse — runs
+unchanged on this machine's RAM. It is exactly what Linux does: there
+`page_allocator` is `mmap` and the allocator above it is std's either way. What
+a kernel has to supply is what Linux supplies, and no more.
+
+So `src/pages.zig` is a page allocator and nothing else: a bitmap, one bit per
+4 KB page, living in the front of the region it describes, so the size of the
+heap is the size of the machine rather than a constant. A page's length is not
+recorded anywhere — `std.mem.Allocator` hands `free` the same slice it was
+given. Freeing a page twice, or a pointer that never came from here, panics:
+the alternative is two owners of the same memory, and whichever writes second
+wins.
+
+**And the machine now knows how much RAM it has.** The PVH loader has been
+handing us a memory map in `%ebx` since the first boot and we were throwing it
+away. `src/pvh.zig` reads it — checking the magic, the version and every
+region — and the linker marks `_kernel_start`/`_kernel_end` so the kernel's own
+image is cut out of what gets handed around. QEMU is the judge, because it
+knows what it was told:
+
+```
+     memory | -m 512: found 536472576 bytes, 389 KB of it the firmware's
+     memory | -m 256: found 268037120 bytes, 389 KB of it the firmware's
+     memory | -m 128: found 133819392 bytes, 389 KB of it the firmware's
+```
+
+**The question that decides deployability is whether the peak stops rising.**
+Live bytes can sit flat forever while a bump allocator's consumption climbs, so
+the machine reports both after every request, and `probe/memory.zig` puts sixty
+rounds of a server's shape — allocate three hundred, free three hundred at
+random — through std's allocator on these pages:
+
+```
+  every one of the 126703 pages taken and given back, twice
+  churn: 18000 allocations, peak 1064960 bytes after 10 rounds, 1101824 after 60
+  the heap is empty again, and std's allocator finds no leak
+```
+
+The same arrangement is checked on the host, where a heap-allocated buffer
+stands in for the machine's RAM, against std's own four allocator conformance
+suites — `testAllocator`, `testAllocatorAligned`, `testAllocatorLargeAlignment`
+and `testAllocatorAlignedShrink`. Those found two bugs in the first version: a
+search that gave up before it had covered the bitmap and reported a nearly
+empty heap as full, and an over-page alignment checked against page indices
+rather than addresses, which failed every 64 KB-aligned request on a region
+that did not happen to start on that boundary.
 
 ## A file has a date, and chat's "recent" is built out of it
 

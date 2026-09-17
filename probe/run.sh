@@ -55,7 +55,7 @@ boot() {
     timeout 60 qemu-system-x86_64 \
         -M microvm \
         -kernel "$HERE/$name.elf" \
-        -nographic -no-reboot -m 512 \
+        -nographic -no-reboot -m "${MEM:-512}" \
         -global virtio-mmio.force-legacy=false \
         -device isa-debug-exit,iobase=0xf4,iosize=0x04 \
         "$@" > "$out" 2>&1
@@ -407,6 +407,28 @@ fi
 
 # Entropy: the host's device and the CPU's instruction. -cpu max is what
 # advertises RDRAND to the guest; microvm's default model does not.
+# **HOW MUCH MEMORY DOES THIS MACHINE HAVE?** Until now the answer was a number
+# typed into a source file, and `-m` bought nothing. The PVH loader has been
+# handing over a memory map all along. QEMU is the judge here in the strongest
+# sense available: it knows what it was told, and the kernel must find it.
+if [ "$want" = all ] || [ "$want" = memory ]; then
+    for m in 512 256 128; do
+        MEM=$m boot memory
+        want_bytes=$(( m * 1024 * 1024 ))
+        got="$(sed -n 's/^ *total ram \([0-9]*\)$/\1/p' "$WORK/memory.out" | head -1)"
+        : "${got:=0}"
+        # A PC's low memory has holes the firmware owns — under a megabyte of
+        # them — so the kernel finds a little less than was asked for, never
+        # more, and never a megabyte less.
+        if [ "$got" -gt "$want_bytes" ] || [ "$got" -lt $(( want_bytes - 1024 * 1024 )) ]; then
+            echo "FAIL memory | -m $m is $want_bytes bytes and the kernel found $got"
+            failed=1
+        else
+            echo "     memory | -m $m: found $got bytes, $(( (want_bytes - got) / 1024 )) KB of it the firmware's"
+        fi
+    done
+fi
+
 if [ "$want" = all ] || [ "$want" = rng ]; then
     boot rng -cpu max -device virtio-rng-device
 fi
