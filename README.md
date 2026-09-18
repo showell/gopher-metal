@@ -19,6 +19,18 @@ and its two load-bearing findings are worth repeating here:
   of 14,423 lines. `std.http.Server` is built from a reader and a writer and
   needs no modification at all.
 
+**PARKED, 2026-09-18.** Chat runs well on the Linux droplet, and the reason to
+push further — running it on hardware with no hypervisor — wants a machine we
+do not have: one in a datacenter whose network card we chose. Everything below
+is green and finished as far as it goes;
+[what is outstanding](http://143.244.172.148:9100/notes/gopher-metal-what-is-outstanding.md)
+is the list, and
+[waking a real machine](http://143.244.172.148:9100/notes/waking-a-real-machine.md)
+is what bare metal would have taken. **The part most worth picking up again is
+not the chat port**: it is the TCP table, the FAT16 volume and the `std.Io`
+host underneath it, which a real application has now used hard enough to find
+the things tests do not.
+
 ## Where it stands
 
 | | |
