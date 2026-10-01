@@ -19,12 +19,27 @@ pub fn init() void {
     screen.attach();
 }
 
+/// **A PORT NOBODY DRAINS MUST NOT HANG THE MACHINE.** A droplet's serial
+/// port goes to DigitalOcean, which may or may not read it; if its
+/// transmitter stays full for 100,000 reads, the port is given up on for the
+/// rest of the boot and the screen carries on alone.
+var serial_dead = false;
+const patience: u32 = 100_000;
+
 pub fn put(bytes: []const u8) void {
+    screen.put(bytes);
+    if (serial_dead) return;
     for (bytes) |b| {
-        while (inb(com1 + 5) & 0x20 == 0) {}
+        var waited: u32 = 0;
+        while (inb(com1 + 5) & 0x20 == 0) {
+            waited += 1;
+            if (waited == patience) {
+                serial_dead = true;
+                return;
+            }
+        }
         outb(com1, b);
     }
-    screen.put(bytes);
 }
 
 pub fn putDec(v: u64) void {

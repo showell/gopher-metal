@@ -45,6 +45,8 @@ _start:
     ljmp $0, $1f                    # some BIOSes arrive at 07C0:0000
 1:  sti
     cld
+    mov $'G', %al
+    call mark
     mov %dl, boot_drive             # the BIOS says which disk it booted
     mov $msg_hello, %si
     call say
@@ -66,22 +68,48 @@ say:
 3:  popa
     ret
 
-# One character, to COM1 and to the screen.
+# **WHERE THE LOADER IS, WITH NOTHING BETWEEN IT AND THE SCREEN**: the
+# character in %al, white on green, in the top-right corner, written straight
+# into text memory. G: stage 1 runs; S: stage 2 runs; K: about to jump to the
+# kernel. On a droplet whose screen shows nothing else, the corner says how
+# far it got.
+mark:
+    push %es
+    push %bx
+    mov $0xB800, %bx
+    mov %bx, %es
+    mov $0x2F, %ah
+    mov %ax, %es:158                # row 0, column 79
+    pop %bx
+    pop %es
+    ret
+
+# One character, to the screen and then to COM1. **THE SCREEN FIRST, AND THE
+# SERIAL PORT NEVER WAITED ON FOR LONG**: a port whose transmitter never
+# empties (nothing reads it) must not hang the loader before anything is
+# shown. After 65,536 not-ready reads the port is given up on for the rest of
+# the boot.
 putc:
     pusha
     mov %al, %cl
-    mov $0x3FD, %dx                 # line status: wait for the transmitter
-4:  in %dx, %al
-    test $0x20, %al
-    jz 4b
-    mov $0x3F8, %dx
-    mov %cl, %al
-    out %al, %dx
     mov $0x0E, %ah                  # the BIOS's teletype: page 0, grey
-    mov %cl, %al
     mov $0x0007, %bx
     int $0x10
-    popa
+    cmpb $0, serial_dead
+    jne 5f
+    mov $0x3FD, %dx                 # line status: wait for the transmitter
+    xor %bx, %bx
+4:  in %dx, %al
+    test $0x20, %al
+    jnz 6f
+    dec %bx
+    jnz 4b
+    movb $1, serial_dead
+    jmp 5f
+6:  mov $0x3F8, %dx
+    mov %cl, %al
+    out %al, %dx
+5:  popa
     ret
 
 # Reads what `dap` describes. A failure is the end of the boot.
@@ -103,6 +131,7 @@ stop:
     jmp stop
 
 boot_drive: .byte 0
+serial_dead: .byte 0
     .balign 4
 dap:                                # the disk address packet int 13h reads
     .byte 16, 0
@@ -121,6 +150,8 @@ kernel_lba: .long 0
 
 # ── stage 2 ──────────────────────────────────────────────────────────────────
 stage2:
+    mov $'S', %al
+    call mark
     mov $msg_stage2, %si
     call say
     call enable_a20
@@ -254,6 +285,8 @@ e820_end:
     mov %bp, 0x6030                 # memmap_entries (byte 48)
     mov $msg_start, %si
     call say
+    mov $'K', %al
+    call mark
 
     # **INTO 32-BIT PROTECTED MODE, AS PVH STARTS A KERNEL**: flat segments,
     # paging off, interrupts off, %ebx at the start_info.

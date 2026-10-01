@@ -18,7 +18,9 @@
 # serial port, which is how shape.sh asks for the PCI list), DIRTY=1 (below),
 # MONITOR_SOCKET=path (QEMU's monitor on a unix socket, beside the serial
 # port), NO_DOOR=1 (no exit door, as on a real droplet: a kernel that ends
-# halts with its screen intact, and the run ends when it is told to).
+# halts with its screen intact, and the run ends when it is told to),
+# MACHINE (QEMU's machine type, default `pc`; a real droplet reports
+# pc-i440fx-6.1) and BIOS (a SeaBIOS image to boot instead of QEMU's own).
 #
 # **DIRTY=1: THE MACHINE STARTS WITH GARBAGE IN EVERY BYTE OF RAM.** QEMU's
 # memory comes fresh from Linux, so it is all zeroes, and a loader or kernel
@@ -54,10 +56,11 @@ public="user,id=public"
 private="user,id=private,net=10.116.0.0/20"
 [ -n "${PRIVATE_FWD:-}" ] && private="$private,hostfwd=tcp:127.0.0.1:$PRIVATE_FWD-:80"
 
-memory=(-M pc -m "${MEMORY:-2048}")
+machine="${MACHINE:-pc}"
+memory=(-M "$machine" -m "${MEMORY:-2048}")
 if [ "${DIRTY:-}" = 1 ]; then
     head -c "${MEMORY:-2048}M" /dev/zero | tr '\0' '\245' > "$WORK/ram"
-    memory=(-M pc,memory-backend=ram -m "${MEMORY:-2048}"
+    memory=(-M "$machine",memory-backend=ram -m "${MEMORY:-2048}"
             -object memory-backend-file,id=ram,size="${MEMORY:-2048}M",mem-path="$WORK/ram",share=off)
 fi
 
@@ -69,12 +72,14 @@ else
     console=(-serial stdio -monitor none)
 fi
 door=(-device isa-debug-exit,iobase=0xf4,iosize=0x04)
+bios=()
+[ -n "${BIOS:-}" ] && bios=(-bios "$BIOS")
 [ "${NO_DOOR:-}" = 1 ] && door=()
 
 # Not `exec`: the trap above has to run when QEMU is done, or every run
 # leaves its directory behind.
 qemu-system-x86_64 \
-    "${memory[@]}" -accel kvm -cpu host -smp 1 \
+    "${memory[@]}" "${bios[@]}" -accel kvm -cpu host -smp 1 \
     -nodefaults -no-reboot -display none "${console[@]}" \
     -device piix3-usb-uhci,addr=01.2 \
     -device virtio-vga,addr=02.0 \
