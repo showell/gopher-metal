@@ -10,12 +10,23 @@
 //! zig against a virtio NIC, one in Roc against an emulated NE2000, both
 //! ending in a lease. That was the point of doing this one first.
 //!
+//! **A LOST MESSAGE IS ASKED AGAIN** (RFC 2131 §4.1): each message waits about
+//! four seconds for its answer, then is sent again, the wait doubling up to 64
+//! seconds, each wait moved by up to a second either way at random so that
+//! machines that lost the same frame do not ask again in step. It used to send
+//! once and spin twenty million times, so a single lost frame on a real
+//! network left the machine with no address forever (found by metal-vmm's
+//! `WIRE_EAT`, 2026-09-18). The waits are durations, so the machine's clock
+//! must be started first (`pit.calibrate` and `io.startClock`, or
+//! `wallclock.start`).
+//!
 //! What it does NOT do: renew, rebind, decline, or handle a NAK. A lease here
 //! is taken once and kept until the machine stops.
 
 const proto = @import("proto.zig");
 const net = @import("net.zig");
 const rng = @import("rng.zig");
+const io = @import("io.zig");
 
 const port_server: u16 = 67;
 const port_client: u16 = 68;
@@ -129,9 +140,27 @@ fn std_mem_eql(a: []const u8, b: []const u8) bool {
     return true;
 }
 
-/// Sends one message and waits for a reply of `want` type, giving up after
-/// `spins` turns of the receive queue. Answers the payload, copied into
-/// `reply`, because the frame it arrived in goes back to the device.
+/// How many times a message is sent before the exchange gives up: waits of
+/// about 4, 8, 16, 32, 64 and 64 seconds, a little over three minutes in all.
+pub const attempts: u32 = 6;
+
+/// The wait after attempt `n` (0 is the first), in nanoseconds: 4 s doubled
+/// per attempt up to 64 s, moved by `jitter_ns`, which is within a second
+/// either way.
+pub fn waitAfter(n: u32, jitter_ns: i64) u64 {
+    const base_s: u64 = @as(u64, 4) << @intCast(@min(n, 4));
+    const ns: i64 = @as(i64, @intCast(base_s * 1_000_000_000)) + jitter_ns;
+    return @intCast(ns);
+}
+
+fn jitter() i64 {
+    return @as(i64, rng.int(u32) % 2_000_000_001) - 1_000_000_000;
+}
+
+/// Sends one message and waits for a reply of `want` type, sending it again
+/// each time a wait runs out, `attempts` times in all. Answers the payload,
+/// copied into `reply`, because the frame it arrived in goes back to the
+/// device.
 fn exchange(
     nic: *net.Net,
     frame: []u8,
@@ -139,30 +168,37 @@ fn exchange(
     xid: u32,
     want: u8,
     reply: []u8,
-    spins: usize,
     from_mac: *[6]u8,
 ) ?usize {
-    nic.send(frame[0..frame_len]);
+    const clock = struct {
+        fn now() i96 {
+            return io.awakeNs() orelse
+                @panic("DHCP before the clock was started: a wait for a lost reply cannot be measured");
+        }
+    };
+    var attempt: u32 = 0;
+    while (attempt < attempts) : (attempt += 1) {
+        nic.send(frame[0..frame_len]);
+        const deadline = clock.now() + waitAfter(attempt, jitter());
+        while (clock.now() < deadline) {
+            const got = nic.poll() orelse {
+                asm volatile ("pause");
+                continue;
+            };
+            defer nic.recycle(got.id);
 
-    var spun: usize = 0;
-    while (spun < spins) : (spun += 1) {
-        const got = nic.poll() orelse {
-            asm volatile ("pause");
-            continue;
-        };
-        defer nic.recycle(got.id);
+            const dg = proto.parseUdp(got.frame) orelse continue;
+            if (dg.dst_port != port_client or dg.src_port != port_server) continue;
+            if (!replyFor(dg.payload, xid, nic.mac)) continue;
+            const t = messageType(dg.payload) orelse continue;
+            if (t == msg_nak) return null;
+            if (t != want) continue;
 
-        const dg = proto.parseUdp(got.frame) orelse continue;
-        if (dg.dst_port != port_client or dg.src_port != port_server) continue;
-        if (!replyFor(dg.payload, xid, nic.mac)) continue;
-        const t = messageType(dg.payload) orelse continue;
-        if (t == msg_nak) return null;
-        if (t != want) continue;
-
-        const n = @min(dg.payload.len, reply.len);
-        @memcpy(reply[0..n], dg.payload[0..n]);
-        from_mac.* = got.frame[6..12].*;
-        return n;
+            const n = @min(dg.payload.len, reply.len);
+            @memcpy(reply[0..n], dg.payload[0..n]);
+            from_mac.* = got.frame[6..12].*;
+            return n;
+        }
     }
     return null;
 }
@@ -170,8 +206,6 @@ fn exchange(
 /// The whole exchange. `frame` and `reply` are scratch the caller owns;
 /// `frame` must be at least a frame long and `reply` at least 576 bytes.
 pub fn acquire(nic: *net.Net, frame: []u8, reply: []u8) Error!Lease {
-    const spins: usize = 20_000_000;
-
     // **THE TRANSACTION ID IS DRAWN, NOT WRITTEN DOWN.** It has to be unlike
     // the last one on this wire, and it used to be a constant in the caller.
     const xid = rng.int(u32);
@@ -186,7 +220,7 @@ pub fn acquire(nic: *net.Net, frame: []u8, reply: []u8) Error!Lease {
 
     var len = proto.writeUdp(frame, nic.mac, proto.mac_broadcast, proto.ip_any, proto.ip_broadcast, port_client, port_server, at);
     var from_mac: [6]u8 = undefined;
-    const offer_len = exchange(nic, frame, len, xid, msg_offer, reply, spins, &from_mac) orelse return Error.NoOffer;
+    const offer_len = exchange(nic, frame, len, xid, msg_offer, reply, &from_mac) orelse return Error.NoOffer;
     const offer = reply[0..offer_len];
 
     var lease = Lease{
@@ -207,7 +241,7 @@ pub fn acquire(nic: *net.Net, frame: []u8, reply: []u8) Error!Lease {
     at += 1;
 
     len = proto.writeUdp(frame, nic.mac, proto.mac_broadcast, proto.ip_any, proto.ip_broadcast, port_client, port_server, at);
-    const ack_len = exchange(nic, frame, len, xid, msg_ack, reply, spins, &from_mac) orelse return Error.NoAck;
+    const ack_len = exchange(nic, frame, len, xid, msg_ack, reply, &from_mac) orelse return Error.NoAck;
     const ack = reply[0..ack_len];
 
     // The ACK is the authority, not the offer: a server may hand over
@@ -220,4 +254,15 @@ pub fn acquire(nic: *net.Net, frame: []u8, reply: []u8) Error!Lease {
     lease.server_mac = from_mac;
 
     return lease;
+}
+
+test "each wait doubles from four seconds and stops at sixty-four" {
+    const std = @import("std");
+    const want = [_]u64{ 4, 8, 16, 32, 64, 64, 64 };
+    for (want, 0..) |seconds, n| {
+        try std.testing.expectEqual(seconds * 1_000_000_000, waitAfter(@intCast(n), 0));
+    }
+    // A second either way, never more.
+    try std.testing.expectEqual(@as(u64, 3_000_000_000), waitAfter(0, -1_000_000_000));
+    try std.testing.expectEqual(@as(u64, 65_000_000_000), waitAfter(9, 1_000_000_000));
 }

@@ -51,6 +51,10 @@ pub fn kmain() noreturn {
     serial.putMac(nic.mac);
     serial.put("\n");
 
+    // DHCP waits a measured time for each answer before asking again.
+    const hz = metal.pit.calibrate() catch serial.fail("the PIT would not calibrate the TSC");
+    metal.io.startClock(hz);
+
     const lease = dhcp.acquire(&nic, &frame, &reply) catch |e| switch (e) {
         error.NoOffer => serial.fail("no DHCP offer came back"),
         error.NoAck => serial.fail("the offer was made and then not acknowledged"),
