@@ -406,15 +406,15 @@ test "a segment bigger than the room is taken in part, and the rest arrives afte
     const body = "abcdefghij" ** 10; // 100 bytes into a 64-byte buffer
 
     var buf: [1600]u8 = undefined;
-    const start = p.seq;
-    _ = handle(&f.table, &f.wire, p.frame(&buf, flag_psh | flag_ack, start, body), 2);
-    try testing.expectEqual(start +% 64, f.wire.last().ack); // only what fitted
+    const first = p.seq;
+    _ = handle(&f.table, &f.wire, p.frame(&buf, flag_psh | flag_ack, first, body), 2);
+    try testing.expectEqual(first +% 64, f.wire.last().ack); // only what fitted
     try testing.expectEqualStrings(body[0..64], f.table.conns[i].pending());
 
     // The peer sends the rest again from where the ACK said.
     f.table.conns[i].consume(64);
-    _ = handle(&f.table, &f.wire, p.frame(&buf, flag_psh | flag_ack, start +% 64, body[64..]), 3);
-    try testing.expectEqual(start +% 100, f.wire.last().ack);
+    _ = handle(&f.table, &f.wire, p.frame(&buf, flag_psh | flag_ack, first +% 64, body[64..]), 3);
+    try testing.expectEqual(first +% 100, f.wire.last().ack);
     try testing.expectEqualStrings(body[64..], f.table.conns[i].pending());
 }
 
