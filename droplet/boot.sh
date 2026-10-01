@@ -8,6 +8,9 @@
 #   droplet/boot.sh          every probe below
 #   droplet/boot.sh clock    just one
 #
+# **EVERY BOOT STARTS ON DIRTY RAM** (droplet.sh's DIRTY=1): a machine that
+# hands over zeroed memory hides a loader that forgot to zero it.
+#
 # Only the probes that need no virtio device are here so far: a droplet's
 # devices are on PCI, and the kernels still look for them where QEMU's microvm
 # puts them. `memory` boots at three sizes, because the memory map is the one
@@ -41,7 +44,7 @@ for one in memory:512 memory:2048 memory:4096 clock:2048; do
         echo "FAIL $probe  sgdisk does not accept the disk:"; sgdisk -v "$img"; failed=1; continue
     fi
     began=$(date +%s%N)
-    MEMORY="$memory" DISK="$img" timeout 120 "$HERE/droplet.sh" > "$WORK/out.txt" 2>&1
+    DIRTY=1 MEMORY="$memory" DISK="$img" timeout 120 "$HERE/droplet.sh" > "$WORK/out.txt" 2>&1
     code=$?
     ms=$(( ($(date +%s%N) - began) / 1000000 ))
     # The door turns the guest's 0 into QEMU's 1.

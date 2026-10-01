@@ -15,7 +15,14 @@
 # Knobs, all environment: DISK (required), MEMORY (MB, default 2048: prod's
 # size), PUBLIC_FWD (a host port forwarded to the guest's port 80 on the
 # public card), MONITOR=stdio (QEMU's monitor on the terminal instead of the
-# serial port, which is how shape.sh asks for the PCI list).
+# serial port, which is how shape.sh asks for the PCI list), DIRTY=1 (below).
+#
+# **DIRTY=1: THE MACHINE STARTS WITH GARBAGE IN EVERY BYTE OF RAM.** QEMU's
+# memory comes fresh from Linux, so it is all zeroes, and a loader or kernel
+# that forgets to clear something it relies on passes anyway. Here the RAM is
+# a file of 0xA5 bytes, mapped privately so the guest's writes never reach it.
+# This is how the loader's clearing of .bss is tested at all: without it, the
+# clock probe fails on dirty memory and passes on clean.
 #
 # **WHAT IS NOT A DROPLET HERE**, both chosen for testing:
 #   - the exit door (0xF4, isa-debug-exit), so a test kernel can end the run.
@@ -42,14 +49,23 @@ truncate -s 488K "$WORK/config.img"
 public="user,id=public"
 [ -n "${PUBLIC_FWD:-}" ] && public="$public,hostfwd=tcp:127.0.0.1:$PUBLIC_FWD-:80"
 
+memory=(-M pc -m "${MEMORY:-2048}")
+if [ "${DIRTY:-}" = 1 ]; then
+    head -c "${MEMORY:-2048}M" /dev/zero | tr '\0' '\245' > "$WORK/ram"
+    memory=(-M pc,memory-backend=ram -m "${MEMORY:-2048}"
+            -object memory-backend-file,id=ram,size="${MEMORY:-2048}M",mem-path="$WORK/ram",share=off)
+fi
+
 if [ "${MONITOR:-}" = stdio ]; then
     console=(-serial none -monitor stdio)
 else
     console=(-serial stdio -monitor none)
 fi
 
-exec qemu-system-x86_64 \
-    -M pc -accel kvm -cpu host -smp 1 -m "${MEMORY:-2048}" \
+# Not `exec`: the trap above has to run when QEMU is done, or every run
+# leaves its directory behind.
+qemu-system-x86_64 \
+    "${memory[@]}" -accel kvm -cpu host -smp 1 \
     -nodefaults -no-reboot -display none "${console[@]}" \
     -device piix3-usb-uhci,addr=01.2 \
     -device virtio-vga,addr=02.0 \

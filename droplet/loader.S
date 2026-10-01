@@ -196,9 +196,9 @@ next_chunk:
 
 # **.bss IS NOT IN THE FILE**: what a segment holds beyond its file size is
 # memory the kernel owns, and it is handed over zeroed, as QEMU's loader and
-# metal-vmm hand it over. **No check here can see this go wrong**: a fresh
-# machine's memory is already zero, and the kernel assumes nothing of .bss
-# (link.ld). Deleting the `rep stosb` below passes boot.sh.
+# metal-vmm hand it over. A fresh machine's memory is already zero, so
+# boot.sh starts every probe on RAM full of 0xA5: without the `rep stosb`
+# below, the clock probe fails there.
 zero_the_rest:
     mov zeroes, %ecx
     call unreal
