@@ -1,10 +1,63 @@
 # gopher-metal
 
-angry-gopher's chat server, on a machine with no operating system under it.
+angry-gopher's server (chat, and the apps it serves: Lyn Rummy, Seattle
+Delivery, Safari and the rest) on a machine with no operating system under it.
 
 Everything here targets `x86_64-freestanding`: no kernel, no libc, no syscalls.
 A kernel is one root file over `src/`, linked with a script that puts a PVH
-note at the front, and booted by QEMU's `microvm` machine.
+note at the front. Tests boot it on QEMU's `microvm` machine, on metal-vmm,
+and on a QEMU laid out like a DigitalOcean droplet; for real, it boots on a
+droplet through our own BIOS loader.
+
+## Where it runs: a TEST site, https://metal.lynrummy.com
+
+**It runs, and it runs well, but nothing on it is meant to last yet.**
+
+- **What:** angry-gopher's whole route table, so chat and every app
+  (Lyn Rummy, Seattle Delivery, Safari, puzzles, chess). Steve's decision,
+  2026-10-01: the apps are served from metal along with chat, not split off.
+- **Where:** a droplet in nyc2, booted from a custom image, with
+  no Linux on it. It listens on its **private** network card only
+  (10.100.0.4). prod's Caddy (the lynrummy.com droplet) proxies the test name
+  to it, from `droplet/metal.lynrummy.com.caddy`, installed by hand in
+  `/etc/caddy/sites/`.
+- **Its data does not survive.** Every new image replaces the droplet's whole
+  disk, chat's files included. That is accepted until much more testing has
+  been done (Steve, 2026-10-01). Where chat's files should live instead (a
+  DigitalOcean volume, or somewhere a deploy does not touch) is undecided.
+- **Its data is test data.** The volume is the chat judge's test site, whose
+  accounts' password is in this repo, so anyone who reads the repo can log in
+  to them.
+- **lynrummy.com itself is unchanged:** still angry-gopher on Linux.
+
+How fast, measured with `droplet/race.py` (the same pages from both sites,
+alternating, 40 rounds; first byte, median / 90th percentile, 2026-10-01,
+with the send fix, before interrupts):
+
+| | lynrummy.com | metal, through Caddy | Linux alone, on prod | metal alone, from prod |
+|---|---|---|---|---|
+| home page | 3.0 / 3.4 ms | 4.1 / 8.1 ms | 0.56 / 0.82 ms | 1.5 / 3.9 ms |
+| /game (a redirect) | 2.5 / 2.9 ms | 2.7 / 4.0 ms | 0.22 / 0.33 ms | 0.41 / 3.4 ms |
+
+At the median, a small page through Caddy is as fast as Linux's. The slow
+tenth is 1 to 5 ms slower. **Interrupts and the idle halt (`src/interrupts.zig`)
+are built and pass every gate, and are not yet measured on the droplet.** That
+measurement says whether the slow tenth was the processor never resting.
+
+**A deploy** is by hand:
+
+1. `droplet/chat.py <out.img>` builds the disk: the loader, `probe/gopher.elf`,
+   and the test site's files in partition 2.
+2. gzip it, and serve it somewhere DigitalOcean can fetch it.
+3. Import it as a custom image, and rebuild the droplet from it.
+
+**Known and open:**
+
+- one boot here printed its first line and then nothing for a minute (1 of
+  27, not reproduced since).
+
+[`TCP_TESTING.md`](TCP_TESTING.md) is the plan for finding the TCP table's
+bugs systematically rather than by reading.
 
 The plan is
 [`notes/angry-gopher-without-linux.md`](http://143.244.172.148:9100/notes/angry-gopher-without-linux.md),
@@ -12,49 +65,30 @@ and its two load-bearing findings are worth repeating here:
 
 - **Caddy on lynrummy.com fronts this box**, so TLS, certificates and HTTP/2
   stay on Linux where they already work. What runs here speaks plain HTTP/1.1
-  on a private address with no public IP.
+  on a private address, and does not answer on its public one.
 - **`std.Io` is the porting seam.** zig 0.16 passes all I/O through an
   interface, and `angry-gopher/zig-server` threads it everywhere — `Io.Dir`
   appears 121 times — so the port is one implementation of `Io`, not a rewrite
   of 14,423 lines. `std.http.Server` is built from a reader and a writer and
   needs no modification at all.
 
-**PARKED, 2026-09-18.** Chat runs well on the Linux droplet, and the reason to
-push further — running it on hardware with no hypervisor — wants a machine we
-do not have: one in a datacenter whose network card we chose. Everything below
-is green and finished as far as it goes;
-[what is outstanding](http://143.244.172.148:9100/notes/gopher-metal-what-is-outstanding.md)
-is the list, and
-[waking a real machine](http://143.244.172.148:9100/notes/waking-a-real-machine.md)
-is what bare metal would have taken. **The part most worth picking up again is
-not the chat port**: it is the TCP table, the FAT16 volume and the `std.Io`
-host underneath it, which a real application has now used hard enough to find
-the things tests do not.
-
-**UNPARKED, 2026-10-01: the target is a DigitalOcean droplet.** gopher-metal
-becomes the droplet's operating system, from a custom image: no Linux, and
-DigitalOcean's hypervisor the only layer under it. The plan is
-[gopher chat on a droplet](http://143.244.172.148:9100/notes/gopher-chat-on-a-droplet.md).
-`droplet/droplet.sh` boots a disk image on a QEMU laid out the way a droplet
-is (`droplet/lspci.txt`, read off a real one), and `droplet/shape.sh` checks
-that it still is: the PCI slots match, and the BIOS boots a disk's first
-sector. `droplet/loader.S` is our own boot loader (BIOS to the PVH entry, the
-memory map from E820), `droplet/image.zig` (`zig build droplet`) puts it and a
-kernel on a GPT disk, and `droplet/boot.sh` boots the probes that way,
-dirty RAM and all. Devices are found on the PCI bus when the machine has one
-(`src/pci.zig`; `virtio.Device` is either transport), so the disk and network
-probes pass on the droplet's own devices. Next: DHCP that asks again, text on
-the screen, and chat's volume.
+**History.** Parked 2026-09-18 with everything green, for want of a machine
+we could run it on; unparked 2026-10-01 when the target became a DigitalOcean
+droplet, booted from a custom image
+([gopher chat on a droplet](http://143.244.172.148:9100/notes/gopher-chat-on-a-droplet.md)).
 
 ## Where it stands
 
 | | |
 |---|---|
 | the boot | **works** — PVH, long mode, identity-mapped low 4 GB |
+| a droplet's boot | **works** — `droplet/loader.S`, our own BIOS loader, from a GPT disk (`droplet/image.zig`); checked on the droplet-shaped QEMU by `droplet/boot.sh` and on real droplets |
+| the screen | **works** — everything the console says is also in VGA text, which is what DigitalOcean's console shows (`droplet/screen.sh`) |
+| interrupts, and resting when idle | **works** — the card wakes the machine by MSI-X, a 1 ms timer otherwise; PCI only, so microvm and metal-vmm still spin. Not yet measured on a droplet |
 | virtio-blk over MMIO | **works** — reads, writes, and reads back |
 | virtio-net over MMIO | **works** |
 | virtio over PCI | **works** — disk and network found on a PC's bus, as a droplet has them |
-| DHCP | **works** — leases 10.0.2.15 from QEMU's server |
+| DHCP | **works** — from QEMU's server and DigitalOcean's, asking again with RFC 2131's backoff |
 | ARP | **works** — answers, which is what makes the address reachable |
 | TCP | **works** — 256 connections; the peer's window and segment size respected, lost segments sent again, silent peers given up on; received in order only |
 | HTTP, ours | **works** — `curl` gets a 200 from it |
@@ -166,7 +200,9 @@ writer needs `drain`, and everything else in both vtables has a default.
 **A read there runs the event loop.** With one core and no preemption there is
 nobody else to move the connection forward, so a read with no bytes yet polls
 the NIC, answers ARP, feeds TCP and tries again. That is what "blocking" means
-when there are no threads to block.
+when there are no threads to block. Where the card can interrupt (on the PCI
+bus), a try that found nothing halts until a frame or the 1 ms timer
+(`src/interrupts.zig`); elsewhere it spins.
 
 A probe is a kernel that is only a driver and a serial port. They exist so a
 driver can be put on virtual hardware and checked before anything is built on
@@ -1014,7 +1050,8 @@ connections.
 ## What the TCP does not do
 
 No congestion control, no fast retransmit, no selective acknowledgement, no
-window scaling, no out-of-order reassembly, no keep-alive. `zig-server`'s own
+window scaling, no out-of-order reassembly, no keep-alive. (It does measure
+round trips: the retransmission clock is RFC 6298's, from the path.) `zig-server`'s own
 comment says keep-alive is deliberately off. The rest are allowed because this
 box sits behind Caddy on a private network, and one of them is a measured cost:
 
@@ -1024,9 +1061,6 @@ box sits behind Caddy on a private network, and one of them is a measured cost:
   acknowledgement number is still taken: it is cumulative, so a newer one
   cannot be wrong, and a peer repeating its FIN with ours acknowledged must
   not be made to wait on a timer.)
-- **No round-trip measurement.** The first retransmission wait is RFC 6298's
-  one second, whatever the network actually costs, so recovery on a fast link
-  is a second slower than it need be.
 - **No TIME-WAIT.** A connection is forgotten as soon as both sides have
   finished, and anything that arrives afterwards is answered with a reset.
 
