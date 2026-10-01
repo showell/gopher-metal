@@ -744,9 +744,13 @@ fn reportStack(deepest: usize) usize {
 /// once per connection, and a client that has gone quiet is exactly the one
 /// that says nothing. A handshake that never completed has no FIN to wait for
 /// at all, and is reset.
+///
+/// The FIN goes on the wire now rather than on the next turn of the network,
+/// which comes after the request's log is written.
 fn close(wire: *stream.Wire, table: *tcp.Table, i: usize) void {
     table.finish(i);
-    if (table.conns[i].state != .closing) table.abandon(wire, i);
+    if (table.conns[i].state != .closing) return table.abandon(wire, i);
+    table.transmit(wire, Io.awakeNs() orelse 0);
 }
 
 /// **A MACHINE WITH NOTHING TO DO HALTS**, once the network card can wake it.
