@@ -34,7 +34,12 @@ pub fn build(b: *std.Build) void {
 
     // One module for everything under src/, so a type from virtio.zig is the
     // same type wherever it is used.
-    const metal = b.createModule(.{ .root_source_file = b.path("src/metal.zig") });
+    // **NO RED ZONE.** x86-64 code may keep a function's scratch in the 128
+    // bytes below the stack pointer, and an interrupt pushes its frame exactly
+    // there. src/interrupts.zig takes interrupts only inside `rest`, but a
+    // kernel that takes them at all must not be compiled to assume nothing
+    // writes below its stack.
+    const metal = b.createModule(.{ .root_source_file = b.path("src/metal.zig"), .red_zone = false });
 
     // `cache_fat` builds the same probe with the FAT held in memory, so one
     // source judges both paths — and run.sh can require the two to leave
@@ -79,6 +84,7 @@ pub fn build(b: *std.Build) void {
                 .sanitize_c = .off,
                 .pic = false,
                 .code_model = .kernel,
+                .red_zone = false,
                 // **THERE IS ONE THREAD AND THERE WILL NOT BE ANOTHER.** A
                 // freestanding target is not single-threaded by default, so
                 // without this std keeps the threaded lowerings -- real atomic
@@ -126,6 +132,7 @@ pub fn build(b: *std.Build) void {
 
     const app = b.createModule(.{
         .root_source_file = .{ .cwd_relative = b.fmt("{s}/router.zig", .{gopher_port}) },
+        .red_zone = false,
         .imports = &.{
             .{ .name = "metal", .module = metal },
             .{ .name = "build_options", .module = build_opts.createModule() },
@@ -149,6 +156,7 @@ pub fn build(b: *std.Build) void {
             .sanitize_c = .off,
             .pic = false,
             .code_model = .kernel,
+            .red_zone = false,
             .single_threaded = true,
             .imports = &.{
                 .{ .name = "metal", .module = metal },

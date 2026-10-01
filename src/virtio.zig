@@ -99,6 +99,7 @@ const common_driver_feature = 0x0C; // u32
 const common_device_status = 0x14; // u8
 const common_queue_select = 0x16; // u16
 const common_queue_size = 0x18; // u16: the device's maximum, until we write ours
+const common_queue_msix_vector = 0x1A; // u16
 const common_queue_enable = 0x1C; // u16
 const common_queue_notify_off = 0x1E; // u16
 const common_queue_desc = 0x20; // u64
@@ -525,6 +526,44 @@ pub fn ack(d: Device) void {
         },
         .pci => |p| _ = read8(p.isr),
     }
+}
+
+/// **A QUEUE THAT INTERRUPTS THE PROCESSOR WHEN IT HAS SOMETHING.** On PCI a
+/// device raises an interrupt by writing a message to an address — MSI-X — and
+/// the table of messages it may write sits in one of its memory windows, named
+/// by its MSI-X capability (PCI 3.0 §6.8.2). Entry 0 is filled in with
+/// `address` and `vector`, unmasked, MSI-X turned on for the device, and each
+/// of `queues` pointed at entry 0 (virtio §4.1.4.3: the device reads back
+/// NO_VECTOR if it would not take it). False, and nothing is routed, on mmio or
+/// on a device without the capability.
+pub fn routeToProcessor(d: Device, queues: []const u16, address: u32, vector: u8) bool {
+    const p = switch (d) {
+        .pci => |p| p,
+        .mmio => return false,
+    };
+    const f = p.function;
+    var caps = f.capabilities();
+    const cap = while (caps.nextOne()) |c| {
+        if (c.id == 0x11) break c;
+    } else return false;
+    const table = f.read32(cap.at + 4);
+    const window = f.bar(@truncate(table & 7)) orelse return false;
+    const entry: usize = @intCast(window + (table & ~@as(u32, 7)));
+    write32(entry + 0, address);
+    write32(entry + 4, 0);
+    write32(entry + 8, vector);
+    write32(entry + 12, 0); // unmasked
+
+    // Enable (bit 15), and not masked as a whole (bit 14).
+    const control = f.read16(cap.at + 2);
+    f.write16(cap.at + 2, (control | 0x8000) & ~@as(u16, 0x4000));
+
+    for (queues) |q| {
+        write16(p.common + common_queue_select, q);
+        write16(p.common + common_queue_msix_vector, 0);
+        if (read16(p.common + common_queue_msix_vector) != 0) return false;
+    }
+    return true;
 }
 
 pub const Error = error{ NoDevice, DeviceRefused, QueueTooSmall, TransferFailed };

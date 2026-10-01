@@ -12,6 +12,7 @@
 //! without learning about any of them.
 
 const virtio = @import("virtio.zig");
+const interrupts = @import("interrupts.zig");
 
 /// The header on every buffer in both directions. With VIRTIO_F_VERSION_1 it
 /// always carries `num_buffers`, so it is 12 bytes and not the legacy 10.
@@ -104,8 +105,17 @@ pub const Net = struct {
         };
         self.tx.offer(0);
         self.tx.notify();
-        _ = self.tx.wait();
+        // The device's thread takes the frame; on a droplet it needs this
+        // processor to do it, so the wait rests rather than spins.
+        while (self.tx.take() == null) interrupts.rest();
         virtio.ack(self.device);
+    }
+
+    /// From now on both queues interrupt this processor at `vector` when
+    /// they have something: a frame arrived, or a frame was taken. False on a
+    /// card that cannot (mmio, or no MSI-X), which goes on being polled.
+    pub fn interruptOnFrames(self: *Net, address: u32, vector: u8) bool {
+        return virtio.routeToProcessor(self.device, &.{ 0, 1 }, address, vector);
     }
 
     /// The next frame the device has delivered, or null. The slice points into

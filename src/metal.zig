@@ -26,3 +26,4 @@ pub const tsc = @import("tsc.zig");
 pub const rtc = @import("rtc.zig");
 pub const pit = @import("pit.zig");
 pub const wallclock = @import("wallclock.zig");
+pub const interrupts = @import("interrupts.zig");

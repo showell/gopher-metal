@@ -25,6 +25,7 @@ const net = @import("net.zig");
 const tcp = @import("tcp.zig");
 const arp = @import("arp.zig");
 const proto = @import("proto.zig");
+const interrupts = @import("interrupts.zig");
 
 const Reader = std.Io.Reader;
 const Writer = std.Io.Writer;
@@ -169,6 +170,12 @@ pub const Stream = struct {
         _ = pump(self.wire, self.table, self.ip);
     }
 
+    /// One turn of the network, and a rest if nothing arrived: what every
+    /// wait here does between looking at its connection.
+    fn pumpOrRest(self: *Stream) void {
+        if (pump(self.wire, self.table, self.ip) == null) interrupts.rest();
+    }
+
     /// Bytes the peer has sent that we have not handed out, waiting for some
     /// to arrive if there are none. Null once nothing more is coming — either
     /// because the peer closed, or because it stopped talking for `idle_ns`,
@@ -185,8 +192,7 @@ pub const Stream = struct {
                 self.timed_out = true;
                 return null;
             }
-            self.pumpOnce();
-            asm volatile ("pause");
+            self.pumpOrRest();
         }
     }
 
@@ -225,8 +231,7 @@ pub const Stream = struct {
                 self.timed_out = true;
                 return error.WriteFailed;
             }
-            self.pumpOnce();
-            asm volatile ("pause");
+            self.pumpOrRest();
         }
     }
 
@@ -246,8 +251,7 @@ pub const Stream = struct {
                 una = c.una;
             }
             if (self.clock() - since >= self.idle_ns) return;
-            self.pumpOnce();
-            asm volatile ("pause");
+            self.pumpOrRest();
         }
     }
 };

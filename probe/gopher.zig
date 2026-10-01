@@ -50,6 +50,7 @@ const pvh = metal.pvh;
 const Io = metal.io;
 const ready = metal.ready;
 const RequestHeap = metal.request_heap.RequestHeap;
+const interrupts = metal.interrupts;
 
 /// The application, as it is.
 const router = @import("router.zig");
@@ -176,6 +177,7 @@ const config_path = "gopher-metal.conf";
 
 pub fn kmain() noreturn {
     serial.init();
+    interrupts.install();
     serial.put("gopher-metal: angry-gopher's route table, with no Linux under it\n");
 
     // ── the machine's memory ────────────────────────────────────────────────
@@ -279,6 +281,7 @@ pub fn kmain() noreturn {
     var nic = net.Net.init(nic_base, &nic_mem) catch serial.fail("the NIC would not come up");
     const lease = dhcp.acquire(&nic, &dhcp_frame, &dhcp_reply) catch
         serial.fail("no DHCP lease, so there is no address to listen on");
+    restBetweenFrames(&nic, clock.tsc_hz);
     serial.put("  address: ");
     serial.putIp(lease.address);
     serial.put("\n  listening on port 80\n");
@@ -348,7 +351,7 @@ pub fn kmain() noreturn {
             served += 1;
             letGo(&wire, &table, pick, lease.address, served, conf.idle_ns);
         } else {
-            if (arrived == null) asm volatile ("pause");
+            if (arrived == null) interrupts.rest();
             continue;
         }
         // What this request used of its heap, BEFORE the reset: the same
@@ -369,7 +372,7 @@ pub fn kmain() noreturn {
     }
     const stopping_at = Io.awakeNs() orelse 0;
     while (closing(&table) and (Io.awakeNs() orelse 0) - stopping_at < 2 * std.time.ns_per_s) {
-        if (stream.pump(&wire, &table, lease.address) == null) asm volatile ("pause");
+        if (stream.pump(&wire, &table, lease.address) == null) interrupts.rest();
     }
     serial.put("  streams: at most ");
     serial.putDec(held_most);
@@ -739,6 +742,24 @@ fn close(s: *stream.Stream, table: *tcp.Table, i: usize) void {
     // sees that through.
     const c = &table.conns[i];
     if (c.state != .closed and c.fin != .acknowledged) table.abandon(s.wire, i);
+}
+
+/// **A MACHINE WITH NOTHING TO DO HALTS**, once the network card can wake it.
+/// Only a card on the PCI bus can: on mmio (QEMU's microvm, metal-vmm) nothing
+/// is touched and every wait goes on spinning, as it always has.
+fn restBetweenFrames(nic: *net.Net, tsc_hz: u64) void {
+    if (nic.device != .pci) return;
+    switch (interrupts.startApic()) {
+        .refused => |why| {
+            serial.put("  never resting: the local APIC refused (");
+            serial.put(@tagName(why));
+            serial.put(")\n");
+        },
+        .id => |apic| if (nic.interruptOnFrames(interrupts.msiAddress(apic), interrupts.wake_vector)) {
+            interrupts.arm(tsc_hz);
+            serial.put("  resting between frames: the card interrupts when one comes\n");
+        } else serial.put("  never resting: the card would not take an MSI-X vector\n"),
+    }
 }
 
 fn logRequest(number: u64, what: []const u8, outcome: []const u8) void {
