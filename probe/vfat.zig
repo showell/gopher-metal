@@ -59,7 +59,7 @@ pub fn kmain() noreturn {
 
     // A bare FAT16 volume starts at sector 0; a GPT disk's starts where its
     // table says. Both are in use here, so both are tried.
-    const start: u32 = if (gpt.firstPartition(&blk, &scratch) catch null) |p| p.first_lba else 0;
+    const start: u32 = if (gpt.dataPartition(&blk, &scratch) catch null) |p| p.first_lba else 0;
     var vol = fat16.Volume.mount(&blk, &scratch, start) catch
         serial.fail("the volume would not mount");
     serial.put("  volume at LBA ");

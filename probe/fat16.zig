@@ -56,7 +56,7 @@ pub fn kmain() noreturn {
 
     // **SECTOR 0 IS NOT THE FILESYSTEM.** These fixtures are GPT disks with a
     // protective MBR, so the volume starts wherever the table says.
-    const part = gpt.firstPartition(&blk, &scratch) catch |e| switch (e) {
+    const part = gpt.dataPartition(&blk, &scratch) catch |e| switch (e) {
         error.NotGpt => serial.fail("no GPT header at LBA 1"),
         error.NoPartition => serial.fail("the GPT table has no partition in it"),
         else => serial.fail("the partition table would not read"),

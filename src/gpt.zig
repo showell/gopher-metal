@@ -8,10 +8,14 @@
 //! mounts sector 0 gets a boot sector of zeros and concludes, correctly and
 //! uselessly, that the volume is not FAT16.
 //!
-//! Only what is needed to answer "where does the first partition start?". No
-//! GUIDs are interpreted, no CRCs are checked, and nothing is written.
+//! Only what is needed to answer "where does the data partition start?": the
+//! first partition that is not gopher-metal's own kernel partition (a droplet's
+//! disk has both; Cobblestone's fixtures and the judge's volumes have only the
+//! data). That one type GUID is the only one interpreted; no CRCs are
+//! checked, and nothing is written.
 
 const virtio = @import("virtio.zig");
+const kernel_partition = @import("kernel_partition.zig");
 
 pub const sector_size: u32 = 512;
 pub const Error = error{ ReadFailed, NotGpt, NoPartition };
@@ -32,6 +36,11 @@ fn le32(b: []const u8) u32 {
     return @as(u32, b[0]) | (@as(u32, b[1]) << 8) | (@as(u32, b[2]) << 16) | (@as(u32, b[3]) << 24);
 }
 
+fn eql16(a: *const [16]u8, b: *const [16]u8) bool {
+    for (a, b) |x, y| if (x != y) return false;
+    return true;
+}
+
 /// A 64-bit little-endian field, truncated: every address here is a sector
 /// number on a disk small enough that the high word is zero, and a disk where
 /// it is not is a disk this machine cannot address anyway.
@@ -39,9 +48,9 @@ fn le64(b: []const u8) u64 {
     return @as(u64, le32(b[0..4])) | (@as(u64, le32(b[4..8])) << 32);
 }
 
-/// The first partition in the table, or an error. `scratch` is one sector of
-/// identity-mapped memory the device writes into.
-pub fn firstPartition(blk: *virtio.Block, scratch: *[sector_size]u8) Error!Partition {
+/// The first partition in the table that is not the kernel's, or an error.
+/// `scratch` is one sector of identity-mapped memory the device writes into.
+pub fn dataPartition(blk: *virtio.Block, scratch: *[sector_size]u8) Error!Partition {
     if (blk.read(header_lba, @intFromPtr(scratch)) != virtio.blk_s_ok) return Error.ReadFailed;
     for (signature, 0..) |c, i| {
         if (scratch[i] != c) return Error.NotGpt;
@@ -68,6 +77,7 @@ pub fn firstPartition(blk: *virtio.Block, scratch: *[sector_size]u8) Error!Parti
             if (b != 0) used = true;
         }
         if (!used) continue;
+        if (eql16(e[0..16], &kernel_partition.type_guid)) continue;
 
         const first = le64(e[32..40]);
         const last = le64(e[40..48]);

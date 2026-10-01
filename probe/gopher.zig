@@ -206,7 +206,7 @@ pub fn kmain() noreturn {
         serial.fail("no disk: this kernel serves the site from a FAT16 volume");
     var blk = blk_mem.bring(blk_base) catch serial.fail("the block device would not come up");
     disk = &blk;
-    const part = gpt.firstPartition(&blk, &sector) catch
+    const part = gpt.dataPartition(&blk, &sector) catch
         serial.fail("the disk has no GPT partition to serve from");
     var vol = fat16.Volume.mount(&blk, &sector, part.first_lba) catch
         serial.fail("the first partition is not FAT16");

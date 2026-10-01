@@ -185,12 +185,14 @@ pub fn build(b: *std.Build) void {
     // **A DISK A DROPLET CAN BOOT.** droplet/image.zig puts the boot loader
     // and a kernel on a GPT disk; droplet/boot.sh assembles the loader and
     // runs the result on the droplet-shaped QEMU.
+    const kernel_partition = b.createModule(.{ .root_source_file = b.path("src/kernel_partition.zig") });
     const image = b.addExecutable(.{
         .name = "gm-image",
         .root_module = b.createModule(.{
             .root_source_file = b.path("droplet/image.zig"),
             .target = b.graph.host,
             .optimize = .Debug,
+            .imports = &.{.{ .name = "kernel_partition", .module = kernel_partition }},
         }),
     });
     b.step("droplet", "the disk-image builder for a droplet").dependOn(&b.addInstallArtifact(image, .{}).step);
@@ -204,6 +206,7 @@ pub fn build(b: *std.Build) void {
         const unit = b.addTest(.{ .root_module = b.createModule(.{
             .root_source_file = b.path(path),
             .target = b.graph.host,
+            .imports = &.{.{ .name = "kernel_partition", .module = kernel_partition }},
         }) });
         test_step.dependOn(&b.addRunArtifact(unit).step);
     }

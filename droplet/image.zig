@@ -7,9 +7,12 @@
 //!   LBA 1          the GPT header        LBA 2-33   its 128 entries
 //!   LBA 34-2047    the loader's second stage, in the gap no partition may use
 //!                  (the header says the first usable LBA is 2048)
-//!   LBA 2048-      the kernel partition, GPT entry 2. **Entry 1 is left
-//!                  empty for chat's volume**: gpt.zig mounts the first used
-//!                  entry, and that has to be the data, not the kernel.
+//!   LBA 2048-      the kernel partition, GPT entry 1, of the type in
+//!                  src/kernel_partition.zig. **Entry 1, not 2**: with entry 1
+//!                  empty, DigitalOcean's import took the disk for a bare
+//!                  filesystem and wrapped it in a new disk whose boot code
+//!                  was zeros. gpt.zig mounts the first partition that is not
+//!                  this type, so chat's volume can go in entry 2.
 //!   the end        the backup entries and header
 //!
 //! The kernel partition is what the loader reads, so it is laid out for a
@@ -27,6 +30,7 @@
 const std = @import("std");
 const linux = std.os.linux;
 const posix = std.posix;
+const kernel_partition = @import("kernel_partition");
 
 const sector: usize = 512;
 const entry_count: usize = 128;
@@ -41,9 +45,8 @@ const kernel_lba_field: usize = 432;
 /// The MBR's own bytes start at 440: a disk signature, then the table.
 const loader_stage1_bytes: usize = 440;
 
-/// gopher-metal's kernel partition. Made up for this, as a type GUID for a
-/// partition only our loader reads should be.
-pub const kernel_type = guid("503d64ca-6a8a-48a9-b509-a23323b6de20");
+/// gopher-metal's kernel partition, shared with gpt.zig, which skips it.
+pub const kernel_type = kernel_partition.type_guid;
 /// Fixed rather than random, so an image is a function of its inputs. Two
 /// droplets with the same disk GUID never meet: each is its own machine.
 const disk_guid = guid("6f9c1e2a-4d7b-4c38-9a51-2e8d0b7f3c64");
@@ -246,9 +249,9 @@ pub fn build(disk: []u8, loader: []const u8, kernel: *const Kernel) Error!void {
     // The second stage, in the gap.
     @memcpy(disk[stage2_lba * sector ..][0 .. loader.len - sector], loader[sector..]);
 
-    // The table: entry 2 is the kernel.
+    // The table: entry 1 is the kernel.
     var entries: [entry_count * entry_size]u8 = @splat(0);
-    const e = entries[1 * entry_size ..][0..entry_size];
+    const e = entries[0..entry_size];
     @memcpy(e[0..16], &kernel_type);
     @memcpy(e[16..32], &kernel_unique);
     put64(e[32..], kernel_first_lba);
@@ -338,6 +341,10 @@ fn fail(what: []const u8, e: anyerror) u8 {
 
 const testing = std.testing;
 
+test "the kernel partition's type is the GUID it says it is" {
+    try testing.expectEqualSlices(u8, &guid("503d64ca-6a8a-48a9-b509-a23323b6de20"), &kernel_type);
+}
+
 test "a GUID is stored the way GPT stores it" {
     // The EFI System partition's type, as every GPT disk writes it.
     const esp = guid("C12A7328-F81F-11D2-BA4B-00A0C93EC93B");
@@ -369,6 +376,9 @@ test "the kernel header says where every segment went" {
     try testing.expectEqual(@as(u8, 0xAA), disk[511]);
     // The second stage, behind the table.
     try testing.expectEqual(@as(u8, 0x90), disk[stage2_lba * sector]);
+    // The kernel is partition entry 1: an empty entry 1 is what made
+    // DigitalOcean wrap the disk.
+    try testing.expectEqualSlices(u8, &kernel_type, disk[2 * sector ..][0..16]);
 }
 
 test "a loader whose second stage would reach the first partition is refused" {
