@@ -40,9 +40,11 @@ is (`droplet/lspci.txt`, read off a real one), and `droplet/shape.sh` checks
 that it still is: the PCI slots match, and the BIOS boots a disk's first
 sector. `droplet/loader.S` is our own boot loader (BIOS to the PVH entry, the
 memory map from E820), `droplet/image.zig` (`zig build droplet`) puts it and a
-kernel on a GPT disk, and `droplet/boot.sh` boots the probes that need no
-device that way. Next: devices found on PCI, DHCP that asks again, and text on
-the screen.
+kernel on a GPT disk, and `droplet/boot.sh` boots the probes that way,
+dirty RAM and all. Devices are found on the PCI bus when the machine has one
+(`src/pci.zig`; `virtio.Device` is either transport), so the disk and network
+probes pass on the droplet's own devices. Next: DHCP that asks again, text on
+the screen, and chat's volume.
 
 ## Where it stands
 
@@ -51,6 +53,7 @@ the screen.
 | the boot | **works** — PVH, long mode, identity-mapped low 4 GB |
 | virtio-blk over MMIO | **works** — reads, writes, and reads back |
 | virtio-net over MMIO | **works** |
+| virtio over PCI | **works** — disk and network found on a PC's bus, as a droplet has them |
 | DHCP | **works** — leases 10.0.2.15 from QEMU's server |
 | ARP | **works** — answers, which is what makes the address reachable |
 | TCP | **works** — 256 connections; the peer's window and segment size respected, lost segments sent again, silent peers given up on; received in order only |
