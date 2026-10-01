@@ -13,8 +13,8 @@
 #   DISK=image.raw droplet/droplet.sh
 #
 # Knobs, all environment: DISK (required), MEMORY (MB, default 2048: prod's
-# size), PUBLIC_FWD (a host port forwarded to the guest's port 80 on the
-# public card), MONITOR=stdio (QEMU's monitor on the terminal instead of the
+# size), PUBLIC_FWD and PRIVATE_FWD (a host port forwarded to the guest's port
+# 80 on that card), MONITOR=stdio (QEMU's monitor on the terminal instead of the
 # serial port, which is how shape.sh asks for the PCI list), DIRTY=1 (below),
 # MONITOR_SOCKET=path (QEMU's monitor on a unix socket, beside the serial
 # port), NO_DOOR=1 (no exit door, as on a real droplet: a kernel that ends
@@ -51,6 +51,8 @@ truncate -s 488K "$WORK/config.img"
 
 public="user,id=public"
 [ -n "${PUBLIC_FWD:-}" ] && public="$public,hostfwd=tcp:127.0.0.1:$PUBLIC_FWD-:80"
+private="user,id=private,net=10.116.0.0/20"
+[ -n "${PRIVATE_FWD:-}" ] && private="$private,hostfwd=tcp:127.0.0.1:$PRIVATE_FWD-:80"
 
 memory=(-M pc -m "${MEMORY:-2048}")
 if [ "${DIRTY:-}" = 1 ]; then
@@ -77,7 +79,7 @@ qemu-system-x86_64 \
     -device piix3-usb-uhci,addr=01.2 \
     -device virtio-vga,addr=02.0 \
     -netdev "$public" -device virtio-net-pci,netdev=public,addr=03.0 \
-    -netdev user,id=private,net=10.116.0.0/20 -device virtio-net-pci,netdev=private,addr=04.0 \
+    -netdev "$private" -device virtio-net-pci,netdev=private,addr=04.0 \
     -device virtio-scsi-pci,addr=05.0 \
     -drive id=boot,file="$DISK",format=raw,if=none -device virtio-blk-pci,drive=boot,addr=06.0,bootindex=0 \
     -drive id=config,file="$WORK/config.img",format=raw,if=none -device virtio-blk-pci,drive=config,addr=07.0 \
