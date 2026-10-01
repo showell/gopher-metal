@@ -181,12 +181,25 @@ pub fn build(b: *std.Build) void {
     });
     b.step("native", "the TCP table as a Linux program behind a TAP device").dependOn(&b.addInstallArtifact(serve, .{}).step);
 
+    // **A DISK A DROPLET CAN BOOT.** droplet/image.zig puts the boot loader
+    // and a kernel on a GPT disk; droplet/boot.sh assembles the loader and
+    // runs the result on the droplet-shaped QEMU.
+    const image = b.addExecutable(.{
+        .name = "gm-image",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("droplet/image.zig"),
+            .target = b.graph.host,
+            .optimize = .Debug,
+        }),
+    });
+    b.step("droplet", "the disk-image builder for a droplet").dependOn(&b.addInstallArtifact(image, .{}).step);
+
     // **HOST TESTS** for the parts of src/ that are pure — no ports, no
     // virtqueues — and so can run here rather than in a guest. Every mode a
     // device can report in is a way to be silently wrong, and those modes are
     // cheaper to enumerate on the host than to provoke in QEMU.
     const test_step = b.step("test", "host unit tests for the pure parts of src/");
-    for ([_][]const u8{ "src/rtc.zig", "src/stack.zig", "src/civil.zig", "src/fat16.zig", "src/pvh.zig", "src/pages.zig", "src/tcp.zig", "src/tcp_test.zig", "src/ready.zig", "src/request_heap.zig" }) |path| {
+    for ([_][]const u8{ "src/rtc.zig", "src/stack.zig", "src/civil.zig", "src/fat16.zig", "src/pvh.zig", "src/pages.zig", "src/tcp.zig", "src/tcp_test.zig", "src/ready.zig", "src/request_heap.zig", "droplet/image.zig" }) |path| {
         const unit = b.addTest(.{ .root_module = b.createModule(.{
             .root_source_file = b.path(path),
             .target = b.graph.host,

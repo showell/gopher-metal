@@ -38,8 +38,11 @@ DigitalOcean's hypervisor the only layer under it. The plan is
 `droplet/droplet.sh` boots a disk image on a QEMU laid out the way a droplet
 is (`droplet/lspci.txt`, read off a real one), and `droplet/shape.sh` checks
 that it still is: the PCI slots match, and the BIOS boots a disk's first
-sector. Next: a boot loader, devices found on PCI, DHCP that asks again, and
-text on the screen.
+sector. `droplet/loader.S` is our own boot loader (BIOS to the PVH entry, the
+memory map from E820), `droplet/image.zig` (`zig build droplet`) puts it and a
+kernel on a GPT disk, and `droplet/boot.sh` boots the probes that need no
+device that way. Next: devices found on PCI, DHCP that asks again, and text on
+the screen.
 
 ## Where it stands
 
