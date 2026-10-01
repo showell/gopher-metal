@@ -31,6 +31,16 @@ not the chat port**: it is the TCP table, the FAT16 volume and the `std.Io`
 host underneath it, which a real application has now used hard enough to find
 the things tests do not.
 
+**UNPARKED, 2026-10-01: the target is a DigitalOcean droplet.** gopher-metal
+becomes the droplet's operating system, from a custom image: no Linux, and
+DigitalOcean's hypervisor the only layer under it. The plan is
+[gopher chat on a droplet](http://143.244.172.148:9100/notes/gopher-chat-on-a-droplet.md).
+`droplet/droplet.sh` boots a disk image on a QEMU laid out the way a droplet
+is (`droplet/lspci.txt`, read off a real one), and `droplet/shape.sh` checks
+that it still is: the PCI slots match, and the BIOS boots a disk's first
+sector. Next: a boot loader, devices found on PCI, DHCP that asks again, and
+text on the screen.
+
 ## Where it stands
 
 | | |
