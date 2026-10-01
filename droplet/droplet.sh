@@ -15,7 +15,10 @@
 # Knobs, all environment: DISK (required), MEMORY (MB, default 2048: prod's
 # size), PUBLIC_FWD (a host port forwarded to the guest's port 80 on the
 # public card), MONITOR=stdio (QEMU's monitor on the terminal instead of the
-# serial port, which is how shape.sh asks for the PCI list), DIRTY=1 (below).
+# serial port, which is how shape.sh asks for the PCI list), DIRTY=1 (below),
+# MONITOR_SOCKET=path (QEMU's monitor on a unix socket, beside the serial
+# port), NO_DOOR=1 (no exit door, as on a real droplet: a kernel that ends
+# halts with its screen intact, and the run ends when it is told to).
 #
 # **DIRTY=1: THE MACHINE STARTS WITH GARBAGE IN EVERY BYTE OF RAM.** QEMU's
 # memory comes fresh from Linux, so it is all zeroes, and a loader or kernel
@@ -58,9 +61,13 @@ fi
 
 if [ "${MONITOR:-}" = stdio ]; then
     console=(-serial none -monitor stdio)
+elif [ -n "${MONITOR_SOCKET:-}" ]; then
+    console=(-serial stdio -monitor "unix:$MONITOR_SOCKET,server,nowait")
 else
     console=(-serial stdio -monitor none)
 fi
+door=(-device isa-debug-exit,iobase=0xf4,iosize=0x04)
+[ "${NO_DOOR:-}" = 1 ] && door=()
 
 # Not `exec`: the trap above has to run when QEMU is done, or every run
 # leaves its directory behind.
@@ -75,4 +82,4 @@ qemu-system-x86_64 \
     -drive id=boot,file="$DISK",format=raw,if=none -device virtio-blk-pci,drive=boot,addr=06.0,bootindex=0 \
     -drive id=config,file="$WORK/config.img",format=raw,if=none -device virtio-blk-pci,drive=config,addr=07.0 \
     -device virtio-balloon-pci,addr=08.0 \
-    -device isa-debug-exit,iobase=0xf4,iosize=0x04
+    "${door[@]}"

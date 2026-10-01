@@ -1,8 +1,10 @@
-//! COM1, and QEMU's exit door. The whole of this machine's console.
+//! COM1, the screen when there is one (screen.zig), and QEMU's exit door. The
+//! whole of this machine's console.
 
 const com1: u16 = 0x3F8;
 
 const port = @import("port.zig");
+const screen = @import("screen.zig");
 pub const outb = port.outb;
 pub const inb = port.inb;
 
@@ -14,6 +16,7 @@ pub fn init() void {
     outb(com1 + 3, 0x03); // 8N1
     outb(com1 + 2, 0xC7);
     outb(com1 + 4, 0x03);
+    screen.attach();
 }
 
 pub fn put(bytes: []const u8) void {
@@ -21,6 +24,7 @@ pub fn put(bytes: []const u8) void {
         while (inb(com1 + 5) & 0x20 == 0) {}
         outb(com1, b);
     }
+    screen.put(bytes);
 }
 
 pub fn putDec(v: u64) void {
