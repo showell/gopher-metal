@@ -269,8 +269,13 @@ pub fn kmain() noreturn {
 
     // ── the network ─────────────────────────────────────────────────────────
     rng.attach(&rng_mem);
-    const nic_base = virtio.find(virtio.device_id_net) orelse
-        serial.fail("no virtio-net device on the PCI bus or in any mmio slot");
+    const nic_base = virtio.findNth(virtio.device_id_net, @intFromEnum(conf.card)) orelse switch (conf.card) {
+        .public => serial.fail("no virtio-net device on the PCI bus or in any mmio slot"),
+        .private => serial.fail("`card = private`, and this machine has no second network card"),
+    };
+    serial.put("  network: the ");
+    serial.put(@tagName(conf.card));
+    serial.put(" card\n");
     var nic = net.Net.init(nic_base, &nic_mem) catch serial.fail("the NIC would not come up");
     const lease = dhcp.acquire(&nic, &dhcp_frame, &dhcp_reply) catch
         serial.fail("no DHCP lease, so there is no address to listen on");
@@ -765,6 +770,11 @@ fn logRequest(number: u64, what: []const u8, outcome: []const u8) void {
 ///                             absent, the application's own keepalive
 ///     lose_one_sent_in = N    lose every Nth TCP frame sent, to prove that
 ///                             what is lost is sent again
+///     card = public|private   which network card to serve on: the first
+///                             (public, the default) or the second (private).
+///                             A droplet's are public then private in PCI slot
+///                             order; chat there belongs on the private one,
+///                             behind prod's Caddy.
 ///
 /// A key that is not one of those is a misconfiguration, and stops the machine
 /// rather than being ignored: a timeout that was silently not applied is how a
@@ -779,7 +789,12 @@ const Config = struct {
     /// streams alone could fill the table and every new page load would be
     /// turned away. The rest of the slots are for requests.
     streams: usize = max_connections - reserved_for_requests,
+    card: Card = .public,
 };
+
+/// A droplet's two network cards, in PCI slot order: what `virtio.findNth` is
+/// asked for.
+const Card = enum(u1) { public = 0, private = 1 };
 
 /// Connection slots no stream may take: room for a burst of page loads while
 /// every stream slot is held.
@@ -788,7 +803,8 @@ const reserved_for_requests = 64;
 fn readConfig(io: Io, alloc: std.mem.Allocator) Config {
     var conf = Config{};
     const text = Io.Dir.cwd().readFileAlloc(io, config_path, alloc, .limited(4096)) catch return conf;
-    // Every setting is a number, so nothing needs the text once it is read. It
+    // No setting keeps the text (numbers, and a card's name), so nothing needs
+    // it once it is read. It
     // used to stay in the long-lived heap, where a longer file meant a bigger
     // heap for the life of the boot — which the stream-churn gate saw as one
     // byte between `requests = 8` and `requests = 28`.
@@ -826,8 +842,11 @@ fn readConfig(io: Io, alloc: std.mem.Allocator) Config {
             if (n == 0 or n > max_connections - reserved_for_requests)
                 serial.fail(config_path ++ ": `streams` must leave room for requests");
             conf.streams = n;
+        } else if (std.mem.eql(u8, key, "card")) {
+            conf.card = std.meta.stringToEnum(Card, value) orelse
+                serial.fail(config_path ++ ": `card` is `public` or `private`");
         } else {
-            serial.fail(config_path ++ ": the keys are `requests`, `idle_timeout_ms`, `streams`, `keepalive_ms` and `lose_one_sent_in`");
+            serial.fail(config_path ++ ": the keys are `requests`, `idle_timeout_ms`, `streams`, `keepalive_ms`, `lose_one_sent_in` and `card`");
         }
     }
     if (!said_anything) serial.fail(config_path ++ " is present but says nothing");

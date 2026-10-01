@@ -402,6 +402,28 @@ class Conf(unittest.TestCase):
     judge's tests are where a typo in a key name gets caught — the kernel stops
     on an unknown key, which is a failure with no diff to read."""
 
+    # These are microvm's files: JUDGE_DROPLET in the environment is pinned
+    # off here, and the droplet's one extra line has a test of its own.
+    def setUp(self):
+        self.droplet = G.DROPLET
+        G.DROPLET = False
+
+    def tearDown(self):
+        G.DROPLET = self.droplet
+
+    def test_on_the_droplet_machine_the_private_card_is_named(self):
+        G.DROPLET = True
+        with tempfile.TemporaryDirectory() as d:
+            real_mount, real_umount = G.mount, G.umount
+            G.mount, G.umount = lambda *a, **k: None, lambda m: None
+            try:
+                G.set_request_limit("unused.img", 1, d)
+                text = open(os.path.join(d, "gopher-metal.conf")).read()
+            finally:
+                G.mount, G.umount = real_mount, real_umount
+        # Spelled as probe/gopher.zig's `Card` enum spells it.
+        self.assertIn("\ncard = private\n", text)
+
     def test_both_keys_are_written_and_spelled_as_the_kernel_reads_them(self):
         import re as _re
         written = {}
@@ -634,6 +656,10 @@ class Accelerator(unittest.TestCase):
             caught["cmd"] = cmd
             raise Stop()
 
+        # These are microvm's arguments; JUDGE_DROPLET in the environment must
+        # not turn this into a test of the droplet machine instead.
+        droplet = G.DROPLET
+        G.DROPLET = False
         subprocess.Popen = fake
         try:
             with tempfile.TemporaryDirectory() as d:
@@ -642,6 +668,7 @@ class Accelerator(unittest.TestCase):
             pass
         finally:
             subprocess.Popen = real
+            G.DROPLET = droplet
         return caught["cmd"]
 
     def test_correctness_boots_stay_on_software_emulation(self):

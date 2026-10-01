@@ -430,6 +430,9 @@ def set_request_limit(image: str, n: int, mnt: str, idle_timeout_ms: int = 10000
     try:
         with open(os.path.join(mnt, "gopher-metal.conf"), "w") as f:
             f.write(f"requests = {n}\nidle_timeout_ms = {idle_timeout_ms}\n")
+            # On the droplet machine, the card chat will really serve on.
+            if DROPLET:
+                f.write("card = private\n")
             if streams is not None:
                 f.write(f"streams = {streams}\n")
             if lose_one_sent_in is not None:
@@ -482,6 +485,70 @@ ISOLATED = bool(os.environ.get("JUDGE_ISOLATED"))
 CAPTURE = bool(os.environ.get("JUDGE_CAPTURE"))
 
 
+# **JUDGE_DROPLET=1: THE SAME JUDGE, ON A DROPLET'S MACHINE.** Every boot
+# builds a droplet disk from the judge's own (droplet/image.sh: the boot loader,
+# the kernel in partition 1, the judge's FAT16 volume copied in as partition
+# 2), boots it on droplet/droplet.sh's machine (a PC, devices on PCI, the BIOS
+# reading the disk), on its private card (`card = private`, as the droplet's
+# chat image says), and, once the kernel stops, copies partition 2 back over
+# the judge's volume. Nothing else in the judge knows: every answer and every
+# file is compared with Linux exactly as on microvm. The droplet machine always
+# runs under KVM, as a real droplet does, so `kvm` asks nothing more of it.
+DROPLET = os.environ.get("JUDGE_DROPLET") == "1"
+DROPLET_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "droplet")
+droplet_boots = {}
+# How many boots went through the boot loader, for the verdict line: a green
+# that never took the droplet path must not read as one that did.
+loader_boots = 0
+
+
+def droplet_start(elf: str, image: str, scratch: str, port: int, serial_log):
+    last = partition_last(image)
+    volume = os.path.join(scratch, "volume.fat")
+    with open(image, "rb") as f, open(volume, "wb") as out:
+        f.seek(PART_FIRST * SECTOR)
+        out.write(f.read((last - PART_FIRST + 1) * SECTOR))
+    disk = os.path.join(scratch, "droplet.img")
+    run([os.path.join(DROPLET_DIR, "image.sh"), elf, disk, volume])
+    info = run(["sgdisk", "-i", "2", disk]).stdout
+    first = int(next(l for l in info.splitlines() if l.startswith("First sector")).split()[2])
+    # The judge's requests arrive on the private card, which is the one
+    # `card = private` (set_request_limit) has the kernel serve.
+    env = dict(os.environ, DISK=disk, PRIVATE_FWD=str(port), MEMORY="512")
+    qemu = subprocess.Popen([os.path.join(DROPLET_DIR, "droplet.sh")], env=env,
+                            stdout=serial_log, stderr=subprocess.STDOUT)
+    droplet_boots[qemu.pid] = (disk, first, image, last)
+    return qemu
+
+
+def droplet_finish(qemu):
+    """The volume the kernel left, back where the judge reads it."""
+    disk, first, image, last = droplet_boots.pop(qemu.pid)
+    with open(disk, "rb") as f, open(image, "r+b") as out:
+        f.seek(first * SECTOR)
+        out.seek(PART_FIRST * SECTOR)
+        out.write(f.read((last - PART_FIRST + 1) * SECTOR))
+
+
+def microvm_start(elf: str, image: str, scratch: str, port: int, serial_log, kvm: bool):
+    return subprocess.Popen([
+        # rtc=on: under KVM microvm leaves the CMOS clock out unless asked,
+        # and this kernel reads it. See probe/run.sh.
+        "qemu-system-x86_64", "-M", "microvm,rtc=on,pit=on", "-kernel", elf,
+        *(["-enable-kvm"] if kvm else []),
+        "-nographic", "-no-reboot", "-m", "512",
+        "-global", "virtio-mmio.force-legacy=false",
+        "-device", "isa-debug-exit,iobase=0xf4,iosize=0x04",
+        "-drive", f"id=d,file={image},format=raw,if=none",
+        "-device", "virtio-blk-device,drive=d",
+        "-cpu", "max", "-device", "virtio-rng-device",
+        "-netdev", f"user,id=n0,hostfwd=tcp:127.0.0.1:{port}-:80",
+        "-device", "virtio-net-device,netdev=n0",
+        *(["-object", f"filter-dump,id=cap,netdev=n0,file={os.path.join(scratch, 'net.pcap')}"]
+          if CAPTURE else []),
+    ], stdout=serial_log, stderr=subprocess.STDOUT)
+
+
 def kvm_usable() -> bool:
     """Whether this user can open /dev/kvm right now."""
     return os.access("/dev/kvm", os.R_OK | os.W_OK)
@@ -501,22 +568,10 @@ def start_kernel(elf: str, image: str, scratch: str, kvm: bool = False):
     port = free_port()
     serial = os.path.join(scratch, "serial")
     log = open(serial, "wb")
-    qemu = subprocess.Popen([
-        # rtc=on: under KVM microvm leaves the CMOS clock out unless asked,
-        # and this kernel reads it. See probe/run.sh.
-        "qemu-system-x86_64", "-M", "microvm,rtc=on,pit=on", "-kernel", elf,
-        *(["-enable-kvm"] if kvm else []),
-        "-nographic", "-no-reboot", "-m", "512",
-        "-global", "virtio-mmio.force-legacy=false",
-        "-device", "isa-debug-exit,iobase=0xf4,iosize=0x04",
-        "-drive", f"id=d,file={image},format=raw,if=none",
-        "-device", "virtio-blk-device,drive=d",
-        "-cpu", "max", "-device", "virtio-rng-device",
-        "-netdev", f"user,id=n0,hostfwd=tcp:127.0.0.1:{port}-:80",
-        "-device", "virtio-net-device,netdev=n0",
-        *(["-object", f"filter-dump,id=cap,netdev=n0,file={os.path.join(scratch, 'net.pcap')}"]
-          if CAPTURE else []),
-    ], stdout=log, stderr=subprocess.STDOUT)
+    if DROPLET:
+        qemu = droplet_start(elf, image, scratch, port, log)
+    else:
+        qemu = microvm_start(elf, image, scratch, port, log, kvm)
     log.close()
     deadline = time.time() + 30
     while time.time() < deadline and qemu.poll() is None:
@@ -534,6 +589,12 @@ def finish_kernel(qemu, serial: str):
         qemu.kill()
         qemu.wait()
         code = "timeout"
+    if qemu.pid in droplet_boots:
+        droplet_finish(qemu)
+        global loader_boots
+        if b"gopher-metal loader" not in open(serial, "rb").read():
+            raise RuntimeError(f"a droplet boot that never printed the loader's line: {serial}")
+        loader_boots += 1
     text = open(serial, "rb").read().decode("latin-1", "replace")
     lines = "\n".join(l for l in text.splitlines()
                       if l.strip() and "SeaBIOS" not in l and "\x1b" not in l)
@@ -2232,6 +2293,8 @@ def main() -> int:
         lap("stamina")
     names = " ".join(g for g in GATES if g in chosen)
     took = f"{lap.total():.0f} s"
+    if DROPLET:
+        took += f"; on the droplet machine, {loader_boots} boot(s) through the boot loader"
     if failures:
         print(f"{failures} failure(s) over: {names} ({took})")
     elif chosen == set(GATES):

@@ -40,16 +40,20 @@
 #
 # **QEMU'S EXIT CODE IS NOT THE GUEST'S.** isa-debug-exit ends the guest with
 # `code << 1 | 1`, so the kernel's 0 arrives as 1.
+#
+# **QEMU REPLACES THIS SCRIPT** (`exec`), so whoever started it holds QEMU's own
+# process and stopping it stops the machine. So nothing is left to clean up
+# afterwards, the two scratch files go beside the disk: `$DISK.config` and,
+# with DIRTY=1, `$DISK.ram`. Every caller here keeps its disk in a temporary
+# directory of its own.
 set -u
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 [ -n "${DISK:-}" ] || { echo "droplet.sh: set DISK to a raw disk image"; exit 2; }
 [ -f "$DISK" ] || { echo "droplet.sh: no $DISK"; exit 2; }
-WORK="$(mktemp -d)"
-trap 'rm -rf "$WORK"' EXIT
 
 # The config drive is where DigitalOcean puts cloud-init's data; nothing of
 # ours reads it, so an empty one of the real size holds the slot.
-truncate -s 488K "$WORK/config.img"
+truncate -s 488K "$DISK.config"
 
 public="user,id=public"
 [ -n "${PUBLIC_FWD:-}" ] && public="$public,hostfwd=tcp:127.0.0.1:$PUBLIC_FWD-:80"
@@ -59,9 +63,9 @@ private="user,id=private,net=10.116.0.0/20"
 machine="${MACHINE:-pc}"
 memory=(-M "$machine" -m "${MEMORY:-2048}")
 if [ "${DIRTY:-}" = 1 ]; then
-    head -c "${MEMORY:-2048}M" /dev/zero | tr '\0' '\245' > "$WORK/ram"
+    head -c "${MEMORY:-2048}M" /dev/zero | tr '\0' '\245' > "$DISK.ram"
     memory=(-M "$machine",memory-backend=ram -m "${MEMORY:-2048}"
-            -object memory-backend-file,id=ram,size="${MEMORY:-2048}M",mem-path="$WORK/ram",share=off)
+            -object memory-backend-file,id=ram,size="${MEMORY:-2048}M",mem-path="$DISK.ram",share=off)
 fi
 
 if [ "${MONITOR:-}" = stdio ]; then
@@ -76,9 +80,7 @@ bios=()
 [ -n "${BIOS:-}" ] && bios=(-bios "$BIOS")
 [ "${NO_DOOR:-}" = 1 ] && door=()
 
-# Not `exec`: the trap above has to run when QEMU is done, or every run
-# leaves its directory behind.
-qemu-system-x86_64 \
+exec qemu-system-x86_64 \
     "${memory[@]}" "${bios[@]}" -accel kvm -cpu host -smp 1 \
     -nodefaults -no-reboot -display none "${console[@]}" \
     -device piix3-usb-uhci,addr=01.2 \
@@ -87,6 +89,6 @@ qemu-system-x86_64 \
     -netdev "$private" -device virtio-net-pci,netdev=private,addr=04.0 \
     -device virtio-scsi-pci,addr=05.0 \
     -drive id=boot,file="$DISK",format=raw,if=none -device virtio-blk-pci,drive=boot,addr=06.0,bootindex=0 \
-    -drive id=config,file="$WORK/config.img",format=raw,if=none -device virtio-blk-pci,drive=config,addr=07.0 \
+    -drive id=config,file="$DISK.config",format=raw,if=none -device virtio-blk-pci,drive=config,addr=07.0 \
     -device virtio-balloon-pci,addr=08.0 \
     "${door[@]}"

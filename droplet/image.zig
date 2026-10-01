@@ -13,6 +13,9 @@
 //!                  filesystem and wrapped it in a new disk whose boot code
 //!                  was zeros. gpt.zig mounts the first partition that is not
 //!                  this type, so chat's volume can go in entry 2.
+//!   then           chat's volume, GPT entry 2, when one is given: a FAT16
+//!                  filesystem image copied in whole, typed "basic data"
+//!                  (what sgdisk calls 0700, as the judge's disks are)
 //!   the end        the backup entries and header
 //!
 //! The kernel partition is what the loader reads, so it is laid out for a
@@ -25,7 +28,7 @@
 //! Every byte is a function of the two inputs, so the same loader and kernel
 //! always make the same image.
 //!
-//!   gm-image <loader.bin> <kernel.elf> <out.img>
+//!   gm-image <loader.bin> <kernel.elf> <out.img> [volume.fat]
 
 const std = @import("std");
 const linux = std.os.linux;
@@ -51,6 +54,9 @@ pub const kernel_type = kernel_partition.type_guid;
 /// droplets with the same disk GUID never meet: each is its own machine.
 const disk_guid = guid("6f9c1e2a-4d7b-4c38-9a51-2e8d0b7f3c64");
 const kernel_unique = guid("1b7e4f90-3c2d-4a6e-8f15-7d9a2c4b6e03");
+/// Chat's volume: the type every FAT partition on a GPT disk has.
+pub const data_type = guid("EBD0A0A2-B9E5-4433-87C0-68B6B72699C7");
+const data_unique = guid("8e2a6c14-5b7d-4f39-a0c2-3d61e9b47f58");
 
 /// A GUID as GPT stores it: the first three fields little-endian, the last
 /// two as written.
@@ -126,7 +132,7 @@ pub const Kernel = struct {
     pub const max_segments = (sector - 16) / 16;
 };
 
-pub const Error = error{ NotAnElf, NotX86_64, NoPvhNote, TooManySegments, PastFourGigabytes, LoaderTooSmall, LoaderTooBig };
+pub const Error = error{ NotAnElf, NotX86_64, NoPvhNote, TooManySegments, PastFourGigabytes, LoaderTooSmall, LoaderTooBig, VolumeNotWholeSectors };
 
 /// The loadable segments and the PVH entry, which is all a loader needs.
 /// **A segment goes to `paddr`, not `vaddr`**, as QEMU's PVH loader and
@@ -194,19 +200,29 @@ fn mib(sectors: usize) usize {
     return std.mem.alignForward(usize, sectors, 2048);
 }
 
-/// How big the image is, in sectors, for this kernel.
-pub fn diskSectors(kernel: *const Kernel) usize {
+fn kernelSectors(kernel: *const Kernel) usize {
     var used: usize = 1; // the header
     for (kernel.segments[0..kernel.count]) |s| used += sectorsFor(s.bytes.len);
-    // The kernel partition rounded to a megabyte, then a megabyte for the
-    // backup table at the end.
-    return kernel_first_lba + mib(used) + 2048;
+    return used;
 }
 
-/// Writes the whole disk into `disk`, which is `diskSectors(kernel)` sectors
-/// of zeroes.
-pub fn build(disk: []u8, loader: []const u8, kernel: *const Kernel) Error!void {
+/// Where chat's volume starts: the megabyte after the kernel partition.
+fn dataFirstLba(kernel: *const Kernel) usize {
+    return kernel_first_lba + mib(kernelSectors(kernel));
+}
+
+/// How big the image is, in sectors, for this kernel and volume.
+pub fn diskSectors(kernel: *const Kernel, volume_bytes: usize) usize {
+    // Each partition rounded to a megabyte, then a megabyte for the backup
+    // table at the end.
+    return dataFirstLba(kernel) + mib(sectorsFor(volume_bytes)) + 2048;
+}
+
+/// Writes the whole disk into `disk`, which is `diskSectors(kernel, volume.len)`
+/// sectors of zeroes. An empty `volume` is no data partition at all.
+pub fn build(disk: []u8, loader: []const u8, kernel: *const Kernel, volume: []const u8) Error!void {
     if (loader.len <= sector) return error.LoaderTooSmall;
+    if (volume.len % sector != 0) return error.VolumeNotWholeSectors;
     if (stage2_lba + sectorsFor(loader.len - sector) > first_usable) return error.LoaderTooBig;
     const total = disk.len / sector;
     const last = total - 1;
@@ -258,6 +274,16 @@ pub fn build(disk: []u8, loader: []const u8, kernel: *const Kernel) Error!void {
     put64(e[40..], kernel_last);
     put64(e[48..], 1); // "required by the platform": leave it alone
     for ("gopher-metal kernel", 0..) |c, i| e[56 + i * 2] = c;
+    if (volume.len > 0) {
+        const first = dataFirstLba(kernel);
+        @memcpy(disk[first * sector ..][0..volume.len], volume);
+        const d = entries[entry_size..][0..entry_size];
+        @memcpy(d[0..16], &data_type);
+        @memcpy(d[16..32], &data_unique);
+        put64(d[32..], first);
+        put64(d[40..], first + volume.len / sector - 1);
+        for ("gopher-metal data", 0..) |c, i| d[56 + i * 2] = c;
+    }
     const entries_crc = std.hash.Crc32.hash(&entries);
 
     @memcpy(disk[2 * sector ..][0..entries.len], &entries);
@@ -317,16 +343,17 @@ fn writeFile(path: [*:0]const u8, bytes: []const u8) !void {
 
 pub fn main(init: std.process.Init.Minimal) !u8 {
     const argv = init.args.vector;
-    if (argv.len != 4) {
-        std.debug.print("usage: gm-image <loader.bin> <kernel.elf> <out.img>\n", .{});
+    if (argv.len != 4 and argv.len != 5) {
+        std.debug.print("usage: gm-image <loader.bin> <kernel.elf> <out.img> [volume.fat]\n", .{});
         return 2;
     }
     const loader = mapFile(argv[1]) catch |e| return fail("cannot read the loader", e);
     const elf = mapFile(argv[2]) catch |e| return fail("cannot read the kernel", e);
     const kernel = readKernel(elf) catch |e| return fail("not a kernel this loader can start", e);
-    const disk = try std.heap.page_allocator.alloc(u8, diskSectors(&kernel) * sector);
+    const volume: []const u8 = if (argv.len == 5) (mapFile(argv[4]) catch |e| return fail("cannot read the volume", e)) else "";
+    const disk = try std.heap.page_allocator.alloc(u8, diskSectors(&kernel, volume.len) * sector);
     @memset(disk, 0);
-    build(disk, loader, &kernel) catch |e| return fail("cannot lay the disk out", e);
+    build(disk, loader, &kernel, volume) catch |e| return fail("cannot lay the disk out", e);
     writeFile(argv[3], disk) catch |e| return fail("cannot write the image", e);
     std.debug.print("gm-image: {d} segment(s), entry 0x{x}, {d} MB\n", .{ kernel.count, kernel.entry, disk.len >> 20 });
     return 0;
@@ -357,10 +384,10 @@ test "the kernel header says where every segment went" {
     kernel.segments[0] = .{ .paddr = 0x100000, .bytes = "abc" ** 200, .memsz = 4096 };
     kernel.segments[1] = .{ .paddr = 0x200000, .bytes = "z", .memsz = 1 };
     kernel.count = 2;
-    const disk = try testing.allocator.alloc(u8, diskSectors(&kernel) * sector);
+    const disk = try testing.allocator.alloc(u8, diskSectors(&kernel, 0) * sector);
     defer testing.allocator.free(disk);
     @memset(disk, 0);
-    try build(disk, &loader, &kernel);
+    try build(disk, &loader, &kernel, "");
 
     const part = disk[kernel_first_lba * sector ..];
     try testing.expectEqualStrings("GMKERNEL", part[0..8]);
@@ -387,7 +414,38 @@ test "a loader whose second stage would reach the first partition is refused" {
     var kernel = Kernel{ .entry = 0x100020 };
     kernel.segments[0] = .{ .paddr = 0x100000, .bytes = "x", .memsz = 1 };
     kernel.count = 1;
-    const disk = try testing.allocator.alloc(u8, diskSectors(&kernel) * sector);
+    const disk = try testing.allocator.alloc(u8, diskSectors(&kernel, 0) * sector);
     defer testing.allocator.free(disk);
-    try testing.expectError(error.LoaderTooBig, build(disk, loader, &kernel));
+    try testing.expectError(error.LoaderTooBig, build(disk, loader, &kernel, ""));
+}
+
+test "chat's volume is entry 2, a megabyte after the kernel, copied whole" {
+    var loader: [sector + 3]u8 = @splat(0x90);
+    var kernel = Kernel{ .entry = 0x100020 };
+    kernel.segments[0] = .{ .paddr = 0x100000, .bytes = "k", .memsz = 1 };
+    kernel.count = 1;
+    var volume: [3 * sector]u8 = undefined;
+    for (&volume, 0..) |*b, i| b.* = @truncate(i);
+    const disk = try testing.allocator.alloc(u8, diskSectors(&kernel, volume.len) * sector);
+    defer testing.allocator.free(disk);
+    @memset(disk, 0);
+    try build(disk, &loader, &kernel, &volume);
+
+    const d = disk[2 * sector + entry_size ..][0..entry_size];
+    try testing.expectEqualSlices(u8, &data_type, d[0..16]);
+    const first = std.mem.readInt(u64, d[32..40], .little);
+    const last = std.mem.readInt(u64, d[40..48], .little);
+    try testing.expectEqual(@as(u64, kernel_first_lba + 2048), first);
+    try testing.expectEqual(first + 2, last);
+    try testing.expectEqualSlices(u8, &volume, disk[first * sector ..][0..volume.len]);
+}
+
+test "a volume that is not whole sectors is refused" {
+    var loader: [sector + 3]u8 = @splat(0x90);
+    var kernel = Kernel{ .entry = 0x100020 };
+    kernel.segments[0] = .{ .paddr = 0x100000, .bytes = "k", .memsz = 1 };
+    kernel.count = 1;
+    const disk = try testing.allocator.alloc(u8, diskSectors(&kernel, 1024) * sector);
+    defer testing.allocator.free(disk);
+    try testing.expectError(error.VolumeNotWholeSectors, build(disk, &loader, &kernel, "odd"));
 }
