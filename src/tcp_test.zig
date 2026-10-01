@@ -280,6 +280,61 @@ test "the window is the room left, and reading gives it back" {
     try testing.expectEqual(@as(u16, 64), f.wire.last().window);
 }
 
+test "a window that reopens is said again until the peer sends" {
+    var f: Fixture = .{};
+    f.init();
+    var p = Peer{ .ip = .{ 10, 0, 2, 2 }, .port = 40000 };
+    const i = try p.connect(&f.table, &f.wire, 0);
+    _ = p.write(&f.table, &f.wire, "0123456789" ** 6, 1);
+    try testing.expectEqual(@as(u16, 4), f.wire.last().window); // shut, as far as the peer can tell
+
+    // The reader takes it all and says so; say that announcement is lost.
+    f.table.conns[i].consume(60);
+    f.table.ack(&f.wire, i);
+    try testing.expectEqual(@as(u16, 64), f.wire.last().window);
+    var from = f.wire.count;
+    f.table.transmit(&f.wire, 2); // starts the clock, sends nothing
+    try testing.expectEqual(from, f.wire.count);
+    f.table.transmit(&f.wire, 2 + rto);
+    try testing.expectEqual(from + 1, f.wire.count);
+    try testing.expectEqual(flag_ack, f.wire.last().flags);
+    try testing.expectEqual(@as(u16, 64), f.wire.last().window);
+    try testing.expectEqual(@as(u64, 1), f.table.window_updates);
+
+    // The peer sends: it saw the window, and nothing more is said.
+    _ = p.write(&f.table, &f.wire, "more", 3 + rto);
+    from = f.wire.count;
+    f.table.transmit(&f.wire, 60 * ns_per_s);
+    try testing.expectEqual(from, f.wire.count);
+}
+
+test "a reader that makes room without saying so is announced for it" {
+    var f: Fixture = .{};
+    f.init();
+    var p = Peer{ .ip = .{ 10, 0, 2, 2 }, .port = 40000 };
+    const i = try p.connect(&f.table, &f.wire, 0);
+    _ = p.write(&f.table, &f.wire, "0123456789" ** 6, 1);
+    f.table.conns[i].consume(60);
+    const from = f.wire.count;
+    f.table.transmit(&f.wire, 2);
+    try testing.expectEqual(from + 1, f.wire.count);
+    try testing.expectEqual(@as(u16, 64), f.wire.last().window);
+}
+
+test "a peer with nothing more to say is told a bounded number of times" {
+    var f: Fixture = .{};
+    f.init();
+    var p = Peer{ .ip = .{ 10, 0, 2, 2 }, .port = 40000 };
+    const i = try p.connect(&f.table, &f.wire, 0);
+    _ = p.write(&f.table, &f.wire, "0123456789" ** 6, 1);
+    f.table.conns[i].consume(60);
+    f.table.ack(&f.wire, i);
+    var now: i96 = 2;
+    while (now < 120 * ns_per_s) : (now += 10 * ms) f.table.transmit(&f.wire, now);
+    try testing.expectEqual(@as(u64, max_retries), f.table.window_updates);
+    try testing.expectEqual(State.established, f.table.conns[i].state);
+}
+
 test "a segment bigger than the room is taken in part, and the rest arrives after a read" {
     var f: Fixture = .{};
     f.init();

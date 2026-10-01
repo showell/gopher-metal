@@ -398,7 +398,9 @@ pub fn kmain() noreturn {
     serial.putDec(table.strays);
     serial.put(" strays reset, ");
     serial.putDec(wire.lost);
-    serial.put(" frames lost on purpose\n");
+    serial.put(" frames lost on purpose, ");
+    serial.putDec(table.window_updates);
+    serial.put(" reopened windows said again\n");
     const mem = router.mem_meter.snapshot();
     const page_stats = pages.stats();
     serial.put("  pages: ");
