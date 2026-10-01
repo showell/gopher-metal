@@ -271,6 +271,60 @@ tests from the table. The value is less in the tests than in the empty
 cells: a cell nobody can fill in is a question about the design, asked
 before a peer asks it.
 
+**Implemented** as `matrix_rows` in `src/tcp_test.zig`: 17 kinds of segment
+× 7 states (no connection, SYN-RECEIVED, ESTABLISHED, FIN-WAIT-1 before and
+after our FIN goes, FIN-WAIT-2, CLOSE-WAIT), each cell run on a fresh table.
+It runs at every starting sequence number of §6, with §1's invariants
+checked at every step. A null cell is one of the questions below. It stays
+null, and untested, until the question has an answer; then the answer goes
+in the cell.
+
+Two cells are filled in with a decision rather than the RFC's letter, and
+are recorded here so they are not mistaken for accidents:
+
+- **A SYN repeated during the handshake gets the SYN-ACK again.** RFC
+  9293's first check would answer it with a bare ACK, which is no use to a
+  client whose copy of our SYN-ACK was lost. Linux does the same.
+- **The peer's FIN in FIN-WAIT-2 closes the connection at once.** There is
+  no TIME-WAIT, as `tcp.zig`'s header says. A FIN repeated after that is
+  answered with a reset.
+
+### The open questions
+
+1. **A SYN inside the window during the handshake** (`syn_in_window` and
+   `syn_with_data` × `syn_received`). The table repeats its SYN-ACK. RFC
+   9293 §3.10.7.4 says a connection opened passively goes back to LISTEN:
+   here, forget it and free the slot. Repeating is harmless to a confused
+   peer. Freeing is what the RFC asks, and is cheaper under a SYN flood.
+   Which?
+2. **An acknowledgement of something never sent, on a synchronized
+   connection** (`ack_future` × every state from ESTABLISHED on).
+   - **What the table does:** ignores the acknowledgement silently. If the
+     segment carries data, it still takes the data.
+   - **What the RFCs say:** RFC 9293 says send an ACK and drop the segment.
+     RFC 5961 §5 says drop it, so that a blind attacker who guessed the
+     sequence number but not the acknowledgement cannot inject data.
+   - Taking the data is the part that matters. Should the segment be
+     dropped, and should the drop be answered with an ACK?
+3. **Data ahead of RCV.NXT during the handshake** (`data_ahead` ×
+   `syn_received`). The table acknowledges it and stays in SYN-RECEIVED,
+   without looking at its acknowledgement. The RFC takes the acknowledgement
+   first, which completes the handshake, and only then deals with the text.
+   Today the handshake completes only on the peer's next in-order segment.
+   Should an acceptable out-of-order segment complete it?
+4. **Data that straddles RCV.NXT** (`data_straddling` × the states that
+   take data). The table drops the whole segment and acknowledges, because
+   it takes in-order segments only. The RFC trims the old part and takes
+   the rest. The peer recovers by sending again from our acknowledgement,
+   so nothing is lost but a round trip. Worth trimming?
+5. **Outside the matrix, for the same reason:**
+   - A segment with neither SYN, ACK nor RST, for a peer the table does not
+     know, is answered with RST|ACK. RFC 9293 says LISTEN drops it
+     silently.
+   - A segment to any port other than ours is ignored without a reset,
+     where a CLOSED port would send one. Both look intentional for a
+     single-port server; neither is written down as such.
+
 ## 8. Differential testing against Linux, made adversarial
 
 `native/serve.zig` and `native/judge_native.py` already run the table with

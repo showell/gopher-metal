@@ -1300,3 +1300,279 @@ test "a shut window's probes are answered without being mistaken for loss" {
     try testing.expectEqual(@as(u64, 0), f.table.fast_retransmits);
     try testing.expectEqual(@as(u64, 1), f.table.given_up);
 }
+
+// ── the state × event matrix (TCP_TESTING.md §7) ───────────────────────────
+//
+// RFC 9293 §3.10.7 says, state by state, what each kind of segment does. Here
+// that is a table: one row per kind of segment, one cell per state, each cell
+// what must be sent back and what the connection becomes. A null cell is a
+// question about the design rather than a test, and is listed under §7 in
+// TCP_TESTING.md; it stays null until the question has an answer.
+
+/// Where the connection is when the segment arrives. `listen` is no
+/// connection at all: a segment from a peer the table does not know, to the
+/// port it listens on. `fin_queued`, `fin_sent` and `fin_acked` are RFC 9293's
+/// FIN-WAIT-1 before and after our FIN goes, and FIN-WAIT-2; `peer_done` is
+/// CLOSE-WAIT.
+const MatrixSetup = enum { listen, syn_received, established, fin_queued, fin_sent, fin_acked, peer_done };
+
+/// What arrives. In the comments, `r` is RCV.NXT, `u` SND.UNA and `h` SND.NXT
+/// (`highest()`). Every segment but the SYNs and the `ack_*` rows carries the
+/// acknowledgement a well-behaved peer would send now: `h` in a handshake
+/// (completing it), `u` otherwise (acknowledging nothing new).
+const MatrixKind = enum {
+    /// SYN at r-1: the peer's SYN again.
+    syn_repeated,
+    /// SYN at r.
+    syn_in_window,
+    /// SYN at r, carrying 5 bytes.
+    syn_with_data,
+    /// RST at r.
+    rst_exact,
+    /// RST at r+1.
+    rst_in_window,
+    /// RST at r+1000, past the 64-byte window.
+    rst_outside,
+    /// ACK of u-10.
+    ack_old,
+    /// ACK of u.
+    ack_duplicate,
+    /// ACK of h.
+    ack_new,
+    /// ACK of h+10: of something never sent.
+    ack_future,
+    /// 10 bytes at r.
+    data_in_order,
+    /// 10 bytes at r+5.
+    data_ahead,
+    /// 10 bytes at r-20: all of them already taken.
+    data_behind,
+    /// 10 bytes at r-5: five old, five new.
+    data_straddling,
+    /// 10 bytes at r+1000.
+    data_past_window,
+    /// FIN at r — in `peer_done`, the peer's FIN repeated, at r-1.
+    fin,
+    /// 10 bytes and a FIN at r.
+    fin_with_data,
+};
+
+const MatrixReply = enum { none, ack, syn_ack, rst };
+
+const MatrixOutcome = struct {
+    reply: MatrixReply,
+    /// The state after, or null for "as it was": state, our FIN and the
+    /// peer's FIN all unchanged.
+    state: ?State = null,
+    fin: ?tcp.Fin = null,
+    peer_done: ?bool = null,
+    /// Bytes the segment added to what waits to be read (not checked once
+    /// the slot is closed).
+    taken: usize = 0,
+    event: ?Event = null,
+};
+
+const MatrixRow = struct { kind: MatrixKind, cells: [7]?MatrixOutcome };
+
+const cell_none: ?MatrixOutcome = .{ .reply = .none };
+const cell_ack: ?MatrixOutcome = .{ .reply = .ack };
+const cell_rst: ?MatrixOutcome = .{ .reply = .rst };
+/// To a peer the table does not know: refused with a reset, nothing opened.
+const cell_refused: ?MatrixOutcome = .{ .reply = .rst, .state = .closed };
+/// Ignored without a word, and nothing opened (or the slot closed).
+const cell_quiet_closed: ?MatrixOutcome = .{ .reply = .none, .state = .closed };
+/// A handshake begun: a SYN-ACK that acknowledges the SYN and nothing else.
+const cell_opens: ?MatrixOutcome = .{ .reply = .syn_ack, .state = .syn_received };
+
+const matrix_rows = [_]MatrixRow{
+    //                                   listen        syn_received       established fin_queued fin_sent  fin_acked peer_done
+    // A SYN-ACK said again, for a peer whose copy was lost (as Linux does;
+    // RFC 9293's first check would send a bare ACK, which a client still
+    // waiting for our SYN cannot use).
+    .{ .kind = .syn_repeated, .cells = .{ cell_opens, .{ .reply = .syn_ack }, cell_ack, cell_ack, cell_ack, cell_ack, cell_ack } },
+    // RFC 5961 §4: a SYN on a synchronized connection gets a challenge ACK.
+    .{ .kind = .syn_in_window, .cells = .{ cell_opens, null, cell_ack, cell_ack, cell_ack, cell_ack, cell_ack } },
+    .{ .kind = .syn_with_data, .cells = .{ cell_opens, null, cell_ack, cell_ack, cell_ack, cell_ack, cell_ack } },
+    // RFC 5961 §3: only an exact reset resets; one in the window is
+    // challenged; anything else is dropped.
+    .{ .kind = .rst_exact, .cells = .{ cell_quiet_closed, cell_quiet_closed, cell_quiet_closed, cell_quiet_closed, cell_quiet_closed, cell_quiet_closed, cell_quiet_closed } },
+    .{ .kind = .rst_in_window, .cells = .{ cell_quiet_closed, cell_ack, cell_ack, cell_ack, cell_ack, cell_ack, cell_ack } },
+    .{ .kind = .rst_outside, .cells = .{ cell_quiet_closed, cell_none, cell_none, cell_none, cell_none, cell_none, cell_none } },
+    // In a handshake an ACK of anything but our SYN is refused with a reset
+    // numbered by it; on a synchronized connection an old or duplicate one
+    // is ignored.
+    .{ .kind = .ack_old, .cells = .{ cell_refused, cell_rst, cell_none, cell_none, cell_none, cell_none, cell_none } },
+    .{ .kind = .ack_duplicate, .cells = .{ cell_refused, cell_rst, cell_none, cell_none, cell_none, cell_none, cell_none } },
+    .{ .kind = .ack_new, .cells = .{
+        cell_refused,
+        .{ .reply = .none, .state = .established, .event = .opened },
+        cell_none, // nothing in flight: the same as a duplicate
+        cell_none,
+        .{ .reply = .none, .state = .closing, .fin = .acknowledged },
+        cell_none,
+        cell_none,
+    } },
+    .{ .kind = .ack_future, .cells = .{ cell_refused, cell_rst, null, null, null, null, null } },
+    // Text is taken in ESTABLISHED and both FIN-WAITs, and ignored (but
+    // acknowledged) once the peer has sent its FIN.
+    .{ .kind = .data_in_order, .cells = .{
+        cell_refused,
+        .{ .reply = .ack, .state = .established, .taken = 10, .event = .opened },
+        .{ .reply = .ack, .taken = 10, .event = .data },
+        .{ .reply = .ack, .taken = 10 },
+        .{ .reply = .ack, .taken = 10 },
+        .{ .reply = .ack, .taken = 10 },
+        cell_ack,
+    } },
+    // In-order only: anything else is acknowledged and dropped.
+    .{ .kind = .data_ahead, .cells = .{ cell_refused, null, cell_ack, cell_ack, cell_ack, cell_ack, cell_ack } },
+    .{ .kind = .data_behind, .cells = .{ cell_refused, cell_ack, cell_ack, cell_ack, cell_ack, cell_ack, cell_ack } },
+    .{ .kind = .data_straddling, .cells = .{ cell_refused, null, null, null, null, null, cell_ack } },
+    .{ .kind = .data_past_window, .cells = .{ cell_refused, cell_ack, cell_ack, cell_ack, cell_ack, cell_ack, cell_ack } },
+    // The peer's FIN: CLOSE-WAIT from a handshake or ESTABLISHED; CLOSING
+    // from FIN-WAIT-1; and from FIN-WAIT-2 closed at once, there being no
+    // TIME-WAIT here.
+    .{ .kind = .fin, .cells = .{
+        cell_refused,
+        .{ .reply = .ack, .state = .established, .peer_done = true, .event = .peer_done },
+        .{ .reply = .ack, .state = .established, .peer_done = true, .event = .peer_done },
+        .{ .reply = .ack, .state = .closing, .fin = .queued, .peer_done = true, .event = .peer_done },
+        .{ .reply = .ack, .state = .closing, .fin = .sent, .peer_done = true, .event = .peer_done },
+        .{ .reply = .ack, .state = .closed, .event = .closed },
+        cell_ack,
+    } },
+    .{ .kind = .fin_with_data, .cells = .{
+        cell_refused,
+        .{ .reply = .ack, .state = .established, .peer_done = true, .taken = 10 },
+        .{ .reply = .ack, .state = .established, .peer_done = true, .taken = 10, .event = .peer_done },
+        .{ .reply = .ack, .state = .closing, .fin = .queued, .peer_done = true, .taken = 10 },
+        .{ .reply = .ack, .state = .closing, .fin = .sent, .peer_done = true, .taken = 10 },
+        .{ .reply = .ack, .state = .closed, .event = .closed },
+        cell_ack,
+    } },
+};
+
+test "the state × event matrix: every state, every kind of segment" {
+    for (matrix_rows) |row| {
+        for (std.enums.values(MatrixSetup), row.cells) |setup, cell| {
+            const want = cell orelse continue; // a question: TCP_TESTING.md §7
+            matrixCell(setup, row.kind, want) catch |err| {
+                std.debug.print("the matrix cell for {s} in {s} failed\n", .{ @tagName(row.kind), @tagName(setup) });
+                return err;
+            };
+        }
+    }
+}
+
+/// Builds a fresh table in `setup`, sends one segment of `kind`, and holds the
+/// result to `want`.
+fn matrixCell(setup: MatrixSetup, kind: MatrixKind, want: MatrixOutcome) !void {
+    var f: Fixture = .{};
+    f.init();
+    var p = Peer{ .ip = .{ 10, 0, 2, 2 }, .port = 40000 };
+    var buf: [1600]u8 = undefined;
+    // A fresh table gives its first connection the first slot.
+    const i: usize = 0;
+    switch (setup) {
+        .listen => {},
+        .syn_received => {
+            _ = handle(&f.table, &f.wire, p.frame(&buf, flag_syn, p.seq, ""), 1);
+            p.seq +%= 1;
+            p.ack = f.wire.last().seq +% 1;
+        },
+        .established, .fin_queued, .fin_sent, .fin_acked, .peer_done => {
+            try testing.expectEqual(i, try p.connect(&f.table, &f.wire, 1));
+            switch (setup) {
+                .fin_queued => f.table.finish(i),
+                .fin_sent, .fin_acked => {
+                    f.table.finish(i);
+                    transmit(&f.table, &f.wire, 1);
+                    try testing.expectEqual(flag_fin | flag_ack, f.wire.last().flags);
+                    if (setup == .fin_acked) _ = p.ackAll(&f.table, &f.wire, 1);
+                },
+                .peer_done => _ = p.fin(&f.table, &f.wire, 1),
+                else => {},
+            }
+        },
+    }
+
+    const c = &f.table.conns[i];
+    const known = setup != .listen;
+    const r: u32 = if (known) c.rcv_nxt else p.seq;
+    const u: u32 = if (known) c.una else 0x1234_5678;
+    const h: u32 = if (known) c.highest() else u;
+    const now_ack: u32 = if (setup == .syn_received) h else u;
+    const was_state = c.state;
+    const was_fin = c.fin;
+    const was_peer_done = c.peer_done;
+    const had = c.pending().len;
+    const from = f.wire.count;
+
+    const got = handle(&f.table, &f.wire, matrixSegment(kind, setup, &p, &buf, r, u, h, now_ack), 2);
+
+    switch (want.reply) {
+        .none => try testing.expectEqual(from, f.wire.count),
+        .ack, .syn_ack, .rst => {
+            try testing.expect(f.wire.count > from);
+            const said = f.wire.last();
+            switch (want.reply) {
+                .ack => try testing.expectEqual(flag_ack, said.flags),
+                .syn_ack => try testing.expectEqual(flag_syn | flag_ack, said.flags),
+                .rst => try testing.expect(said.flags & flag_rst != 0),
+                .none => unreachable,
+            }
+            if (want.reply == .rst) {
+                // Numbered by the acknowledgement it answers.
+                try testing.expectEqual(p.ack, said.seq);
+            } else if (c.state != .closed) {
+                try testing.expectEqual(c.rcv_nxt, said.ack);
+                const numbered = if (want.reply == .syn_ack) c.una else c.highest();
+                try testing.expectEqual(numbered, said.seq);
+            }
+        },
+    }
+
+    if (want.state) |state| {
+        try testing.expectEqual(state, c.state);
+        if (want.fin) |fin_now| try testing.expectEqual(fin_now, c.fin);
+        if (want.peer_done) |done| try testing.expectEqual(done, c.peer_done);
+    } else {
+        try testing.expectEqual(was_state, c.state);
+        try testing.expectEqual(was_fin, c.fin);
+        try testing.expectEqual(was_peer_done, c.peer_done);
+    }
+    if (c.state != .closed) try testing.expectEqual(had + want.taken, c.pending().len);
+    if (want.event) |event| try testing.expectEqual(event, got.event);
+}
+
+/// The segment of `kind`, from `p`, numbered from the connection's `r`, `u`
+/// and `h` (see `MatrixKind`), acknowledging `now_ack` unless the kind says
+/// otherwise.
+fn matrixSegment(kind: MatrixKind, setup: MatrixSetup, p: *Peer, buf: []u8, r: u32, u: u32, h: u32, now_ack: u32) []const u8 {
+    const ten = "0123456789";
+    const data_flags = flag_psh | flag_ack;
+    p.ack = now_ack;
+    switch (kind) {
+        .ack_old => p.ack = u -% 10,
+        .ack_duplicate => p.ack = u,
+        .ack_new => p.ack = h,
+        .ack_future => p.ack = h +% 10,
+        else => {},
+    }
+    return switch (kind) {
+        .syn_repeated => p.frame(buf, flag_syn, r -% 1, ""),
+        .syn_in_window => p.frame(buf, flag_syn, r, ""),
+        .syn_with_data => p.frame(buf, flag_syn, r, "hello"),
+        .rst_exact => p.frame(buf, flag_rst | flag_ack, r, ""),
+        .rst_in_window => p.frame(buf, flag_rst | flag_ack, r +% 1, ""),
+        .rst_outside => p.frame(buf, flag_rst | flag_ack, r +% 1000, ""),
+        .ack_old, .ack_duplicate, .ack_new, .ack_future => p.frame(buf, flag_ack, r, ""),
+        .data_in_order => p.frame(buf, data_flags, r, ten),
+        .data_ahead => p.frame(buf, data_flags, r +% 5, ten),
+        .data_behind => p.frame(buf, data_flags, r -% 20, ten),
+        .data_straddling => p.frame(buf, data_flags, r -% 5, ten),
+        .data_past_window => p.frame(buf, data_flags, r +% 1000, ten),
+        .fin => p.frame(buf, flag_fin | flag_ack, if (setup == .peer_done) r -% 1 else r, ""),
+        .fin_with_data => p.frame(buf, flag_fin | data_flags, r, ten),
+    };
+}
