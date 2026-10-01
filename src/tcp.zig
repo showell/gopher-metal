@@ -32,6 +32,10 @@
 //!   TIME-WAIT: a FIN repeated after the close is answered with a reset.)
 //! - **A segment for no connection we hold is answered with a reset**, so a
 //!   peer never waits on a connection this side has forgotten.
+//! - **A window that reopens is said again until the peer sends.** The
+//!   announcement is a bare acknowledgement, which the peer never
+//!   acknowledges; if it is lost, a peer that believes the window is shut
+//!   waits for its own persist timer, which backs off to minutes.
 //!
 //! **STILL THE SMALL TCP**, allowed because this box sits behind Caddy on a
 //! private network: no congestion control, no fast retransmit, no selective
@@ -182,6 +186,16 @@ pub const Conn = struct {
     /// arrived is still there to be read.
     peer_done: bool = false,
 
+    /// **THE WINDOW WE LAST TOLD THE PEER**, in the last segment we sent it.
+    told_wnd: u16 = 0xFFFF,
+    /// **A REOPENED WINDOW, SAID ONCE AND NOT YET HEARD.** Set when a segment
+    /// opens a window the peer last saw too small to send into; the next turn
+    /// of `transmit` starts the clock, and the announcement is repeated on it
+    /// until the peer sends something, finishes, or `max_retries` have gone.
+    reopened: bool = false,
+    update_at: ?i96 = null,
+    updates: u8 = 0,
+
     /// **HELD BY THE HOST.** A slot the host is serving is never handed to a
     /// new connection, even after this one ends — otherwise a reader part-way
     /// through a request could find a stranger's bytes in its buffer.
@@ -275,6 +289,18 @@ pub const Conn = struct {
     fn window(self: *const Conn) u16 {
         return @intCast(@min(self.room(), 0xFFFF));
     }
+
+    /// A window too small for the peer to send a full segment into, or into
+    /// half the buffer when the buffer itself is smaller than that.
+    fn tight(self: *const Conn, w: u16) bool {
+        return @as(usize, w) < @min(@as(usize, our_mss), self.rx.len / 2);
+    }
+
+    /// The peer has been heard sending: whatever we told it, it heard.
+    fn heard(self: *Conn) void {
+        self.reopened = false;
+        self.update_at = null;
+    }
 };
 
 pub const Result = struct {
@@ -330,6 +356,8 @@ pub const Table = struct {
     strays: u64 = 0,
     /// Segments whose checksum was wrong, dropped.
     damaged: u64 = 0,
+    /// Reopened windows said again, because the peer had not sent since.
+    window_updates: u64 = 0,
     /// Round trips measured, and the newest smoothed estimate — what this
     /// machine believes the path to its peers costs.
     samples: u64 = 0,
@@ -363,14 +391,23 @@ pub const Table = struct {
     }
 
     /// Builds and sends one segment on connection `i`, numbered `seq`. A SYN
-    /// carries our segment size.
+    /// carries our segment size, and every segment notes when the window it
+    /// carries reopens one the peer last saw shut.
     fn emit(self: *Table, wire: anytype, i: usize, flags: u8, seq: u32, payload: []const u8) void {
         const c = &self.conns[i];
+        const w = c.window();
+        if (c.tight(w)) {
+            c.heard(); // nothing open to announce any more
+        } else if (c.tight(c.told_wnd)) {
+            c.reopened = true;
+            c.updates = 0;
+        }
+        c.told_wnd = w;
         self.segment(wire, .{
             .mac = c.peer_mac,
             .ip = c.peer_ip,
             .port = c.peer_port,
-        }, flags, seq, c.rcv_nxt, c.window(), payload);
+        }, flags, seq, c.rcv_nxt, w, payload);
     }
 
     const Peer = struct { mac: [6]u8, ip: [4]u8, port: u16 };
@@ -490,6 +527,7 @@ pub const Table = struct {
     }
 
     fn transmitOne(self: *Table, wire: anytype, i: usize, now: i96) void {
+        self.announce(wire, i, now);
         const c = &self.conns[i];
         const expired = if (c.rto_at) |at| now >= at else false;
 
@@ -551,6 +589,38 @@ pub const Table = struct {
             c.fin_ever_sent = true;
             if (c.rto_at == null) c.rto_at = now + c.rto_ns;
         }
+    }
+
+    /// **THE RECEIVE SIDE'S ONE TIMER.** A window the peer last saw shut, and
+    /// that has room again, is announced — by the reader's own `ack` if it
+    /// called one, and here if it did not. The announcement is then repeated
+    /// on the retransmission clock, doubling, until the peer is heard sending
+    /// (it saw the window), finishes, or `max_retries` have gone (it has
+    /// nothing more to say).
+    fn announce(self: *Table, wire: anytype, i: usize, now: i96) void {
+        const c = &self.conns[i];
+        if (c.state != .established and c.state != .closing) return;
+        if (c.peer_done) return c.heard();
+        if (c.tight(c.told_wnd) and !c.tight(c.window())) {
+            self.emit(wire, i, flag_ack, c.highest(), "");
+        }
+        if (c.reopened) {
+            c.reopened = false;
+            c.update_at = now + c.rto_ns;
+            return;
+        }
+        const at = c.update_at orelse return;
+        if (now < at) return;
+        if (c.updates >= max_retries) {
+            c.update_at = null;
+            return;
+        }
+        c.updates += 1;
+        self.window_updates += 1;
+        const wait = @min(c.rto_ns * (@as(u64, 1) << @intCast(c.updates)), max_rto_ns);
+        // Set before the emit, which clears it if the window has shut again.
+        c.update_at = now + wait;
+        self.emit(wire, i, flag_ack, c.highest(), "");
     }
 
     /// Sends everything unacknowledged again, now, without touching the
@@ -835,6 +905,7 @@ pub const Table = struct {
             @memcpy(c.rx[c.end..][0..n], data[0..n]);
             c.end += n;
             c.rcv_nxt +%= @intCast(n);
+            if (n > 0) c.heard();
             self.emit(wire, i, flag_ack, c.highest(), "");
             if (n > 0 and event == .nothing) event = .data;
             if (n < data.len) return self.settle(i, event, fin_acknowledged, now);
