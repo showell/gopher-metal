@@ -37,6 +37,7 @@ const std = @import("std");
 const metal = @import("metal");
 const serial = metal.serial;
 const virtio = metal.virtio;
+const scsi = metal.scsi;
 const net = metal.net;
 const dhcp = metal.dhcp;
 const rng = metal.rng;
@@ -111,6 +112,7 @@ var gpa: std.heap.DebugAllocator(.{
 }) = .{};
 
 var blk_mem: virtio.BlockMemory align(4096) = .{};
+var volume_mem: virtio.BlockMemory align(4096) = .{};
 /// The block device, for the per-request log: how many requests it served and
 /// how long they took. Set once the device is up.
 var disk: ?*virtio.Block = null;
@@ -204,9 +206,7 @@ pub fn kmain() noreturn {
     serial.put(" pages\n");
 
     // ── the volume. This host serves from it, so no disk is a failure. ──────
-    const blk_base = virtio.find(virtio.device_id_block) orelse
-        serial.fail("no disk: this kernel serves the site from a FAT16 volume");
-    var blk = blk_mem.bring(blk_base) catch serial.fail("the block device would not come up");
+    var blk = chatDisk();
     disk = &blk;
     const part = gpt.dataPartition(&blk, &sector) catch
         serial.fail("the disk has no GPT partition to serve from");
@@ -769,6 +769,41 @@ fn restBetweenFrames(nic: *net.Net, tsc_hz: u64) void {
             serial.put("  resting between frames: the card interrupts when one comes\n");
         } else serial.put("  never resting: the card would not take an MSI-X vector\n"),
     }
+}
+
+/// **CHAT'S FILES ARE ON A VOLUME WHEN ONE IS ATTACHED**, and on the boot
+/// disk's data partition otherwise. A volume survives a new image; the boot
+/// disk does not, which is why the volume wins. A droplet has the SCSI
+/// controller volumes attach to whether or not one is attached, so finding
+/// no disk on it is ordinary and said; a controller or a disk that will not
+/// work stops the machine instead of quietly serving the boot disk's copy.
+fn chatDisk() virtio.Block {
+    if (virtio.find(scsi.device_id)) |controller| {
+        if (scsi.bring(controller, &volume_mem)) |b| {
+            const at = b.address.?;
+            serial.put("  chat's files: the volume (SCSI target ");
+            serial.putDec(at.target);
+            serial.put(", LUN ");
+            serial.putDec(at.lun);
+            serial.put(", ");
+            serial.putDec(b.capacity / 2048);
+            serial.put(" MB)\n");
+            return b;
+        } else |e| switch (e) {
+            error.NoDisk => serial.put("  no volume attached\n"),
+            else => {
+                serial.put("  the SCSI controller: ");
+                serial.put(@errorName(e));
+                serial.put("\n");
+                serial.fail("the volume controller or its disk would not come up");
+            },
+        }
+    }
+    const base = virtio.find(virtio.device_id_block) orelse
+        serial.fail("no disk: this kernel serves the site from a FAT16 volume");
+    const b = blk_mem.bring(base) catch serial.fail("the block device would not come up");
+    serial.put("  chat's files: the boot disk\n");
+    return b;
 }
 
 fn logRequest(number: u64, what: []const u8, outcome: []const u8) void {

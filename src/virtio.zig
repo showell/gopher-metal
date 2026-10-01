@@ -22,6 +22,7 @@
 const std = @import("std");
 const tsc = @import("tsc.zig");
 const pci = @import("pci.zig");
+const scsi = @import("scsi.zig");
 
 /// A device, found on whichever transport this machine has.
 pub const Device = union(enum) {
@@ -218,6 +219,14 @@ pub fn configRead8(d: Device, off: u32) u8 {
     return read8(configAddress(d, off));
 }
 
+pub fn configRead16(d: Device, off: u32) u16 {
+    return read16(configAddress(d, off));
+}
+
+pub fn configRead32(d: Device, off: u32) u32 {
+    return read32(configAddress(d, off));
+}
+
 fn configRead64(d: Device, off: u32) u64 {
     const at = configAddress(d, off);
     return (@as(u64, read32(at + 4)) << 32) | read32(at);
@@ -337,7 +346,7 @@ fn pciDevice(f: pci.Function) ?Pci {
 
 // ---- the virtqueue -------------------------------------------------------
 
-const Desc = extern struct {
+pub const Desc = extern struct {
     addr: u64,
     len: u32,
     flags: u16,
@@ -602,6 +611,11 @@ pub const Block = struct {
     requests: u64 = 0,
     busy_ticks: u64 = 0,
 
+    /// **ON A SCSI CONTROLLER, THE DISK THIS BLOCK IS** (`scsi.zig`), and the
+    /// memory its commands are built in. Null on virtio-blk.
+    address: ?scsi.Address = null,
+    scsi: ?*scsi.Memory = null,
+
     /// `mem` is memory the caller owns and keeps for as long as the device is
     /// up; it must be identity-mapped, since what goes in a descriptor is a
     /// PHYSICAL address.
@@ -626,6 +640,7 @@ pub const Block = struct {
     /// That is the whole reason the door takes an address: the 512 bytes never
     /// pass through this function.
     fn transfer(self: *Block, kind: u32, lba: u64, addr: u64, len: u32) u8 {
+        if (self.address) |at| return scsi.transfer(self, at, kind == blk_t_in, lba, addr, len);
         self.header.* = .{ .type = kind, .reserved = 0, .sector = lba };
         self.status.* = 0xFF; // so a device that writes nothing is not read as OK
 
@@ -690,6 +705,8 @@ pub const BlockMemory = struct {
     ring: Block.Q.RingType align(16) = undefined,
     header: BlkReqHeader align(16) = undefined,
     status: u8 = 0,
+    /// Used only when the Block is a disk on a SCSI controller.
+    scsi: scsi.Memory = .{},
 
     pub fn bring(self: *BlockMemory, device: Device) Error!Block {
         return Block.init(device, self);

@@ -9,6 +9,7 @@ pub const pages = @import("pages.zig");
 pub const serial = @import("serial.zig");
 pub const screen = @import("screen.zig");
 pub const virtio = @import("virtio.zig");
+pub const scsi = @import("scsi.zig");
 pub const net = @import("net.zig");
 pub const proto = @import("proto.zig");
 pub const dhcp = @import("dhcp.zig");

@@ -1,0 +1,247 @@
+//! **A DIGITALOCEAN VOLUME: A SCSI DISK BEHIND A VIRTIO CONTROLLER.** A
+//! droplet's own disk is virtio-blk (slot 06), and every new image replaces
+//! it whole. A volume is a separate disk that survives that, and it arrives
+//! on the virtio-SCSI controller in slot 05 — which a droplet has whether or
+//! not any volume is attached. So chat's files go on a volume, and this is how
+//! the machine reaches one.
+//!
+//! virtio-scsi carries SCSI commands. A request is a header naming the disk
+//! (target and LUN) with a command block (the CDB), then the data, then a
+//! response the device writes: its own outcome, the disk's SCSI status, and
+//! sense data saying why when the status is CHECK CONDITION. Four commands are
+//! all a disk needs here: INQUIRY (is there a disk at this address?), READ
+//! CAPACITY (how big?), READ(10) and WRITE(10).
+//!
+//! **IT IS A `virtio.Block` LIKE ANY OTHER.** The FAT16 volume and the GPT
+//! reader call `read`, `readMany`, `write` and `writeMany`; on a Block brought
+//! up here those become SCSI commands, and nothing above notices.
+//!
+//! virtio 1.2 §5.6 (the device), SCSI Primary Commands (SPC-4) for INQUIRY and
+//! the sense data, SCSI Block Commands (SBC-3) for the rest. The numbers below
+//! are theirs.
+
+const virtio = @import("virtio.zig");
+const tsc = @import("tsc.zig");
+
+/// The virtio device type of a SCSI controller.
+pub const device_id: u32 = 8;
+
+const control_queue: u16 = 0;
+const event_queue: u16 = 1;
+const request_queue: u16 = 2;
+
+/// The sizes the device uses unless told otherwise (§5.6.4), and the only ones
+/// this driver speaks: the request header's CDB, and the sense data in a
+/// response.
+const cdb_size = 32;
+const sense_size = 96;
+
+/// A disk's address on the controller.
+pub const Address = struct {
+    target: u8,
+    lun: u16,
+
+    /// The 8-byte LUN field (§5.6.6.1): 1, the target, then the LUN in the
+    /// flat addressing SAM-5 calls single-level, as Linux writes it.
+    fn field(self: Address) [8]u8 {
+        return .{ 1, self.target, 0x40 | @as(u8, @truncate(self.lun >> 8)), @truncate(self.lun), 0, 0, 0, 0 };
+    }
+};
+
+/// What the device reads first. **ITS LENGTH ON THE WIRE IS EXACTLY
+/// `request_len`**: the device takes that many bytes as the header and any
+/// readable bytes after them as data, so the struct's own padding must not go
+/// in the descriptor.
+pub const Request = extern struct {
+    lun: [8]u8,
+    tag: u64,
+    task_attr: u8,
+    prio: u8,
+    crn: u8,
+    cdb: [cdb_size]u8,
+};
+const request_len = 19 + cdb_size;
+
+/// What the device writes first, before any data it returns. Its length on the
+/// wire is exactly `response_len`, for the same reason.
+pub const Response = extern struct {
+    sense_len: u32,
+    residual: u32,
+    status_qualifier: u16,
+    status: u8,
+    response: u8,
+    sense: [sense_size]u8,
+};
+const response_len = 12 + sense_size;
+
+comptime {
+    if (@offsetOf(Request, "cdb") != 19) @compileError("virtio-scsi request header layout");
+    if (@sizeOf(Response) != response_len) @compileError("virtio-scsi response layout");
+}
+
+/// The device's own outcome (§5.6.6.1): OK means the command reached the disk,
+/// and `status` says how it went there.
+const response_ok: u8 = 0;
+const response_bad_target: u8 = 3;
+/// SCSI status: GOOD, or CHECK CONDITION with sense data.
+const status_good: u8 = 0;
+const status_check_condition: u8 = 2;
+/// The sense key a disk reports once after it is attached or reset: a fact to
+/// be told, not a failure. The command is simply sent again.
+const sense_unit_attention: u8 = 6;
+
+/// The memory a SCSI disk needs on top of `virtio.BlockMemory`'s ring: the
+/// controller's two other queues, the header and response, and a sector of
+/// scratch for what INQUIRY and READ CAPACITY return.
+pub const Memory = struct {
+    control_ring: virtio.Block.Q.RingType align(16) = undefined,
+    event_ring: virtio.Block.Q.RingType align(16) = undefined,
+    request: Request align(16) = undefined,
+    response: Response align(16) = undefined,
+    scratch: [512]u8 align(16) = undefined,
+};
+
+const Outcome = struct { response: u8, status: u8, sense_key: u8 };
+
+const Direction = enum { none, from_disk, to_disk };
+
+/// One command, start to finish, polled to completion.
+fn command(b: *virtio.Block, at: Address, cdb: []const u8, dir: Direction, addr: u64, len: u32) Outcome {
+    const mem = b.scsi.?;
+    mem.request = .{ .lun = at.field(), .tag = 0, .task_attr = 0, .prio = 0, .crn = 0, .cdb = [_]u8{0} ** cdb_size };
+    @memcpy(mem.request.cdb[0..cdb.len], cdb);
+    mem.response.response = 0xFF; // so a device that writes nothing is not read as OK
+    mem.response.status = 0xFF;
+
+    // Every buffer the device reads, then every buffer it writes.
+    const d = &b.q.ring.desc;
+    const req: virtio.Desc = .{ .addr = @intFromPtr(&mem.request), .len = request_len, .flags = virtio.desc_flag_next, .next = 1 };
+    const resp_flags = virtio.desc_flag_write;
+    switch (dir) {
+        .none => {
+            d[0] = req;
+            d[1] = .{ .addr = @intFromPtr(&mem.response), .len = response_len, .flags = resp_flags, .next = 0 };
+        },
+        .from_disk => {
+            d[0] = req;
+            d[1] = .{ .addr = @intFromPtr(&mem.response), .len = response_len, .flags = resp_flags | virtio.desc_flag_next, .next = 2 };
+            d[2] = .{ .addr = addr, .len = len, .flags = virtio.desc_flag_write, .next = 0 };
+        },
+        .to_disk => {
+            d[0] = req;
+            d[1] = .{ .addr = addr, .len = len, .flags = virtio.desc_flag_next, .next = 2 };
+            d[2] = .{ .addr = @intFromPtr(&mem.response), .len = response_len, .flags = resp_flags, .next = 0 };
+        },
+    }
+
+    const began = tsc.read();
+    b.q.offer(0);
+    b.q.notify();
+    _ = b.q.wait();
+    virtio.ack(b.device);
+    b.busy_ticks +%= tsc.read() -% began;
+    b.requests +%= 1;
+
+    const sense_key: u8 = if (mem.response.sense_len >= 3) mem.response.sense[2] & 0x0F else 0;
+    return .{ .response = mem.response.response, .status = mem.response.status, .sense_key = sense_key };
+}
+
+/// A command, sent again while the disk answers UNIT ATTENTION (it does once
+/// after being attached, and may again after a reset). Three tries are plenty:
+/// a disk that keeps saying it is a failure.
+fn commandSettled(b: *virtio.Block, at: Address, cdb: []const u8, dir: Direction, addr: u64, len: u32) Outcome {
+    var tries: u8 = 0;
+    while (true) : (tries += 1) {
+        const o = command(b, at, cdb, dir, addr, len);
+        const attention = o.response == response_ok and o.status == status_check_condition and
+            o.sense_key == sense_unit_attention;
+        if (!attention or tries == 2) return o;
+    }
+}
+
+fn good(o: Outcome) bool {
+    return o.response == response_ok and o.status == status_good;
+}
+
+/// READ(10) or WRITE(10): `len` bytes at `addr`, from or to the sectors from
+/// `lba`. Answers a virtio-blk status byte, which is what every caller of a
+/// Block already understands.
+pub fn transfer(b: *virtio.Block, at: Address, from_disk: bool, lba: u64, addr: u64, len: u32) u8 {
+    if (lba + len / 512 > 0xFFFF_FFFF or len / 512 > 0xFFFF) return virtio.blk_s_unsupp;
+    const l: u32 = @intCast(lba);
+    const n: u16 = @intCast(len / 512);
+    const cdb = [10]u8{
+        if (from_disk) 0x28 else 0x2A, 0,
+        @truncate(l >> 24),            @truncate(l >> 16),
+        @truncate(l >> 8),             @truncate(l),
+        0,                             @truncate(n >> 8),
+        @truncate(n),                  0,
+    };
+    const o = commandSettled(b, at, &cdb, if (from_disk) .from_disk else .to_disk, addr, len);
+    return if (good(o)) virtio.blk_s_ok else virtio.blk_s_ioerr;
+}
+
+fn be32(bytes: []const u8) u32 {
+    return (@as(u32, bytes[0]) << 24) | (@as(u32, bytes[1]) << 16) | (@as(u32, bytes[2]) << 8) | bytes[3];
+}
+
+pub const Error = virtio.Error || error{
+    /// The controller has no disk on it: no volume is attached.
+    NoDisk,
+    /// The device's CDB or sense sizes are not the defaults this driver uses.
+    UnexpectedSizes,
+    /// The disk would not say how big it is, or its sectors are not 512 bytes.
+    NoCapacity,
+};
+
+/// The controller brought up, and the first disk on it found: a `Block` whose
+/// reads and writes are SCSI commands to that disk. `NoDisk` is the ordinary
+/// answer on a droplet with no volume attached, since the controller is there
+/// either way.
+pub fn bring(device: virtio.Device, mem: *virtio.BlockMemory) Error!virtio.Block {
+    const st = try virtio.negotiate(device, 0);
+    if (virtio.configRead32(device, 24) != cdb_size or virtio.configRead32(device, 20) != sense_size)
+        return Error.UnexpectedSizes;
+    // The control and event queues are set up because the device has them;
+    // nothing is ever sent on either, and an event with no buffer waiting is
+    // simply dropped, which the spec allows.
+    _ = try virtio.Block.Q.setup(device, control_queue, &mem.scsi.control_ring);
+    _ = try virtio.Block.Q.setup(device, event_queue, &mem.scsi.event_ring);
+    const q = try virtio.Block.Q.setup(device, request_queue, &mem.ring);
+    try virtio.driverOk(device, st);
+
+    var b = virtio.Block{
+        .device = device,
+        .q = q,
+        .header = &mem.header,
+        .status = &mem.status,
+        .capacity = 0,
+        .scsi = &mem.scsi,
+    };
+
+    const max_target: u16 = @min(virtio.configRead16(device, 32), 63);
+    const max_lun: u32 = @min(virtio.configRead32(device, 36), 7);
+    const scratch = @intFromPtr(&mem.scsi.scratch);
+    var target: u16 = 0;
+    while (target <= max_target) : (target += 1) {
+        var lun: u16 = 0;
+        while (lun <= max_lun) : (lun += 1) {
+            const at = Address{ .target = @intCast(target), .lun = lun };
+            const inquiry = [6]u8{ 0x12, 0, 0, 0, 36, 0 };
+            const o = commandSettled(&b, at, &inquiry, .from_disk, scratch, 36);
+            if (o.response == response_bad_target) break; // nobody at this target
+            if (!good(o)) continue;
+            // Peripheral qualifier 0 (connected) and device type 0 (a disk).
+            if (mem.scsi.scratch[0] != 0x00) continue;
+
+            const capacity = [10]u8{ 0x25, 0, 0, 0, 0, 0, 0, 0, 0, 0 };
+            if (!good(commandSettled(&b, at, &capacity, .from_disk, scratch, 8))) return Error.NoCapacity;
+            const last = be32(mem.scsi.scratch[0..4]);
+            if (be32(mem.scsi.scratch[4..8]) != 512 or last == 0xFFFF_FFFF) return Error.NoCapacity;
+            b.capacity = @as(u64, last) + 1;
+            b.address = at;
+            return b;
+        }
+    }
+    return Error.NoDisk;
+}

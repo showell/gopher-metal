@@ -22,7 +22,9 @@
 # MACHINE (QEMU's machine type, default `pc`; a real droplet reports
 # pc-i440fx-6.1), BIOS (a SeaBIOS image to boot instead of QEMU's own), and
 # NO_SCREEN=1 (no display card in slot 02, so gopher-metal finds no screen and
-# writes only to the serial port: not a droplet, a way to measure the screen).
+# writes only to the serial port: not a droplet, a way to measure the screen),
+# and VOLUME=path (a raw disk image attached as a DigitalOcean volume is, on
+# the SCSI controller; VOLUME_TARGET and VOLUME_LUN place it).
 #
 # **DIRTY=1: THE MACHINE STARTS WITH GARBAGE IN EVERY BYTE OF RAM.** QEMU's
 # memory comes fresh from Linux, so it is all zeroes, and a loader or kernel
@@ -78,6 +80,12 @@ else
     console=(-serial stdio -monitor none)
 fi
 door=(-device isa-debug-exit,iobase=0xf4,iosize=0x04)
+# A DigitalOcean volume: a disk on the SCSI controller in slot 05, which is
+# there with or without one. VOLUME names a raw disk image; the target and LUN
+# default to 0 and 1, and the kernel finds the disk wherever it is.
+volume=()
+[ -n "${VOLUME:-}" ] && volume=(-drive id=volume,file="$VOLUME",format=raw,if=none
+    -device scsi-hd,drive=volume,bus=scsi.0,scsi-id="${VOLUME_TARGET:-0}",lun="${VOLUME_LUN:-1}")
 screen=(-device virtio-vga,addr=02.0)
 [ "${NO_SCREEN:-}" = 1 ] && screen=()
 bios=()
@@ -91,7 +99,7 @@ exec qemu-system-x86_64 \
     "${screen[@]}" \
     -netdev "$public" -device virtio-net-pci,netdev=public,addr=03.0 \
     -netdev "$private" -device virtio-net-pci,netdev=private,addr=04.0 \
-    -device virtio-scsi-pci,addr=05.0 \
+    -device virtio-scsi-pci,id=scsi,addr=05.0 "${volume[@]}" \
     -drive id=boot,file="$DISK",format=raw,if=none -device virtio-blk-pci,drive=boot,addr=06.0,bootindex=0 \
     -drive id=config,file="$DISK.config",format=raw,if=none -device virtio-blk-pci,drive=config,addr=07.0 \
     -device virtio-balloon-pci,addr=08.0 \

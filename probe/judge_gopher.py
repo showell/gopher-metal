@@ -486,48 +486,35 @@ CAPTURE = bool(os.environ.get("JUDGE_CAPTURE"))
 
 
 # **JUDGE_DROPLET=1: THE SAME JUDGE, ON A DROPLET'S MACHINE.** Every boot
-# builds a droplet disk from the judge's own (droplet/image.sh: the boot loader,
-# the kernel in partition 1, the judge's FAT16 volume copied in as partition
-# 2), boots it on droplet/droplet.sh's machine (a PC, devices on PCI, the BIOS
+# builds a droplet boot disk holding only the loader and the kernel
+# (droplet/image.sh), and attaches the judge's own disk, a GPT disk with its
+# FAT16 partition, as a DigitalOcean volume: a disk on the SCSI controller in
+# slot 05. That is where the kernel finds chat's files on a real droplet, and
+# QEMU writes to the judge's disk in place, so there is nothing to copy back.
+# It boots on droplet/droplet.sh's machine (a PC, devices on PCI, the BIOS
 # reading the disk), on its private card (`card = private`, as the droplet's
-# chat image says), and, once the kernel stops, copies partition 2 back over
-# the judge's volume. Nothing else in the judge knows: every answer and every
+# chat image says). Nothing else in the judge knows: every answer and every
 # file is compared with Linux exactly as on microvm. The droplet machine always
 # runs under KVM, as a real droplet does, so `kvm` asks nothing more of it.
 DROPLET = os.environ.get("JUDGE_DROPLET") == "1"
 DROPLET_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "droplet")
 droplet_boots = {}
-# How many boots went through the boot loader, for the verdict line: a green
-# that never took the droplet path must not read as one that did.
+# How many boots went through the boot loader and served from the volume, for
+# the verdict line: a green that never took the droplet path must not read as
+# one that did.
 loader_boots = 0
 
 
 def droplet_start(elf: str, image: str, scratch: str, port: int, serial_log):
-    last = partition_last(image)
-    volume = os.path.join(scratch, "volume.fat")
-    with open(image, "rb") as f, open(volume, "wb") as out:
-        f.seek(PART_FIRST * SECTOR)
-        out.write(f.read((last - PART_FIRST + 1) * SECTOR))
     disk = os.path.join(scratch, "droplet.img")
-    run([os.path.join(DROPLET_DIR, "image.sh"), elf, disk, volume])
-    info = run(["sgdisk", "-i", "2", disk]).stdout
-    first = int(next(l for l in info.splitlines() if l.startswith("First sector")).split()[2])
+    run([os.path.join(DROPLET_DIR, "image.sh"), elf, disk])
     # The judge's requests arrive on the private card, which is the one
     # `card = private` (set_request_limit) has the kernel serve.
-    env = dict(os.environ, DISK=disk, PRIVATE_FWD=str(port), MEMORY="512")
+    env = dict(os.environ, DISK=disk, VOLUME=image, PRIVATE_FWD=str(port), MEMORY="512")
     qemu = subprocess.Popen([os.path.join(DROPLET_DIR, "droplet.sh")], env=env,
                             stdout=serial_log, stderr=subprocess.STDOUT)
-    droplet_boots[qemu.pid] = (disk, first, image, last)
+    droplet_boots[qemu.pid] = disk
     return qemu
-
-
-def droplet_finish(qemu):
-    """The volume the kernel left, back where the judge reads it."""
-    disk, first, image, last = droplet_boots.pop(qemu.pid)
-    with open(disk, "rb") as f, open(image, "r+b") as out:
-        f.seek(first * SECTOR)
-        out.seek(PART_FIRST * SECTOR)
-        out.write(f.read((last - PART_FIRST + 1) * SECTOR))
 
 
 def microvm_start(elf: str, image: str, scratch: str, port: int, serial_log, kvm: bool):
@@ -590,10 +577,13 @@ def finish_kernel(qemu, serial: str):
         qemu.wait()
         code = "timeout"
     if qemu.pid in droplet_boots:
-        droplet_finish(qemu)
+        droplet_boots.pop(qemu.pid)
         global loader_boots
-        if b"gopher-metal loader" not in open(serial, "rb").read():
+        said = open(serial, "rb").read()
+        if b"gopher-metal loader" not in said:
             raise RuntimeError(f"a droplet boot that never printed the loader's line: {serial}")
+        if b"chat's files: the volume" not in said:
+            raise RuntimeError(f"a droplet boot that did not serve from the volume: {serial}")
         loader_boots += 1
     text = open(serial, "rb").read().decode("latin-1", "replace")
     lines = "\n".join(l for l in text.splitlines()
@@ -2294,7 +2284,7 @@ def main() -> int:
     names = " ".join(g for g in GATES if g in chosen)
     took = f"{lap.total():.0f} s"
     if DROPLET:
-        took += f"; on the droplet machine, {loader_boots} boot(s) through the boot loader"
+        took += f"; on the droplet machine, {loader_boots} boot(s) through the boot loader, chat's files on a SCSI volume"
     if failures:
         print(f"{failures} failure(s) over: {names} ({took})")
     elif chosen == set(GATES):
