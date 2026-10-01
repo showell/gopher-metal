@@ -31,18 +31,23 @@ droplet through our own BIOS loader.
 - **lynrummy.com itself is unchanged:** still angry-gopher on Linux.
 
 How fast, measured with `droplet/race.py` (the same pages from both sites,
-alternating, 40 rounds; first byte, median / 90th percentile, 2026-10-01,
-with the send fix, before interrupts):
+alternating, 40 rounds; first byte, median / 90th percentile; 2026-10-01, v4:
+interrupts and the idle halt):
 
 | | lynrummy.com | metal, through Caddy | Linux alone, on prod | metal alone, from prod |
 |---|---|---|---|---|
-| home page | 3.0 / 3.4 ms | 4.1 / 8.1 ms | 0.56 / 0.82 ms | 1.5 / 3.9 ms |
-| /game (a redirect) | 2.5 / 2.9 ms | 2.7 / 4.0 ms | 0.22 / 0.33 ms | 0.41 / 3.4 ms |
+| home page | 2.95 / 3.55 ms | 4.14 / 7.53 ms | 0.55 / 0.63 ms | 1.27 / 2.37 ms |
+| a gallery picture | 2.72 / 3.31 ms | 4.12 / 5.27 ms | 0.28 / 0.38 ms | 1.23 / 1.66 ms |
+| /delivery | 2.56 / 2.96 ms | 2.77 / 3.40 ms | 0.20 / 0.30 ms | 0.31 / 0.50 ms |
+| /game (a redirect) | 2.52 / 3.20 ms | 2.75 / 3.43 ms | 0.23 / 0.29 ms | 0.30 / 0.50 ms |
 
-At the median, a small page through Caddy is as fast as Linux's. The slow
-tenth is 1 to 5 ms slower. **Interrupts and the idle halt (`src/interrupts.zig`)
-are built and pass every gate, and are not yet measured on the droplet.** That
-measurement says whether the slow tenth was the processor never resting.
+Pages that need no file are within about 0.1 ms of Linux, at the median and in
+the slow tenth. Before interrupts the slow tenth was 3 to 5 ms: a guest that
+never halted kept the droplet's own network threads waiting for the processor.
+**Pages read from files are still about 1 ms slower**, most likely because
+metal reads them from its disk every time and Linux has them in memory; that
+is a guess, not yet measured apart. One run, on one evening: DigitalOcean's
+neighbours vary.
 
 **A deploy** is by hand:
 
@@ -84,7 +89,7 @@ droplet, booted from a custom image
 | the boot | **works** — PVH, long mode, identity-mapped low 4 GB |
 | a droplet's boot | **works** — `droplet/loader.S`, our own BIOS loader, from a GPT disk (`droplet/image.zig`); checked on the droplet-shaped QEMU by `droplet/boot.sh` and on real droplets |
 | the screen | **works** — everything the console says is also in VGA text, which is what DigitalOcean's console shows (`droplet/screen.sh`) |
-| interrupts, and resting when idle | **works** — the card wakes the machine by MSI-X, a 1 ms timer otherwise; PCI only, so microvm and metal-vmm still spin. Not yet measured on a droplet |
+| interrupts, and resting when idle | **works** — the card wakes the machine by MSI-X, a 1 ms timer otherwise; PCI only, so microvm and metal-vmm still spin. On the droplet it took the slow tenth of requests from 3-5 ms to 0.5 ms |
 | virtio-blk over MMIO | **works** — reads, writes, and reads back |
 | virtio-net over MMIO | **works** |
 | virtio over PCI | **works** — disk and network found on a PC's bus, as a droplet has them |
