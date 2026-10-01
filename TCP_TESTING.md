@@ -65,7 +65,8 @@ Concretely, for a non-closed connection at least one of these must hold:
 | queued bytes with a shut window              | `rto_at` (the probe)                |
 | a handshake (`syn_received`)                 | `rto_at`                            |
 | our FIN acknowledged, the peer's not yet come| `fin_wait_until`                    |
-| a reopened window not yet heard              | `reopened` or `update_at`           |
+| a reopened window, said once (`window_news == .said_once`) | the next `transmit`, which times its repeat |
+| a reopened window, said and not yet heard (`.repeating`)  | `update_at`                          |
 | nothing (established, idle)                  | the host's `quiet()` (outside the table) |
 
 Write the table as code. A row with no armed deadline is a failure, and the
@@ -73,6 +74,17 @@ message names the row. Bug C would have failed this check the first time a
 test consumed a full buffer, because nothing in the table said "a window
 update is owed". The row did not exist, and writing the table is what makes
 someone notice the missing row.
+
+**A debt needs a state of its own, or it cannot have a row.** The first
+version of this table missed a mutant. It deleted the line in `announce`
+that armed `update_at`, and no invariant fired. A reopened window was then
+tracked by a `reopened` flag that `announce` cleared as it armed the timer.
+Once the flag was clear, "said and not yet heard" was not a state the
+checker could see, so nothing owed the timer. The fix was to make the debt
+an enum, `window_news: none → said_once → repeating`, with a row for each
+stage. The general rule: if a connection can owe something, some field must
+say so for as long as it is owed. A timer is not that field, because a timer
+nobody armed looks the same as a debt nobody has.
 
 **Every deadline must also be in the future, or due now.** A deadline that
 has passed without `transmit` acting on it is a timer that never fires.
@@ -218,7 +230,20 @@ look for.
 
 ## 6. Run the whole suite at awkward initial sequence numbers
 
-`fakeIsn` starts at 1000. Wraparound bugs (a `<` where `after()` belongs, or
+**Implemented** in `build.zig`. `zig build test` runs `src/tcp_test.zig`
+once per (our ISN, the peer's first sequence number) pair:
+
+- `2000/5000`, where the tests were written
+- `0/0`
+- both 16 bytes before half-way
+- both 16 bytes before the wrap
+- each side at a different edge
+
+`Fixture.init` resets `fakeIsn`, so every test's first connection starts
+exactly there. Tests compare sequence numbers only to each other, never to
+a literal. What follows is why.
+
+`fakeIsn` used to start at 1000. Wraparound bugs (a `<` where `after()` belongs, or
 `-` where `-%` belongs) cannot show up there. Make the starting ISN a
 parameter of the fixture, and run every existing test at least at:
 
@@ -303,7 +328,7 @@ where `git stash` would also sweep up any unrelated work in progress.)
 
 1. §1 invariants, including the liveness table, wired into the existing
    fixture. **Done:** `src/tcp_check.zig`.
-2. §6 awkward ISNs. This is nearly free.
+2. §6 awkward ISNs. **Done:** `build.zig`.
 3. §2 the queue audit, written into the code headers.
 4. §9 the loop-latency numbers and their judge bounds.
 5. §3 the simulator and model peer: the biggest investment, and the biggest

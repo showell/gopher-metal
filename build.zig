@@ -210,12 +210,42 @@ pub fn build(b: *std.Build) void {
     // device can report in is a way to be silently wrong, and those modes are
     // cheaper to enumerate on the host than to provoke in QEMU.
     const test_step = b.step("test", "host unit tests for the pure parts of src/");
-    for ([_][]const u8{ "src/rtc.zig", "src/stack.zig", "src/civil.zig", "src/fat16.zig", "src/pvh.zig", "src/pages.zig", "src/tcp.zig", "src/tcp_check.zig", "src/tcp_test.zig", "src/ready.zig", "src/request_heap.zig", "droplet/image.zig", "src/dhcp.zig", "src/screen.zig" }) |path| {
+    for ([_][]const u8{ "src/rtc.zig", "src/stack.zig", "src/civil.zig", "src/fat16.zig", "src/pvh.zig", "src/pages.zig", "src/tcp.zig", "src/tcp_check.zig", "src/ready.zig", "src/request_heap.zig", "droplet/image.zig", "src/dhcp.zig", "src/screen.zig" }) |path| {
         const unit = b.addTest(.{ .root_module = b.createModule(.{
             .root_source_file = b.path(path),
             .target = b.graph.host,
             .imports = &.{.{ .name = "kernel_partition", .module = kernel_partition }},
         }) });
+        test_step.dependOn(&b.addRunArtifact(unit).step);
+    }
+
+    // **THE TCP TABLE'S TESTS, AT AWKWARD SEQUENCE NUMBERS** (TCP_TESTING.md
+    // §6). Every number on the wire is modulo 2^32, and a `<` where `after()`
+    // belongs, or a `-` where `-%` belongs, is invisible a thousand bytes from
+    // zero. So the whole suite runs once per pair below: where our first
+    // initial sequence number is, and where the peer's first byte is. Every
+    // scenario then crosses zero, or the half-way point that decides which
+    // of two numbers comes first, within its first few segments.
+    const starts = [_]struct { isn: u32, peer: u32 }{
+        .{ .isn = 2000, .peer = 5000 }, // where the tests were written
+        .{ .isn = 0, .peer = 0 },
+        .{ .isn = 0x7FFF_FFF0, .peer = 0x7FFF_FFF0 }, // 16 bytes before half-way
+        .{ .isn = 0xFFFF_FFF0, .peer = 0xFFFF_FFF0 }, // 16 bytes before the wrap
+        .{ .isn = 0xFFFF_FFF0, .peer = 0x7FFF_FFF0 }, // each side at its own edge
+        .{ .isn = 0x7FFF_FFF0, .peer = 0xFFFF_FFF0 },
+    };
+    for (starts) |start| {
+        const options = b.addOptions();
+        options.addOption(u32, "isn", start.isn);
+        options.addOption(u32, "peer", start.peer);
+        const unit = b.addTest(.{
+            .name = b.fmt("tcp_test isn={x} peer={x}", .{ start.isn, start.peer }),
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("src/tcp_test.zig"),
+                .target = b.graph.host,
+                .imports = &.{.{ .name = "tcp_test_start", .module = options.createModule() }},
+            }),
+        });
         test_step.dependOn(&b.addRunArtifact(unit).step);
     }
 }

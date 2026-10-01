@@ -134,7 +134,14 @@ fn verify(table: *Table, wire: *Wire, now: i96, phase: invariants.Phase) void {
     }
 }
 
-var next_isn: u32 = 1000;
+/// **WHERE SEQUENCE NUMBERS START**, from build.zig: the suite runs once per
+/// pair, near zero, half-way and the wrap (TCP_TESTING.md §6). Tests compare
+/// sequence numbers only to each other, with `+%` and `-%`, never to a literal.
+const start = @import("tcp_test_start");
+
+/// The first initial sequence number each fixture hands out is `start.isn`,
+/// and each after it 1000 further on.
+var next_isn: u32 = 0;
 fn fakeIsn() u32 {
     next_isn +%= 1000;
     return next_isn;
@@ -144,7 +151,7 @@ fn fakeIsn() u32 {
 const Peer = struct {
     ip: [4]u8,
     port: u16,
-    seq: u32 = 5000,
+    seq: u32 = start.peer,
     ack: u32 = 0,
     window: u16 = 8192,
     /// The segment size its SYN says, if it says one.
@@ -222,6 +229,7 @@ const Fixture = struct {
     table: Table = undefined,
 
     fn init(self: *Fixture) void {
+        next_isn = start.isn -% 1000;
         for (&self.conns, &self.rx, &self.tx) |*c, *r, *t| c.* = .{ .rx = r, .tx = t };
         self.table = Table.init(server_ip, server_mac, 80, &self.conns, &self.out, fakeIsn);
     }

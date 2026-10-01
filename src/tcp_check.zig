@@ -47,6 +47,7 @@ pub const Rule = enum {
     handshake_with_bytes,
     peer_finished_during_handshake,
     retries_past_the_limit,
+    window_timer_without_news,
 
     // ── liveness: the rows of `liveness` ────────────────────────────────────
     handshake_without_a_timer,
@@ -55,6 +56,7 @@ pub const Rule = enum {
     fin_queued_and_not_sent,
     fin_wait_without_a_deadline,
     reopened_window_not_timed,
+    reopened_window_without_a_timer,
     reopened_window_not_announced,
 
     // ── after a turn ────────────────────────────────────────────────────────
@@ -73,12 +75,14 @@ pub const Rule = enum {
             .handshake_with_bytes => "a connection still in its handshake has bytes queued or received",
             .peer_finished_during_handshake => "the peer's FIN was taken before the handshake completed",
             .retries_past_the_limit => "more timeouts than max_retries without giving up",
+            .window_timer_without_news => "the window-update timer is armed, and no reopened window is being repeated",
             .handshake_without_a_timer => "a SYN-ACK is unanswered and nothing will send it again",
             .in_flight_without_a_timer => "bytes or a FIN are on the wire unacknowledged and nothing will send them again",
             .queued_without_a_timer => "bytes are queued and unsent, a turn has passed, and no timer will probe for room",
             .fin_queued_and_not_sent => "our FIN is queued behind nothing, and a turn passed without sending it",
             .fin_wait_without_a_deadline => "our FIN is acknowledged and nothing bounds the wait for the peer's",
             .reopened_window_not_timed => "a reopened window was announced and a turn passed without timing its repeat",
+            .reopened_window_without_a_timer => "a reopened window is said and not yet heard, and nothing will say it again",
             .reopened_window_not_announced => "the peer last saw a shut window, there is room now, and a turn passed without saying so",
             .deadline_passed => "a deadline is in the past after a turn that should have acted on it",
         };
@@ -110,7 +114,7 @@ pub fn checkConn(c: *const Conn, now: i96, phase: Phase) ?Rule {
 
 /// A slot that is free has been reset whole: nothing armed, nothing held.
 fn free(c: *const Conn) ?Rule {
-    if (c.rto_at != null or c.fin_wait_until != null or c.update_at != null or c.reopened)
+    if (c.rto_at != null or c.fin_wait_until != null or c.update_at != null or c.window_news != .none)
         return .closed_holds_a_deadline;
     if (c.queued() != 0 or c.start != 0 or c.end != 0) return .closed_holds_bytes;
     return null;
@@ -128,6 +132,9 @@ fn safety(c: *const Conn) ?Rule {
         if (c.peer_done) return .peer_finished_during_handshake;
     }
     if (c.retries > tcp.max_retries) return .retries_past_the_limit;
+    // One direction only: a repeating debt with no timer is a liveness
+    // failure, and the liveness table is the one to name it.
+    if (c.update_at != null and c.window_news != .repeating) return .window_timer_without_news;
     return null;
 }
 
@@ -163,7 +170,10 @@ const liveness = [_]Row{
     .{ .rule = .fin_wait_without_a_deadline, .owes = &finAcknowledged, .covered = &finWaitArmed },
     // A reopened window just announced: the next turn starts the clock on
     // which it is repeated (`update_at`).
-    .{ .rule = .reopened_window_not_timed, .owes = &reopenedFlag, .covered = &nextTurn },
+    .{ .rule = .reopened_window_not_timed, .owes = &saidOnce, .covered = &nextTurn },
+    // A reopened window said and not yet heard: `update_at`, which says it
+    // again until the peer sends, finishes, or `max_retries` have gone.
+    .{ .rule = .reopened_window_without_a_timer, .owes = &repeating, .covered = &updateArmed },
     // A window the peer last saw shut, with room now, and nobody has said so
     // (the reader made room without calling `ack`): the next turn says it.
     .{ .rule = .reopened_window_not_announced, .owes = &reopenedUnsaid, .covered = &nextTurn },
@@ -184,8 +194,11 @@ fn finQueued(c: *const Conn) bool {
 fn finAcknowledged(c: *const Conn) bool {
     return c.fin == .acknowledged;
 }
-fn reopenedFlag(c: *const Conn) bool {
-    return c.reopened;
+fn saidOnce(c: *const Conn) bool {
+    return c.window_news == .said_once;
+}
+fn repeating(c: *const Conn) bool {
+    return c.window_news == .repeating;
 }
 fn reopenedUnsaid(c: *const Conn) bool {
     if (c.state != .established and c.state != .closing) return false;
@@ -199,6 +212,9 @@ fn rtoArmed(c: *const Conn, _: Phase) bool {
 }
 fn finWaitArmed(c: *const Conn, _: Phase) bool {
     return c.fin_wait_until != null;
+}
+fn updateArmed(c: *const Conn, _: Phase) bool {
+    return c.update_at != null;
 }
 fn nextTurn(_: *const Conn, phase: Phase) bool {
     return phase == .after_handle;
@@ -267,6 +283,30 @@ test "a window the peer saw shut, with room again and nobody saying so, is owed"
     try testing.expectEqual(@as(?Rule, .reopened_window_not_announced), checkConn(&c, 0, .after_transmit));
     c.peer_done = true; // a finished peer is owed nothing
     try testing.expectEqual(@as(?Rule, null), checkConn(&c, 0, .after_transmit));
+}
+
+test "a reopened window said and not yet heard, with no timer to say it again, is owed" {
+    // The mutant that got past the first checker: announce() moving the debt
+    // to repeating without arming update_at. With the debt a state of its
+    // own, the state has a row, and the row asks for the timer.
+    var rx: [64]u8 = undefined;
+    var tx: [64]u8 = undefined;
+    var c = conn(&rx, &tx);
+    c.state = .established;
+    c.window_news = .repeating;
+    try testing.expectEqual(@as(?Rule, .reopened_window_without_a_timer), checkConn(&c, 0, .after_handle));
+    try testing.expectEqual(@as(?Rule, .reopened_window_without_a_timer), checkConn(&c, 0, .after_transmit));
+    c.update_at = 10;
+    try testing.expectEqual(@as(?Rule, null), checkConn(&c, 0, .after_transmit));
+    // Said once is the next turn's to time, and not after it.
+    c.window_news = .said_once;
+    c.update_at = null;
+    try testing.expectEqual(@as(?Rule, null), checkConn(&c, 0, .after_handle));
+    try testing.expectEqual(@as(?Rule, .reopened_window_not_timed), checkConn(&c, 0, .after_transmit));
+    // A timer with no debt behind it is bookkeeping gone wrong.
+    c.window_news = .none;
+    c.update_at = 10;
+    try testing.expectEqual(@as(?Rule, .window_timer_without_news), checkConn(&c, 0, .after_handle));
 }
 
 test "an acknowledged FIN with no bound on the wait for the peer's is owed" {

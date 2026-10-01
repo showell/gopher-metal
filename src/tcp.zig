@@ -188,11 +188,14 @@ pub const Conn = struct {
 
     /// **THE WINDOW WE LAST TOLD THE PEER**, in the last segment we sent it.
     told_wnd: u16 = 0xFFFF,
-    /// **A REOPENED WINDOW, SAID ONCE AND NOT YET HEARD.** Set when a segment
-    /// opens a window the peer last saw too small to send into; the next turn
-    /// of `transmit` starts the clock, and the announcement is repeated on it
-    /// until the peer sends something, finishes, or `max_retries` have gone.
-    reopened: bool = false,
+    /// **WHAT WE STILL OWE THE PEER ABOUT OUR WINDOW.** A segment that opens
+    /// a window the peer last saw too small to send into makes it
+    /// `.said_once`; the next turn of `transmit` makes it `.repeating` and
+    /// starts `update_at`, on which the announcement is said again until the
+    /// peer sends something, finishes, or `max_retries` have gone.
+    window_news: WindowNews = .none,
+    /// When the reopened window is said again. Armed exactly while
+    /// `window_news` is `.repeating`.
     update_at: ?i96 = null,
     updates: u8 = 0,
 
@@ -298,9 +301,20 @@ pub const Conn = struct {
 
     /// The peer has been heard sending: whatever we told it, it heard.
     fn heard(self: *Conn) void {
-        self.reopened = false;
+        self.window_news = .none;
         self.update_at = null;
     }
+};
+
+/// A connection's debt to the peer about its window, as a state of its own,
+/// so that each stage of it has a deadline the checker can ask for.
+pub const WindowNews = enum {
+    /// Nothing owed: the peer saw the window we have, or needs no telling.
+    none,
+    /// A reopened window was just said, once. The next turn times its repeat.
+    said_once,
+    /// Said, and not yet heard: said again at `update_at`, doubling.
+    repeating,
 };
 
 pub const Result = struct {
@@ -399,7 +413,8 @@ pub const Table = struct {
         if (c.tight(w)) {
             c.heard(); // nothing open to announce any more
         } else if (c.tight(c.told_wnd)) {
-            c.reopened = true;
+            c.window_news = .said_once;
+            c.update_at = null;
             c.updates = 0;
         }
         c.told_wnd = w;
@@ -604,15 +619,22 @@ pub const Table = struct {
         if (c.tight(c.told_wnd) and !c.tight(c.window())) {
             self.emit(wire, i, flag_ack, c.highest(), "");
         }
-        if (c.reopened) {
-            c.reopened = false;
-            c.update_at = now + c.rto_ns;
-            return;
+        switch (c.window_news) {
+            .none => return,
+            .said_once => {
+                c.window_news = .repeating;
+                c.update_at = now + c.rto_ns;
+                return;
+            },
+            .repeating => {},
         }
+        // Repeating: a missing timer is a broken debt, which the checker
+        // names; here it is only not acted on.
         const at = c.update_at orelse return;
         if (now < at) return;
         if (c.updates >= max_retries) {
-            c.update_at = null;
+            // It has nothing more to say, or it would have: the debt lapses.
+            c.heard();
             return;
         }
         c.updates += 1;
