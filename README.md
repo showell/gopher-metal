@@ -23,8 +23,14 @@ droplet through our own BIOS loader.
   `/etc/caddy/sites/`.
 - **Its data does not survive.** Every new image replaces the droplet's whole
   disk, chat's files included. That is accepted until much more testing has
-  been done (Steve, 2026-10-01). Where chat's files should live instead (a
-  DigitalOcean volume, or somewhere a deploy does not touch) is undecided.
+  been done (Steve, 2026-10-01). **The fix is built and not yet deployed:** a
+  DigitalOcean volume, which a new image does not touch (`src/scsi.zig`; the
+  kernel serves from a volume whenever one is attached). Still to do before it
+  goes live: the site's own files (`pages/`, `gallery/`) and
+  `gopher-metal.conf` belong with the image, not the volume, so the kernel is
+  to mount both disks, sending each path to the right one. FAT16 limits a
+  volume to 2 GB; prod's data is 215 MB (2026-10-01), and each user may upload
+  1 GiB, so FAT32 is the eventual next step.
 - **Its data is test data.** The volume is the chat judge's test site, whose
   accounts' password is in this repo, so anyone who reads the repo can log in
   to them.
@@ -93,6 +99,7 @@ droplet, booted from a custom image
 | virtio-blk over MMIO | **works** — reads, writes, and reads back |
 | virtio-net over MMIO | **works** |
 | virtio over PCI | **works** — disk and network found on a PC's bus, as a droplet has them |
+| a DigitalOcean volume (virtio-SCSI) | **works on the droplet-shaped QEMU** — found at any target and LUN; the chat judge serves from one and matches Linux. Not yet tried on a real volume |
 | DHCP | **works** — from QEMU's server and DigitalOcean's, asking again with RFC 2131's backoff |
 | ARP | **works** — answers, which is what makes the address reachable |
 | TCP | **works** — 256 connections; the peer's window and segment size respected, lost segments sent again, silent peers given up on; received in order only |
