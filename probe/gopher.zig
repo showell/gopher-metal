@@ -270,7 +270,7 @@ pub fn kmain() noreturn {
     // ── the network ─────────────────────────────────────────────────────────
     rng.attach(&rng_mem);
     const nic_base = virtio.find(virtio.device_id_net) orelse
-        serial.fail("no virtio-net device in any mmio slot");
+        serial.fail("no virtio-net device on the PCI bus or in any mmio slot");
     var nic = net.Net.init(nic_base, &nic_mem) catch serial.fail("the NIC would not come up");
     const lease = dhcp.acquire(&nic, &dhcp_frame, &dhcp_reply) catch
         serial.fail("no DHCP lease, so there is no address to listen on");

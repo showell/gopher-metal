@@ -78,7 +78,7 @@ pub fn kmain() noreturn {
 
     rng.attach(&rng_mem);
     const base = virtio.find(virtio.device_id_net) orelse
-        serial.fail("no virtio-net device in any mmio slot");
+        serial.fail("no virtio-net device on the PCI bus or in any mmio slot");
     var nic = net.Net.init(base, &nic_mem) catch serial.fail("the NIC would not come up");
 
     const lease = dhcp.acquire(&nic, &frame, &reply) catch

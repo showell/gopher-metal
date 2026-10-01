@@ -359,7 +359,7 @@ pub fn kmain() noreturn {
     const carved = pages.bring(pvh.largestFree(entries, metal.boot.image()));
     if (carved.pages_total == 0) serial.fail("no usable region of RAM");
 
-    const base = virtio.find(virtio.device_id_block) orelse serial.fail("no virtio-blk device");
+    const base = virtio.find(virtio.device_id_block) orelse serial.fail("no virtio-blk device on the PCI bus or in any mmio slot");
     var blk = blk_mem.bring(base) catch serial.fail("the block device would not come up");
     var vol = fat16.Volume.mount(&blk, &scratch, 0) catch serial.fail("the disk does not start with a FAT16 volume");
     const fat = pages.allocator.alloc(u8, vol.fatBytes()) catch serial.fail("no memory to hold the FAT");
@@ -381,7 +381,7 @@ pub fn kmain() noreturn {
 
     if (echo_port == 0) serial.fail("no echo_port= on the command line: the network rungs need the host");
     rng.attach(&rng_mem);
-    const nic_base = virtio.find(virtio.device_id_net) orelse serial.fail("no virtio-net device");
+    const nic_base = virtio.find(virtio.device_id_net) orelse serial.fail("no virtio-net device on the PCI bus or in any mmio slot");
     var nic = net.Net.init(nic_base, &nic_mem) catch serial.fail("the NIC would not come up");
     const lease = dhcp.acquire(&nic, &frame, &dhcp_reply) catch serial.fail("no DHCP lease");
     var link = Link{

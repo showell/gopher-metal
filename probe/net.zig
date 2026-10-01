@@ -35,10 +35,12 @@ pub fn kmain() noreturn {
 
     rng.attach(&rng_mem);
     const base = virtio.find(virtio.device_id_net) orelse
-        serial.fail("no virtio-net device in any mmio slot");
+        serial.fail("no virtio-net device on the PCI bus or in any mmio slot");
     serial.put("  device at 0x");
-    serial.putHex(base, 8);
-    serial.put("\n");
+    serial.putHex(base.address(), 8);
+    serial.put(" (");
+    serial.put(base.describe());
+    serial.put(")\n");
 
     var nic = net.Net.init(base, &nic_mem) catch |e| switch (e) {
         error.DeviceRefused => serial.fail("the device refused the driver"),

@@ -51,7 +51,7 @@ pub fn kmain() noreturn {
     serial.put("gopher-metal fat16 probe\n");
 
     const base = virtio.find(virtio.device_id_block) orelse
-        serial.fail("no virtio-blk device in any mmio slot");
+        serial.fail("no virtio-blk device on the PCI bus or in any mmio slot");
     var blk = blk_mem.bring(base) catch serial.fail("the block device would not come up");
 
     // **SECTOR 0 IS NOT THE FILESYSTEM.** These fixtures are GPT disks with a

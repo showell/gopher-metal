@@ -42,10 +42,12 @@ pub fn kmain() noreturn {
     }
 
     const base = virtio.find(virtio.device_id_block) orelse
-        serial.fail("no virtio-blk device in any mmio slot (is -device virtio-blk-device there?)");
+        serial.fail("no virtio-blk device on the PCI bus or in any mmio slot (is -device virtio-blk-device there?)");
     serial.put("  device at 0x");
-    serial.putHex(base, 8);
-    serial.put("\n");
+    serial.putHex(base.address(), 8);
+    serial.put(" (");
+    serial.put(base.describe());
+    serial.put(")\n");
 
     var blk = blk_mem.bring(base) catch |e| switch (e) {
         error.DeviceRefused => serial.fail("the device refused the driver"),

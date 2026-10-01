@@ -52,7 +52,7 @@ pub const Memory = struct {
 };
 
 pub const Net = struct {
-    base: usize,
+    device: virtio.Device,
     rx: Q,
     tx: Q,
     mem: *Memory,
@@ -61,10 +61,10 @@ pub const Net = struct {
     /// Frames sent since the device came up.
     sent: u64 = 0,
 
-    pub fn init(base: usize, mem: *Memory) virtio.Error!Net {
-        const st = try virtio.negotiate(base, feature_mac);
-        var rx = try Q.setup(base, 0, &mem.rx_ring);
-        const tx = try Q.setup(base, 1, &mem.tx_ring);
+    pub fn init(device: virtio.Device, mem: *Memory) virtio.Error!Net {
+        const st = try virtio.negotiate(device, feature_mac);
+        var rx = try Q.setup(device, 0, &mem.rx_ring);
+        const tx = try Q.setup(device, 1, &mem.tx_ring);
 
         // **EVERY RECEIVE BUFFER IS OFFERED BEFORE DRIVER_OK.** A frame that
         // arrives with no buffer waiting is dropped, and the first frame we
@@ -81,11 +81,11 @@ pub const Net = struct {
         }
 
         var mac: [6]u8 = undefined;
-        for (&mac, 0..) |*b, k| b.* = virtio.configRead8(base, @intCast(k));
+        for (&mac, 0..) |*b, k| b.* = virtio.configRead8(device, @intCast(k));
 
-        try virtio.driverOk(base, st);
+        try virtio.driverOk(device, st);
         rx.notify();
-        return .{ .base = base, .rx = rx, .tx = tx, .mem = mem, .mac = mac };
+        return .{ .device = device, .rx = rx, .tx = tx, .mem = mem, .mac = mac };
     }
 
     /// Sends one frame, and waits for the device to say it took it. Waiting is
@@ -105,14 +105,14 @@ pub const Net = struct {
         self.tx.offer(0);
         self.tx.notify();
         _ = self.tx.wait();
-        virtio.ack(self.base);
+        virtio.ack(self.device);
     }
 
     /// The next frame the device has delivered, or null. The slice points into
     /// the receive buffer it arrived in and stays valid until `recycle`.
     pub fn poll(self: *Net) ?struct { id: u16, frame: []const u8 } {
         const e = self.rx.take() orelse return null;
-        virtio.ack(self.base);
+        virtio.ack(self.device);
         const id: u16 = @intCast(e.id);
         if (id >= rx_buffers or e.len <= @sizeOf(Header)) {
             self.recycle(id);

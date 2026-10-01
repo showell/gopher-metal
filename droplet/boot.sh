@@ -11,11 +11,13 @@
 # **EVERY BOOT STARTS ON DIRTY RAM** (droplet.sh's DIRTY=1): a machine that
 # hands over zeroed memory hides a loader that forgot to zero it.
 #
-# Only the probes that need no virtio device are here so far: a droplet's
-# devices are on PCI, and the kernels still look for them where QEMU's microvm
-# puts them. `memory` boots at three sizes, because the memory map is the one
-# thing the loader builds from what the BIOS says, and 4 GB is where the map
-# gets a hole in it (the PCI window, under 4 GB) and a region above it.
+# `memory` boots at three sizes, because the memory map is the one thing the
+# loader builds from what the BIOS says, and 4 GB is where the map gets a hole
+# in it (the PCI window, under 4 GB) and a region above it. `block` and `net`
+# find their devices on the PCI bus, as on a droplet; `block` writes the disk's
+# last sector, which on this image is the backup GPT header, so it runs after
+# sgdisk has looked. `rng` finds no virtio-rng, because a droplet has none,
+# and draws from RDRAND alone.
 set -u
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="$(dirname "$HERE")"
@@ -30,7 +32,7 @@ as --32 -o "$WORK/loader.o" "$HERE/loader.S" \
 
 failed=0
 # probe:memory-in-MB
-for one in memory:512 memory:2048 memory:4096 clock:2048; do
+for one in memory:512 memory:2048 memory:4096 clock:2048 block:2048 net:2048 rng:2048; do
     probe="${one%%:*}"
     memory="${one##*:}"
     [ "$want" = all ] || [ "$want" = "$probe" ] || continue
@@ -50,7 +52,7 @@ for one in memory:512 memory:2048 memory:4096 clock:2048; do
     # The door turns the guest's 0 into QEMU's 1.
     if [ "$code" = 1 ] && [ "$(tail -1 "$WORK/out.txt" | tr -d '\r')" = PASS ]; then
         printf 'PASS %-7s %5s MB  %s (%s ms)\n' "$probe" "$memory" \
-            "$(grep -m1 'total ram\|tsc_hz' "$WORK/out.txt" | sed 's/^ *//')" "$ms"
+            "$(grep -a -m1 'total ram\|tsc_hz\|device at\|virtio-rng' "$WORK/out.txt" | sed 's/^ *//')" "$ms"
     else
         echo "FAIL $probe  $memory MB, exit $code:"; sed 's/^/    /' "$WORK/out.txt"; failed=1
     fi

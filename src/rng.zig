@@ -44,16 +44,16 @@ pub const Memory = struct {
     buf: [256]u8 align(16) = undefined,
 };
 
-var device: ?struct { base: usize, q: Q, mem: *Memory } = null;
+var device: ?struct { device: virtio.Device, q: Q, mem: *Memory } = null;
 
 /// Brings virtio-rng up if the machine has one. A machine without one is not an
 /// error here; RDRAND may still answer.
 pub fn attach(mem: *Memory) void {
-    const base = virtio.find(device_id_entropy) orelse return;
-    const st = virtio.negotiate(base, 0) catch return;
-    const q = Q.setup(base, 0, &mem.ring) catch return;
-    virtio.driverOk(base, st) catch return;
-    device = .{ .base = base, .q = q, .mem = mem };
+    const found = virtio.find(device_id_entropy) orelse return;
+    const st = virtio.negotiate(found, 0) catch return;
+    const q = Q.setup(found, 0, &mem.ring) catch return;
+    virtio.driverOk(found, st) catch return;
+    device = .{ .device = found, .q = q, .mem = mem };
 }
 
 /// Asks the host for bytes. Answers how many arrived, which may be zero.
@@ -70,7 +70,7 @@ fn fromHost(out: []u8) usize {
     d.q.offer(0);
     d.q.notify();
     const used = d.q.wait();
-    virtio.ack(d.base);
+    virtio.ack(d.device);
 
     const got = @min(@as(usize, used.len), want);
     @memcpy(out[0..got], d.mem.buf[0..got]);

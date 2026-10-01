@@ -55,7 +55,7 @@ pub fn kmain() noreturn {
 
     rng.attach(&rng_mem);
     const base = virtio.find(virtio.device_id_net) orelse
-        serial.fail("no virtio-net device in any mmio slot");
+        serial.fail("no virtio-net device on the PCI bus or in any mmio slot");
     var nic = net.Net.init(base, &nic_mem) catch serial.fail("the NIC would not come up");
 
     const lease = dhcp.acquire(&nic, &dhcp_frame, &dhcp_reply) catch
@@ -73,7 +73,7 @@ pub fn kmain() noreturn {
     var spins: usize = 0;
     while (spins < 200_000_000) : (spins += 1) {
         const c = &table.conns[0];
-        if (c.state == .established and metal.ready.check(c.pending(), c.peer_done) != .waiting) break;
+        if (c.state == .established and metal.ready.check(c.pending(), c.peer_done, c.rx.len) != .waiting) break;
         if (stream.pump(&wire, &table, lease.address) == null) asm volatile ("pause");
     }
     if (table.conns[0].state != .established) serial.fail("nothing connected before the spin budget ran out");

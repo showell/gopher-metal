@@ -1,4 +1,4 @@
-//! virtio over MMIO: the transport, and the block device on it.
+//! virtio: the two transports, the virtqueue, and the block device.
 //!
 //! **THIS IS THE DEVICE THE FLOOR'S DISK DOOR WAS ALREADY SHAPED FOR.** A
 //! virtio-blk request is a header naming a sector, a data buffer named by
@@ -6,18 +6,55 @@
 //! outcome, arrived at from the other direction. Nothing here copies a sector;
 //! the device writes into the page the caller named.
 //!
-//! The transport is virtio-mmio, not PCI: a device is a window of registers at
-//! a known physical address, with a magic value at offset 0 and no bus to
-//! enumerate. That is what QEMU's `microvm` machine and Firecracker give a
-//! guest, and it is the smallest thing that could possibly work. A cloud VM
-//! hands out the same devices behind PCI instead, which is a discovery
-//! problem and not a different driver.
+//! **TWO TRANSPORTS, ONE DRIVER.** On QEMU's `microvm` (and Firecracker) a
+//! device is a window of registers at a known address, with a magic value at
+//! offset 0 and no bus to enumerate: virtio-mmio. On a PC, and so on a
+//! DigitalOcean droplet, the same devices sit on the PCI bus and say, through
+//! their capability list, which of their memory windows holds which controls:
+//! virtio-pci. Everything above "write the status", "pick a queue" and "ring
+//! the doorbell" is the same, so a `Device` is either kind and the rest of
+//! this file does not ask which.
 //!
-//! The spec is virtio 1.2. Register offsets and constants below are its
-//! numbers, not ours.
+//! The spec is virtio 1.2 (§4.1 PCI, §4.2 MMIO). Register offsets and
+//! constants below are its numbers, not ours. Only the modern interface is
+//! spoken on either transport.
 
 const std = @import("std");
 const tsc = @import("tsc.zig");
+const pci = @import("pci.zig");
+
+/// A device, found on whichever transport this machine has.
+pub const Device = union(enum) {
+    /// The base of its register window.
+    mmio: usize,
+    pci: Pci,
+
+    pub fn describe(self: Device) []const u8 {
+        return switch (self) {
+            .mmio => "virtio-mmio",
+            .pci => "virtio-pci",
+        };
+    }
+
+    /// Where it is, for a report: the register window on mmio, the common
+    /// configuration's window on pci.
+    pub fn address(self: Device) u64 {
+        return switch (self) {
+            .mmio => |base| base,
+            .pci => |p| p.common,
+        };
+    }
+};
+
+/// Where a PCI device's four kinds of control live, from its capabilities.
+pub const Pci = struct {
+    function: pci.Function,
+    common: usize,
+    notify: usize,
+    notify_multiplier: u32,
+    isr: usize,
+    device: usize,
+};
 
 // ---- the mmio register window --------------------------------------------
 
@@ -49,6 +86,31 @@ const Reg = enum(u32) {
 
 const magic_value: u32 = 0x74726976;
 
+// ---- the pci common configuration (§4.1.4.3) -----------------------------
+//
+// **EACH FIELD IS READ AND WRITTEN AT ITS OWN WIDTH.** The spec requires it,
+// and the widths are not all 32 bits: the status is a byte, a queue's size a
+// 16-bit word.
+
+const common_device_feature_select = 0x00; // u32
+const common_device_feature = 0x04; // u32
+const common_driver_feature_select = 0x08; // u32
+const common_driver_feature = 0x0C; // u32
+const common_device_status = 0x14; // u8
+const common_queue_select = 0x16; // u16
+const common_queue_size = 0x18; // u16: the device's maximum, until we write ours
+const common_queue_enable = 0x1C; // u16
+const common_queue_notify_off = 0x1E; // u16
+const common_queue_desc = 0x20; // u64
+const common_queue_driver = 0x28; // u64
+const common_queue_device = 0x30; // u64
+
+/// The capability types a virtio-pci device lists (§4.1.4).
+const cap_common: u8 = 1;
+const cap_notify: u8 = 2;
+const cap_isr: u8 = 3;
+const cap_device: u8 = 4;
+
 /// Status bits the driver walks up in order; the device watches them.
 const status_acknowledge: u32 = 1;
 const status_driver: u32 = 2;
@@ -69,25 +131,95 @@ fn fence() void {
     asm volatile ("mfence" ::: .{ .memory = true });
 }
 
+fn read8(at: usize) u8 {
+    return @as(*volatile u8, @ptrFromInt(at)).*;
+}
+fn read16(at: usize) u16 {
+    return @as(*volatile u16, @ptrFromInt(at)).*;
+}
+fn read32(at: usize) u32 {
+    return @as(*volatile u32, @ptrFromInt(at)).*;
+}
+fn write8(at: usize, v: u8) void {
+    @as(*volatile u8, @ptrFromInt(at)).* = v;
+}
+fn write16(at: usize, v: u16) void {
+    @as(*volatile u16, @ptrFromInt(at)).* = v;
+}
+fn write32(at: usize, v: u32) void {
+    @as(*volatile u32, @ptrFromInt(at)).* = v;
+}
+fn write64(at: usize, v: u64) void {
+    write32(at, @truncate(v));
+    write32(at + 4, @truncate(v >> 32));
+}
+
 fn mmioRead(base: usize, reg: Reg) u32 {
-    const p: *volatile u32 = @ptrFromInt(base + @intFromEnum(reg));
-    return p.*;
+    return read32(base + @intFromEnum(reg));
 }
 
 fn mmioWrite(base: usize, reg: Reg, value: u32) void {
-    const p: *volatile u32 = @ptrFromInt(base + @intFromEnum(reg));
-    p.* = value;
+    write32(base + @intFromEnum(reg), value);
 }
 
-pub fn configRead8(base: usize, off: u32) u8 {
-    const p: *volatile u8 = @ptrFromInt(base + @intFromEnum(Reg.config) + off);
-    return p.*;
+// ---- the operations, once per transport ----------------------------------
+
+fn setStatus(d: Device, v: u32) void {
+    switch (d) {
+        .mmio => |base| mmioWrite(base, .status, v),
+        .pci => |p| write8(p.common + common_device_status, @truncate(v)),
+    }
 }
 
-fn configRead64(base: usize, off: u32) u64 {
-    const lo: *volatile u32 = @ptrFromInt(base + @intFromEnum(Reg.config) + off);
-    const hi: *volatile u32 = @ptrFromInt(base + @intFromEnum(Reg.config) + off + 4);
-    return (@as(u64, hi.*) << 32) | lo.*;
+fn getStatus(d: Device) u32 {
+    return switch (d) {
+        .mmio => |base| mmioRead(base, .status),
+        .pci => |p| read8(p.common + common_device_status),
+    };
+}
+
+fn deviceFeatures(d: Device, select: u32) u32 {
+    switch (d) {
+        .mmio => |base| {
+            mmioWrite(base, .device_features_sel, select);
+            return mmioRead(base, .device_features);
+        },
+        .pci => |p| {
+            write32(p.common + common_device_feature_select, select);
+            return read32(p.common + common_device_feature);
+        },
+    }
+}
+
+fn driverFeatures(d: Device, select: u32, value: u32) void {
+    switch (d) {
+        .mmio => |base| {
+            mmioWrite(base, .driver_features_sel, select);
+            mmioWrite(base, .driver_features, value);
+        },
+        .pci => |p| {
+            write32(p.common + common_driver_feature_select, select);
+            write32(p.common + common_driver_feature, value);
+        },
+    }
+}
+
+/// The device-specific configuration: a block device's capacity, a network
+/// card's address.
+fn configAddress(d: Device, off: u32) usize {
+    return switch (d) {
+        .mmio => |base| base + @intFromEnum(Reg.config) + off,
+        .pci => |p| p.device + off,
+    };
+}
+
+pub fn configRead8(d: Device, off: u32) u8 {
+    return read8(configAddress(d, off));
+}
+
+fn configRead64(d: Device, off: u32) u64 {
+    const at = configAddress(d, off);
+    return (@as(u64, read32(at + 4)) << 32) | read32(at);
 }
 
 /// Every window QEMU's microvm machine puts a virtio-mmio transport in: slots
@@ -114,19 +246,92 @@ pub fn deviceIdAt(base: usize) u32 {
     return mmioRead(base, .device_id);
 }
 
-/// The first slot holding a device of this kind, or null. A slot whose magic
-/// is wrong is empty; a slot whose version is not 2 is the legacy interface,
-/// which this driver does not speak and will not pretend to.
-pub fn find(want: u32) ?usize {
+/// The first device of this kind, or null.
+pub fn find(want: u32) ?Device {
+    return findNth(want, 0);
+}
+
+/// The `n`th device of this kind (0 is the first), or null. **A MACHINE WITH
+/// A PCI BUS IS ASKED THROUGH IT**, and only a machine without one has its
+/// mmio slots scanned: the two are never mixed, so a PCI window that happened
+/// to sit where an mmio slot would cannot be mistaken for one. A droplet has
+/// two network cards (public, then private, in slot order) and two disks (the
+/// boot disk, then the config drive), which is what `n` is for.
+pub fn findNth(want: u32, n: usize) ?Device {
+    var seen: usize = 0;
+    if (pci.present()) {
+        var scan = pci.Scan{};
+        while (scan.next()) |f| {
+            if (pciType(f) != want) continue;
+            const d = pciDevice(f) orelse continue;
+            if (seen == n) return .{ .pci = d };
+            seen += 1;
+        }
+        return null;
+    }
     var i: usize = 0;
     while (i < mmio_slots) : (i += 1) {
         const base = mmio_base + i * mmio_stride;
+        // A slot whose magic is wrong is empty; one whose version is not 2 is
+        // the legacy interface, which this driver does not speak.
         if (mmioRead(base, .magic) != magic_value) continue;
         if (mmioRead(base, .device_id) != want) continue;
         if (mmioRead(base, .version) != 2) continue;
-        return base;
+        if (seen == n) return .{ .mmio = base };
+        seen += 1;
     }
     return null;
+}
+
+/// The virtio device type of a PCI function, or 0 if it is not virtio.
+/// **TWO NUMBERINGS** (§4.1.2.1): a modern-only device is 0x1040 plus its
+/// type; a transitional one (what a droplet has: 0x1000 for its network cards,
+/// 0x1001 for its disks) is 0x1000-0x103F and says its type in the subsystem
+/// id instead.
+fn pciType(f: pci.Function) u32 {
+    if (f.vendor() != 0x1AF4) return 0;
+    const id = f.device();
+    if (id >= 0x1040 and id <= 0x107F) return id - 0x1040;
+    if (id >= 0x1000 and id <= 0x103F) return f.subsystem();
+    return 0;
+}
+
+/// Reads the capability list into the four windows, and lets the device at
+/// memory. Null if any of the four is missing: that is a legacy-only device,
+/// which this driver does not speak.
+fn pciDevice(f: pci.Function) ?Pci {
+    var common: ?usize = null;
+    var notify: ?usize = null;
+    var isr: ?usize = null;
+    var device: ?usize = null;
+    var multiplier: u32 = 0;
+    var caps = f.capabilities();
+    while (caps.nextOne()) |cap| {
+        if (cap.id != 0x09) continue; // vendor-specific: virtio's
+        const kind = f.read8(cap.at + 3);
+        const bar = f.bar(f.read8(cap.at + 4)) orelse continue;
+        const at: usize = @intCast(bar + f.read32(cap.at + 8));
+        switch (kind) {
+            cap_common => common = common orelse at,
+            cap_notify => if (notify == null) {
+                notify = at;
+                multiplier = f.read32(cap.at + 16);
+            },
+            cap_isr => isr = isr orelse at,
+            cap_device => device = device orelse at,
+            else => {},
+        }
+    }
+    const found = Pci{
+        .function = f,
+        .common = common orelse return null,
+        .notify = notify orelse return null,
+        .notify_multiplier = multiplier,
+        .isr = isr orelse return null,
+        .device = device orelse return null,
+    };
+    f.enable();
+    return found;
 }
 
 // ---- the virtqueue -------------------------------------------------------
@@ -176,33 +381,54 @@ pub fn Queue(comptime size: u16) type {
         const Self = @This();
         pub const RingType = Ring(size);
 
-        base: usize,
+        device: Device,
         index: u16,
         ring: *RingType,
         last_used: u16 = 0,
+        /// Where this queue's doorbell is: one register for every queue on
+        /// mmio, a register of its own on pci.
+        doorbell: usize,
 
         /// Tells the device where this queue's rings are and marks it ready.
         /// Must happen before DRIVER_OK.
-        pub fn setup(base: usize, index: u16, ring: *RingType) Error!Self {
-            mmioWrite(base, .queue_sel, index);
-            if (mmioRead(base, .queue_num_max) < size) return Error.QueueTooSmall;
-            mmioWrite(base, .queue_num, size);
-
+        pub fn setup(device: Device, index: u16, ring: *RingType) Error!Self {
             const ring_addr = @intFromPtr(ring);
             const avail_addr = ring_addr + @offsetOf(RingType, "avail_flags");
             const used_addr = ring_addr + @offsetOf(RingType, "used_flags");
-            mmioWrite(base, .queue_desc_lo, @truncate(ring_addr));
-            mmioWrite(base, .queue_desc_hi, @truncate(ring_addr >> 32));
-            mmioWrite(base, .queue_driver_lo, @truncate(avail_addr));
-            mmioWrite(base, .queue_driver_hi, @truncate(avail_addr >> 32));
-            mmioWrite(base, .queue_device_lo, @truncate(used_addr));
-            mmioWrite(base, .queue_device_hi, @truncate(used_addr >> 32));
-            mmioWrite(base, .queue_ready, 1);
+            var doorbell: usize = undefined;
+            switch (device) {
+                .mmio => |base| {
+                    mmioWrite(base, .queue_sel, index);
+                    if (mmioRead(base, .queue_num_max) < size) return Error.QueueTooSmall;
+                    mmioWrite(base, .queue_num, size);
+                    mmioWrite(base, .queue_desc_lo, @truncate(ring_addr));
+                    mmioWrite(base, .queue_desc_hi, @truncate(ring_addr >> 32));
+                    mmioWrite(base, .queue_driver_lo, @truncate(avail_addr));
+                    mmioWrite(base, .queue_driver_hi, @truncate(avail_addr >> 32));
+                    mmioWrite(base, .queue_device_lo, @truncate(used_addr));
+                    mmioWrite(base, .queue_device_hi, @truncate(used_addr >> 32));
+                    mmioWrite(base, .queue_ready, 1);
+                    doorbell = base + @intFromEnum(Reg.queue_notify);
+                },
+                .pci => |p| {
+                    write16(p.common + common_queue_select, index);
+                    // Zero is "no such queue"; otherwise the device's maximum.
+                    const max = read16(p.common + common_queue_size);
+                    if (max < size) return Error.QueueTooSmall;
+                    write16(p.common + common_queue_size, size);
+                    write64(p.common + common_queue_desc, ring_addr);
+                    write64(p.common + common_queue_driver, avail_addr);
+                    write64(p.common + common_queue_device, used_addr);
+                    const off = read16(p.common + common_queue_notify_off);
+                    doorbell = p.notify + @as(usize, off) * p.notify_multiplier;
+                    write16(p.common + common_queue_enable, 1);
+                },
+            }
 
             ring.avail_flags = 0;
             ring.avail_idx = 0;
             ring.used_idx = 0;
-            return .{ .base = base, .index = index, .ring = ring };
+            return .{ .device = device, .index = index, .ring = ring, .doorbell = doorbell };
         }
 
         /// Puts the chain starting at descriptor `head` on the available ring.
@@ -216,7 +442,10 @@ pub fn Queue(comptime size: u16) type {
 
         /// Rings the doorbell for this queue.
         pub fn notify(self: *Self) void {
-            mmioWrite(self.base, .queue_notify, self.index);
+            switch (self.device) {
+                .mmio => write32(self.doorbell, self.index),
+                .pci => write16(self.doorbell, self.index),
+            }
         }
 
         /// The next completion, or null if the device has published none.
@@ -245,50 +474,57 @@ pub fn Queue(comptime size: u16) type {
 ///
 /// Answers the status word so far; the caller adds its queues, then calls
 /// `driverOk`.
-pub fn negotiate(base: usize, want_low: u32) Error!u32 {
-    mmioWrite(base, .status, 0); // reset
+pub fn negotiate(d: Device, want_low: u32) Error!u32 {
+    setStatus(d, 0); // reset
+    // **A RESET IS NOT DONE UNTIL THE DEVICE SAYS SO** on pci (§4.1.4.3.1):
+    // the status reads back 0 once it is. mmio's reset is immediate.
+    if (d == .pci) {
+        while (getStatus(d) != 0) asm volatile ("pause");
+    }
     var st: u32 = status_acknowledge;
-    mmioWrite(base, .status, st);
+    setStatus(d, st);
     st |= status_driver;
-    mmioWrite(base, .status, st);
+    setStatus(d, st);
 
-    mmioWrite(base, .device_features_sel, 1);
-    const hi = mmioRead(base, .device_features);
+    const hi = deviceFeatures(d, 1);
     if (hi & (@as(u32, 1) << (feature_version_1 - 32)) == 0) {
-        mmioWrite(base, .status, status_failed);
+        setStatus(d, status_failed);
         return Error.DeviceRefused;
     }
-    mmioWrite(base, .device_features_sel, 0);
-    const lo = mmioRead(base, .device_features);
+    const lo = deviceFeatures(d, 0);
     if (lo & want_low != want_low) {
-        mmioWrite(base, .status, status_failed);
+        setStatus(d, status_failed);
         return Error.DeviceRefused;
     }
 
-    mmioWrite(base, .driver_features_sel, 1);
-    mmioWrite(base, .driver_features, @as(u32, 1) << (feature_version_1 - 32));
-    mmioWrite(base, .driver_features_sel, 0);
-    mmioWrite(base, .driver_features, want_low);
+    driverFeatures(d, 1, @as(u32, 1) << (feature_version_1 - 32));
+    driverFeatures(d, 0, want_low);
 
     st |= status_features_ok;
-    mmioWrite(base, .status, st);
-    if (mmioRead(base, .status) & status_features_ok == 0) {
-        mmioWrite(base, .status, status_failed);
+    setStatus(d, st);
+    if (getStatus(d) & status_features_ok == 0) {
+        setStatus(d, status_failed);
         return Error.DeviceRefused;
     }
     return st;
 }
 
-pub fn driverOk(base: usize, st: u32) Error!void {
-    mmioWrite(base, .status, st | status_driver_ok);
-    if (mmioRead(base, .status) & status_failed != 0) return Error.DeviceRefused;
+pub fn driverOk(d: Device, st: u32) Error!void {
+    setStatus(d, st | status_driver_ok);
+    if (getStatus(d) & status_failed != 0) return Error.DeviceRefused;
 }
 
 /// The interrupt this device raised, acknowledged. Polling drivers still have
-/// to do this or the device stops raising them.
-pub fn ack(base: usize) void {
-    const s = mmioRead(base, .interrupt_status);
-    if (s != 0) mmioWrite(base, .interrupt_ack, s);
+/// to do this or the device stops raising them. On pci, reading the ISR byte
+/// is the acknowledgement.
+pub fn ack(d: Device) void {
+    switch (d) {
+        .mmio => |base| {
+            const s = mmioRead(base, .interrupt_status);
+            if (s != 0) mmioWrite(base, .interrupt_ack, s);
+        },
+        .pci => |p| _ = read8(p.isr),
+    }
 }
 
 pub const Error = error{ NoDevice, DeviceRefused, QueueTooSmall, TransferFailed };
@@ -313,7 +549,7 @@ const BlkReqHeader = extern struct {
 pub const Block = struct {
     pub const Q = Queue(8);
 
-    base: usize,
+    device: Device,
     q: Q,
     header: *BlkReqHeader,
     status: *volatile u8,
@@ -330,16 +566,16 @@ pub const Block = struct {
     /// `mem` is memory the caller owns and keeps for as long as the device is
     /// up; it must be identity-mapped, since what goes in a descriptor is a
     /// PHYSICAL address.
-    pub fn init(base: usize, mem: *BlockMemory) Error!Block {
-        const st = try negotiate(base, 0);
-        const q = try Q.setup(base, 0, &mem.ring);
-        try driverOk(base, st);
+    pub fn init(device: Device, mem: *BlockMemory) Error!Block {
+        const st = try negotiate(device, 0);
+        const q = try Q.setup(device, 0, &mem.ring);
+        try driverOk(device, st);
         return .{
-            .base = base,
+            .device = device,
             .q = q,
             .header = &mem.header,
             .status = &mem.status,
-            .capacity = configRead64(base, 0),
+            .capacity = configRead64(device, 0),
         };
     }
 
@@ -368,7 +604,7 @@ pub const Block = struct {
         self.q.offer(0);
         self.q.notify();
         _ = self.q.wait();
-        ack(self.base);
+        ack(self.device);
         self.busy_ticks +%= tsc.read() -% began;
         self.requests +%= 1;
         return self.status.*;
@@ -416,7 +652,7 @@ pub const BlockMemory = struct {
     header: BlkReqHeader align(16) = undefined,
     status: u8 = 0,
 
-    pub fn bring(self: *BlockMemory, base: usize) Error!Block {
-        return Block.init(base, self);
+    pub fn bring(self: *BlockMemory, device: Device) Error!Block {
+        return Block.init(device, self);
     }
 };

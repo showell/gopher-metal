@@ -132,7 +132,7 @@ pub fn kmain() noreturn {
     serial.put("gopher-metal replace probe\n");
 
     const base = virtio.find(virtio.device_id_block) orelse
-        serial.fail("no virtio-blk device in any mmio slot");
+        serial.fail("no virtio-blk device on the PCI bus or in any mmio slot");
     var blk = blk_mem.bring(base) catch serial.fail("the block device would not come up");
     var vol = fat16.Volume.mount(&blk, &scratch, 0) catch
         serial.fail("this is not the FAT16 volume the probe expects");
