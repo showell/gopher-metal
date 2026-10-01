@@ -276,7 +276,10 @@ fn drainFn(w: *Writer, data: []const []const u8, splat: usize) Writer.Error!usiz
         try self.sendAll(w.buffer[0..w.end]);
         w.end = 0;
     }
-    if (data.len == 0) return 0;
+    if (data.len == 0) {
+        self.pumpOnce();
+        return 0;
+    }
 
     var written: usize = 0;
     for (data[0 .. data.len - 1]) |bytes| {
@@ -291,6 +294,12 @@ fn drainFn(w: *Writer, data: []const []const u8, splat: usize) Writer.Error!usiz
             written += pattern.len;
         }
     }
+    // **WHAT IS DRAINED GOES ON THE WIRE NOW.** `sendAll` only queues what
+    // fits, and a queue nobody transmits waits for the next turn of the
+    // network — which, after a request, comes after the host has written its
+    // log. On a droplet, where every character logged is a trip out to the
+    // hypervisor, that held every answer behind its own log line.
+    self.pumpOnce();
     return written;
 }
 
