@@ -49,6 +49,43 @@
 //! caller supplies, and the time is a number the caller passes. The kernel
 //! passes the NIC, the entropy pool and its clock; the tests pass a recorder,
 //! a counter and a fake.
+//!
+//! **WHAT WAITS IN THE TABLE, AND WHAT BOUNDS THE WAIT** (TCP_TESTING.md §2;
+//! tcp_check.zig's liveness table is the same list, checked). Every deadline
+//! here is looked at only inside `transmit`, so each bound below is "the
+//! deadline, plus however long until the next `transmit`" — and that second
+//! part is the host's to bound (stream.zig).
+//!
+//! - **Bytes queued and not yet sent** (`tx`, past `sent`). Sent by the next
+//!   `transmit` as far as the peer's window allows. Bounded by: the window;
+//!   while it is shut, a probe at `rto_at`, and a reset after `max_retries`
+//!   timeouts with no progress.
+//! - **Bytes and a FIN on the wire, unacknowledged** (`tx` up to `high`).
+//!   Sent again at `rto_at` (the measured clock, at least `min_rto_ns`,
+//!   doubling to `max_rto_ns`), or at once on three duplicate
+//!   acknowledgements. Bounded by: a reset after `max_retries` timeouts with
+//!   nothing acknowledged — about 16 s from a 200 ms clock, 35 s at most.
+//! - **Our FIN, queued** (`fin == .queued`). Sent by the first `transmit`
+//!   after the last queued byte. Bounded by: the bytes ahead of it (above).
+//! - **Our SYN-ACK, unanswered** (`syn_received`). Sent again at `rto_at`.
+//!   Bounded by: `max_retries`, the same as bytes on the wire.
+//! - **The peer's FIN, after ours was acknowledged.** Waited for until
+//!   `fin_wait_until`. Bounded by: `fin_wait_ns` (30 s), then a reset.
+//! - **A reopened window the peer may not have seen** (`window_news`).
+//!   `.said_once` is timed by the next `transmit`; `.repeating` is said again
+//!   at `update_at`, doubling. Bounded by: the peer sending anything, or
+//!   `max_retries` repeats, after which the debt lapses.
+//! - **Bytes received and not yet read** (`rx[start..end]`). Not the table's
+//!   to drain: the host reads them. Bounded by: the host — in gopher.zig, the
+//!   loop serves a connection once its request is whole, and lets go of one
+//!   silent for `idle_ns`. While the buffer is full the window is shut, and
+//!   the peer waits on its own persist timer.
+//!
+//! **NOT QUEUED AT ALL**, so nothing can be left waiting: an acknowledgement
+//! (every in-order segment is acknowledged as it is taken; there is no
+//! delayed ACK), a segment out of order (dropped and re-acknowledged; the
+//! peer's timer sends it again), and a SYN that finds no free slot (dropped
+//! and counted; the peer's SYN timer tries again).
 
 const proto = @import("proto.zig");
 

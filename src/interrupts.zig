@@ -25,6 +25,27 @@
 //! `install` also gives the processor's exceptions somewhere to go: a fault
 //! prints which one and where, rather than resetting the machine.
 //!
+//! **WHAT WAITS HERE, AND WHAT BOUNDS THE WAIT** (TCP_TESTING.md §2).
+//! Interrupts carry no work, only wake-ups: every handler ends the interrupt
+//! and returns, and the loop that halted finds the work by looking. So an
+//! interrupt can delay work, never lose it.
+//!
+//! - **The machine itself, halted in `rest`.** Woken by the network card
+//!   (MSI-X, `wake_vector`) or by the APIC timer. Bounded by: `slice_ns`
+//!   (1 ms) — `rest` writes the timer's deadline before every halt, so no
+//!   halt is ever without one. Before `arm`, and on a card that cannot
+//!   interrupt (mmio), `rest` is one `pause` and nothing halts.
+//! - **An interrupt raised while interrupts are off**, which is always,
+//!   outside `rest`'s one instruction. Held by the local APIC and taken by
+//!   the next halt, which then returns at once. Bounded by: the next `rest`
+//!   — but what it signals (a frame) is found by the next `pump` whether or
+//!   not the interrupt is ever taken.
+//!
+//! What a halt must never do is begin with work already owed. The callers
+//! rest only after a turn of the network that found nothing: the main loop
+//! when nothing arrived and nothing was served, and every wait in
+//! `stream.Stream` after a `pump` that returned null.
+//!
 //! Intel SDM vol. 3A: §6.10-6.14 (the IDT), §11.4-11.5 (the local APIC and its
 //! timer), §10.11 (MSI message format).
 
