@@ -2,7 +2,8 @@
 """**CHAT, ON A DISK A DROPLET CAN BOOT.** The real server (gopher.elf) in
 partition 1, and in partition 2 a FAT16 volume holding the judge's own staged
 site: the same pages, the same two test accounts (Steve and apoorva, the
-judge's test password), the same session secret. Test data, never prod's.
+judge's test password), the same session secret, plus the home page's
+pictures (gallery/). Test data, never prod's.
 
 The volume is built by the judge's own functions (stage, build_disk), so it is
 the volume `probe/run.sh gopher` already judges against Linux, and its
@@ -15,6 +16,7 @@ reach it, only machines on the droplet's private network, prod among them.
 Needs `sudo -n` for the loop mount, as the judge does.
 """
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -40,6 +42,10 @@ def main() -> int:
         content = os.path.join(work, "content")
         os.makedirs(content)
         judge.stage(content, GOPHER_ROOT)
+        # The home page's pictures: prod's deploy copies gallery/ beside
+        # pages/, and the server reads them from disk. The judge's site leaves
+        # them out (it compares answers, not pictures), so they are added here.
+        shutil.copytree(os.path.join(GOPHER_ROOT, "gallery"), os.path.join(content, "gallery"))
         # A connection that makes no progress for ten seconds is let go, as in
         # the judge; no `requests` line, so the machine never stops on its own;
         # and only the private card, where prod's Caddy reaches it.

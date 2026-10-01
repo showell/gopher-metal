@@ -42,7 +42,7 @@ s.connect(os.path.join(work, "monitor"))
 def ask(cmd):
     s.sendall((cmd + "\n").encode())
     time.sleep(0.3)
-ask(f'pmemsave 0xb8000 4000 "{work}/screen.bin"')
+ask(f'pmemsave 0xb8000 32000 "{work}/screen.bin"')
 if ppm:
     ask(f'screendump "{ppm}"')
 ask("quit")
@@ -54,11 +54,12 @@ python3 - "$WORK" <<'PY'
 import sys
 work = sys.argv[1]
 raw = open(f"{work}/screen.bin", "rb").read()
-screen = [bytes(raw[(r * 80 + c) * 2] for c in range(80)).decode("latin-1").rstrip() for r in range(25)]
+screen = [bytes(raw[(r * 80 + c) * 2] for c in range(80)).decode("latin-1").rstrip() for r in range(200)]
 said = [l.rstrip("\r\n").rstrip() for l in open(f"{work}/serial.txt", encoding="latin-1")]
 said = [l for l in said if l]
 print("  ┌" + "─" * 80 + "┐")
-for line in screen:
+shown = [l for l in screen if l.strip()]
+for line in shown:
     print("  │" + line.ljust(80) + "│")
 print("  └" + "─" * 80 + "┘")
 # Each serial line, in order, among the screen's rows.

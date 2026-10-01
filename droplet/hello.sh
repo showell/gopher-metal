@@ -47,7 +47,7 @@ python3 - "$WORK" <<'PY'
 import socket, sys, time, os
 s = socket.socket(socket.AF_UNIX)
 s.connect(os.path.join(sys.argv[1], "monitor"))
-for cmd in [f'pmemsave 0xb8000 4000 "{sys.argv[1]}/screen.bin"', "quit"]:
+for cmd in [f'pmemsave 0xb8000 32000 "{sys.argv[1]}/screen.bin"', "quit"]:
     s.sendall((cmd + "\n").encode())
     time.sleep(0.3)
 PY
@@ -58,7 +58,7 @@ python3 - "$WORK" "$n" <<'PY' || failed=1
 import sys
 work, n = sys.argv[1], int(sys.argv[2])
 raw = open(f"{work}/screen.bin", "rb").read()
-screen = [bytes(raw[(r * 80 + c) * 2] for c in range(80)).decode("latin-1").rstrip() for r in range(25)]
+screen = [bytes(raw[(r * 80 + c) * 2] for c in range(80)).decode("latin-1").rstrip() for r in range(200)]
 for line in screen:
     if line.strip():
         print("    | " + line)
