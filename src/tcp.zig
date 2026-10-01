@@ -258,7 +258,7 @@ pub const Conn = struct {
     /// `sent` is not it: a timeout rewinds `sent` to re-send from `una`, and a
     /// segment numbered back there is behind the peer's window and is
     /// discarded (a reset) or answered with a duplicate acknowledgement.
-    fn highest(self: *const Conn) u32 {
+    pub fn highest(self: *const Conn) u32 {
         var n = self.una +% @as(u32, @intCast(self.high));
         if (self.state == .syn_received) n +%= 1;
         if (self.fin_ever_sent and self.fin != .acknowledged) n +%= 1;
@@ -286,13 +286,13 @@ pub const Conn = struct {
         self.* = .{ .rx = rx, .tx = tx, .claimed = claimed };
     }
 
-    fn window(self: *const Conn) u16 {
+    pub fn window(self: *const Conn) u16 {
         return @intCast(@min(self.room(), 0xFFFF));
     }
 
     /// A window too small for the peer to send a full segment into, or into
     /// half the buffer when the buffer itself is smaller than that.
-    fn tight(self: *const Conn, w: u16) bool {
+    pub fn tight(self: *const Conn, w: u16) bool {
         return @as(usize, w) < @min(@as(usize, our_mss), self.rx.len / 2);
     }
 

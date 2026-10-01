@@ -26,17 +26,24 @@ The strategies below are ordered by value per effort.
 
 ## 1. Invariants checked after every step
 
-Write one function, `check(table: *const Table, now: i96)`, and call it from
-the test fixture after every `handle` and every `transmit`. Every existing
-test then becomes an invariant test for free. Generated runs (§3, §4) reuse
-it.
+**Implemented** in `src/tcp_check.zig`. `check(table, now, phase)` names
+the first rule any slot breaks. Every test in `src/tcp_test.zig` drives the
+table through `handle` and `transmit` wrappers that call it after each step,
+so every existing test is an invariant test for free. A broken rule stops
+the run with the rule, the connection and the time. Generated runs (§3, §4)
+should reuse it. The code is the authoritative list; what follows is the
+reasoning behind it.
+
+`check` is told **when** it is looking. Some debts belong to the next
+`transmit`, such as bytes just queued or a window just reopened. After
+`handle` it is enough that they are owed to it. After `transmit` it is not:
+that turn has run, and every deadline left must be in the future.
 
 **Safety invariants**, per connection that is not `closed`:
 
 - `start <= end <= rx.len` and `tx_start <= tx_end <= tx.len`
-- `sent <= high <= queued()`
-- `highest() -% una` is no more than `queued() + 2`: the bytes in flight
-  plus a SYN and a FIN at most
+- `sent <= high <= queued()`, so what is in flight is at most the queue
+  plus a SYN and a FIN
 - `state == .syn_received` implies `queued() == 0` and `fin == .none`
 - `fin != .none` implies `state == .closing`
 - `fin == .acknowledged` implies `queued() == 0`
@@ -80,7 +87,10 @@ holds work gets an entry with three answers:
 
 | queue                                  | drained by            | what guarantees the drainer runs, and how soon        |
 |----------------------------------------|-----------------------|--------------------------------------------------------|
-| NIC receive ring                       | `stream.pump`         | every loop turn, every read and write wait             |
+| the machine itself, halted             | `interrupts.rest`     | the card's MSI-X interrupt, or the APIC timer at most `slice_ns` (1 ms) after the halt; a card on mmio cannot interrupt, so there nothing halts and every wait spins |
+| NIC receive ring                       | `stream.pump`         | every loop turn, every read and write wait; while idle, every wake (≤ 1 ms) |
+| a frame handed to the card (`Net.send`)| the device            | `send` rests until the card takes it: on a droplet the device's thread needs this processor, which the halt gives back |
+| every table and stream timer           | `transmit`, `serviceStreams` | as often as `pump` runs: at least every `slice_ns` while idle, **not at all during a request that does not pump** (long disk work) |
 | a connection's send queue (`tx`)       | `Table.transmit`      | every `pump`; bounded by `rto_at` / `max_retries`      |
 | our FIN (`fin == .queued`)             | `transmitOne`         | after the last queued byte; same timers                |
 | a reopened window                      | `announce`            | every `transmit`; `update_at`, at most `max_retries`   |
@@ -89,7 +99,21 @@ holds work gets an entry with three answers:
 | a held stream's `carry` and mailbox    | `serviceStreams`      | every `pump`, via `after_arrivals`                     |
 | a closing connection                   | the table's timers    | `rto_at`, `fin_wait_ns`                                |
 
-The bold row is where bug A lived. Its guarantee holds only if no single
+**Interrupts change the question.** Before them, "the drainer runs soon"
+meant "the loop spins". Now the loop halts between turns, and it means "the
+machine wakes". The 1 ms APIC timer is the floor under every deadline row:
+`rest` arms it before every `hlt`, and the interrupt handlers do nothing
+but end the interrupt, so all work happens when the loop looks again. An
+interrupt can delay work by at most `slice_ns`; it cannot lose work. Two
+things would break that, and both belong on the audit:
+
+- a halt with no timer armed (`rest` before `arm` falls back to `pause`, so
+  this is about future code);
+- a halt while work is already owed. The main loop rests only when nothing
+  arrived and nothing was served, and every wait in `Stream` rests only
+  after a `pump` that found nothing.
+
+The "ready connection" row is where bug A lived. Its guarantee holds only if no single
 step of the main loop waits unboundedly, so every call that can wait inside
 the loop needs its own row in a second list: who it waits for, and what
 bounds the wait. `Stream.finish` would have had the answer "a peer already
@@ -270,12 +294,15 @@ the code on purpose and see whether anything notices. Delete `c.heard()`,
 swap `>=` for `>` in `transmitOne`'s expiry test, drop the `if (c.rto_at ==
 null)` re-arm in the probe path, change `-%` to `-` in `after()`. Each
 mutant that survives names a property no test checks. Done by hand with a
-small script and `git stash`, a dozen mutants is an afternoon.
+small script that applies each mutant, runs `zig build test`, and puts the
+file back with `git checkout <rev> -- <file>`, a dozen mutants is an
+afternoon. (`git checkout` names exactly the file and revision restored,
+where `git stash` would also sweep up any unrelated work in progress.)
 
 ## Suggested order
 
 1. §1 invariants, including the liveness table, wired into the existing
-   fixture. This has the highest value and makes every later step better.
+   fixture. **Done:** `src/tcp_check.zig`.
 2. §6 awkward ISNs. This is nearly free.
 3. §2 the queue audit, written into the code headers.
 4. §9 the loop-latency numbers and their judge bounds.
