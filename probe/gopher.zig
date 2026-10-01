@@ -346,7 +346,7 @@ pub fn kmain() noreturn {
             serveOne(io, &wire, &table, pick, lease.address, request_heap.allocator(), &hub, served, conf.idle_ns, conf.streams);
         } else if (quiet(&table, now, conf.idle_ns)) |pick| {
             served += 1;
-            letGo(&wire, &table, pick, lease.address, served, conf.idle_ns);
+            letGo(&wire, &table, pick, served);
         } else {
             if (arrived == null) asm volatile ("pause");
             continue;
@@ -447,13 +447,9 @@ fn quiet(table: *tcp.Table, now: i96, idle_ns: u64) ?usize {
 
 /// **A CLIENT THAT STOPPED TALKING IS NOT A BROKEN NIC.** It is logged as a
 /// request that never came, the way it always has been, and closed.
-fn letGo(wire: *stream.Wire, table: *tcp.Table, i: usize, address: [4]u8, number: u64, idle_ns: u64) void {
-    table.claim(i);
-    defer table.release(i);
-    var s = stream.Stream.init(wire, table, i, address, &read_buf, &write_buf);
-    s.idle_ns = idle_ns;
+fn letGo(wire: *stream.Wire, table: *tcp.Table, i: usize, number: u64) void {
     logRequest(number, "(no request)", "the client stopped sending, and was let go");
-    close(&s, table, i);
+    close(wire, table, i);
 }
 
 /// Answers the request waiting on connection `i`, and closes it. Every failure
@@ -489,7 +485,7 @@ fn serveOne(
             "the client stopped sending, and was let go"
         else
             @errorName(e));
-        close(&s, table, i);
+        close(wire, table, i);
         return;
     };
     req.head.keep_alive = false;
@@ -556,7 +552,7 @@ fn serveOne(
     // already: it is reset rather than waited on again for a goodbye.
     if (s.timed_out) {
         table.abandon(wire, i);
-    } else close(&s, table, i);
+    } else close(wire, table, i);
 }
 
 /// What a turn of the held streams needs, set once the network is up.
@@ -731,14 +727,21 @@ fn reportStack(deepest: usize) usize {
     return u.used;
 }
 
-fn close(s: *stream.Stream, table: *tcp.Table, i: usize) void {
-    s.finish();
-    // A peer that stopped acknowledging would otherwise hold its slot in
-    // `closing` until the table's retransmissions ran out. One that has
-    // acknowledged our FIN is only waiting to send its own, and the table
-    // sees that through.
-    const c = &table.conns[i];
-    if (c.state != .closed and c.fin != .acknowledged) table.abandon(s.wire, i);
+/// **SAYS GOODBYE WITHOUT WAITING FOR IT TO BE HEARD.** The FIN is queued
+/// behind whatever the response still has on its way, and the table finishes
+/// the close on later turns: it re-sends what is not acknowledged, waits
+/// `fin_wait_ns` for the peer's own FIN, and resets a peer that stops
+/// answering. A closing connection is not handed to anyone else meanwhile.
+///
+/// **WAITING HERE WOULD STOP THE MACHINE.** It answers one request at a time,
+/// so a close that waited for the peer's acknowledgement held every other
+/// ready request for as long as the peer said nothing — up to the idle time,
+/// once per connection, and a client that has gone quiet is exactly the one
+/// that says nothing. A handshake that never completed has no FIN to wait for
+/// at all, and is reset.
+fn close(wire: *stream.Wire, table: *tcp.Table, i: usize) void {
+    table.finish(i);
+    if (table.conns[i].state != .closing) table.abandon(wire, i);
 }
 
 fn logRequest(number: u64, what: []const u8, outcome: []const u8) void {

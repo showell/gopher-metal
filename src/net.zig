@@ -110,18 +110,27 @@ pub const Net = struct {
 
     /// The next frame the device has delivered, or null. The slice points into
     /// the receive buffer it arrived in and stays valid until `recycle`.
+    ///
+    /// **NULL MEANS THE RING IS EMPTY, AND NOTHING ELSE.** A completion that
+    /// carries no frame is passed over, not reported as the end: a caller that
+    /// drains until null would otherwise stop with frames still waiting behind
+    /// it. One naming a buffer we never offered cannot be handed back, and is
+    /// dropped; one too short to hold a header returns its buffer at once.
     pub fn poll(self: *Net) ?struct { id: u16, frame: []const u8 } {
-        const e = self.rx.take() orelse return null;
-        virtio.ack(self.device);
-        const id: u16 = @intCast(e.id);
-        if (id >= rx_buffers or e.len <= @sizeOf(Header)) {
-            self.recycle(id);
-            return null;
+        while (self.rx.take()) |e| {
+            virtio.ack(self.device);
+            if (e.id >= rx_buffers) continue;
+            const id: u16 = @intCast(e.id);
+            if (e.len <= @sizeOf(Header) or e.len > buffer_size) {
+                self.recycle(id);
+                continue;
+            }
+            return .{
+                .id = id,
+                .frame = self.mem.rx_bufs[id][@sizeOf(Header)..e.len],
+            };
         }
-        return .{
-            .id = id,
-            .frame = self.mem.rx_bufs[id][@sizeOf(Header)..e.len],
-        };
+        return null;
     }
 
     /// Hands a receive buffer back to the device. A driver that forgets this

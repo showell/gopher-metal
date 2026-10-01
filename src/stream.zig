@@ -82,18 +82,30 @@ pub const Wire = struct {
 /// timers first would call those segments lost and send them again. A
 /// needless second SYN-ACK once left slirp sending nothing more on that
 /// connection for as long as the host would wait.
+///
+/// **SO THE RING IS DRAINED UNTIL IT IS EMPTY**, not for as many frames as it
+/// has buffers: each buffer goes back to the device as soon as its frame is
+/// read, and the device can fill it again before the loop reaches the end, so
+/// stopping after one ringful left acknowledgements waiting behind the timers.
+/// The bound is only there so a flood cannot keep the timers from ever
+/// running.
 /// **THE HOST'S OWN STATE MACHINES TURN HERE TOO**, after what arrived and
 /// before what is sent: a host that keeps live streams sets this, and they move
 /// on every turn — including the turns taken inside a request's reads and
 /// writes — rather than only between requests.
 pub var after_arrivals: ?*const fn () void = null;
 
+/// The most frames one turn takes before the timers run regardless: many
+/// ringfuls, far more than arrive between two turns of a loop that is keeping
+/// up.
+pub const max_frames_per_turn: usize = 8 * net.rx_buffers;
+
 pub fn pump(wire: *Wire, table: *tcp.Table, ip: [4]u8) ?tcp.Result {
     const now = io.awakeNs() orelse 0;
     const nic = wire.nic;
     var last: ?tcp.Result = null;
     var taken: usize = 0;
-    while (taken < net.rx_buffers) : (taken += 1) {
+    while (taken < max_frames_per_turn) : (taken += 1) {
         const got = nic.poll() orelse break;
         defer nic.recycle(got.id);
         last = .{ .event = .nothing };
