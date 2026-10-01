@@ -138,6 +138,25 @@ rule.
 
 ## 3. A simulated network, many seeds
 
+**Implemented** in `src/tcp_sim.zig`, with seeds 1–8 run by `zig build
+test`. A failing seed prints its whole scenario and the counters on both
+sides. To soak, add seeds to `seeds`; a seed that fails and is fixed stays
+there, as a regression test. Where it departs from the sketch below:
+
+- **The clock ticks a millisecond at a time**, as the kernel's slowest
+  turn does, rather than jumping from event to event. The cost is a few
+  seconds per hundred seeds, and it is simpler to believe.
+- **Loss happens only in the first three seconds.** After that the path is
+  clean, so a run that does not finish within 60 s is a bug, not bad luck.
+- **The client takes segments in order only.** Holding later ones is a MAY
+  in RFC 9293, so a client that does not is still a correct client. It
+  makes the table's go-back retransmission do all the recovering.
+- **The host is a model of `gopher.zig`'s**, not the real loop:
+  - it reads at its own pace, stalling for up to 8 s;
+  - it announces a reopened window, or leaves that to the table, by the seed;
+  - it lets go of a connection after `idle_ns` without progress;
+  - it closes without waiting.
+
 Put a deterministic, seeded network between the table and a model peer:
 
 ```
