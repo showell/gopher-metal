@@ -10,6 +10,24 @@
 //! Nothing here interprets a frame. That is `proto.zig`'s job, and keeping the
 //! line there is what lets the same driver carry ARP, DHCP and eventually TCP
 //! without learning about any of them.
+//!
+//! **WHAT WAITS IN THE DRIVER, AND WHAT BOUNDS THE WAIT** (TCP_TESTING.md
+//! §2). The driver drains nothing by itself; whoever calls `poll` does.
+//!
+//! - **Frames the device has delivered** (the receive ring's used entries).
+//!   Taken by `poll`, which `stream.pump` calls until the ring is empty.
+//!   Bounded by: the next `pump` — at most `interrupts.slice_ns` while the
+//!   machine is idle, since a frame's arrival or the timer wakes it; but
+//!   nothing at all while a request does work that does not pump (the
+//!   disk). Then the ring fills, and past `rx_buffers` frames the device
+//!   drops what arrives: the wait is bounded, by loss, and TCP sends again.
+//! - **A receive buffer handed out by `poll`.** Returned by `recycle`, which
+//!   `pump` defers to the end of the frame's turn. Bounded by: that turn.
+//! - **A frame being sent** (`send`). One buffer, reused, so `send` waits
+//!   until the device has taken it, resting between looks. Bounded by: the
+//!   device alone — nothing here gives up. A device that stopped taking
+//!   frames would stop the machine; on a droplet the device's own thread
+//!   needs this processor, which the rest gives back.
 
 const virtio = @import("virtio.zig");
 const interrupts = @import("interrupts.zig");

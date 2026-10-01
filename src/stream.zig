@@ -18,6 +18,36 @@
 //! preemption there is nobody else to move the connection forward, so a read
 //! that has no bytes yet polls the NIC, answers ARP, feeds TCP, and tries
 //! again. That is what "blocking" means when there are no threads to block.
+//!
+//! **WHAT WAITS HERE, AND WHAT BOUNDS THE WAIT** (TCP_TESTING.md §2). `pump`
+//! is what every other queue on the machine waits for: the table's timers,
+//! the held streams and the NIC's ring move only inside it. So the bound on
+//! all of them is how often `pump` runs.
+//!
+//! - **One turn, `pump`.** Every frame in the ring (up to
+//!   `max_frames_per_turn`), ARP answered at once, the host's state machines
+//!   (`after_arrivals`), then the table's `transmit`. Bounded by: that many
+//!   frames and one pass over the table.
+//! - **Between turns.** While a wait below is waiting: one turn, then a rest
+//!   of at most `interrupts.slice_ns` if nothing arrived. While a handler is
+//!   doing anything else — reading the disk, rendering — no turn at all.
+//!   Bounded by: that handler's own work, which nothing here can cut short.
+//!   This is the row to read when anything else on the machine is late.
+//! - **A read waiting for the peer's bytes** (`waitForBytes`). Bounded by:
+//!   the first byte, the peer finishing or the connection closing, or
+//!   `idle_ns` from the start of the read.
+//! - **A write waiting for room in the send queue** (`sendAll`). Bounded by:
+//!   `idle_ns` with neither a byte queued nor one acknowledged; and below it
+//!   the table's own `max_retries`.
+//! - **Bytes a write has queued.** Put on the wire by a turn at the end of
+//!   every `drain`, before the handler goes on. Bounded by: that turn.
+//! - **A close waiting for its FIN to be acknowledged** (`Stream.finish`).
+//!   Bounded by: `idle_ns` with nothing acknowledged. The real server does
+//!   not use it — a wait there would hold every other request — and closes
+//!   without waiting, leaving the rest to the table.
+//! - **A window shut while a request waited its turn.** Announced by the
+//!   read that reopens it (`streamFn`), and said again by the table until the
+//!   peer sends. Bounded by: the table's window news (tcp.zig).
 
 const std = @import("std");
 const io = @import("io.zig");

@@ -337,6 +337,29 @@ pub fn kmain() noreturn {
     // arrived, start to finish, or else the oldest one that has been quiet for
     // `idle_timeout_ms`, which is let go. A client that connects and says
     // nothing waits in the table instead of holding the door.
+    //
+    // **WHAT WAITS FOR THIS LOOP, AND WHAT BOUNDS THE WAIT** (TCP_TESTING.md
+    // §2). The loop serves one thing at a time, so every row below is bounded
+    // only as long as no single serve waits without a bound of its own.
+    //
+    // - **A connection whose request has arrived.** Served when it is the
+    //   oldest ready. Bounded by: every older ready request's serve, plus the
+    //   one in progress. A serve's waits are each bounded by `idle_ns`
+    //   without progress (stream.zig); its close queues a FIN and does not
+    //   wait — the table finishes it.
+    // - **A connection that has gone quiet.** Let go once it has been silent
+    //   for `idle_ns`, and only on a turn with nothing ready: a steady run of
+    //   ready requests delays it, at the cost of a slot, never of an answer.
+    //   Bounded by: `idle_ns`, plus the serves ahead of it.
+    // - **A held stream's frames and pings.** Moved by every turn of the
+    //   network, the turns inside a serve included (`stream.after_arrivals`).
+    //   Bounded by: the next turn — which a serve doing disk work holds back.
+    // - **A connection served and closing.** The table's timers.
+    // - **The loop itself, with nothing to do.** It rests only when nothing
+    //   arrived, nothing was ready and nothing was quiet. Bounded by: the
+    //   card's interrupt, or `interrupts.slice_ns`.
+    // - **The goodbyes, when the boot ends.** Connections still closing are
+    //   given two seconds of turns, then the machine stops.
     var served: u64 = 0;
     var deepest: usize = 0;
     var busiest: usize = 0;
