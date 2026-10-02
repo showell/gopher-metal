@@ -476,7 +476,7 @@ Answers below carry the detail. In this order:
     - **4:** `checkAPIKey` requires the id prefix to be all digits.
     - **5:** the admin key form and the `keyrevoked` flash take uids only
       (`users.validUid`).
-23. **Design: signing `gopher_uid`** (findings 1-2's root). A design note,
+23. **Design: signing `gopher_uid`** *(CC, done: `DESIGN-signed-uid.md`; four questions for Steve at its end)* (findings 1-2's root). A design note,
     `angry-gopher/docs/` or here, not code yet: the cookie signed with the
     session secret as `gopher_auth` is; what happens to every unsigned
     cookie already in browsers (prod has 19 players and 6 guests: are they
