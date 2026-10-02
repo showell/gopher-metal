@@ -109,8 +109,12 @@ APP_PATHS = [
     (rf"data/chat/users/{ID}/(?:last|pinned)-sessions/(?:{CONV}|{CHANNEL})", "a user's chat state", False, True),
     (r"data/chat/_session_secret", "the session secret", False, False),
     (rf"data/users/{ID}(?:/last-seen|/upload-bytes|/admin)?", "a user's record", False, False),
-    (rf"data/players/{ID}(?:/name|/last-seen)?", "a player", False, False),
+    # `signed`: the id's gopher_uid has been signed once, so its unsigned
+    # spelling is refused (angry-gopher's uid_cookie.zig, QUEUE.md item 51).
+    (rf"data/players/{ID}(?:/name|/last-seen|/signed)?", "a player", False, False),
     (r"data/players/next-id\.txt", "the player counter", False, False),
+    (r"data/players/unsigned-window", "when unsigned gopher_uid cookies stop being re-signed (item 51)",
+     False, False),
     (r"data/lynrummy(?:/.*)?", "game and puzzle sessions (storage.zig)", False, False),
     (rf"auth/{ID}(?:/[a-z_-]+)?", "an account", False, False),
     (r"auth/next-id\.txt", "the account counter", False, False),
@@ -369,7 +373,8 @@ def self_test():
 
     with tempfile.TemporaryDirectory() as d:
         for rel in ["auth/1/api-key", "auth/next-id.txt", "data/users/1/admin",
-                    "data/players/3/last-seen", "data/chat/users/1/links.md",
+                    "data/players/3/last-seen", "data/players/p3/signed", "data/players/unsigned-window",
+                    "data/chat/users/1/links.md",
                     "data/chat/1_2/sessions/topic.md"]:
             os.makedirs(os.path.dirname(os.path.join(d, rel)), exist_ok=True)
             open(os.path.join(d, rel), "wb").close()
