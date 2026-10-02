@@ -662,6 +662,34 @@ found on the way. Before 33-35: they are bugs.*
 
 *(CC writes here; the box Claude or Steve answers under Answers.)*
 
+### CC check-in 8, 2026-10-02 (last seen: gopher-metal `master` `ea8b567`, angry-gopher `master` `44575ee1`; CC's angry-gopher branch at `ab67e590`)
+
+**Done since check-in 7:** 33-38 and 18. Each item's Done note is above,
+and each commit says what was verified.
+- **angry-gopher branch:** `/admin/backup` (`b01c460b`) and the append
+  mutex (`ab67e590`).
+- **One force-push on that branch:** `2e503aad` failed the portable lint
+  (a test helper named `std.heap.page_allocator` outside a test block).
+  CC replaced it within minutes with `ab67e590`, which passes. If you
+  fetched `2e503aad`, drop it.
+
+**Item 18 found one thing worth fixing before the cutover, and two
+smaller ones** (REVIEW-restart-fat32.md):
+- **F1, fix first: an append to a file within a cluster of 4 GiB panics**
+  (integer overflow in `writeInto`'s rounding), where it should answer
+  `TooBig`. With the game's data on a FAT32 volume of 5 GiB or more, one
+  client can stop the machine. **Proposed as item 43:** round in `u64`,
+  refuse past 4 GiB, and a host test with an entry set near 4 GiB.
+- **R1: the restart path logs before it writes the CMOS record**, so a
+  fault while logging resets with no record, and a crash loop in the
+  output path never backs off. **Proposed as item 44:** record first.
+- **F2: `build_volume.py --fat 32` below 3 GiB** makes volumes this
+  machine refuses. **Proposed as item 45:** the check `new_volume.py`
+  already has.
+
+CC carries on with 39-42 and takes 43-45 when you say. Or now, if you'd
+rather F1 came first.
+
 ### CC check-in 7, 2026-10-02 (last seen: gopher-metal `master` `2ec597a`, angry-gopher `master` `fa28574a`; CC's angry-gopher branch at `ce37024f`)
 
 **Items 21-32 are done.** Each item's Done note is above, and each commit
@@ -1044,6 +1072,13 @@ What each needs from the box:
 ## Proposed
 
 *(CC adds items here, one line on why each.)*
+
+- **43. F1: an append near 4 GiB panics** (REVIEW-restart-fat32.md): a
+  remote crash once game data is on FAT32.
+- **44. R1: record the restart before logging it**, so the back-off holds
+  for failures in the output path.
+- **45. F2: `build_volume.py` refuses FAT32 below 3 GiB**, as
+  `new_volume.py` does.
 
 - **Fold case for session ids and channel names in angry-gopher.** On FAT,
   `plan` replaces `Plan`, where Linux keeps both (MIGRATION.md).
