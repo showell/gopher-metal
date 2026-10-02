@@ -188,6 +188,9 @@ MEMBER_STORY = [
     step("links", "GET", "/chat/links", JAR),
     step("settings", "GET", "/settings", JAR),
     step("the admin roster (Steve is uid 1)", "GET", "/admin", JAR),
+    # Everything the Store keeps, as one tar (QUEUE.md item 35): compared by
+    # its members, not its bytes, whose file times differ by host.
+    step("the backup", "GET", "/admin/backup", JAR),
     step("the game roster", "GET", "/admin/lynrummy", JAR),
     step("someone else's DM is not his", "GET", "/chat/c/2_9/general", JAR),
     step("a session minted outside both servers", "GET", "/chat/conversations", FRESH),
@@ -913,6 +916,8 @@ def differences(c: dict, metal: dict, linux: dict) -> list:
             out.append(f"{h}: metal {m!r}, Linux {l!r}")
     if c["path"] == "/version":
         out += version_differences(metal["body"], linux["body"])
+    elif c["path"] == "/admin/backup" and metal["status"] == 200 and linux["status"] == 200:
+        out += backup_differences(metal["body"], linux["body"], metal["window"], linux["window"])
     elif c["path"] == "/admin/host" and metal["status"] == 200:
         # A refusal (no session, not the admin) is an ordinary page, compared
         # whole below; only the page itself differs on purpose.
@@ -990,6 +995,49 @@ def oracle_megabytes(path: str, base: int = None) -> tuple:
     total = ((v.max_cluster - 1) * v.cluster_bytes) >> 20
     free = (sum(1 for c in range(2, v.max_cluster + 1) if v.fat(c) == 0) * v.cluster_bytes) >> 20
     return free, total
+
+
+def backup_differences(metal: bytes, linux: bytes, metal_window=None, linux_window=None) -> list:
+    """**/admin/backup, BY ITS MEMBERS.** The two archives' bytes differ (each
+    host stamps its own file times, FAT in two-second steps), so what is
+    compared is each member: its name and kind, its size, and its contents
+    with each host's own times normalized (a message's date, a last-seen),
+    as every page is."""
+    import io
+    import tarfile
+
+    def members(name, body, window):
+        try:
+            t = tarfile.open(fileobj=io.BytesIO(body))
+            got = {}
+            for m in t.getmembers():
+                data = t.extractfile(m).read() if m.isfile() else b""
+                got[m.name] = ("folder" if m.isdir() else "file", m.size,
+                               normalize(data, window) if window else data)
+            return got, None
+        except (tarfile.TarError, EOFError) as e:
+            return {}, f"/admin/backup on {name} is not a whole tar: {e}"
+
+    m, merr = members("metal", metal, metal_window)
+    l, lerr = members("Linux", linux, linux_window)
+    out = [e for e in (merr, lerr) if e]
+    if out:
+        return out
+    if not m:
+        out.append("/admin/backup on metal is empty")
+    for name in sorted(set(m) - set(l)):
+        out.append(f"/admin/backup: {name} is on metal only")
+    for name in sorted(set(l) - set(m)):
+        out.append(f"/admin/backup: {name} is on Linux only")
+    for name in sorted(set(m) & set(l)):
+        (mk, ms, mc), (lk, ls, lc) = m[name], l[name]
+        if mk != lk:
+            out.append(f"/admin/backup: {name} is a {mk} on metal, a {lk} on Linux")
+        elif ms != ls:
+            out.append(f"/admin/backup: {name} is {ms} bytes on metal, {ls} on Linux")
+        elif mc != lc:
+            out.append(f"/admin/backup: {name} differs{first_difference(mc, lc)}")
+    return out
 
 
 def host_page_differences(metal: bytes, linux: bytes, image: str = None, boot_disk: str = None) -> list:

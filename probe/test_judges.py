@@ -338,6 +338,46 @@ class Differences(unittest.TestCase):
         self.assertEqual(G.checkout_commit("/nonexistent"), "unknown")
 
 
+class Backup(unittest.TestCase):
+    @staticmethod
+    def tar(files, mtime=0):
+        import io
+        import tarfile
+        buf = io.BytesIO()
+        with tarfile.open(fileobj=buf, mode="w", format=tarfile.USTAR_FORMAT) as t:
+            for name, data in files.items():
+                if data is None:
+                    info = tarfile.TarInfo(name)
+                    info.type = tarfile.DIRTYPE
+                    info.mtime = mtime
+                    t.addfile(info)
+                    continue
+                info = tarfile.TarInfo(name)
+                info.size = len(data)
+                info.mtime = mtime
+                t.addfile(info, io.BytesIO(data))
+        return buf.getvalue()
+
+    def test_two_archives_of_the_same_data_agree_though_their_times_differ(self):
+        # Each host wrote the message at its own time, inside its own window.
+        metal = {"data": None, "data/chat/1_2/sessions/general.md": b"date: 2025-09-16T05:20:01Z\n\nhi",
+                 "auth/1/name": b"Steve"}
+        linux = dict(metal, **{"data/chat/1_2/sessions/general.md": b"date: 2025-09-16T05:21:41Z\n\nhi"})
+        mw, lw = (1757999990, 1758000010), (1758000090, 1758000110)
+        self.assertEqual(G.backup_differences(self.tar(metal, 100), self.tar(linux, 999), mw, lw), [])
+
+    def test_a_missing_member_a_size_and_a_content_are_each_named(self):
+        base = {"data": None, "data/a": b"one", "data/b": b"two"}
+        got = G.backup_differences(self.tar(base), self.tar({"data": None, "data/a": b"one"}))
+        self.assertEqual(got, ["/admin/backup: data/b is on metal only"])
+        got = G.backup_differences(self.tar(base), self.tar(dict(base, **{"data/b": b"twos"})))
+        self.assertTrue(any("4 on Linux" in g for g in got), got)
+        got = G.backup_differences(self.tar(base), self.tar(dict(base, **{"data/b": b"TWO"})))
+        self.assertTrue(any("data/b differs" in g for g in got), got)
+        self.assertTrue(G.backup_differences(self.tar(base)[:700], self.tar(base)))
+        self.assertTrue(G.backup_differences(self.tar({}), self.tar({})))
+
+
 class RawSocket(unittest.TestCase):
     def test_a_refused_connection_is_an_error_not_a_crash(self):
         port = G.free_port()  # nothing listens there
