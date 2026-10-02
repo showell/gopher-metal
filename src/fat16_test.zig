@@ -215,3 +215,127 @@ test "a disk that stops answering is an error, not a hang or a wrong answer" {
     try testing.expectError(fat16.Error.ReadFailed, d.vol.open("data/x"));
     try testing.expect(std.meta.isError(d.vol.writeFile("data/y", "after")));
 }
+
+/// Sets `cluster`'s entry in both copies of the FAT on the disk, then mounts
+/// again so that a held FAT sees it too.
+fn damageFat(d: *test_disk.Disk, cached: bool, cluster: u16, value: u16) !void {
+    const l = Layout.of(d.bytes);
+    for (0..2) |copy| {
+        std.mem.writeInt(u16, d.bytes[l.fat_start + copy * l.fat_bytes + @as(usize, cluster) * 2 ..][0..2], value, .little);
+    }
+    try d.mount(cached);
+}
+
+/// The clusters of a chain, in order, read from the first FAT on the disk.
+fn chainOf(d: *const test_disk.Disk, first: u16, out: []u16) []u16 {
+    const l = Layout.of(d.bytes);
+    var n: usize = 0;
+    var c = first;
+    while (c >= 2 and c < 0xFFF8 and n < out.len) {
+        out[n] = c;
+        n += 1;
+        c = std.mem.readInt(u16, d.bytes[l.fat_start + @as(usize, c) * 2 ..][0..2], .little);
+    }
+    return out[0..n];
+}
+
+// **A LOOP IN THE FAT MUST END A WALK WITH AN ERROR.** Before the walks were
+// bounded, each of these hung: the test did not fail, it never finished.
+
+test "a file whose chain loops back is a broken chain to append to, not a hang" {
+    for (both) |cached| {
+        const d = try Disk.make("damaged-loop-file", small, cached);
+        defer d.deinit();
+        var data: [1536]u8 = undefined; // three clusters, full, so an append needs a fourth
+        try d.vol.writeFile("data/log", pattern(&data, 4));
+        const e = try d.vol.open("data/log");
+        var chain: [8]u16 = undefined;
+        const c = chainOf(d, e.first_cluster, &chain);
+        try testing.expectEqual(@as(usize, 3), c.len);
+        try damageFat(d, cached, c[2], c[0]);
+        // A read stops at the file's size, so it never reaches the loop.
+        try d.expectFile("data/log", &data);
+        // An append looks for the chain's end, which a loop does not have.
+        try testing.expectError(fat16.Error.BadChain, d.vol.writeInto("data/log", data.len, "more"));
+        try testing.expectError(fat16.Error.BadChain, d.vol.layout(try d.vol.open("data/log")));
+    }
+}
+
+test "a directory whose chain loops back is a broken chain to list, search or grow, not a hang" {
+    for (both) |cached| {
+        const d = try Disk.make("damaged-loop-dir", small, cached);
+        defer d.deinit();
+        // Every cluster of it full, so no end-of-directory entry stops a walk:
+        // "." and "..", and three entries a name, are 32, two clusters.
+        var path: [64]u8 = undefined;
+        for (0..10) |k| {
+            const p = try std.fmt.bufPrint(&path, "data/sessions/session-{d:0>4}.md", .{k});
+            try d.vol.writeFile(p, "x");
+        }
+        const dir = try d.vol.open("data/sessions");
+        var chain: [64]u16 = undefined;
+        const c = chainOf(d, dir.first_cluster, &chain);
+        try testing.expectEqual(@as(usize, 2), c.len);
+        try damageFat(d, cached, c[c.len - 1], c[0]);
+
+        var buf: [4096]u8 = undefined;
+        try testing.expectError(fat16.Error.BadChain, d.names(dir.first_cluster, &buf));
+        try testing.expect(std.meta.isError(d.vol.open("data/sessions/nothing-by-this-name")));
+        try testing.expect(std.meta.isError(d.vol.writeFile("data/sessions/one-more-session.md", "x")));
+    }
+}
+
+test "a link past the last cluster, or to the bad-cluster mark, is a broken chain" {
+    for (both) |cached| {
+        const d = try Disk.make("damaged-past-end", small, cached);
+        defer d.deinit();
+        var data: [1500]u8 = undefined;
+        try d.vol.writeFile("f", pattern(&data, 5));
+        const e = try d.vol.open("f");
+        const past: u16 = @intCast(Layout.of(d.bytes).clusters + 2);
+        for ([_]u16{ past, 0xFFF0, 0xFFF7 }) |link| {
+            try damageFat(d, cached, e.first_cluster, link);
+            var out: [1500]u8 = undefined;
+            try testing.expectError(fat16.Error.BadChain, d.vol.readFile(e, &out));
+            try testing.expectError(fat16.Error.BadChain, d.vol.writeInto("f", 1000, "x"));
+            try testing.expectError(fat16.Error.BadChain, d.vol.layout(e));
+        }
+    }
+}
+
+test "an entry whose first cluster is past the volume is a broken chain, and removing it frees nothing" {
+    for (both) |cached| {
+        const d = try Disk.make("damaged-first-cluster", small, cached);
+        defer d.deinit();
+        try d.vol.writeFile("f", "some bytes");
+        try d.vol.writeFile("data/x", "a directory's worth");
+        const e = try d.vol.open("f");
+        const dir = try d.vol.open("data");
+        const past: u16 = @intCast(Layout.of(d.bytes).clusters + 2);
+        // The first cluster is two bytes at offset 26 of the entry.
+        std.mem.writeInt(u16, d.bytes[e.lba * test_disk.sector + e.slot + 26 ..][0..2], past, .little);
+        std.mem.writeInt(u16, d.bytes[dir.lba * test_disk.sector + dir.slot + 26 ..][0..2], 0xFF00, .little);
+        try d.mount(cached);
+        const free = d.free();
+
+        var out: [64]u8 = undefined;
+        try testing.expectError(fat16.Error.BadChain, d.vol.readFile(try d.vol.open("f"), &out));
+        try testing.expectError(fat16.Error.BadChain, d.vol.writeInto("f", 2, "x"));
+        try testing.expectError(fat16.Error.BadChain, d.vol.open("data/x"));
+        var buf: [64]u8 = undefined;
+        try testing.expectError(fat16.Error.BadChain, d.names(0xFF00, &buf));
+        try d.vol.remove("f");
+        try testing.expectEqual(free, d.free());
+        try testing.expect(d.fatsAgree());
+    }
+}
+
+test "a FAT too short for the clusters it describes is refused at mount" {
+    const bytes = try testing.allocator.alloc(u8, small.sectors * test_disk.sector);
+    defer testing.allocator.free(bytes);
+    test_disk.format(bytes, small);
+    std.mem.writeInt(u16, bytes[22..24], 2, .little); // room for 510 clusters of ~8,000
+    var blk = @import("virtio.zig").Block.inMemory(bytes);
+    var scratch: [test_disk.sector]u8 align(16) = undefined;
+    try testing.expectError(fat16.Error.BadBootSector, fat16.Volume.mount(&blk, &scratch, 0));
+}

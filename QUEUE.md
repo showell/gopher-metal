@@ -43,6 +43,13 @@ in order. The box Claude reorders on `master`, and CC proposes at the bottom.
 
    Whatever must change in `io.zig` or `fat16.zig` to make them host-testable,
    change it. This is the foundation for items 4 and 5.
+   **Done** (CC): `006475a` (`virtio.Block.inMemory`, `src/fat16_test.zig`),
+   then `src/io_test.zig` for the routing, and a fat16.zig fix that came out
+   of it: a FAT damaged into a loop hung every walk along it (an append,
+   a directory listing, a search, `grow`), and a link or a first cluster past
+   the volume's last cluster read past the FAT and wrote past the volume. Both
+   are now `BadChain`, tested with damage made on purpose. The disk helpers
+   are `src/test_disk.zig`, for item 5.
 4. **An independent FAT16 reader in Python** (`tools/fat16_read.py`, written
    from the spec, not from our code).
    - It lists and reads a FAT16 image and checks its consistency: chains
@@ -154,3 +161,6 @@ in order. The box Claude reorders on `master`, and CC proposes at the bottom.
   `plan` replaces `Plan`, where Linux keeps both (MIGRATION.md).
 - **Stop `fat16.zig`'s `grow` at 65,536 directory entries.** It grows past
   FAT's limit today, and `fsck.fat` would then reject the volume.
+- **`zig fmt` the three files on `master` it flags** (`src/tcp_sim.zig`,
+  `src/rtc.zig`, `src/civil.zig`). `zig fmt --check src` fails today, so a
+  gate on it would fail before it checked anything new.

@@ -276,6 +276,9 @@ pub const Volume = struct {
         // anything the boot sector says about itself.
         const clusters = (total - data_start) / sectors_per_cluster;
         if (clusters < 4085 or clusters >= 65525) return Error.NotFat16;
+        // A FAT too short for the clusters it describes would have `fatGet`
+        // read past its end, into the next copy or the root.
+        if (sectors_per_fat * (sector_size / 2) < clusters + 2) return Error.BadBootSector;
 
         return .{
             .blk = blk,
@@ -319,12 +322,50 @@ pub const Volume = struct {
     }
 
     /// The next cluster in a chain, or null at its end.
+    ///
+    /// **A LINK PAST THE LAST CLUSTER IS A BROKEN CHAIN**, not a cluster: the
+    /// FAT has no entry for it (a held FAT would be indexed past its end) and
+    /// `clusterSector` would put it past the volume, where a write lands on
+    /// whatever the disk holds next. That includes 0xFFF7, the bad-cluster
+    /// mark, which nothing should be chained through.
     fn nextCluster(self: *Volume, cluster: u16) Error!?u16 {
         const v = try self.fatGet(cluster);
         if (v >= chain_end) return null;
-        if (v < 2) return Error.BadChain;
+        if (!self.inData(v)) return Error.BadChain;
         return v;
     }
+
+    /// A cluster the data region holds: 2 to `max_cluster`.
+    fn inData(self: *const Volume, cluster: u16) bool {
+        return cluster >= 2 and cluster <= self.max_cluster;
+    }
+
+    /// **A CHAIN THAT COMES BACK TO A CLUSTER IT PASSED GOES ROUND FOR EVER**:
+    /// a FAT damaged into a loop would hang every walk along it. A walk hands
+    /// each cluster it reaches to `pass`, which answers BadChain once the
+    /// chain has repeated one.
+    ///
+    /// It is Brent's cycle finding, in four words of state: remember one
+    /// cluster, and remember a later one each time the steps since reach the
+    /// next power of two. A loop is found within about two laps of it, so a
+    /// looped directory hands out each name at most a few times before its
+    /// listing fails, not once for every cluster on the volume.
+    const Loop = struct {
+        /// The cluster remembered. Zero is never in a chain.
+        seen: u16 = 0,
+        power: u32 = 1,
+        steps: u32 = 0,
+
+        fn pass(self: *Loop, cluster: u16) Error!void {
+            if (cluster == self.seen) return Error.BadChain;
+            self.steps += 1;
+            if (self.steps == self.power) {
+                self.seen = cluster;
+                self.power *= 2;
+                self.steps = 0;
+            }
+        }
+    };
 
     /// Where a directory's next sector is. The root is a fixed run outside the
     /// data region; everything else is a cluster chain. Keeping the difference
@@ -337,14 +378,19 @@ pub const Volume = struct {
         lba: u32,
         left_in_root: u32,
         in_cluster: u32 = 0,
+        /// So that a looped chain ends the walk.
+        loop: Loop = .{},
 
-        fn start(vol: *Volume, dir_cluster: u16) Walk {
+        fn start(vol: *Volume, dir_cluster: u16) Error!Walk {
+            if (dir_cluster != 0 and !vol.inData(dir_cluster)) return Error.BadChain;
             return .{
                 .vol = vol,
                 .root = dir_cluster == 0,
                 .cluster = dir_cluster,
                 .lba = if (dir_cluster == 0) vol.root_start else vol.clusterSector(dir_cluster),
                 .left_in_root = vol.root_sectors,
+                // As `pass(dir_cluster)` leaves it.
+                .loop = .{ .seen = dir_cluster, .power = 2 },
             };
         }
 
@@ -362,6 +408,7 @@ pub const Volume = struct {
                 return true;
             }
             self.cluster = (try self.vol.nextCluster(self.cluster)) orelse return false;
+            try self.loop.pass(self.cluster);
             self.lba = self.vol.clusterSector(self.cluster);
             self.in_cluster = 0;
             return true;
@@ -377,7 +424,7 @@ pub const Volume = struct {
         context: anytype,
         comptime each: fn (@TypeOf(context), Entry) void,
     ) Error!void {
-        var walk = Walk.start(self, dir_cluster);
+        var walk = try Walk.start(self, dir_cluster);
         // A long name arrives before its entry, in reverse order, so it is
         // collected here and handed over with the short entry that closes it.
         var long: [max_name]u8 = undefined;
@@ -558,7 +605,7 @@ pub const Volume = struct {
 
     fn freeChain(self: *Volume, first: u16) Error!void {
         var cluster = first;
-        while (cluster >= 2 and cluster < chain_end) {
+        while (self.inData(cluster)) {
             const next = try self.fatGet(cluster);
             try self.fatSet(cluster, 0);
             cluster = next;
@@ -596,7 +643,7 @@ pub const Volume = struct {
 
     fn findRun(self: *Volume, dir_cluster: u16, needed: u32) Error!Run {
         if (needed == 0 or needed > max_long_parts + 1) return Error.BadName;
-        var walk = Walk.start(self, dir_cluster);
+        var walk = try Walk.start(self, dir_cluster);
         var run = Run{};
 
         while (true) {
@@ -627,8 +674,7 @@ pub const Volume = struct {
 
     /// Adds one zeroed cluster to the end of a directory's chain.
     fn grow(self: *Volume, dir_cluster: u16) Error!void {
-        var last = dir_cluster;
-        while (try self.nextCluster(last)) |n| last = n;
+        const last = try self.lastCluster(dir_cluster);
 
         const fresh = try self.allocChain(1);
         var s: u32 = 0;
@@ -669,7 +715,7 @@ pub const Volume = struct {
     /// player's session folder can have that.
     fn removeEntry(self: *Volume, dir_cluster: u16, name: []const u8) Error!void {
         const Pos = struct { lba: u32, at: u32 };
-        var walk = Walk.start(self, dir_cluster);
+        var walk = try Walk.start(self, dir_cluster);
         var parts: [max_long_parts]Pos = undefined;
         var part_count: usize = 0;
         var parts_overflowed = false;
@@ -1025,10 +1071,12 @@ pub const Volume = struct {
 
     /// The last cluster of a chain — where an extension links on.
     fn lastCluster(self: *Volume, first: u16) Error!u16 {
-        if (first < 2) return Error.BadChain;
+        if (!self.inData(first)) return Error.BadChain;
         var cluster = first;
+        var loop = Loop{};
+        try loop.pass(first);
         while (try self.nextCluster(cluster)) |next| {
-            if (next < 2) return Error.BadChain;
+            try loop.pass(next);
             cluster = next;
         }
         return cluster;
@@ -1060,7 +1108,7 @@ pub const Volume = struct {
         const cluster_bytes: u32 = self.sectors_per_cluster * sector_size;
 
         var cluster = first;
-        if (cluster < 2) return Error.BadChain;
+        if (!self.inData(cluster)) return Error.BadChain;
         var skip = offset / cluster_bytes;
         while (skip > 0) : (skip -= 1) {
             cluster = (try self.nextCluster(cluster)) orelse return Error.BadChain;
@@ -1279,6 +1327,7 @@ pub const Volume = struct {
         var out = Layout{ .clusters = 0, .runs = 0, .longest = 0 };
         var cluster = entry.first_cluster;
         if (cluster < 2) return out;
+        if (!self.inData(cluster)) return Error.BadChain;
         var previous: u16 = 0;
         var run: u32 = 0;
         while (true) {
@@ -1304,7 +1353,7 @@ pub const Volume = struct {
 
         const cluster_bytes: u32 = self.sectors_per_cluster * sector_size;
         var cluster = entry.first_cluster;
-        if (cluster < 2) return Error.BadChain; // a non-empty file has a chain
+        if (!self.inData(cluster)) return Error.BadChain; // a non-empty file has a chain
         var skip = offset / cluster_bytes;
         while (skip > 0) : (skip -= 1) {
             cluster = (try self.nextCluster(cluster)) orelse return Error.BadChain;
