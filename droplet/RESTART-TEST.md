@@ -6,7 +6,8 @@ a DigitalOcean droplet's machine starts it again. If a reset **powers the
 droplet off** instead, a restart is worse than halting with the log on the
 screen. QEMU here cannot answer it: DigitalOcean's own settings decide.
 This page is the test. It takes about fifteen minutes, and the test site
-is down meanwhile.
+is down meanwhile. It is not part of the cutover (CUTOVER.md keeps the
+restart off), and is best done on a day when nothing else is changing.
 
 **The box prepares** (Steve need not):
 

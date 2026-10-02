@@ -1,19 +1,18 @@
 # Moving prod's chat data onto a FAT volume
 
-Prod's chat data is about 215 MB in 801 files under `data/` and `auth/`. It
-lives on Linux, whose filesystem allows almost anything in a name or a tree.
-It is going onto a FAT16 volume that two different programs will handle:
+**The procedure is CUTOVER.md**, steps 2 to 5. This page is the background
+to them: what a Linux folder can hold that a FAT volume cannot, which of
+those the application itself can make, and what
+`droplet/check_volume_tree.py` (step 3) looks for. Read it when the checker
+finds something.
 
-- **Linux's vfat driver writes the volume.** The volume is made the way
-  `droplet/chat.py` and `judge_gopher.build_disk` make one: `mkfs.vfat -F 16`,
-  loop-mount, copy.
-- **This machine's own `src/fat16.zig` and `src/io.zig` read it afterwards**,
-  and write it from then on.
-
-This note lists what Linux allows and one of those two cannot hold, says
-which of those the application itself can produce, and gives the copy step
-by step. `droplet/check_volume_tree.py <dir>` finds every case in a real
-tree before anything is copied.
+Prod's chat data is about 215 MB in about 800 files under `data/` and
+`auth/`. It lives on Linux, whose filesystem allows almost anything in a
+name or a tree. It moves onto a FAT32 volume that two different programs
+handle:
+- **`droplet/build_volume.py` writes it once**, with mtools, without root;
+- **this machine's own `src/fat16.zig` and `src/io.zig`** read and write
+  it from then on.
 
 ## Which FAT
 
@@ -30,26 +29,15 @@ Every tool here says which format it makes or assumes:
 | tool | FAT16 (the default) | FAT32 |
 |---|---|---|
 | `droplet/check_volume_tree.py` | a 512-entry root, a 2 GiB volume | `--fat 32 --gib N`: the root grows like any directory; the space estimate uses N |
-| `droplet/new_volume.py` | 2 GiB | `--fat 32 --gib N`, N of 3 or more, 32 KiB clusters |
+| `droplet/build_volume.py` | 2 GiB | `--fat 32 --gib N`: the cutover's volume |
+| `droplet/new_volume.py` (an empty volume) | 2 GiB | `--fat 32 --gib N`, N of 3 or more, 32 KiB clusters |
 | `droplet/compare_volume.py`, `tools/fat16_read.py` | read either kind, decided by cluster count | the same |
 | `probe/run.sh`, `probe/run.sh gopher` | the default | `FAT=32` |
 
 The hazards below are the same on both kinds, except that FAT32's root has
 no fixed limit of 512 entries.
 
-## The short version
-
-1. Run `droplet/check_volume_tree.py <copy of prod's data>` (the directory
-   holding `data/` and `auth/`). Fix or decide on everything it lists.
-2. Build the volume without root: `droplet/build_volume.py <copy> <out.img>`
-   (add `--fat 32 --gib N` for FAT32). It copies with mtools in UTC,
-   keeping modification times, and refuses a tree step 1 still finds
-   anything in.
-3. It then checks what it built with `fsck.fat -n`, `tools/fat16_read.py`
-   and step 4's comparison, and prints the serial.
-4. Compare every name, size, hash and modification time with the source:
-   `droplet/compare_volume.py <copy> <volume.img>`, which needs no mount.
-   Then boot this machine on it and let the chat judge's read gates look.
+## What the application can make
 
 The application can produce exactly one of the hazards below: **names that
 differ only in case**. It could also produce **names too long for
@@ -93,9 +81,9 @@ The deepest path is about 200 bytes and seven levels:
 machine, creating session `plan` when `Plan` exists replaces it
 (`writeFileIn` removes the old entry by name, without case, first). The
 same request on Linux makes a second session. The fix belongs in the
-application: fold session ids and channel names to one case, or refuse one
-that differs from an existing one only in case. Until then, the checker
-says whether prod has any.
+application: Steve has decided on names without case, and the box is
+making that change in angry-gopher. Until then, the checker says whether
+prod has any (on 2026-10-02 it had none).
 
 ### Names too long for this machine — **the application could produce these, before `max_name` was 96**
 
@@ -150,10 +138,11 @@ in all.
   is ordered by modification time:
   - **resolution:** FAT keeps times in 2-second steps, so two writes in the
     same 2 seconds sort by name;
-  - **time zone:** vfat stores local time. `build_disk` mounts without
-    `tz=`, so on a host whose zone is not UTC every time shifts by the
-    host's offset. **Mount with `tz=UTC` for the migration.** This machine
-    reads FAT times as UTC.
+  - **time zone:** FAT stores local time, and this machine reads it as
+    UTC. So the volume is written in UTC: `build_volume.py` runs mtools
+    with `TZ=UTC`, and the judge's Linux mount uses `tz=UTC`. Written any
+    other way, every time would shift by the host's offset, and
+    `compare_volume.py` would say so.
 
 ### Symlinks, hard links and special files — the application cannot produce these
 
@@ -195,9 +184,10 @@ each is reported as a hard link.
 - **The root is a fixed run** of 512 entries (`mkfs.vfat`'s default). It
   holds `data` and `auth`, 4 entries in all.
 - **Every other directory may grow to 65,536 entries** (2 MiB). Past that
-  `fsck.fat` calls it broken. **`fat16.zig`'s `grow` does not stop there:** it
-  would go on extending the directory, and the Linux side would then refuse
-  the volume. This is worth a check in `grow`.
+  `fsck.fat` calls it broken, and `fat16.zig` stops there too: a write
+  that needs more room fails, and the application answers it as a full
+  disk. angry-gopher's Store header says how near each of its folders can
+  come (REVIEW-fixed-sizes.md, finding 1).
 - **The application's busiest directories:**
   - **a conversation's `sessions/`:** five names a session, about 4–8 entries
     each, so roughly 4,000 sessions in one conversation before the limit;
@@ -211,14 +201,12 @@ The checker reports, per directory, whether it is over its limit.
 
 ### Space on the volume
 
-`chat.py` asks for 2 GiB, as large as FAT16 goes, which `mkfs.vfat` formats
-with 32 KiB clusters. Every file and directory takes whole clusters:
+Every file and directory takes whole clusters: 32 KiB, on the FAT32
+volume `build_volume.py --fat 32` makes, as on the 2 GiB FAT16 one the
+test site uses. 800 files waste at most 800 × 32 KiB ≈ 26 MB.
 
-- 801 files waste at most 801 × 32 KiB ≈ 26 MB;
-- with 215 MB of data, that is well inside 2 GiB.
-
-The checker adds it up for the real tree. On prod, 2026-10-02: 835 files and
-275 directories take 251 MB on the volume, 12% of it.
+The checker adds it up for the real tree, against `--gib N`. On prod,
+2026-10-02: 835 files and 275 directories take 251 MB on the volume.
 
 ### What survives, changed
 
@@ -229,61 +217,31 @@ The checker adds it up for the real tree. On prod, 2026-10-02: 835 files and
 - **Access and change times are lost**; only the modification time is kept,
   in 2-second steps.
 
-## The copy, step by step
+## What the tools check
 
-1. **Take a consistent copy of prod's `data/` and `auth/`.** Stop the server
-   or snapshot, so that no file changes during the copy.
-2. **Check it:**
+CUTOVER.md runs these in order; `droplet/rehearse.sh` runs them all on a
+copy. What each one proves:
+- **`check_volume_tree.py COPY --fat 32 --gib N`**: every hazard above,
+  in the real tree. `--json` gives the same for a script. Fix or decide on
+  each finding in the copy, and run it again until it finds nothing.
+- **`build_volume.py COPY OUT.img --fat 32 --gib N`**: GPT, one
+  partition, mkfs.vfat with 32 KiB clusters, then the tree copied in with
+  mtools (`mcopy -s -m`, `TZ=UTC`), keeping modification times in UTC. It
+  refuses a tree the checker still finds anything in. It then runs
+  `fsck.fat -n`, `tools/fat16_read.py check` and `compare_volume.py`, and
+  prints the FAT serial.
+- **`compare_volume.py COPY OUT.img`**, which needs no root: it reads the
+  volume through `tools/fat16_read.py`, an independent reader written
+  from the FAT spec. For every file and directory in the copy:
+  - the name exists, compared exactly, not by case;
+  - the size and SHA-256 match;
+  - the modification time is within 2 seconds, read as UTC.
 
-       droplet/check_volume_tree.py /path/to/copy        # exit 0: nothing found
-       droplet/check_volume_tree.py /path/to/copy --json # the same, for a script
-
-   For each finding, rename or remove it in the copy (and in prod, if prod
-   is to keep running on Linux meanwhile), or decide to lose it. Then run
-   the checker again until it finds nothing.
-3. **Build the volume**, without root:
-
-       droplet/build_volume.py /path/to/copy volume.img                    # FAT16, 2 GiB
-       droplet/build_volume.py /path/to/copy volume.img --fat 32 --gib 16  # FAT32
-
-   It lays the disk out as `new_volume.py` does: GPT, one partition,
-   mkfs.vfat, with 32 KiB clusters on FAT32. It copies the tree in with
-   mtools (`mcopy -s -m`, `TZ=UTC`), keeping modification times in UTC,
-   and refuses a tree `check_volume_tree.py` still finds anything in. It
-   prints the FAT serial.
-
-   The old way still works where there is root, and the box builds the
-   same copy both ways once to compare them: `judge.build_disk`, mounted
-   with `tz=UTC`, then `shutil.copytree`.
-4. **Check the volume.** `build_volume.py` already ran `fsck.fat -n` on the
-   partition, `tools/fat16_read.py check`, and step 5's comparison. Any
-   problem is printed, and it exits 1.
-5. **Compare**, without mounting:
-
-       droplet/compare_volume.py /path/to/copy volume.img        # exit 0: identical
-       droplet/compare_volume.py /path/to/copy volume.img --json
-
-   It reads the volume through `tools/fat16_read.py`, an independent reader
-   written from the FAT spec, so it needs no root. For every file and
-   directory in the copy it checks:
-   - the name exists, compared exactly, not by case;
-   - the size and SHA-256 match;
-   - the modification time is within 2 seconds, read as UTC.
-
-   It also reports anything on the volume that is not in the copy, and any
-   inconsistency in the volume itself. A volume copied without `tz=UTC`
-   shows here as every file's time off by the host's offset.
-   `droplet/compare_volume.py --self-test` makes volumes with mkfs.vfat and
-   mtools and checks that each kind of mismatch is found.
-6. **Let this machine read it.** Boot with the volume attached and request:
-   - a conversation;
-   - a session with uploads;
-   - "recent";
-   - a login with a real account.
-
-   The droplet judge's read gates do the same against Linux.
-7. **Write the volume onto the DigitalOcean volume once.** From then on, a
-   new boot image never touches it.
+  It also reports anything on the volume that is not in the copy. Its
+  `--self-test` makes volumes with mkfs.vfat and mtools and checks that
+  each kind of mismatch is found.
+- **Booting this machine on the volume, and `compare_hosts.py`**: every
+  page as Linux serves it from the same copy, then the same after writes.
 
 ## Rehearsed, 2026-10-02, on a copy of prod's data (FAT16)
 
@@ -327,4 +285,4 @@ now takes its times from the messages (QUEUE item 27).
 - the same build through Linux's own vfat driver (`--mount`): the first
   attempt was killed for memory, because the volume tools held the 3 GiB
   image whole (QUEUE item 75);
-- step 7, the real DigitalOcean volume.
+- writing the real DigitalOcean volume (CUTOVER.md, step 8).

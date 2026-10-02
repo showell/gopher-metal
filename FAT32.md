@@ -1,7 +1,10 @@
 # FAT32: past FAT16's 2 GB
 
-A design note, not yet code. It covers what changes in `src/fat16.zig`, what
-stays, and how the result is judged against Linux.
+**Built, and judged under QEMU on both hosts** (QUEUE.md item 17): this
+machine mounts FAT16 and FAT32 alike, and the cutover's volume is FAT32.
+This page is the design as it was written before the work, and is
+background only: the cutover is CUTOVER.md, and what a volume can and
+cannot hold is MIGRATION.md.
 
 ## Why, and how far it goes
 

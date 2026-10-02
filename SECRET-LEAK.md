@@ -1,7 +1,8 @@
 # If the session secret leaks
 
-QUEUE.md item 66. One page, for the day it is needed. The options behind it
-are in DESIGN-sessions.md; this is the procedure, whatever Steve decides
+QUEUE.md item 66. One page, for the day it is needed. CUTOVER.md is where
+the cutover's papers start, and how a backup is taken safely; the options
+behind this page are in DESIGN-sessions.md. It holds whatever is decided
 about session lifetimes.
 
 ## What the secret is, and what a leak gives away

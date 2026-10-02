@@ -93,9 +93,11 @@ neighbours vary.
 3. Import it as a custom image, and rebuild the droplet from it. The volume
    stays attached and is not touched.
 
-**The cutover**, lynrummy.com itself onto metal, is planned step by step in
-[`CUTOVER.md`](CUTOVER.md), with a go/no-go line at each step and the way
-back. Its tools are all here, all without root:
+**The cutover**, lynrummy.com itself onto metal, starts at
+[`CUTOVER.md`](CUTOVER.md): every step with a go/no-go line, the way back,
+and a table of the other pages (MIGRATION.md, FAT32.md, RESTART.md,
+SECRET-LEAK.md) saying when each is needed. Its tools are all here, all
+without root:
 - `droplet/check_volume_tree.py` checks a copy of the data, and
   `build_volume.py` builds the volume;
 - `compare_volume.py` compares a volume with its copy;
@@ -104,8 +106,9 @@ back. Its tools are all here, all without root:
 - `drift.py` compares two hosts' clocks, and `load.py` measures uploads
   while others browse.
 
-**A new volume** is once, by hand: `droplet/new_volume.py <out.img>` builds the
-image and prints its serial; write it onto the volume from the recovery console
+**A new, empty volume** is once, by hand (the cutover's volume is built
+from prod's data instead, CUTOVER.md step 4): `droplet/new_volume.py
+<out.img>` builds the image and prints its serial; write it onto the volume from the recovery console
 (the command is in the script); put the serial in `droplet/volume-serial`; then
 deploy as above.
 
@@ -119,7 +122,8 @@ deploy as above.
   of the log it missed when it drains.
 - **The restart on failure is built but off** (`-Drestart`, RESTART.md).
   It waits on one measurement on a real droplet: that a guest's reset
-  restarts it rather than powering it off. Until then, a failure while
+  restarts it rather than powering it off (droplet/RESTART-TEST.md, the
+  console test). Until then, a failure while
   serving halts the machine with its reason on the screen.
 
 [`TCP_TESTING.md`](TCP_TESTING.md) is the plan for finding the TCP table's

@@ -1,5 +1,10 @@
 # Restarting on failure while serving
 
+**For the cutover: nothing to do.** It is off in every image built, and
+CUTOVER.md, "Before the day" step 4, keeps it off. Turning it on waits on
+one test on a real droplet, written up for the console in
+[droplet/RESTART-TEST.md](droplet/RESTART-TEST.md).
+
 > **Status (QUEUE.md item 16): built, and off in every deployed image.**
 >
 > - **What is built:**
@@ -26,10 +31,10 @@
 > - **The record lives at CMOS `0x70`–`0x77`.** That is past the last byte
 >   SeaBIOS (`0x5F`) or QEMU's `pc_cmos_init` (`0x5D`) uses.
 
-QUEUE.md item 7. A design note: nothing here is wired yet. The measurements
+The rest of this page is the design, as written before it was built (QUEUE.md
+item 7). The status above says where the build differs. The measurements
 come from `probe/restart.elf` (below), run on QEMU 8.2 under TCG in the
-cloud container. The box Claude has KVM and a droplet, and can run the same
-kernel on both.
+cloud container.
 
 ## What happens today
 
@@ -156,7 +161,8 @@ code, so it must use only `putPort` and the restart path.
   `droplet/droplet.sh` with `-no-reboot` removed (the cloud container has
   no KVM).
 - **On a real droplet**, booted from `droplet/image.sh probe/restart.elf`,
-  read through the recovery console. This one matters most, and is the
+  read through the recovery console (droplet/RESTART-TEST.md, step by
+  step). This one matters most, and is the
   one thing this note cannot settle.
   - DigitalOcean may run its guests with libvirt's `on_reboot` set to
     something other than `restart`. If a guest's reset powers the droplet

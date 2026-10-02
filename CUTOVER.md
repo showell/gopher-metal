@@ -10,6 +10,20 @@ FAT32 DigitalOcean volume that gopher-metal serves. lynrummy.com's Caddy
 then sends the site to it. Linux keeps the old data, untouched, until the
 first day is over.
 
+## The papers, and when each is needed
+
+**This page is the one to follow,** from the day before to the first week.
+The others explain a step, or are for another day:
+
+| page | what it is for | when |
+|---|---|---|
+| [MIGRATION.md](MIGRATION.md) | what in a Linux folder would not survive a FAT volume, and what the checker in step 3 looks for | if step 3 finds something |
+| [FAT32.md](FAT32.md) | how this machine reads and writes FAT32 | background only |
+| [RESTART.md](RESTART.md) | restarting the machine after a crash: built, and off | why "Before the day" step 4 says off |
+| [droplet/RESTART-TEST.md](droplet/RESTART-TEST.md) | the console test that would let it be turned on | another day, not the cutover's |
+| [SECRET-LEAK.md](SECRET-LEAK.md) | what to do if a backup or the session secret leaks | if it happens |
+| [README.md](README.md), "A deploy" | building and deploying a new boot image | step 9, and every deploy after |
+
 Placeholders, not real addresses: `<prod>` is the lynrummy.com droplet,
 `<metal>` the gopher-metal droplet's private address, `<box>` the dev
 box, `N` the volume's size in GiB, and `/dev/sdX` whatever `lsblk` shows.
@@ -25,13 +39,17 @@ Each of these is done, and checked, at least a day before.
    prod first, as usual (angry-gopher's `deploy/README.md`). The two hosts
    are then compared page by page, so they must be the same program.
    - GO: `https://lynrummy.com/version` names that commit.
-3. **The rehearsal, on FAT32**, on a fresh copy of prod's data (MIGRATION.md
-   "Rehearsed", repeated with `--fat 32`). The box runs `compare_hosts.py`
-   with `--writes` between metal under QEMU and Linux on the same copy.
-   - GO: `0 different`. Write down how long each step took; the day's
-     freeze is their sum.
-4. **The restart stays off** (RESTART.md) unless the box has measured on a
-   real droplet that a guest's reset restarts it. A failure while serving
+3. **The rehearsal, on FAT32**, on a fresh copy of prod's data. The box
+   runs the day's steps 3 to 6 and 11 as one command, with metal under
+   QEMU and Linux on the same copy, neither reachable from outside:
+
+       droplet/rehearse.sh COPY --fat 32 --gib N
+
+   - GO: it exits 0, and its comparisons end `0 different`. Write down how
+     long each step took; the day's freeze is about their sum, plus steps
+     8 and 9.
+4. **The restart stays off** (RESTART.md) unless a real droplet has been
+   seen to restart after a reset (droplet/RESTART-TEST.md). A failure while serving
    then halts the machine, and the first-day watch catches it.
    - GO: the boot image is built without `-Drestart=true` (the default),
      or the measurement is written up.
@@ -251,7 +269,8 @@ without a newline:
 - GO: `check_backup: whole: N files, ...`. A tar cut short lists cleanly
   in `tar`, so this line is the only proof it is whole.
 - It holds the session secret and every password hash: keep it
-  encrypted, or delete it once it has been used.
+  encrypted, or delete it once it has been used. If one is lost, follow
+  SECRET-LEAK.md.
 
 Prod's Linux server stays stopped, with its data as it was at step 1. **Do
 not start it** while metal serves: two hosts writing two copies of the
