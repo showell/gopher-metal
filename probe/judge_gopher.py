@@ -251,6 +251,47 @@ UID_STORY = [
 ]
 
 
+# **A PLAYER AT THE GAME STORE'S BOUND** (QUEUE.md item 52): one player's
+# games may take 16 MiB. New games of 250,000 bytes each, until the store
+# says no: every one before the bound is saved on both hosts, the first past
+# it is a 507 that says why, and so is every one after. The trees then
+# compare equal, so the bound fell at the same game on both.
+CAP_GAME = "x" * 250_000
+CAP_TRIES = 70  # 16 MiB / 250,000 bytes is 67 and a bit
+P1_SIGNED = "$P1_SIGNED"
+
+CAP_STORY = [step(f"new game {n + 1}", "POST", "/game/new-session", P1_SIGNED, CAP_GAME)
+             for n in range(CAP_TRIES)] + [
+    step("the player's games, listed", "GET", "/game/sessions", P1_SIGNED),
+]
+
+
+# **LYN RUMMY, ON BOTH** (QUEUE.md item 49). Metal serves the games too. A
+# player arrives by name, starts a game and makes moves, starts a puzzle and
+# moves in it, reloads both, and the admin's roster shows them. The files
+# they write are compared at the end, as chat's are.
+GAME_STATE = "hand:\n  AS KD 7H\nboard:\n  (empty)\n"
+LYNRUMMY_STORY = [
+    step("a player names themselves", "POST", "/play", None, "name=Lyn&next=%2Fgame"),
+    step("the game page", "GET", "/game", JAR),
+    step("a new game", "POST", "/game/new-session", JAR, GAME_STATE),
+    step("a move", "POST", "/game/sessions/1/actions", JAR, "1) draw"),
+    step("another move", "POST", "/game/sessions/1/actions", JAR, "2) meld AS KD"),
+    step("an annotation", "POST", "/game/sessions/1/annotations", JAR, '{"note":"a good meld"}'),
+    step("the game, reloaded", "GET", "/game/1", JAR),
+    step("its state and moves, for the reload", "GET", "/game/sessions/1/actions", JAR),
+    step("the player's games", "GET", "/game/sessions", JAR),
+    step("the same, as JSON", "GET", "/game/api/sessions", JAR),
+    step("the game's detail", "GET", "/game/sessions/1", JAR),
+    step("a game never made", "POST", "/game/sessions/9/actions", JAR, "1) draw"),
+    step("the puzzles page", "GET", "/puzzles", JAR),
+    step("a puzzle's first move", "POST", "/puzzles/sessions/1/puzzles/0/actions", JAR, "1) move"),
+    step("its second", "POST", "/puzzles/sessions/1/puzzles/0/actions", JAR, "2) move"),
+    step("the puzzles page, reloaded", "GET", "/puzzles", JAR),
+    step("the game roster", "GET", "/admin/lynrummy", FRESH),
+]
+
+
 # ENDURANCE: the writes, over and over, READ BACK EVERY ROUND.
 #
 # **STAMINA BELOW ONLY READS, AND A READ CANNOT LOSE ANYTHING.** Three GETs
@@ -594,7 +635,7 @@ QUICK = bool(os.environ.get("JUDGE_QUICK"))
 # answerable in one of those minutes. `JUDGE_ONLY=uploads` (probe/run.sh gopher
 # uploads) runs that gate and nothing else. An unknown name is an error, not a
 # silently complete run.
-GATES = ["cases", "members", "uids", "streams-linux", "streams-metal", "budget", "churn",
+GATES = ["cases", "members", "uids", "caps", "lynrummy", "streams-linux", "streams-metal", "budget", "churn",
          "bulk", "uploads", "slow", "lagging", "concurrent", "timeouts",
          "damaged", "endurance", "stamina"]
 # The boots that exist to be long. The quick tier leaves them out; asking for
@@ -850,7 +891,12 @@ class LinuxServer:
             # be a difference between two hosts' configuration rather than
             # between two answers.
             f.write("data_dir = data\nauth_dir = auth\n")
-        env = dict(os.environ, GOPHER_CONFIG=conf, GOPHER_PORT=str(self.port))
+        # **NO FLOOR ON LINUX'S SIDE.** angry-gopher stops game writes when the
+        # data's volume is under a quarter free (QUEUE.md item 52). Here that
+        # volume is whatever disk this machine's temporary folder is on, which
+        # says nothing about the server under test, and a full development
+        # disk would refuse what the kernel, on its own image, takes.
+        env = dict(os.environ, GOPHER_CONFIG=conf, GOPHER_PORT=str(self.port), GOPHER_GAME_FLOOR="off")
         self.log = open(log, "wb")
         # Popen gives the server's OWN pid, so stopping it stops it — not a
         # shell that happens to be its parent.
@@ -2685,6 +2731,67 @@ def main() -> int:
                   f"nothing, a hand-set and a wrongly signed cookie named no one, and a legacy cookie "
                   f"was re-signed once and refused after")
         lap("uid story")
+
+    # ── a player at the game store's bound ──────────────────────────────────
+    if running("caps"):
+        minted = {P1_SIGNED: mint_uid("p1", int(time.time()))}
+        f, _, answers, files = run_story(elf, linux_bin, content, pristine, work, mnt,
+                                         CAP_STORY, "caps", print, minted)
+        failures += f
+        statuses = [a.get("status") for a in answers[:CAP_TRIES]]
+        saved = statuses.index(507) if 507 in statuses else len(statuses)
+        wrong = []
+        if saved < 60 or saved == len(statuses):
+            wrong.append(f"{saved} games saved before a 507, of {CAP_TRIES} tried: {statuses}")
+        elif any(st != 200 for st in statuses[:saved]) or any(st != 507 for st in statuses[saved:]):
+            wrong.append(f"not every game before the bound saved and every one after refused: {statuses}")
+        elif b"16 MiB" not in (answers[saved].get("body") or b""):
+            wrong.append(f"the 507 did not say why: {answers[saved].get('body')!r}")
+        if answers[CAP_TRIES].get("status") != 200:
+            wrong.append(f"the list of games answered {answers[CAP_TRIES].get('status')} at the bound")
+        for w in wrong:
+            failures += 1
+            print(f"FAIL  caps: {w}")
+        if not f and not wrong:
+            print(f"ok    the cap story: {saved} games of 250,000 bytes saved and the next "
+                  f"{CAP_TRIES - saved} refused (507, saying why) on both hosts alike, all {files} files agree")
+        lap("cap story")
+
+    # ── Lyn Rummy ────────────────────────────────────────────────────────────
+    if running("lynrummy"):
+        minted = {FRESH: mint_session("1", int(time.time()))}
+        f, _, answers, files = run_story(elf, linux_bin, content, pristine, work, mnt,
+                                         LYNRUMMY_STORY, "lynrummy", print, minted)
+        failures += f
+        # As each step's name says, not merely alike on both.
+        by_name = {s["name"]: a for s, a in zip(LYNRUMMY_STORY, answers)}
+        body = lambda name: by_name[name].get("body") or b""
+        want = {"a player names themselves": 303, "the game page": 200, "a new game": 200,
+                "a move": 204, "another move": 204, "an annotation": 204, "the game, reloaded": 200,
+                "its state and moves, for the reload": 200, "the player's games": 200,
+                "the same, as JSON": 200, "the game's detail": 200, "a game never made": 404,
+                "the puzzles page": 200, "a puzzle's first move": 204, "its second": 204,
+                "the puzzles page, reloaded": 200, "the game roster": 200}
+        wrong = [f"{name} answered {by_name[name].get('status')}, want {st}"
+                 for name, st in want.items() if by_name[name].get("status") != st]
+        if not wrong:
+            if body("a new game") != b'{"session_id":1}\n':
+                wrong.append(f"the new game answered {body('a new game')!r}")
+            reload = body("its state and moves, for the reload")
+            if b"hand:" not in reload or not reload.endswith(b"---\n1) draw\n2) meld AS KD\n"):
+                wrong.append(f"the reload is not the state and both moves: {reload[-80:]!r}")
+            if b"session_id: 1\\n" not in body("the puzzles page") or b"session_id: 2\\n" not in body("the puzzles page, reloaded"):
+                wrong.append("the puzzles page did not offer session 1, then 2 after a move")
+            if b"Lyn" not in body("the game roster"):
+                wrong.append("the roster does not show the player")
+        for w in wrong:
+            failures += 1
+            print(f"FAIL  lynrummy: {w}")
+        if not f and not wrong:
+            print(f"ok    the Lyn Rummy story: {len(LYNRUMMY_STORY)} requests to ONE boot — a name, a game "
+                  f"and its moves, a puzzle and its moves, both reloaded, the roster — each answered as "
+                  f"Linux answered, all {files} files agree")
+        lap("Lyn Rummy story")
 
     # ── a live stream, on both ───────────────────────────────────────────────
     if running("streams-linux"):
