@@ -656,58 +656,102 @@ pub const Volume = struct {
         }
     };
 
-    /// Walks the entries of a directory, calling `each` for every real one.
-    /// Cluster 0 means the root directory, which on FAT16 is a fixed run of
-    /// sectors outside the data region rather than a chain.
+    /// **A DIRECTORY, ONE ENTRY AT A TIME**, from a sector of its own: what
+    /// io.zig's directory iterator hands the application. It used to be
+    /// `list` into a fixed array of 256 entries, and a directory past that
+    /// stopped the machine. The application makes such folders: a player may
+    /// keep 500 game sessions (angry-gopher's game_limits.zig), and nothing
+    /// bounds how many players there are. A cursor has no ceiling, and its
+    /// memory is one sector and one long name, however long the directory.
+    ///
+    /// Its sector is its own, not `scratch`, so whatever the volume does
+    /// between two `next` calls cannot change what it is reading. What the
+    /// directory itself holds is read as it is reached: an entry written
+    /// meanwhile, past where the cursor is, is seen.
+    pub const Lister = struct {
+        walk: Walk,
+        sector: [sector_size]u8 = undefined,
+        at: usize = 0,
+        loaded: bool = false,
+        done: bool = false,
+        // A long name arrives before its entry, in reverse order, so it is
+        // collected here and handed over with the short entry that closes it.
+        long: [max_name]u8 = undefined,
+        long_len: usize = 0,
+        long_sum: u8 = 0,
+        long_ok: bool = false,
+
+        /// The next real entry, or null at the directory's end.
+        pub fn next(self: *Lister) Error!?Entry {
+            while (!self.done) {
+                if (!self.loaded) {
+                    try self.walk.vol.readSector(self.walk.lba, &self.sector);
+                    self.loaded = true;
+                    self.at = 0;
+                }
+                while (self.at + dirent_size <= sector_size) {
+                    const at = self.at;
+                    self.at += dirent_size;
+                    const e = self.sector[at..][0..dirent_size];
+                    if (e[0] == 0x00) { // nothing further in this directory
+                        self.done = true;
+                        return null;
+                    }
+                    if (e[0] == 0xE5) {
+                        self.long_ok = false;
+                        continue;
+                    }
+                    if (e[11] == attr_long_name) {
+                        takeLongPart(e, &self.long, &self.long_len, &self.long_sum, &self.long_ok);
+                        continue;
+                    }
+                    if (e[11] & attr_volume_label != 0) {
+                        self.long_ok = false;
+                        continue;
+                    }
+                    var entry = self.walk.vol.entryFrom(e);
+                    entry.lba = self.walk.lba;
+                    entry.slot = @intCast(at);
+                    // **THE CHECKSUM IS WHAT TIES A LONG NAME TO ITS ENTRY.** A
+                    // run whose checksum does not match the short name it
+                    // precedes belongs to a file that was deleted and partly
+                    // overwritten, and using it would put the wrong name on the
+                    // wrong bytes.
+                    if (self.long_ok and self.long_len > 0 and self.long_sum == shortChecksum(e[0..11].*)) {
+                        entry.long_len = @intCast(@min(self.long_len, entry.long.len));
+                        @memcpy(entry.long[0..entry.long_len], self.long[0..entry.long_len]);
+                    }
+                    self.long_ok = false;
+                    self.long_len = 0;
+                    return entry;
+                }
+                if (!(try self.walk.next())) {
+                    self.done = true;
+                    return null;
+                }
+                self.loaded = false;
+            }
+            return null;
+        }
+    };
+
+    /// A cursor over a directory's entries. Cluster 0 means the root
+    /// directory, which on FAT16 is a fixed run of sectors outside the data
+    /// region rather than a chain.
+    pub fn lister(self: *Volume, dir_cluster: Cluster) Error!Lister {
+        return .{ .walk = try Walk.start(self, dir_cluster) };
+    }
+
+    /// Walks the entries of a directory, calling `each` for every real one:
+    /// a `Lister` run to its end.
     pub fn list(
         self: *Volume,
         dir_cluster: Cluster,
         context: anytype,
         comptime each: fn (@TypeOf(context), Entry) void,
     ) Error!void {
-        var walk = try Walk.start(self, dir_cluster);
-        // A long name arrives before its entry, in reverse order, so it is
-        // collected here and handed over with the short entry that closes it.
-        var long: [max_name]u8 = undefined;
-        var long_len: usize = 0;
-        var long_sum: u8 = 0;
-        var long_ok = false;
-
-        while (true) {
-            try self.readSector(walk.lba, self.scratch);
-            var at: usize = 0;
-            while (at + dirent_size <= sector_size) : (at += dirent_size) {
-                const e = self.scratch[at..][0..dirent_size];
-                if (e[0] == 0x00) return; // nothing further in this directory
-                if (e[0] == 0xE5) {
-                    long_ok = false;
-                    continue;
-                }
-                if (e[11] == attr_long_name) {
-                    takeLongPart(e, &long, &long_len, &long_sum, &long_ok);
-                    continue;
-                }
-                if (e[11] & attr_volume_label != 0) {
-                    long_ok = false;
-                    continue;
-                }
-                var entry = self.entryFrom(e);
-                entry.lba = walk.lba;
-                entry.slot = @intCast(at);
-                // **THE CHECKSUM IS WHAT TIES A LONG NAME TO ITS ENTRY.** A run
-                // whose checksum does not match the short name it precedes
-                // belongs to a file that was deleted and partly overwritten, and
-                // using it would put the wrong name on the wrong bytes.
-                if (long_ok and long_len > 0 and long_sum == shortChecksum(e[0..11].*)) {
-                    entry.long_len = @intCast(@min(long_len, entry.long.len));
-                    @memcpy(entry.long[0..entry.long_len], long[0..entry.long_len]);
-                }
-                long_ok = false;
-                long_len = 0;
-                each(context, entry);
-            }
-            if (!(try walk.next())) return;
-        }
+        var l = try self.lister(dir_cluster);
+        while (try l.next()) |entry| each(context, entry);
     }
 
     /// The entry named `name` in a directory, or null. Case-insensitive, as
