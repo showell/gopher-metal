@@ -382,6 +382,11 @@ class DiskCheckLines(unittest.TestCase):
         # A boot that never mounted the disk has nothing to say about it.
         self.assertEqual(G.disk_check_differences("FAIL: no disk\n"), [])
 
+    def test_a_fat32_disk_is_held_to_the_same_line(self):
+        log = self.CLEAN.replace("FAT16 at LBA", "FAT32 at LBA")
+        self.assertEqual(G.disk_check_differences(log), [])
+        self.assertTrue(G.disk_check_differences(log.replace("  disk check, the boot disk: 18 files", "  x")))
+
     def test_the_volume_needs_its_own_line_when_it_serves_chat(self):
         log = self.CLEAN + ("  the volume: FAT16 at LBA 2048, FAT held in memory (1 bytes)\n"
                             "  chat's data: the volume\n")

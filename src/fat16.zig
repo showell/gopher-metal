@@ -313,6 +313,15 @@ pub const Volume = struct {
     /// both wrote would each count only their own writes. On this machine
     /// only io.zig's copy writes once it has one (`mount`, `keepData`).
     free_clusters: u32 = 0,
+    /// **WHERE THE NEXT ALLOCATION STARTS LOOKING** (FAT32.md §8). Every
+    /// cluster below it is in use: it starts at 2, moves only past clusters
+    /// an allocation took or found taken, and moves back to any cluster
+    /// `freeChain` gives back. So the first free cluster from here is the
+    /// first free cluster on the volume, the one a search from 2 would find,
+    /// and allocation chooses exactly what it chose before, without
+    /// re-reading every entry below on each small file. On FAT32's millions
+    /// of clusters that scan is the cost.
+    next_free: Cluster = 2,
     /// **WHICH VOLUME THIS IS**: the serial number mkfs chose at random when it
     /// formatted it (the extended boot record's volume ID, offset 39), or null
     /// on a boot sector without one. Linux's `blkid` shows it as the UUID,
@@ -352,14 +361,18 @@ pub const Volume = struct {
         if (buf.len < self.fatBytes()) return Error.TooBig;
         const fat = buf[0..self.fatBytes()];
         try self.readSectors(self.fat_start, self.sectors_per_fat, fat.ptr);
-        var s: u32 = 0;
+        // The other copies are compared in runs, not a sector at a time: a
+        // FAT32 FAT of 12.5 MiB is 25,600 sectors (FAT32.md §9).
+        var run: [run_sectors * sector_size]u8 align(16) = undefined;
         var copy: u32 = 1;
         while (copy < self.num_fats) : (copy += 1) {
-            s = 0;
-            while (s < self.sectors_per_fat) : (s += 1) {
-                try self.readSector(self.fat_start + copy * self.sectors_per_fat + s, self.scratch);
-                if (!std.mem.eql(u8, self.scratch, fat[s * sector_size ..][0..sector_size]))
+            var s: u32 = 0;
+            while (s < self.sectors_per_fat) {
+                const n = @min(run_sectors, self.sectors_per_fat - s);
+                try self.readSectors(self.fat_start + copy * self.sectors_per_fat + s, n, &run);
+                if (!std.mem.eql(u8, run[0 .. n * sector_size], fat[s * sector_size ..][0 .. n * sector_size]))
                     return Error.FatsDisagree;
+                s += n;
             }
         }
         self.fat = fat;
@@ -453,20 +466,27 @@ pub const Volume = struct {
     /// time: `sectors_per_fat` reads, not one per cluster.
     fn countFree(self: *Volume) Error!u32 {
         var free: u32 = 0;
-        var s: u32 = 0;
         const per = self.entriesPerSector();
-        while (s < self.sectors_per_fat) : (s += 1) {
-            try self.readSector(self.fat_start + s, self.scratch);
+        var run: [run_sectors * sector_size]u8 align(16) = undefined;
+        var s: u32 = 0;
+        while (s < self.sectors_per_fat) {
+            const n = @min(run_sectors, self.sectors_per_fat - s);
+            try self.readSectors(self.fat_start + s, n, &run);
             var i: u32 = 0;
-            while (i < per) : (i += 1) {
+            while (i < n * per) : (i += 1) {
                 const c = s * per + i;
                 if (c < 2) continue;
                 if (c > self.max_cluster) return free;
-                if (self.entryIn(self.scratch, i) == 0) free += 1;
+                if (self.entryIn(&run, i) == 0) free += 1;
             }
+            s += n;
         }
         return free;
     }
+
+    /// How many sectors a FAT is read in at a time, where it is read whole:
+    /// a buffer of this many on the stack.
+    const run_sectors = 64;
 
     /// Bytes a FAT entry takes: 2 on FAT16, 4 on FAT32.
     fn entryBytes(self: *const Volume) u32 {
@@ -847,13 +867,19 @@ pub const Volume = struct {
         var first: Cluster = 0;
         var previous: Cluster = 0;
         var taken: u32 = 0;
-        var candidate: Cluster = 2;
+        var candidate: Cluster = @max(self.next_free, 2);
+        // Once round the whole volume at most: a cursor that was wrong (a FAT
+        // changed under it) costs a wrap, not a wrong answer.
+        var looked: u32 = 0;
+        const clusters: u32 = self.max_cluster - 1;
 
         while (taken < count) {
-            if (candidate > self.max_cluster) {
+            if (candidate > self.max_cluster) candidate = 2;
+            if (looked == clusters) {
                 if (first != 0) self.freeChain(first) catch {};
                 return Error.Full;
             }
+            looked += 1;
             if ((try self.fatGet(candidate)) != 0) {
                 candidate += 1;
                 continue;
@@ -865,6 +891,7 @@ pub const Volume = struct {
             taken += 1;
             candidate += 1;
         }
+        self.next_free = candidate;
         return first;
     }
 
@@ -873,6 +900,7 @@ pub const Volume = struct {
         while (self.inData(cluster)) {
             const next = try self.fatGet(cluster);
             try self.fatSet(cluster, 0);
+            if (cluster < self.next_free) self.next_free = cluster;
             cluster = next;
         }
     }

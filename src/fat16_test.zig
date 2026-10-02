@@ -987,3 +987,75 @@ test "FAT32: a volume this machine cannot write safely is refused at mount, each
     try testing.expectEqual(fat16.Kind.fat32, v.kind);
     try testing.expectEqual(@as(?u32, 0x3232_3232), v.serial);
 }
+
+// ---- the free-cluster cursor (FAT32.md §8) -----------------------------------
+
+/// Every cluster below the cursor is in use, read from the FAT on the disk:
+/// what makes a search from the cursor choose what a search from 2 would.
+fn expectCursorSound(d: *test_disk.Disk) !void {
+    const l = Layout.of(d.bytes);
+    var c: usize = 2;
+    while (c < d.vol.next_free) : (c += 1) {
+        if (l.get(d.bytes, 0, c) == 0) {
+            std.debug.print("cluster {d} is free, below the cursor at {d}\n", .{ c, d.vol.next_free });
+            return error.TestUnexpectedResult;
+        }
+    }
+}
+
+test "the cursor: every cluster below it stays in use, through writes, removes, a refused write and a remount" {
+    for (configs) |cfg| {
+        const shape, const cached = .{ cfg.shape, cfg.cached };
+        const d = try Disk.make("cursor", shape, cached);
+        defer d.deinit();
+        var data: [5000]u8 = undefined;
+        var path: [64]u8 = undefined;
+        for (0..30) |k| {
+            const p = try std.fmt.bufPrint(&path, "data/f{d}", .{k});
+            try d.vol.writeFile(p, pattern(data[0 .. 100 + 150 * k], @intCast(k)));
+            try expectCursorSound(d);
+        }
+        // Holes, low and high: the cursor goes back to the lowest, and the
+        // next write fills from there, as a search from 2 would.
+        for ([_]usize{ 3, 17, 4, 25 }) |k| {
+            const p = try std.fmt.bufPrint(&path, "data/f{d}", .{k});
+            const first = (try d.vol.open(p)).first_cluster;
+            try d.vol.remove(p);
+            try testing.expect(d.vol.next_free <= first);
+            try expectCursorSound(d);
+        }
+        const lowest_free = blk: {
+            const l = Layout.of(d.bytes);
+            var c: usize = 2;
+            while (l.get(d.bytes, 0, c) != 0) c += 1;
+            break :blk c;
+        };
+        try d.vol.writeFile("data/new", "fills the first hole");
+        try testing.expectEqual(@as(fat16.Cluster, @intCast(lowest_free)), (try d.vol.open("data/new")).first_cluster);
+        try expectCursorSound(d);
+        try d.vol.removeTree("data");
+        try expectCursorSound(d);
+        try d.mount(cached);
+        try testing.expectEqual(@as(fat16.Cluster, 2), d.vol.next_free);
+        try d.vol.writeFile("after-a-mount", "x");
+        try expectCursorSound(d);
+    }
+}
+
+test "the cursor: on a FAT32 volume 33 MiB full, a small write reads a few FAT sectors, not 67,000" {
+    // The FAT on the disk, so each entry looked at is a read the device
+    // counts.
+    const d = try Disk.make("cursor-cost", big32, false);
+    defer d.deinit();
+    const huge = try testing.allocator.alloc(u8, 33 << 20);
+    defer testing.allocator.free(huge);
+    @memset(huge, 7);
+    try d.vol.writeFile("data/huge.bin", huge);
+    const before = d.blk.requests;
+    try d.vol.writeFile("data/small.md", "a small file after a big one");
+    const reads = d.blk.requests - before;
+    // A search from 2 would read a FAT sector for each of the 67,584
+    // clusters in use. From the cursor it is the directory walk and a handful.
+    try testing.expect(reads < 200);
+    try d.expectFile("data/small.md", "a small file after a big one");
+}

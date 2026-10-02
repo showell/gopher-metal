@@ -700,7 +700,7 @@ def disk_check_differences(log: str, damaged: bool = False) -> list:
     lines = disk_check_lines(log)
     disks = ["the boot disk"] + (["the volume"] if "chat's data: the volume" in log else [])
     for disk in disks:
-        if f"  {disk}: FAT16 at LBA" not in log:
+        if not re.search(rf"^  {re.escape(disk)}: FAT(16|32) at LBA", log, re.M):
             continue  # this boot never got as far as mounting it
         got = lines.get(disk)
         if got is None:

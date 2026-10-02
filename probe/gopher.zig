@@ -890,6 +890,10 @@ fn dataVolume() ?virtio.Block {
 /// memory: without that every lookup is a device read, and the free-cluster
 /// search re-reads its way past every cluster in use on each small file the
 /// application replaces.
+/// The most memory one volume's FAT may take (FAT32.md §9): about 256 GiB of
+/// volume at 32 KiB clusters.
+const fat_budget_bytes: usize = 32 << 20;
+
 fn mountFat(blk: *virtio.Block, scratch: *[fat16.sector_size]u8, what: []const u8) fat16.Volume {
     const part = gpt.dataPartition(blk, scratch) catch {
         serial.put("  ");
@@ -897,12 +901,28 @@ fn mountFat(blk: *virtio.Block, scratch: *[fat16.sector_size]u8, what: []const u
         serial.put(": no GPT partition\n");
         serial.fail("a disk has no partition to serve from");
     };
-    var vol = fat16.Volume.mount(blk, scratch, part.first_lba) catch {
+    var vol = fat16.Volume.mount(blk, scratch, part.first_lba) catch |e| {
         serial.put("  ");
         serial.put(what);
-        serial.put(": its first partition is not FAT16\n");
-        serial.fail("a disk's partition is not FAT16");
+        serial.put(": its first partition is not a FAT this machine takes (");
+        serial.put(@errorName(e));
+        serial.put(")\n");
+        serial.fail("a disk's partition is not FAT16 or FAT32, or is one this machine refuses");
     };
+    // **THE FAT IS HELD WHOLE, SO ITS SIZE IS CAPPED** (FAT32.md §9): one
+    // copy is 4 bytes a cluster on FAT32, 12.5 MiB for 100 GiB at 32 KiB
+    // clusters. A volume whose FAT is larger is refused, saying so, rather
+    // than failing an allocation. Format larger volumes with larger clusters.
+    if (vol.fatBytes() > fat_budget_bytes) {
+        serial.put("  ");
+        serial.put(what);
+        serial.put(": its FAT is ");
+        serial.putDec(vol.fatBytes() >> 20);
+        serial.put(" MiB, past the ");
+        serial.putDec(fat_budget_bytes >> 20);
+        serial.put(" MiB set aside for it\n");
+        serial.fail("a disk's FAT is too large to hold in memory; format it with larger clusters");
+    }
     const fat_cache = pages.allocator.alloc(u8, vol.fatBytes()) catch
         serial.fail("no memory to hold the FAT");
     vol.cacheFat(fat_cache) catch |e| {
@@ -913,7 +933,7 @@ fn mountFat(blk: *virtio.Block, scratch: *[fat16.sector_size]u8, what: []const u
     };
     serial.put("  ");
     serial.put(what);
-    serial.put(": FAT16 at LBA ");
+    serial.put(if (vol.kind == .fat32) ": FAT32 at LBA " else ": FAT16 at LBA ");
     serial.putDec(part.first_lba);
     serial.put(", FAT held in memory (");
     serial.putDec(vol.fatBytes());
