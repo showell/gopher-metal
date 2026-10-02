@@ -649,6 +649,40 @@ pub const Block = struct {
     address: ?scsi.Address = null,
     scsi: ?*scsi.Memory = null,
 
+    /// **A DISK IN MEMORY, FOR HOST TESTS** (`inMemory`): every transfer is a
+    /// copy to or from these bytes, and no device is touched. Null on a real
+    /// device.
+    memory: ?[]u8 = null,
+    /// A host test's way to make the disk fail: once this many requests have
+    /// been served, every further one answers `blk_s_ioerr`.
+    fail_after: ?u64 = null,
+
+    /// A disk of `bytes.len / 512` sectors held in `bytes`, which the caller
+    /// owns. For host tests of what sits on a disk (`fat16.zig`, `io.zig`):
+    /// on a host every address is the caller's own memory, so a transfer is a
+    /// copy. Nothing here may be called on it but the transfers.
+    pub fn inMemory(bytes: []u8) Block {
+        return .{
+            .device = .{ .mmio = 0 },
+            .q = undefined,
+            .header = undefined,
+            .status = undefined,
+            .capacity = bytes.len / 512,
+            .memory = bytes,
+        };
+    }
+
+    fn memoryTransfer(self: *Block, disk: []u8, kind: u32, lba: u64, addr: u64, len: u32) u8 {
+        if (self.fail_after) |n| if (self.requests >= n) return blk_s_ioerr;
+        self.requests +%= 1;
+        const at = lba * 512;
+        if (at > disk.len or len > disk.len - at) return blk_s_ioerr;
+        const there = disk[@intCast(at)..][0..len];
+        const here: [*]u8 = @ptrFromInt(@as(usize, @intCast(addr)));
+        if (kind == blk_t_in) @memcpy(here[0..len], there) else @memcpy(there, here[0..len]);
+        return blk_s_ok;
+    }
+
     /// `mem` is memory the caller owns and keeps for as long as the device is
     /// up; it must be identity-mapped, since what goes in a descriptor is a
     /// PHYSICAL address.
@@ -673,6 +707,7 @@ pub const Block = struct {
     /// That is the whole reason the door takes an address: the 512 bytes never
     /// pass through this function.
     fn transfer(self: *Block, kind: u32, lba: u64, addr: u64, len: u32) u8 {
+        if (self.memory) |disk| return self.memoryTransfer(disk, kind, lba, addr, len);
         if (self.address) |at| return scsi.transfer(self, at, kind == blk_t_in, lba, addr, len);
         self.header.* = .{ .type = kind, .reserved = 0, .sector = lba };
         self.status.* = 0xFF; // so a device that writes nothing is not read as OK

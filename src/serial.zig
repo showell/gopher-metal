@@ -3,6 +3,7 @@
 
 const com1: u16 = 0x3F8;
 
+const std = @import("std");
 const port = @import("port.zig");
 const screen = @import("screen.zig");
 pub const outb = port.outb;
@@ -34,6 +35,7 @@ pub fn put(bytes: []const u8) void {
 /// The serial port alone, without the screen. For a handler that may have
 /// interrupted `screen.put` part-way, whose state it must not touch.
 pub fn putPort(bytes: []const u8) void {
+    if (@import("builtin").is_test) return captureForTest(bytes);
     if (serial_dead) return;
     for (bytes) |b| {
         var waited: u32 = 0;
@@ -104,4 +106,32 @@ pub fn fail(why: []const u8) noreturn {
 pub fn pass() noreturn {
     put("PASS\n");
     exitQemu(0);
+}
+
+/// **WHAT A HOST TEST WOULD HAVE SEEN ON THE PORT.** A host test has no
+/// serial port, and its process may not touch I/O ports, so in a test build
+/// `putPort` writes here instead: the last `captured_max` bytes, oldest
+/// dropped first. A test reads it with `captured()` and empties it with
+/// `clearCaptured()`.
+const captured_max = 4096;
+var captured_buf: [captured_max]u8 = undefined;
+var captured_len: usize = 0;
+
+fn captureForTest(bytes: []const u8) void {
+    for (bytes) |b| {
+        if (captured_len == captured_max) {
+            std.mem.copyForwards(u8, captured_buf[0 .. captured_max - 1], captured_buf[1..]);
+            captured_len -= 1;
+        }
+        captured_buf[captured_len] = b;
+        captured_len += 1;
+    }
+}
+
+pub fn captured() []const u8 {
+    return captured_buf[0..captured_len];
+}
+
+pub fn clearCaptured() void {
+    captured_len = 0;
 }
