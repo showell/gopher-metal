@@ -98,6 +98,20 @@ else
     echo "     build | kernels of unknown build"
 fi
 
+# **A FIXTURE THAT WILL NOT COPY FAILS ITS PROBE** (QUEUE.md item 60). WORK
+# outlives a run, so an unchecked `cp` that failed left the last run's copy
+# where the probe looks, and the probe could boot it and pass. The old copy
+# is removed first, and a copy that fails is the probe's FAIL, with no boot.
+#   fixture NAME SRC DST  -- true when DST is a fresh copy of SRC
+fixture() {
+    rm -f "$3"
+    if ! err="$(cp "$2" "$3" 2>&1)"; then
+        echo "FAIL $1 | its fixture would not copy: ${err:-cp failed}"
+        failed=1
+        return 1
+    fi
+}
+
 boot() {
     local name="$1"; shift
     if [ ! -f "$HERE/$name.elf" ]; then
@@ -152,8 +166,7 @@ boot() {
 # prove the device writes where it was told, and it must never do that to a
 # fixture.
 if [ "$want" = all ] || [ "$want" = block ]; then
-    cp "$IMAGE" "$WORK/disk.img"
-    boot block \
+    fixture block "$IMAGE" "$WORK/disk.img" && boot block \
         -drive id=d,file="$WORK/disk.img",format=raw,if=none \
         -device virtio-blk-device,drive=d
 fi
@@ -163,8 +176,7 @@ fi
 # The FAT16 probe reads Cobblestone's fat16-list.disk, whose contents are
 # pinned by that test's own verdict.
 if [ "$want" = all ] || [ "$want" = fat16 ]; then
-    cp "${FAT16_IMAGE:-$CHECKOUT/codex/test/fat16-list.disk}" "$WORK/fat16.img"
-    boot fat16 \
+    fixture fat16 "${FAT16_IMAGE:-$CHECKOUT/codex/test/fat16-list.disk}" "$WORK/fat16.img" && boot fat16 \
         -drive id=d,file="$WORK/fat16.img",format=raw,if=none \
         -device virtio-blk-device,drive=d
 fi
@@ -174,8 +186,8 @@ fi
 # test's own verdict -- the same file roc-apps/floor's verify.sh uses for the
 # Roc implementation. Two filesystems, two languages, one disk image.
 if [ "$want" = all ] || [ "$want" = fat16write ]; then
-    cp "${WRITE_IMAGE:-$CHECKOUT/codex/test/fat16-write.disk}" "$WORK/fat16write.img"
-    boot fat16write \
+    rm -f "$WORK/fat16write.out"  # judged below: never the last run's
+    fixture fat16write "${WRITE_IMAGE:-$CHECKOUT/codex/test/fat16-write.disk}" "$WORK/fat16write.img" && boot fat16write \
         -drive id=d,file="$WORK/fat16write.img",format=raw,if=none \
         -device virtio-blk-device,drive=d
     if [ -f "$WORK/fat16write.out" ]; then
@@ -192,8 +204,7 @@ fi
 # std.Io's own surface -- our Dir, the one the application's 121 filesystem
 # calls are spelled against.
 if [ "$want" = all ] || [ "$want" = stdio ]; then
-    cp "${WRITE_IMAGE:-$CHECKOUT/codex/test/fat16-write.disk}" "$WORK/stdio.img"
-    boot stdio \
+    fixture stdio "${WRITE_IMAGE:-$CHECKOUT/codex/test/fat16-write.disk}" "$WORK/stdio.img" && boot stdio \
         -drive id=d,file="$WORK/stdio.img",format=raw,if=none \
         -device virtio-blk-device,drive=d
 fi
@@ -420,7 +431,7 @@ if [ "$want" = all ] || [ "$want" = replace ]; then
         mkfs.vfat "${mkfat[@]}" -n GOPHER -C "$blank" "$fat_blocks" > /dev/null 2>&1
         for k in replace replace_cached; do
             img="$WORK/$k.img"
-            cp "$blank" "$img"
+            fixture "$k" "$blank" "$img" || continue
             boot "$k" \
                 -drive id=d,file="$img",format=raw,if=none \
                 -device virtio-blk-device,drive=d
