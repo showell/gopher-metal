@@ -105,11 +105,22 @@ in order. The box Claude reorders on `master`, and CC proposes at the bottom.
      (`?password=` from a client; an upload's random id in its path). Nothing
      logs headers, bodies, hashes or the session secret, and the
      application's `std.log` has no sink on this machine.
-   - **The ring's header is in `.data`, its bytes in `.bss`,** which the
-     loader does not zero. That matters for item 7: after a reset that keeps
-     RAM, `.bss` holds the last boot's values, and `serial_dead` and
-     `tss_loaded` assume it is zero.
-7. **Design: restart on failure while serving** (`RESTART.md`).
+   - **The ring's header is in `.data`, its bytes in `.bss`.** Both loaders
+     zero `.bss` on every boot and restart (measured for item 7), so the
+     ring starts empty after a restart. RESTART.md says where it should go
+     to survive one.
+7. **Design: restart on failure while serving** (`RESTART.md`). **Done**
+   (CC): `RESTART.md`, with `probe/restart.elf`, which restarts the machine
+   each of the three ways and reports what survived.
+   - **The droplet's QEMU machine:** all three ways restart it.
+   - **`microvm`:** only the triple fault does.
+   - **What survives:** CMOS and RAM past the kernel survive every one;
+     `.data` is reloaded and `.bss` zeroed.
+   - **With `-no-reboot`,** a restart ends QEMU with status 0, apart from
+     the door's 1 and 3.
+   - **Measured under TCG only.** Box Claude: run it under KVM, and above
+     all on a real droplet, where a guest's reset might power it off
+     (RESTART.md, "Not measured here").
    - Today every fatal error halts the machine for good. On a droplet that
      means down until Steve reboots by hand.
    - Separate refusals at boot (keep halting: wrong volume, bad config) from

@@ -62,6 +62,7 @@ pub fn build(b: *std.Build) void {
         .{ .name = "http.elf", .root = "probe/http.zig", .step = "http", .help = "the one-request web server probe kernel" },
         .{ .name = "ladder.elf", .root = "probe/ladder.zig", .step = "ladder", .help = "one operation many times, at a flat cost" },
         .{ .name = "stdhttp.elf", .root = "probe/stdhttp.zig", .step = "stdhttp", .help = "the same, but with zig's own std.http.Server" },
+        .{ .name = "restart.elf", .root = "probe/restart.zig", .step = "restart", .help = "what each way of restarting keeps (RESTART.md)" },
         .{ .name = "hello.elf", .root = "droplet/hello.zig", .step = "hello", .help = "for a real droplet: both cards, every request, forever" },
     };
 
