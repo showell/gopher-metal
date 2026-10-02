@@ -1972,6 +1972,11 @@ def named(answer: dict) -> dict:
     return dict(answer, body=STORED_NAME.sub(b"<NAME>", answer["body"]))
 
 
+# A picture, it read back, one sent after 100-continue, one not a picture,
+# and (not QUICK) one bigger than the heap keeps.
+UPLOAD_STORY_REQUESTS = 5
+
+
 def upload_story(port: int, session: str) -> dict:
     """Posts pictures to chat and reads one back. Answers what each step got,
     with the stored file's random name left out — it is random on both sides."""
@@ -2030,7 +2035,10 @@ def upload_failures(elf, linux_bin, content, pristine, work, mnt, report) -> int
     scratch = tempfile.mkdtemp(dir=work)
     image = os.path.join(scratch, "disk.img")
     shutil.copy(pristine, image)
-    set_request_limit(image, 30, mnt)
+    # Exactly the story's requests, so the kernel stops on its last answer:
+    # 30 left it waiting out finish_kernel's 60 s (QUICK: 62 s of a 152 s run).
+    # A story that went wrong sends fewer, and then the 60 s is the wait.
+    set_request_limit(image, UPLOAD_STORY_REQUESTS - (1 if QUICK else 0), mnt)
     qemu, port, serial = start_kernel(elf, image, scratch)
     try:
         metal = upload_story(port, session)
@@ -2046,6 +2054,9 @@ def upload_failures(elf, linux_bin, content, pristine, work, mnt, report) -> int
         server.stop()
 
     failures = 0
+    if code != 1:
+        failures += 1
+        report(f"FAIL  uploads: the kernel exited {code}, not on the story's last answer")
     for name, want in linux.items():
         got = metal.get(name, {})
         if got != want:
