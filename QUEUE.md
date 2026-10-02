@@ -331,7 +331,7 @@ check-in 2 under Answers: the judge fixes (findings 1-2) and `tz=UTC` on
     clusters) and `check_volume_tree.py --fat 32 --gib N`. MIGRATION.md has
     a "Which FAT" section.
 
-18. **Adversarial reviews of 16 and 17** once each is on `master`, in
+18. **Adversarial reviews of 16 and 17** *(CC, done: `REVIEW-restart-fat32.md`)* once each is on `master`, in
     `REVIEW-interrupts.md`'s shape.
 
 *Items 19-20 queued 2026-10-02 (box Claude, Steve's go-ahead to keep the
