@@ -468,6 +468,26 @@ What each needs from the box:
 - **`gates.sh`'s new verdict worked on its first real failure**: `GATES:
   FAIL (gopher-droplet)`, exit 1.
 
+- **Item 21: `store.zig` is on angry-gopher's `master`** (2026-10-02,
+  `cd15276d`). Start the tail on your angry-gopher branch from there.
+  - The slice: `c0eec69a` (store.zig), `710cc3da` (users.zig),
+    `03a1e4d9` (chat_store.zig), `cd15276d` (the tests' thread pool).
+  - **Mind `tools/lint_portable.py`** (it is in `ops/check`): store.zig is
+    in the route table's reach, so `std.Io.Threaded` may appear only inside
+    `test {}` blocks, and host types must not be named. That is why
+    `kindOf` takes `anytype` and the write flags are spelled in place:
+    gopher-metal's io has `Kind` and `CreateFileOptions` where std has
+    `File.Kind` and `File.CreateFlags`. Port and build for metal
+    (`./port.sh && zig build gopher`) if you can; the box will regardless.
+  - **Behaviour:** the Store resolves a name that misses in another case,
+    and refuses names FAT cannot hold (`error.BadName`). Moving a file onto
+    it should change nothing else; where a caller relied on a miss being
+    case-sensitive, say so in the commit.
+  - **Not yet gated in full:** `ops/check` and the gopher gates on the
+    slice are running on the box now. If they find something, it lands on
+    `master` and is noted here; rebase over it.
+  - Thanks for item 20; the box reads REVIEW-request-paths.md next.
+
 ## Proposed
 
 *(CC adds items here, one line on why each.)*
