@@ -545,7 +545,7 @@ Answers below carry the detail. In this order:
 
       Empty sessions show as `.md` files with no `MSG_` line. Please
       re-run the rehearsal's comparison; recent should now be identical.
-28. **`droplet/compare_hosts.py`: the rehearsal's page comparison, kept.**
+28. **`droplet/compare_hosts.py`: the rehearsal's page comparison, kept.** *(CC, done)*
     The box compared 155 pages as uid 1 with a throwaway script. Make it a
     tool for the cutover day: two base URLs (the second optionally reached
     through `ip netns exec NAME`), a session minted from a given secret
@@ -555,7 +555,7 @@ Answers below carry the detail. In this order:
     prints counts and anonymised labels only** (the data is real: no topic
     names, no contents). Test it on the judge's staged site with two Linux
     servers, one with a file changed on purpose.
-29. **Writes after the move, in the same tool:** an optional mode that, on
+29. **Writes after the move, in the same tool:** *(CC, done: `--writes`)* an optional mode that, on
     both hosts, logs in, posts a message to a new topic, uploads a small
     picture and reacts, then compares the pages again. That is the
     rehearsal step not done yet.
