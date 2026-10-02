@@ -57,6 +57,8 @@ pub const Error = error{
     /// A volume that runs past sector 2^32: this machine's sector numbers are
     /// 32 bits (FAT32.md §10).
     VolumeTooLarge,
+    /// A file asked to replace a directory, which Linux refuses too (EISDIR).
+    IsDirectory,
 };
 
 /// **WHICH FAT A VOLUME IS**, decided as Microsoft's specification decides
@@ -1253,10 +1255,15 @@ pub const Volume = struct {
     /// case, so `PLAN.md` replaces `plan.md`; the file stays `plan.md`, with
     /// the same 8.3 alias, as an append keeps it and as Linux's vfat keeps it
     /// on a truncating open. Only a new file takes the case it was given.
+    ///
+    /// **A DIRECTORY OF THAT NAME IS REFUSED, NOT REPLACED.** Removing its
+    /// entry would orphan everything in it, and say nothing; Linux refuses
+    /// the same write (EISDIR, std's `IsDir`), and so does this.
     pub fn writeFileIn(self: *Volume, dir_cluster: Cluster, given: []const u8, bytes: []const u8) Error!void {
         if (given.len == 0 or given.len > max_name) return Error.BadName;
         const old = try self.find(dir_cluster, given);
-        const kept = if (old) |*e| !e.isDirectory() else false;
+        if (old) |*e| if (e.isDirectory()) return Error.IsDirectory;
+        const kept = old != null;
         const name = if (kept) old.?.text() else given;
         try self.removeEntry(dir_cluster, given);
 
@@ -1562,7 +1569,8 @@ pub const Volume = struct {
     /// Never two entries on one chain, never a `to` that is neither file.
     ///
     /// `to` keeps the name it has (as a whole-file write does); a new `to`
-    /// takes the case it is given. Both must be files in the same directory.
+    /// takes the case it is given. Both must be files in the same directory:
+    /// a directory as `to` is `IsDirectory`, as on Linux; as `from`, `BadName`.
     pub fn rename(self: *Volume, from: []const u8, to: []const u8) Error!void {
         const a = try self.parentOf(from);
         const b = try self.parentOf(to);
@@ -1572,7 +1580,7 @@ pub const Volume = struct {
         if (src.isDirectory()) return Error.BadName;
         if (eqlFold(src.text(), b.name)) return; // the same file
         const dst = try self.find(b.cluster, b.name);
-        if (dst) |d| if (d.isDirectory()) return Error.BadName;
+        if (dst) |d| if (d.isDirectory()) return Error.IsDirectory;
 
         try self.unlinkEntry(a.cluster, a.name, false);
 
