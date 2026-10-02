@@ -840,7 +840,11 @@ test "a lost FIN is sent again" {
     f.table.finish(i);
     transmit(&f.table, &f.wire, 0);
     const fin = f.wire.last();
+    const before = f.wire.count;
     transmit(&f.table, &f.wire, rto);
+    // A segment of its own: the last one on the wire being the old FIN proves
+    // nothing (tools/mutate_tcp.py's go-back-keeps-fin passed that way).
+    try testing.expectEqual(before + 1, f.wire.count);
     try testing.expectEqual(flag_fin | flag_ack, f.wire.last().flags);
     try testing.expectEqual(fin.seq, f.wire.last().seq);
     _ = p.ackAll(&f.table, &f.wire, rto + 10 * ms);
@@ -951,6 +955,25 @@ test "a keepalive probe is acknowledged, and does not count as hearing from the 
     try testing.expectEqual(flag_ack, f.wire.last().flags);
     try testing.expectEqual(p.seq, f.wire.last().ack);
     try testing.expectEqual(@as(i96, 1), f.table.conns[i].heard_at);
+}
+
+test "a reset at the window's right edge is outside it, and is ignored" {
+    // RFC 9293: in the window means RCV.NXT <= SEG.SEQ < RCV.NXT + RCV.WND,
+    // so the edge itself is outside, and RFC 5961 drops a reset there.
+    var f: Fixture = .{};
+    f.init();
+    var p = Peer{ .ip = .{ 10, 0, 2, 2 }, .port = 40000 };
+    const i = try p.connect(&f.table, &f.wire, 0);
+    const c = &f.table.conns[i];
+    const edge = c.rcv_nxt +% @as(u32, c.window());
+    const before = f.wire.count;
+    var buf: [1600]u8 = undefined;
+    _ = handle(&f.table, &f.wire, p.frame(&buf, flag_rst | flag_ack, edge, ""), 1);
+    try testing.expectEqual(before, f.wire.count);
+    try testing.expectEqual(State.established, c.state);
+    // One byte inside it draws the challenge.
+    _ = handle(&f.table, &f.wire, p.frame(&buf, flag_rst | flag_ack, edge -% 1, ""), 2);
+    try testing.expectEqual(before + 1, f.wire.count);
 }
 
 test "a reset counts only at the next byte expected; one inside the window draws an acknowledgement" {
@@ -1271,6 +1294,43 @@ test "three duplicate acknowledgements send it again at once" {
     try testing.expectEqual(@as(u8, 0), f.table.conns[i].dupacks);
 }
 
+test "a fast retransmit restarts the timer, so the timeout does not follow on its heels" {
+    var f: Fixture = .{};
+    f.init();
+    var p = Peer{ .ip = .{ 10, 0, 2, 2 }, .port = 40000, .window = 8192 };
+    const i = try p.connect(&f.table, &f.wire, ms);
+    var body: [3000]u8 = undefined;
+    _ = f.table.queue(i, pattern(&body));
+    transmit(&f.table, &f.wire, 2 * ms); // the timer: 2 ms + rto
+    const una = f.table.conns[i].una;
+    for (0..3) |_| _ = p.ackUpTo(&f.table, &f.wire, una, 3 * ms);
+    try testing.expectEqual(@as(u64, 1), f.table.retransmits);
+    // When the first timer would have run out, the restarted one has not.
+    transmit(&f.table, &f.wire, 2 * ms + rto);
+    try testing.expectEqual(@as(u64, 1), f.table.retransmits);
+    transmit(&f.table, &f.wire, 3 * ms + rto);
+    try testing.expectEqual(@as(u64, 2), f.table.retransmits);
+}
+
+test "duplicates before new data are forgotten: a new run needs three of its own" {
+    var f: Fixture = .{};
+    f.init();
+    var p = Peer{ .ip = .{ 10, 0, 2, 2 }, .port = 40000, .window = 8192 };
+    const i = try p.connect(&f.table, &f.wire, ms);
+    var body: [3000]u8 = undefined;
+    _ = f.table.queue(i, pattern(&body));
+    transmit(&f.table, &f.wire, 2 * ms);
+    const una = f.table.conns[i].una;
+    // Two duplicates, then something new acknowledged, then two more: never
+    // three in a row, so nothing is sent again early.
+    for (0..2) |_| _ = p.ackUpTo(&f.table, &f.wire, una, 3 * ms);
+    _ = p.ackUpTo(&f.table, &f.wire, una +% 100, 3 * ms);
+    for (0..2) |_| _ = p.ackUpTo(&f.table, &f.wire, una +% 100, 3 * ms);
+    try testing.expectEqual(@as(u64, 0), f.table.fast_retransmits);
+    _ = p.ackUpTo(&f.table, &f.wire, una +% 100, 3 * ms);
+    try testing.expectEqual(@as(u64, 1), f.table.fast_retransmits);
+}
+
 test "a peer that repeats itself forever gets one answer, not one each time" {
     var f: Fixture = .{};
     f.init();
@@ -1403,15 +1463,18 @@ const matrix_rows = [_]MatrixRow{
     // is ignored.
     .{ .kind = .ack_old, .cells = .{ cell_refused, cell_rst, cell_none, cell_none, cell_none, cell_none, cell_none } },
     .{ .kind = .ack_duplicate, .cells = .{ cell_refused, cell_rst, cell_none, cell_none, cell_none, cell_none, cell_none } },
-    .{ .kind = .ack_new, .cells = .{
-        cell_refused,
-        .{ .reply = .none, .state = .established, .event = .opened },
-        cell_none, // nothing in flight: the same as a duplicate
-        cell_none,
-        .{ .reply = .none, .state = .closing, .fin = .acknowledged },
-        cell_none,
-        cell_none,
-    } },
+    .{
+        .kind = .ack_new,
+        .cells = .{
+            cell_refused,
+            .{ .reply = .none, .state = .established, .event = .opened },
+            cell_none, // nothing in flight: the same as a duplicate
+            cell_none,
+            .{ .reply = .none, .state = .closing, .fin = .acknowledged },
+            cell_none,
+            cell_none,
+        },
+    },
     .{ .kind = .ack_future, .cells = .{ cell_refused, cell_rst, null, null, null, null, null } },
     // Text is taken in ESTABLISHED and both FIN-WAITs, and ignored (but
     // acknowledged) once the peer has sent its FIN.
