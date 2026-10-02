@@ -147,6 +147,7 @@ def forge_session(claimed: str, signed_for: str, issued: int) -> str:
 FRESH = "$FRESH"      # minted when the story starts: must be honored
 STALE = "$STALE"      # minted 400 days back: must be refused
 FORGED = "$FORGED"    # a fresh one with the MAC of another id: must be refused
+MEMBER2 = "$MEMBER2"  # a fresh, honest session for uid 2, a member who is not the admin
 
 MEMBER_STORY = [
     step("chat, anonymous", "GET", "/chat"),
@@ -186,6 +187,14 @@ MEMBER_STORY = [
     step("a forged session", "GET", "/chat/conversations", FORGED),
     step("logging out", "POST", "/logout", JAR, "release=no"),
     step("chat, after logging out", "GET", "/chat", JAR),
+    # **ONLY THE ADMIN** (REVIEW-admin-host.md finding 2): the gate that
+    # refuses /admin refuses this too, today because it is the same gate. These
+    # ask /admin/host itself, so a dispatch that served it before the gate
+    # fails. They come after logging out, so that nothing they set reaches a
+    # later step that uses the jar.
+    step("the running server, anonymous", "GET", "/admin/host"),
+    step("the running server, as a bare uid", "GET", "/admin/host", P1),
+    step("the running server, as a member who is not the admin", "GET", "/admin/host", MEMBER2),
     # What arrives on a socket is not always a request, and a server that takes
     # one connection at a time has to survive each of these AND answer the next
     # caller. (These four came from the Lyn Rummy story, which is gone.)
@@ -515,6 +524,7 @@ CAPTURE = bool(os.environ.get("JUDGE_CAPTURE"))
 # file is compared with Linux exactly as on microvm. The droplet machine always
 # runs under KVM, as a real droplet does, so `kvm` asks nothing more of it.
 DROPLET = os.environ.get("JUDGE_DROPLET") == "1"
+TOOLS_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "tools")
 DROPLET_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "droplet")
 droplet_boots = {}
 # How many boots went through the boot loader and served from the volume, for
@@ -778,8 +788,10 @@ def differences(c: dict, metal: dict, linux: dict) -> list:
             out.append(f"{h}: metal {m!r}, Linux {l!r}")
     if c["path"] == "/version":
         out += version_differences(metal["body"], linux["body"])
-    elif c["path"] == "/admin/host":
-        out += host_page_differences(metal["body"], linux["body"])
+    elif c["path"] == "/admin/host" and metal["status"] == 200:
+        # A refusal (no session, not the admin) is an ordinary page, compared
+        # whole below; only the page itself differs on purpose.
+        out += host_page_differences(metal["body"], linux["body"], metal.get("image"))
     else:
         mb = normalize(metal["body"], metal["window"])
         lb = normalize(linux["body"], linux["window"])
@@ -826,10 +838,23 @@ def checkout_commit(root: str) -> str:
     return head.stdout.strip() + ("+dirty" if status.strip() else "")
 
 
-def host_page_differences(metal: bytes, linux: bytes) -> list:
+def host_page_differences(metal: bytes, linux: bytes, image: str = None) -> list:
     """**/admin/host DIFFERS ON PURPOSE**: its second table is each host's own
     account of itself. So what is compared is its shape: both have the
-    application's half, with the same rows, and each says which host it is."""
+    application's half, with the same rows, and each says which host it is.
+
+    **AND WHAT METAL SAYS ABOUT ITS DISK IS CHECKED** (REVIEW-admin-host.md
+    finding 1), because the page is where an operator learns the volume is
+    filling:
+      - the host's report must not have failed (its one row then names the
+        error), and no volume's free space may be "unreadable";
+      - every "N MB free of M MB" must have 0 < M and N <= M, and there must
+        be one;
+      - given the disk image the kernel served from, the boot disk's total
+        must be what tools/fat16_read.py makes of that image, and its free
+        space within 2 MB of the oracle's count of the image at the end of
+        the story: the page is asked for early, and what the story writes
+        after it is kilobytes."""
     rows = lambda body: re.findall(rb"<tr><td>(.*?)</td><td>", body)
     out = []
     for name, body in (("metal", metal), ("Linux", linux)):
@@ -844,6 +869,35 @@ def host_page_differences(metal: bytes, linux: bytes) -> list:
         out.append("/admin/host on Linux does not say it is Linux")
     if b"serial " not in metal:
         out.append("/admin/host on metal names no volume serial")
+
+    host = metal.split(b"<h2>The host</h2>")[-1]
+    figures = {}
+    for label, value in re.findall(rb"<tr><td>(.*?)</td><td>(.*?)</td></tr>", host):
+        if re.fullmatch(rb"the host(&#39;|')s report", label):
+            out.append(f"/admin/host on metal: the host's report failed: {value.decode('latin-1')}")
+        if b"unreadable" in value:
+            out.append(f"/admin/host on metal: {label.decode('latin-1')}: {value.decode('latin-1')}")
+        m = re.search(rb"(\d+) MB free of (\d+) MB", value)
+        if m:
+            free, total = int(m.group(1)), int(m.group(2))
+            figures[label] = (free, total)
+            if total == 0 or free > total:
+                out.append(f"/admin/host on metal: {label.decode('latin-1')}: {free} MB free of {total} MB")
+    if not figures:
+        out.append("/admin/host on metal gives no volume's free space")
+    site = figures.get(b"the boot disk (the site)")
+    if image and site:
+        sys.path.insert(0, TOOLS_DIR)
+        import fat16_read
+        with open(image, "rb") as f:
+            v = fat16_read.Volume(f.read())
+        total = ((v.max_cluster - 1) * v.cluster_bytes) >> 20
+        free = (sum(1 for c in range(2, v.max_cluster + 1) if v.fat(c) == 0) * v.cluster_bytes) >> 20
+        if site[1] != total:
+            out.append(f"/admin/host on metal: the boot disk is {site[1]} MB, and the oracle reads {total} MB")
+        if abs(site[0] - free) > 2:
+            out.append(f"/admin/host on metal: the boot disk has {site[0]} MB free, and the oracle "
+                       f"counts {free} MB at the story's end")
     return out
 
 
@@ -990,7 +1044,7 @@ def run_story(elf, linux_bin, content, pristine, work, mnt, steps, label, report
         report(f"FAIL  {label}: the kernel exited {code} after the story: "
                + " | ".join(log.splitlines()[-3:]))
     for s, m, l in zip(steps, metal_answers, linux_answers):
-        m = dict(m, guest_exit=1, window=metal_window, serial=log)
+        m = dict(m, guest_exit=1, window=metal_window, serial=log, image=image)
         l = dict(l, window=linux_window)
         diffs = differences(s, m, l)
         if diffs:
@@ -2234,6 +2288,7 @@ def main() -> int:
             FRESH: mint_session("1", now),
             STALE: mint_session("1", now - 400 * 86400),
             FORGED: forge_session("1", "2", now),
+            MEMBER2: mint_session("2", now),
         }
         f, log, answers, files = run_story(elf, linux_bin, content, pristine, work, mnt,
                                            MEMBER_STORY, "members", print, minted)
@@ -2247,6 +2302,17 @@ def main() -> int:
             if got != want:
                 failures += 1
                 print(f"FAIL  members: {name} answered {got}, want {want}")
+        # /admin/host: the admin gets the page; nobody else does, whatever both
+        # sides agree on.
+        if by_name["the running server, as the admin"].get("status") != 200:
+            failures += 1
+            print("FAIL  members: /admin/host did not answer the admin")
+        for name in ("the running server, anonymous", "the running server, as a bare uid",
+                     "the running server, as a member who is not the admin"):
+            a = by_name[name]
+            if a.get("status") == 200 or b"<h2>The host</h2>" in (a.get("body") or b""):
+                failures += 1
+                print(f"FAIL  members: {name}: /admin/host answered {a.get('status')}, with the page")
         # A session the KERNEL minted must be honored by Linux: same secret, same
         # HMAC, and the kernel's clock close enough to Linux's.
         login = by_name["the right one (a $2a$ hash)"]

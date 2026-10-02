@@ -12,6 +12,7 @@ that lies, so its rules are tested here, on the host, before any kernel boots.
 """
 import http.server
 import os
+import shutil
 import socket
 import subprocess
 import sys
@@ -219,13 +220,59 @@ class Differences(unittest.TestCase):
 
     def test_the_host_page_is_compared_by_shape(self):
         app = b"<h2>The application</h2><table><tr><td>version</td><td>0.1</td></tr></table><h2>The host</h2>"
-        m = app + b"<tr><td>host</td><td>gopher-metal, with no operating system</td></tr><td>FAT16, serial 92DE-8831"
+        # A whole volume row, as metalFacts writes one: the judge now reads
+        # the free-space figure (REVIEW-admin-host.md finding 1).
+        m = app + (b"<tr><td>host</td><td>gopher-metal, with no operating system</td></tr>"
+                   b"<tr><td>the boot disk (the site)</td><td>FAT16, serial 92DE-8831: 30 MB free of 62 MB</td></tr>")
         l = app + b"<tr><td>host</td><td>Linux, zig-server, pid 7</td></tr>"
         self.assertEqual(G.host_page_differences(m, l), [])
         self.assertTrue(G.host_page_differences(l, l))
         self.assertTrue(G.host_page_differences(m.replace(b"<h2>The host</h2>", b""), l))
         extra = app.replace(b"</table>", b"<tr><td>commit</td><td>x</td></tr></table>")
         self.assertTrue(G.host_page_differences(extra + m[len(app):], l))
+
+    HOST_APP = b"<h2>The application</h2><table><tr><td>version</td><td>0.1</td></tr></table><h2>The host</h2>"
+    LINUX = HOST_APP + b"<table><tr><td>host</td><td>Linux, zig-server, pid 7</td></tr></table>"
+
+    def metal_page(self, *rows):
+        cells = b"".join(b"<tr><td>%s</td><td>%s</td></tr>" % r for r in rows)
+        return self.HOST_APP + b"<table><tr><td>host</td><td>gopher-metal, with no operating system</td></tr>" + cells + b"</table>"
+
+    def test_the_host_page_s_disk_figures_must_be_sane(self):
+        good = (b"the boot disk (the site)", b"FAT16, serial 92DE-8831: 30 MB free of 62 MB")
+        self.assertEqual(G.host_page_differences(self.metal_page(good), self.LINUX), [])
+        unreadable = (b"the volume (chat&#39;s data)", b"FAT16, serial 1234-5678: free space unreadable (ReadFailed)")
+        self.assertTrue(G.host_page_differences(self.metal_page(good, unreadable), self.LINUX))
+        more_free_than_all = (b"the boot disk (the site)", b"FAT16, serial 92DE-8831: 70 MB free of 62 MB")
+        self.assertTrue(G.host_page_differences(self.metal_page(more_free_than_all), self.LINUX))
+        empty = (b"the boot disk (the site)", b"FAT16, serial 92DE-8831: 0 MB free of 0 MB")
+        self.assertTrue(G.host_page_differences(self.metal_page(empty), self.LINUX))
+        # No figure at all is a failure too, though the serial is named.
+        self.assertTrue(G.host_page_differences(self.metal_page((b"x", b"serial 92DE-8831")), self.LINUX))
+
+    def test_a_failed_host_report_is_named_as_one(self):
+        failed = self.metal_page((b"the host&#39;s report", b"OutOfMemory"),
+                                 (b"the boot disk (the site)", b"FAT16, serial 92DE-8831: 30 MB free of 62 MB"))
+        got = G.host_page_differences(failed, self.LINUX)
+        self.assertTrue(any("report failed: OutOfMemory" in d for d in got), got)
+
+    @unittest.skipUnless(shutil.which("mkfs.vfat"), "needs mkfs.vfat (dosfstools) to make a volume")
+    def test_the_boot_disk_s_figures_are_checked_against_the_oracle(self):
+        with tempfile.TemporaryDirectory() as d:
+            img = os.path.join(d, "v.img")
+            subprocess.run(["mkfs.vfat", "-F", "16", "-S", "512", "-s", "4", "-C", img, str(64 * 1024)],
+                           check=True, capture_output=True)
+            sys.path.insert(0, G.TOOLS_DIR)
+            import fat16_read
+            with open(img, "rb") as f:
+                v = fat16_read.Volume(f.read())
+            total = ((v.max_cluster - 1) * v.cluster_bytes) >> 20
+            free = (sum(1 for c in range(2, v.max_cluster + 1) if v.fat(c) == 0) * v.cluster_bytes) >> 20
+            row = lambda f, t: (b"the boot disk (the site)", b"FAT16, serial 92DE-8831: %d MB free of %d MB" % (f, t))
+            self.assertEqual(G.host_page_differences(self.metal_page(row(free, total)), self.LINUX, img), [])
+            self.assertEqual(G.host_page_differences(self.metal_page(row(free - 2, total)), self.LINUX, img), [])
+            self.assertTrue(G.host_page_differences(self.metal_page(row(free - 3, total)), self.LINUX, img))
+            self.assertTrue(G.host_page_differences(self.metal_page(row(free, total - 1)), self.LINUX, img))
 
     def test_the_checkout_commit_reads_as_build_zig_writes_it(self):
         here = os.path.dirname(os.path.abspath(__file__))
