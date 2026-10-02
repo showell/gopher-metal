@@ -39,6 +39,21 @@ for img in "$DIR"/*.img; do
 done
 echo "$n images checked by tools/fat16_read.py"
 
+# The names test writes data/chat/<name> for every length from 1 to
+# fat16.max_name, each name the first that many characters of a fixed
+# alphabet. The oracle must list each, whole: a name it read under its 8.3
+# alias, or cut short, is missing.
+max_name=$(grep -o 'pub const max_name: usize = [0-9]*' "$ROOT/src/fat16.zig" | grep -o '[0-9]*$')
+for img in "$DIR"/names-*.img; do
+    name="$(basename "$img")"
+    want="$(python3 -c "
+a = 'abcdefghijklmnopqrstuvwxyz0123456789-'
+print('\n'.join('/data/chat/' + ''.join(a[i % 37] for i in range(n)) for n in range(1, $max_name + 1)))" | sort)"
+    got="$(python3 "$HERE/fat16_read.py" list "$img" | awk '$1 == "-" {print $3}' | grep '^/data/chat/' | sort)"
+    if [ "$got" = "$want" ]; then echo "ok   $name: the oracle reads every name from 1 to $max_name characters by its long name"
+    else echo "FAIL $name: the oracle's names differ:"; diff <(echo "$want") <(echo "$got") | head; failed=1; fi
+done
+
 # Each mtools volume: judged by fat16.zig, and its verdict the oracle's.
 m=0
 for img in "$FOREIGN"/*.img; do

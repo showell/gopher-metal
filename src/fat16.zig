@@ -63,10 +63,13 @@ fn le32(b: []const u8) u32 {
     return @as(u32, b[0]) | (@as(u32, b[1]) << 8) | (@as(u32, b[2]) << 16) | (@as(u32, b[3]) << 24);
 }
 
-/// The longest name this filesystem will hold. VFAT allows 255; the
-/// application's longest is `_session_secret` at fifteen, and a buffer per
-/// entry is a buffer on a machine with a bump allocator.
-pub const max_name: usize = 64;
+/// The longest name this filesystem will hold. VFAT allows 255. The
+/// application's longest is 96: `<sid>.reactions.jsonl` at a session id of
+/// 80, which it allows (MIGRATION.md). At 64 such a file could be written by
+/// Linux and then found here only under its 8.3 alias. A buffer per entry is
+/// a buffer on a machine with a bump allocator, so it is the application's
+/// longest and no more: 8 long-name parts.
+pub const max_name: usize = 96;
 
 /// **A FAT16 DIRECTORY ENTRY CARRIES A DATE, AND THIS MACHINE WRITES IT.**
 ///
