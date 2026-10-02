@@ -387,6 +387,43 @@ the longest-wait number pointing straight at it.
 
 ## 10. Check that the tests can fail: mutation testing
 
+**Implemented** as `tools/mutate_tcp.py`: 38 mutants of `src/tcp.zig`,
+judged by `zig build test`, which includes §1, §6, §7 and §3. Run it with:
+
+    tools/mutate_tcp.py            # all of them
+    tools/mutate_tcp.py --list     # names, and what each breaks
+    tools/mutate_tcp.py NAME...    # some
+
+Each mutant takes about five seconds, so the whole list takes about three
+minutes. The script:
+
+- refuses to start if `tcp.zig` has uncommitted changes;
+- restores the file with `git checkout <rev> -- src/tcp.zig` after every
+  mutant;
+- reports a mutant whose text is no longer in `tcp.zig` as **out of date**,
+  so the list cannot rot silently.
+
+**The first run (2026-10-02) left five alive.** Four were real gaps, now each
+closed by a test:
+
+| mutant | what it showed |
+|---|---|
+| `go-back-keeps-fin` | "a lost FIN is sent again" passed **vacuously**: with no segment sent at all, the last one on the wire was still the old FIN. The test now requires a new segment. |
+| `dupacks-kept` | no test had two runs of duplicates on one connection |
+| `resend-no-timer` | nothing checked the timer after a fast retransmit |
+| `window-edge-inclusive` | nothing put a reset exactly at the window's right edge |
+
+**One survives, on purpose: `sample-too-early`.** It takes an
+acknowledgement one byte short of the timed segment as its RTT sample. Real
+acknowledgements land on segment boundaries, so the difference is not
+observable through the wire. It stays in the list as a reminder.
+
+**What a mutant is good for** goes beyond the first run. A test that passes
+for the wrong reason, as the lost-FIN test did, is invisible to every other
+strategy here. Add a mutant whenever a bug is fixed: the mutant is the bug,
+and the list keeps proving it stays fixed.
+
+
 Every strategy above is only as good as its oracles. The check is to break
 the code on purpose and see whether anything notices. Delete `c.heard()`,
 swap `>=` for `>` in `transmitOne`'s expiry test, drop the `if (c.rto_at ==
