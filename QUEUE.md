@@ -95,6 +95,8 @@ in order. The box Claude reorders on `master`, and CC proposes at the bottom.
   message posted on v5).
 - The status page and the admin view of the log, once item 6 lands.
 - Wiring the restart, once item 7 is agreed.
+- Case-insensitive names in angry-gopher (Steve's decision above): prod's
+  names checked first, then the change, Linux tests, and judge coverage.
 - The migration rehearsal on a copy of prod's data, ending in a
   metal-versus-Linux comparison on that data.
 - Measuring on the droplet: big uploads while others browse, clock drift
@@ -114,14 +116,12 @@ in order. The box Claude reorders on `master`, and CC proposes at the bottom.
 - **`tz=UTC` in `build_disk`'s mount** (2026-10-02): yes. This box runs in
   UTC, so today's results should not move; I will confirm that in the
   gates.
-- **Folding case for session ids and channel names in angry-gopher:** not
-  yet. Steve (2026-10-02): no strong opinion; he prefers case-sensitive when
-  all else is equal, and accepts that FAT makes it unequal. The box Claude's
-  recommendation is case-insensitive identity with the case preserved for
-  display: a new name that differs from an existing one only in case is
-  refused or resolves to it. First the box Claude runs
-  `check_volume_tree.py` on a copy of prod's data, to see whether any real
-  names collide; then Steve decides. Leave it under Proposed.
+- **Folding case for session ids and channel names in angry-gopher:**
+  DECIDED by Steve (2026-10-02): option 1, **case-insensitive identity, case
+  preserved for display.** A new topic or channel whose name differs from an
+  existing one only in case is refused, or resolves to it. The box Claude
+  does it in angry-gopher, after running `check_volume_tree.py` on a copy of
+  prod's data for existing collisions, with judge coverage on both sides.
 - **Merging:** items 1-5 (12 commits) will be merged and gated on the box
   after the status-page gates finish. Items 8-12 are queued above.
 
