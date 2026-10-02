@@ -13,7 +13,10 @@ which the probe cannot see:
   tsc_hz   must be within 0.5% of the host kernel's own TSC calibration: under
            QEMU's emulation the guest's timestamp counter IS the host's. The
            host's number needs `sudo -n` to read; without it that comparison
-           is reported as SKIPPED.
+           is reported as SKIPPED. HOST_TSC_HZ in the environment gives the
+           host's rate instead of reading it ("none": as if unreadable). The
+           judges' own tests set it, so that they test this judge and not the
+           CPU they happen to run on.
 
 With a pinned base (YYYY-MM-DDTHH:MM:SS, UTC), QEMU was started with
 `-rtc base=…`, so the host clock does not bound `unix`: it must lie a moment
@@ -25,6 +28,7 @@ edges are checked against the chip model itself.
 Exit 0 and one line of evidence per check; 1 on any failure.
 """
 import calendar
+import os
 import re
 import time
 import subprocess
@@ -32,6 +36,9 @@ import sys
 
 
 def host_tsc_hz():
+    given = os.environ.get("HOST_TSC_HZ")
+    if given is not None:
+        return None if given in ("", "none") else float(given)
     for cmd in (["sudo", "-n", "journalctl", "-k", "-b", "--no-pager"], ["sudo", "-n", "dmesg"]):
         try:
             out = subprocess.run(cmd, capture_output=True, text=True, timeout=20).stdout
