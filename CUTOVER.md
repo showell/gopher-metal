@@ -74,6 +74,19 @@ On `<box>`:
 - GO: rsync exits 0, and `find copy -type f | wc -l` is the same number as
   on `<prod>`.
 
+Then **close the window for unsigned cookies** (QUEUE.md item 51: "until
+the cutover or 30 days, whichever is first"). angry-gopher re-signs an
+unsigned `gopher_uid` once while `data/players/unsigned-window` holds a
+time still to come; this makes that time now, in the copy metal will
+serve, and leaves prod's own data alone:
+
+    date +%s > copy/data/players/unsigned-window
+
+- GO: `cat copy/data/players/unsigned-window` is a number no later than
+  `date +%s`. A player or guest who has not visited since the signed
+  cookie was deployed now gets the name page, as DESIGN-signed-uid.md
+  says; their data stays on the volume.
+
 ### 3. Check it
 
     droplet/check_volume_tree.py copy --fat 32 --gib N
