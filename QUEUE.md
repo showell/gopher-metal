@@ -23,7 +23,8 @@ in order. The box Claude reorders on `master`, and CC proposes at the bottom.
 ## CC
 
 1. **MIGRATION.md and `droplet/check_volume_tree.py`.** *(handed over
-   2026-10-02.)*
+   2026-10-02.)* **Done:** `daaaf6f`, with `448962f` (the reader stopped at
+   52 characters, the writer at 64).
    - For moving prod's chat data (about 215 MB, 801 files under `data/` and
      `auth/`) onto FAT16.
    - The checker reads a directory tree and lists everything that would not
@@ -31,8 +32,9 @@ in order. The box Claude reorders on `master`, and CC proposes at the bottom.
    - Plain Python, no mounts.
 2. **TCP_TESTING.md §10 as a script.** *(handed over 2026-10-02.)* It
    mutates `tcp.zig` one way at a time and reports every mutant the tests and
-   `tcp_sim` miss.
-3. **An in-memory disk for host tests.** A `virtio.Block` stand-in backed by
+   `tcp_sim` miss. **Done:** `5d706bf`, and `d313b4b` for the four gaps it
+   found. 37 of 38 are killed; `sample-too-early` is left alive on purpose.
+3. **An in-memory disk for host tests.** *(CC, started 2026-10-02.)* A `virtio.Block` stand-in backed by
    a byte array.
    - With it, `fat16.zig` tests: mount, write, read back, remove trees, a
      full disk, a chain the FAT does not end.
@@ -106,6 +108,15 @@ in order. The box Claude reorders on `master`, and CC proposes at the bottom.
 
 *(CC writes here; the box Claude or Steve answers under Answers.)*
 
+- **`probe/run.sh` fails before any probe on a CPU it was not recorded on.**
+  - The judges' self-test compares a recorded `tsc_hz` (2.494 GHz) with the
+    host's; a cloud CPU at 2.1 GHz fails it, and run.sh exits there.
+  - Should the clock judge's self-test take the rate as a parameter? CLOUD.md
+    says run.sh is not CC's to change.
+- **`judge_gopher.build_disk` mounts without `tz=UTC`.** On a host not set to
+  UTC, every copied file's time shifts, and chat's "recent" with it.
+  MIGRATION.md tells the migration to add it. Should build_disk add it too?
+
 ## Answers
 
 - **The recorded `tsc_hz` in the judges' self-test** (2026-10-02): yes, make
@@ -128,3 +139,12 @@ in order. The box Claude reorders on `master`, and CC proposes at the bottom.
 ## Proposed
 
 *(CC adds items here, one line on why each.)*
+
+- **Raise `fat16.max_name` to 96, or cap session ids and doc slugs at 48 in
+  angry-gopher.** The application can make names up to 96 characters
+  (`<sid>.reactions.jsonl` at an 80-character sid), and this machine holds 64
+  (MIGRATION.md).
+- **Fold case for session ids and channel names in angry-gopher.** On FAT,
+  `plan` replaces `Plan`, where Linux keeps both (MIGRATION.md).
+- **Stop `fat16.zig`'s `grow` at 65,536 directory entries.** It grows past
+  FAT's limit today, and `fsck.fat` would then reject the volume.
