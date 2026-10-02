@@ -728,16 +728,12 @@ class Conf(unittest.TestCase):
 
     def test_on_the_droplet_machine_the_private_card_and_the_volume_are_named(self):
         G.DROPLET = True
-        with tempfile.TemporaryDirectory() as d:
-            real = G.mount, G.umount, G.fat_serial
-            G.mount, G.umount = lambda *a, **k: None, lambda m: None
-            G.fat_serial = lambda image: "92DE-8831"
-            try:
-                G.set_request_limit("unused.img", 1, d)
-                with open(os.path.join(d, "gopher-metal.conf")) as f:
-                    text = f.read()
-            finally:
-                G.mount, G.umount, G.fat_serial = real
+        real = G.fat_serial
+        G.fat_serial = lambda image: "92DE-8831"
+        try:
+            text = G.request_limit_text("unused.img", 1)
+        finally:
+            G.fat_serial = real
         # Spelled as probe/gopher.zig's `Card` enum and `parseSerial` spell them.
         self.assertIn("\ncard = private\n", text)
         self.assertIn("\nvolume = 92DE-8831\n", text)
@@ -752,46 +748,56 @@ class Conf(unittest.TestCase):
 
     def test_both_keys_are_written_and_spelled_as_the_kernel_reads_them(self):
         import re as _re
-        written = {}
-
-        def fake_mount(image, mnt, writable):
-            written["mnt"] = mnt
-
-        with tempfile.TemporaryDirectory() as d:
-            real_mount, real_umount = G.mount, G.umount
-            G.mount, G.umount = fake_mount, lambda m: None
-            try:
-                G.set_request_limit("unused.img", 7, d, idle_timeout_ms=1234)
-                text = open(os.path.join(d, "gopher-metal.conf")).read()
-            finally:
-                G.mount, G.umount = real_mount, real_umount
+        text = G.request_limit_text("unused.img", 7, idle_timeout_ms=1234)
         self.assertEqual(text, "requests = 7\nidle_timeout_ms = 1234\n")
         # The kernel's parser: `key = value`, one per line, nothing else.
         for line in text.strip().splitlines():
             self.assertRegex(line, _re.compile(r"^(requests|idle_timeout_ms) = \d+$"))
 
     def test_a_default_timeout_is_written_when_none_is_asked_for(self):
-        with tempfile.TemporaryDirectory() as d:
-            real_mount, real_umount = G.mount, G.umount
-            G.mount, G.umount = lambda *a, **k: None, lambda m: None
-            try:
-                G.set_request_limit("unused.img", 1, d)
-                text = open(os.path.join(d, "gopher-metal.conf")).read()
-            finally:
-                G.mount, G.umount = real_mount, real_umount
+        text = G.request_limit_text("unused.img", 1)
         self.assertIn("idle_timeout_ms = 10000", text)
 
 
     def test_the_optional_keys_are_written_as_the_kernel_reads_them(self):
-        with tempfile.TemporaryDirectory() as d:
-            real_mount, real_umount = G.mount, G.umount
-            G.mount, G.umount = lambda *a, **k: None, lambda m: None
-            try:
-                G.set_request_limit("unused.img", 3, d, streams=2, lose_one_sent_in=7)
-                text = open(os.path.join(d, "gopher-metal.conf")).read()
-            finally:
-                G.mount, G.umount = real_mount, real_umount
+        text = G.request_limit_text("unused.img", 3, streams=2, lose_one_sent_in=7)
         self.assertEqual(text, "requests = 3\nidle_timeout_ms = 10000\nstreams = 2\nlose_one_sent_in = 7\n")
+
+
+class DiskByMtools(unittest.TestCase):
+    """The judge's own way onto and off the kernel's disk (QUEUE.md item 64):
+    what it puts there it reads back, a site is moved off whole, and a file
+    that is not there reads as None."""
+
+    def test_put_write_read_take_and_move(self):
+        import shutil as _sh
+        if any(_sh.which(t) is None for t in ("sgdisk", "mkfs.vfat", "mcopy", "mdir", "mdeltree")):
+            self.skipTest("mtools, sgdisk or mkfs.vfat is not installed")
+        if G.MOUNT:
+            self.skipTest("JUDGE_MOUNT=1: these are the mtools path's")
+        with tempfile.TemporaryDirectory() as d:
+            content = os.path.join(d, "content")
+            for rel, body in (("data/chat/1_2/sessions/General.md", b"hi"), ("auth/1/name", b"Steve"),
+                              ("pages/home.txt", b"home"), ("gopher-metal.conf", b"x")):
+                os.makedirs(os.path.dirname(os.path.join(content, rel)), exist_ok=True)
+                with open(os.path.join(content, rel), "wb") as f:
+                    f.write(body)
+            os.utime(os.path.join(content, "auth/1/name"), (1758000000, 1758000000))
+            image = os.path.join(d, "disk.img")
+            G.build_disk(image, content, os.path.join(d, "mnt"), size=16 << 20, fat="16")
+            G.set_request_limit(image, 3, os.path.join(d, "mnt"))
+            got = G.disk_read(image, "unused", ["data/chat/1_2/sessions/General.md", "gopher-metal.conf",
+                                                "data/missing"])
+            self.assertEqual(got["data/chat/1_2/sessions/General.md"], b"hi")
+            self.assertEqual(got["gopher-metal.conf"], G.request_limit_text(image, 3).encode())
+            self.assertIsNone(got["data/missing"])
+            taken = os.path.join(d, "taken")
+            G.disk_take(image, "unused", taken, names=G.DATA_DIRS)
+            self.assertEqual(sorted(G.tree(taken)), ["auth/1/name", "data/chat/1_2/sessions/General.md"])
+            self.assertEqual(int(os.path.getmtime(os.path.join(taken, "auth/1/name"))), 1758000000)
+            fat = G.split_site_off(image, os.path.join(d, "s"))
+            self.assertEqual(sorted(G.disk_names(image)), ["auth", "data"])
+            self.assertEqual(sorted(G.disk_names(fat, partitioned=False)), ["gopher-metal.conf", "pages"])
 
 
 class TcpCounts(unittest.TestCase):

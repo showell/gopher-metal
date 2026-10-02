@@ -18,7 +18,8 @@ of game writes an hour) apply to the whole site at once; this says so.
 
     droplet/chat.py <out.img>
 
-Needs `sudo -n` for the loop mount, as the judge does.
+Builds its disks with mtools, as the judge does (no root); JUDGE_MOUNT=1 in the
+environment builds them through a loop mount instead, which needs `sudo -n`.
 """
 import os
 import shutil

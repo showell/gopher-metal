@@ -31,8 +31,10 @@ a bare number, and the comparison would fail. Times staged into the fixture
 (1758000000) are nowhere near either window, so pages that render them are
 compared exactly — including the Eastern-time formatting.
 
-Populating and reading the disk needs a loop mount, so this needs `sudo -n`.
-Without it the whole check is SKIPPED — exit 77 — and says so.
+The kernel's disk is populated and read with mtools, which needs no root
+(QUEUE.md item 64). JUDGE_MOUNT=1 does it through Linux's vfat driver, a loop
+mount, instead: another independent reader, which needs `sudo -n`, and without
+it the whole check is SKIPPED (exit 77) and says so.
 
 Exit 0 when every case agrees, 1 when any does not, 77 when it could not run.
 """
@@ -423,16 +425,7 @@ def build_disk(image: str, content: str, mnt: str, size: int = 64 << 20,
     blocks = (partition_last(image) - PART_FIRST + 1) // 2
     run(["mkfs.vfat", "-F", fat, "-S", "512", *(["-s", str(spc)] if spc else []), "-n", "GOPHER",
          "--offset", str(PART_FIRST), image, str(blocks)])
-    mount(image, mnt, writable=True)
-    try:
-        for entry in os.listdir(content):
-            src, dst = os.path.join(content, entry), os.path.join(mnt, entry)
-            if os.path.isdir(src):
-                shutil.copytree(src, dst)
-            else:
-                shutil.copy(src, dst)
-    finally:
-        umount(mnt)
+    disk_put(image, mnt, content)
 
 
 def leak_a_cluster(image: str) -> int:
@@ -493,6 +486,120 @@ def mount(image: str, mnt: str, writable: bool) -> None:
 
 def umount(mnt: str) -> None:
     run(["sudo", "-n", "umount", mnt])
+
+
+# ── the kernel's disk, two ways (QUEUE.md item 64) ──────────────────────────
+#
+# **mtools BY DEFAULT, LINUX'S vfat WITH JUDGE_MOUNT=1.** Every file the judge
+# puts on the kernel's disk, and every file it reads back off it, goes through
+# one of two readers that are not the kernel's own: mtools, which needs no
+# root and so runs anywhere (a cloud container included), or the Linux vfat
+# driver through a loop mount, which needs `sudo -n`. They are independent
+# oracles, and the box runs both. Each helper takes the mount point the
+# mount path uses; the mtools path ignores it.
+
+MOUNT = os.environ.get("JUDGE_MOUNT") == "1"
+MTOOLS_ENV = dict(os.environ, TZ="UTC", MTOOLS_SKIP_CHECK="1")
+
+
+def _at(image: str, partitioned: bool = True) -> str:
+    """mtools' name for the filesystem: the partition at PART_FIRST, or a
+    bare filesystem image."""
+    return f"{image}@@{PART_FIRST * SECTOR}" if partitioned else image
+
+
+def _mt(*args):
+    return run(list(args), env=MTOOLS_ENV)
+
+
+def disk_names(image: str, partitioned: bool = True) -> list:
+    """The entries in the volume's root, by name."""
+    out = _mt("mdir", "-b", "-i", _at(image, partitioned), "::/").stdout
+    return [line[3:].rstrip("/") for line in out.splitlines() if line.startswith("::/")]
+
+
+def disk_put(image: str, mnt: str, src: str, partitioned: bool = True) -> None:
+    """Every entry of the folder `src` into the volume's root, with its
+    modification times."""
+    if MOUNT:
+        if partitioned:
+            mount(image, mnt, writable=True)
+        else:
+            os.makedirs(mnt, exist_ok=True)
+            run(["sudo", "-n", "mount", "-o", f"loop,tz=UTC,uid={os.getuid()},gid={os.getgid()}", image, mnt])
+        try:
+            for entry in os.listdir(src):
+                s_, d_ = os.path.join(src, entry), os.path.join(mnt, entry)
+                if os.path.isdir(s_):
+                    shutil.copytree(s_, d_, dirs_exist_ok=True)
+                else:
+                    shutil.copy2(s_, d_)
+        finally:
+            umount(mnt)
+        return
+    for entry in sorted(os.listdir(src)):
+        _mt("mcopy", "-s", "-m", "-o", "-D", "o", "-i", _at(image, partitioned), os.path.join(src, entry), "::/")
+
+
+def disk_write(image: str, mnt: str, name: str, text: str) -> None:
+    """One file, `name`, in the volume's root, holding `text`."""
+    with tempfile.TemporaryDirectory() as d:
+        with open(os.path.join(d, name), "w") as f:
+            f.write(text)
+        disk_put(image, mnt, d)
+
+
+def disk_take(image: str, mnt: str, dest: str, names=None, remove: bool = False) -> None:
+    """The volume root's entries (`names`, or all of them) into the folder
+    `dest`, with their times; with `remove`, they are then deleted from the
+    volume (moved, not copied)."""
+    os.makedirs(dest, exist_ok=True)
+    if MOUNT:
+        mount(image, mnt, writable=remove)
+        try:
+            for entry in os.listdir(mnt):
+                if names is not None and entry not in names:
+                    continue
+                s_, d_ = os.path.join(mnt, entry), os.path.join(dest, entry)
+                if remove:
+                    shutil.move(s_, d_)
+                elif os.path.isdir(s_):
+                    shutil.copytree(s_, d_)
+                else:
+                    shutil.copy2(s_, d_)
+        finally:
+            umount(mnt)
+        return
+    at = _at(image)
+    for entry in disk_names(image):
+        if names is not None and entry not in names:
+            continue
+        _mt("mcopy", "-s", "-m", "-n", "-i", at, f"::/{entry}", dest)
+        if remove:
+            if os.path.isdir(os.path.join(dest, entry)):
+                _mt("mdeltree", "-i", at, f"::/{entry}")
+            else:
+                _mt("mdel", "-i", at, f"::/{entry}")
+
+
+def disk_read(image: str, mnt: str, rels) -> dict:
+    """{rel: its bytes, or None when it is not there}, for each path."""
+    out = {}
+    if MOUNT:
+        mount(image, mnt, writable=False)
+        try:
+            for rel in rels:
+                out[rel] = read_or_none(os.path.join(mnt, rel))
+        finally:
+            umount(mnt)
+        return out
+    with tempfile.TemporaryDirectory() as d:
+        for i, rel in enumerate(rels):
+            got = os.path.join(d, str(i))
+            r = subprocess.run(["mcopy", "-n", "-i", _at(image), f"::/{rel}", got],
+                               env=MTOOLS_ENV, capture_output=True)
+            out[rel] = read_or_none(got) if r.returncode == 0 and os.path.isfile(got) else None
+    return out
 
 
 # ── asking a server ─────────────────────────────────────────────────────────
@@ -597,25 +704,25 @@ def ask(port: int, c: dict, scratch: str, patience: int = 400) -> dict:
     return {"status": resp.status, "headers": answer_headers, "body": payload}
 
 
-def set_request_limit(image: str, n: int, mnt: str, idle_timeout_ms: int = 10000,
-                      streams: int = None, lose_one_sent_in: int = None,
-                      keepalive_ms: int = None) -> None:
-    mount(image, mnt, writable=True)
-    try:
-        with open(os.path.join(mnt, "gopher-metal.conf"), "w") as f:
-            f.write(f"requests = {n}\nidle_timeout_ms = {idle_timeout_ms}\n")
-            # On the droplet machine, the card chat will really serve on, and
-            # the volume it must find: the judge's own disk, by its serial.
-            if DROPLET:
-                f.write(f"card = private\nvolume = {fat_serial(image)}\n")
-            if streams is not None:
-                f.write(f"streams = {streams}\n")
-            if lose_one_sent_in is not None:
-                f.write(f"lose_one_sent_in = {lose_one_sent_in}\n")
-            if keepalive_ms is not None:
-                f.write(f"keepalive_ms = {keepalive_ms}\n")
-    finally:
-        umount(mnt)
+def request_limit_text(image: str, n: int, idle_timeout_ms: int = 10000, streams: int = None,
+                       lose_one_sent_in: int = None, keepalive_ms: int = None) -> str:
+    """gopher-metal.conf for a boot that serves `n` requests."""
+    text = f"requests = {n}\nidle_timeout_ms = {idle_timeout_ms}\n"
+    # On the droplet machine, the card chat will really serve on, and
+    # the volume it must find: the judge's own disk, by its serial.
+    if DROPLET:
+        text += f"card = private\nvolume = {fat_serial(image)}\n"
+    if streams is not None:
+        text += f"streams = {streams}\n"
+    if lose_one_sent_in is not None:
+        text += f"lose_one_sent_in = {lose_one_sent_in}\n"
+    if keepalive_ms is not None:
+        text += f"keepalive_ms = {keepalive_ms}\n"
+    return text
+
+
+def set_request_limit(image: str, n: int, mnt: str, **conf) -> None:
+    disk_write(image, mnt, "gopher-metal.conf", request_limit_text(image, n, **conf))
 
 
 def silent_client(port: int, payload: bytes):
@@ -697,44 +804,31 @@ def split_site_off(image: str, scratch: str) -> str:
     mnt = os.path.join(scratch, "split")
     site = os.path.join(scratch, "site")
     os.makedirs(site)
-    mount(image, mnt, writable=True)
-    try:
-        for entry in os.listdir(mnt):
-            if entry not in DATA_DIRS:
-                shutil.move(os.path.join(mnt, entry), os.path.join(site, entry))
-    finally:
-        umount(mnt)
+    names = [n for n in _root_names(image, mnt) if n not in DATA_DIRS]
+    disk_take(image, mnt, site, names=names, remove=True)
     if not os.listdir(site):
         raise RuntimeError(f"nothing but data on {image}: was its site split off already?")
     fat = os.path.join(scratch, "site.fat")
     run(["mkfs.vfat", "-F", "16", "-S", "512", "-n", "SITE", "-C", fat, str(32 * 1024)])
-    os.makedirs(mnt, exist_ok=True)
-    run(["sudo", "-n", "mount", "-o", f"loop,tz=UTC,uid={os.getuid()},gid={os.getgid()}", fat, mnt])
+    disk_put(fat, mnt, site, partitioned=False)
+    return fat
+
+
+def _root_names(image: str, mnt: str) -> list:
+    """The volume root's entries, through whichever reader is in use."""
+    if not MOUNT:
+        return disk_names(image)
+    mount(image, mnt, writable=False)
     try:
-        for entry in os.listdir(site):
-            src, dst = os.path.join(site, entry), os.path.join(mnt, entry)
-            if os.path.isdir(src):
-                shutil.copytree(src, dst)
-            else:
-                shutil.copy(src, dst)
+        return os.listdir(mnt)
     finally:
         umount(mnt)
-    return fat
 
 
 def restore_site(image: str, site: str, mnt: str) -> None:
     """Puts back on `image` the site files split_site_off moved from it into
     `site`: copied, since the story's own split keeps its copy."""
-    mount(image, mnt, writable=True)
-    try:
-        for entry in os.listdir(site):
-            src, dst = os.path.join(site, entry), os.path.join(mnt, entry)
-            if os.path.isdir(src):
-                shutil.copytree(src, dst)
-            else:
-                shutil.copy(src, dst)
-    finally:
-        umount(mnt)
+    disk_put(image, mnt, site)
 
 
 def droplet_start(elf: str, image: str, scratch: str, port: int, serial_log):
@@ -742,7 +836,8 @@ def droplet_start(elf: str, image: str, scratch: str, port: int, serial_log):
     run([os.path.join(DROPLET_DIR, "image.sh"), elf, disk, split_site_off(image, scratch)])
     # The judge's requests arrive on the private card, which is the one
     # `card = private` (set_request_limit) has the kernel serve.
-    env = dict(os.environ, DISK=disk, VOLUME=image, PRIVATE_FWD=str(port), MEMORY="512")
+    env = dict(os.environ, DISK=disk, VOLUME=image, PRIVATE_FWD=str(port), MEMORY="512",
+               ACCEL="kvm" if kvm_usable() else "tcg")
     qemu = subprocess.Popen([os.path.join(DROPLET_DIR, "droplet.sh")], env=env,
                             stdout=serial_log, stderr=subprocess.STDOUT)
     droplet_boots[qemu.pid] = disk
@@ -1246,17 +1341,14 @@ def file_differences(c: dict, image: str, metal: dict, linux: dict, mnt: str) ->
     if not c["files"]:
         return []
     out = []
-    mount(image, mnt, writable=False)
-    try:
-        for rel in c["files"]:
-            m = read_or_none(os.path.join(mnt, rel))
-            l = read_or_none(os.path.join(linux["root"], rel))
-            nm = None if m is None else normalize(m, metal["window"])
-            nl = None if l is None else normalize(l, linux["window"])
-            if nm != nl:
-                out.append(f"{rel}: metal wrote {abbrev(nm)}, Linux wrote {abbrev(nl)}")
-    finally:
-        umount(mnt)
+    on_metal = disk_read(image, mnt, c["files"])
+    for rel in c["files"]:
+        m = on_metal[rel]
+        l = read_or_none(os.path.join(linux["root"], rel))
+        nm = None if m is None else normalize(m, metal["window"])
+        nl = None if l is None else normalize(l, linux["window"])
+        if nm != nl:
+            out.append(f"{rel}: metal wrote {abbrev(nm)}, Linux wrote {abbrev(nl)}")
 
     # fsck.vfat has no offset option, so it checks a copy of the partition.
     part = image + ".part"
@@ -1414,11 +1506,9 @@ def run_story(elf, linux_bin, content, pristine, work, mnt, steps, label, report
         report(f"FAIL  {label}: the boot after the story printed no disk check")
 
     # The whole data tree, both sides, at the end of the story.
-    mount(image, mnt, writable=False)
-    try:
-        metal_tree = tree(mnt)
-    finally:
-        umount(mnt)
+    taken = tempfile.mkdtemp(dir=scratch)
+    disk_take(image, mnt, taken, names=DATA_DIRS)
+    metal_tree = tree(taken)
     linux_tree = tree(root)
     for rel in sorted(set(metal_tree) | set(linux_tree)):
         m = metal_tree.get(rel)
@@ -2577,10 +2667,11 @@ def main() -> int:
         return 2
     global EXPECTED_COMMIT
     EXPECTED_COMMIT = checkout_commit(gopher_root)
-    if subprocess.run(["sudo", "-n", "true"], capture_output=True).returncode != 0:
-        print("SKIPPED: populating and reading the disk needs `sudo -n` for a loop mount")
+    if MOUNT and subprocess.run(["sudo", "-n", "true"], capture_output=True).returncode != 0:
+        print("SKIPPED: JUDGE_MOUNT=1 reads the disk through a loop mount, which needs `sudo -n`")
         return 77
-    for tool in ("sgdisk", "mkfs.vfat", "fsck.vfat", "qemu-system-x86_64"):
+    for tool in ("sgdisk", "mkfs.vfat", "fsck.vfat", "qemu-system-x86_64",
+                 *(() if MOUNT else ("mcopy", "mdir", "mdel", "mdeltree"))):
         if shutil.which(tool) is None:
             print(f"SKIPPED: {tool} is not installed")
             return 77
