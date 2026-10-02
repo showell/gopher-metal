@@ -168,14 +168,59 @@ in order. The box Claude reorders on `master`, and CC proposes at the bottom.
 
 *(CC writes here; the box Claude or Steve answers under Answers.)*
 
-- **`probe/run.sh` fails before any probe on a CPU it was not recorded on.**
-  - The judges' self-test compares a recorded `tsc_hz` (2.494 GHz) with the
-    host's; a cloud CPU at 2.1 GHz fails it, and run.sh exits there.
-  - Should the clock judge's self-test take the rate as a parameter? CLOUD.md
-    says run.sh is not CC's to change.
-- **`judge_gopher.build_disk` mounts without `tz=UTC`.** On a host not set to
-  UTC, every copied file's time shifts, and chat's "recent" with it.
-  MIGRATION.md tells the migration to add it. Should build_disk add it too?
+### CC check-in, 2026-10-02 (branch at `6c9fb91`, on `master` `7db2603`)
+
+The two earlier questions (the TSC self-test, `tz=UTC`) are answered below,
+and both are next on CC's list.
+
+**Ready to merge: items 1–10.** 18 commits, one topic each. Every one
+compiles; `zig build test` runs 627 tests plus the fmt check, and `zig build
+kernels` and `gopher` both build (gopher against angry-gopher `be16d28`).
+What each needs from the box:
+
+- **Items 3–5, 8, 9 (fat16, io):** run `tools/check_fat16_images.sh`, which
+  needs dosfstools and mtools. It checks 51 images with the oracle, plus 7
+  mkfs/mtools volumes judged by both readers. `fat16.zig` changes behaviour
+  in five ways:
+  - a looped or out-of-range chain is now `BadChain`, not a hang or a write
+    past the volume;
+  - `mount` refuses a FAT too short for its clusters;
+  - `max_name` is 96;
+  - directories stop at 65,536 entries;
+  - `Volume.check` is new, and not wired.
+
+  The QEMU gates should see none of the five on a healthy volume.
+- **Item 6 (the log ring):** `serial.put` now also writes `serial.ring`
+  (64 KiB, secrets redacted). Nothing reads it yet. The port and the screen
+  are unchanged.
+- **Item 7 (RESTART.md):** design only, plus a new kernel,
+  `probe/restart.elf` (`zig build restart`). **One thing only the box can
+  settle:** does a guest's reset restart a real droplet, or power it off?
+  - Boot `droplet/image.sh probe/restart.elf` on a droplet and watch the
+    recovery console. It should reach `boot 4` and `PASS`.
+  - Under TCG here it does that on the droplet-shaped QEMU, and on microvm
+    it reaches `boot 2`.
+  - Also worth a run under KVM: a copy of `droplet.sh` without
+    `-no-reboot`.
+- **Item 10:** `zig build test` now fails on a mis-formatted file in `src/`.
+  The three files were formatted, and `tcp_sim`'s seed list split so it
+  stays readable; the seeds run are the same.
+
+**Next, in order, unless you reorder:**
+1. item 11 (review `/admin/host`);
+2. the TSC self-test;
+3. `tz=UTC` in `build_disk`;
+4. item 12 (NT case bits).
+
+**Questions:**
+- **May CC add `restart.elf` to `probe/run.sh`?** It needs a run without
+  `-no-reboot`, which run.sh's loop has no knob for. CLOUD.md says to ask
+  before changing run.sh. If not, it stays a manual measurement.
+- **Is the log ring's 64 KiB in `.bss` fine for the droplet's memory
+  budget?** RESTART.md proposes moving it to a fixed region past
+  `_kernel_end`, so that the previous boot's log survives a restart. That
+  is a change to the page allocator's view of RAM. Should CC do it, or
+  wait for the restart wiring?
 
 ## Answers
 
