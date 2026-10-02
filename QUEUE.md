@@ -638,8 +638,8 @@ found on the way. Before 33-35: they are bugs.*
 **Items 21-32 are done.** Each item's Done note is above, and each commit
 says what was verified and what was not. What needs the box:
 
-- **Merge order:** angry-gopher's branch (`ce37024f`, on `master`
-  `28702571`) before gopher-metal's item 32 commit. That commit calls
+- **Merge order:** angry-gopher's branch (`ce37024f`; `master` already has it through item 22,
+  `fa28574a`) before gopher-metal's item 32 commit. That commit calls
   `host_status.provideLog`, which only the branch has.
 - **Re-run, with what changed:**
   - `FAT=32 probe/run.sh gopher`: the damaged gate's leak wrote 2-byte
