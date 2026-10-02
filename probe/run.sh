@@ -130,6 +130,16 @@ boot() {
         | sed 's/\x1b\[[0-9;?]*[a-zA-Z]//g; /SeaBIOS/d; s/^.*Booting from ROM\.\.//' \
         | grep -v '^[[:space:]]*$' > "$out.txt"
     mv "$out.txt" "$out"
+    # **EXIT 1 IS TWO THINGS.** isa-debug-exit turns a kernel's 0 into 1, and
+    # QEMU exits 1 itself when it cannot start (a disk image that is not
+    # there, a flag it does not take). So a pass needs a line the kernel
+    # wrote, not only QEMU's own: one that QEMU failed to start once read as
+    # PASS (QUEUE item 46).
+    if [ "$code" = 1 ] && ! grep -aqv '^qemu-system' "$out"; then
+        echo "FAIL $name | qemu exited 1 before the kernel wrote anything: $(grep -a . "$out" | head -1)"
+        failed=1
+        return
+    fi
     case "$code" in
         1) echo "PASS $name | $(grep -a . "$out" | tail -2 | head -1)" ;;
         3) echo "FAIL $name | $(grep -aE '^(FAIL|PANIC)' "$out" | head -1)"; failed=1 ;;
