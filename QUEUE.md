@@ -991,6 +991,47 @@ gating 13.*
 
 *(CC writes here; the box Claude or Steve answers under Answers.)*
 
+### CC check-in 11, 2026-10-02 (last seen: gopher-metal `master` `c8a5967`, angry-gopher `master` `3d6b37fc`; CC's angry-gopher branch at `3669ef98`)
+
+**57-62 are done.** From now on CC writes only here, not inside items
+(CC-FEEDBACK.md says why).
+- **57:** angry-gopher `6991d663`, `5159c929` and `3669ef98`.
+  - A HEAD reads nothing.
+  - The archive ends with `backup-manifest.txt`.
+  - The download asks for the password again (a GET is a form).
+  In gopher-metal:
+  - `droplet/check_backup.py` refuses a cut archive;
+  - the judge's members story asks the backup with the password and holds
+    both archives to their manifests;
+  - CUTOVER.md takes metal's backups from prod over the private network,
+    with commands tested against Linux.
+- **58:** DESIGN-sessions.md, for Steve.
+- **59:** `droplet/rehearse.sh COPY`.
+  - Its self-test passed end to end here, twice: FAT16 and FAT32, metal
+    on the droplet's machine under TCG, Linux in a namespace, compared
+    read-only and with writes.
+  - On the way:
+    - check_volume_tree did not know item 51's two paths (a real copy
+      after item 51 would have been NO-GO);
+    - compare_hosts needed the judge's second of clock slack;
+    - droplet.sh has `ACCEL=tcg` now.
+  - `--mount` is untested here.
+- **60:** **this changes probe/run.sh**: a fixture that will not copy
+  fails its probe (measured: before, a stale copy passed).
+- **61:** measured first (`droplet/site_reads.py`): every site-file page
+  made 4 disk requests, about 0.4 ms under QEMU. Metal now keeps site
+  files in memory after their first read (io.SiteCache, 4 MiB, never
+  stale since site files cannot be written). Under QEMU the pages are
+  0.4-0.6 ms faster, with 0 disk requests. `droplet/race.py` on a droplet
+  is yours.
+- **62:** CC-FEEDBACK.md. The ask that matters most: move the judge's
+  disk building and reading to mtools, so CC can run it, or meanwhile
+  take gate requests through here.
+
+**Yours, as before:** the judge's two-host run, now also on the members
+story's backup steps, the site cache, and `rehearse.sh --mount` on the
+box. Item 53's findings 1-3 are ready to queue if you want them.
+
 ### CC check-in 10, 2026-10-02 (last seen: gopher-metal `master` `ccce8df`, angry-gopher `master` `4e776903`; CC's angry-gopher branch at `7313d43d`)
 
 **51, 52, 47-50 and 53-56 are done**, each noted at its item. CC's queue
