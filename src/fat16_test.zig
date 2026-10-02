@@ -219,16 +219,16 @@ test "a disk that stops answering is an error, not a hang or a wrong answer" {
 
 /// Sets `cluster`'s entry in both copies of the FAT on the disk, then mounts
 /// again so that a held FAT sees it too.
-fn damageFat(d: *test_disk.Disk, cached: bool, cluster: u16, value: u16) !void {
+fn damageFat(d: *test_disk.Disk, cached: bool, cluster: fat16.Cluster, value: fat16.Cluster) !void {
     const l = Layout.of(d.bytes);
     for (0..2) |copy| {
-        std.mem.writeInt(u16, d.bytes[l.fat_start + copy * l.fat_bytes + @as(usize, cluster) * 2 ..][0..2], value, .little);
+        std.mem.writeInt(u16, d.bytes[l.fat_start + copy * l.fat_bytes + @as(usize, cluster) * 2 ..][0..2], @intCast(value), .little);
     }
     try d.mount(cached);
 }
 
 /// The clusters of a chain, in order, read from the first FAT on the disk.
-fn chainOf(d: *const test_disk.Disk, first: u16, out: []u16) []u16 {
+fn chainOf(d: *const test_disk.Disk, first: fat16.Cluster, out: []fat16.Cluster) []fat16.Cluster {
     const l = Layout.of(d.bytes);
     var n: usize = 0;
     var c = first;
@@ -250,7 +250,7 @@ test "a file whose chain loops back is a broken chain to append to, not a hang" 
         var data: [1536]u8 = undefined; // three clusters, full, so an append needs a fourth
         try d.vol.writeFile("data/log", pattern(&data, 4));
         const e = try d.vol.open("data/log");
-        var chain: [8]u16 = undefined;
+        var chain: [8]fat16.Cluster = undefined;
         const c = chainOf(d, e.first_cluster, &chain);
         try testing.expectEqual(@as(usize, 3), c.len);
         try damageFat(d, cached, c[2], c[0]);
@@ -274,7 +274,7 @@ test "a directory whose chain loops back is a broken chain to list, search or gr
             try d.vol.writeFile(p, "x");
         }
         const dir = try d.vol.open("data/sessions");
-        var chain: [64]u16 = undefined;
+        var chain: [64]fat16.Cluster = undefined;
         const c = chainOf(d, dir.first_cluster, &chain);
         try testing.expectEqual(@as(usize, 2), c.len);
         try damageFat(d, cached, c[c.len - 1], c[0]);
@@ -454,7 +454,7 @@ test "the check finds two files sharing clusters, and a file that loops" {
         try d.vol.writeFile("a", pattern(&data, 3));
         try d.vol.writeFile("b", pattern(&data, 4));
         try d.vol.writeFile("c", pattern(&data, 5));
-        var chain: [8]u16 = undefined;
+        var chain: [8]fat16.Cluster = undefined;
         const a = chainOf(d, (try d.vol.open("a")).first_cluster, &chain)[0..3].*;
         const b = chainOf(d, (try d.vol.open("b")).first_cluster, &chain)[0..3].*;
         const c = chainOf(d, (try d.vol.open("c")).first_cluster, &chain)[0..3].*;
@@ -483,7 +483,7 @@ test "the check finds a directory that loops, and one that points at its own par
         const data_dir = try d.vol.open("data");
         const sessions = try d.vol.open("data/sessions");
         const up = try d.vol.open("data/up");
-        var chain: [8]u16 = undefined;
+        var chain: [8]fat16.Cluster = undefined;
         const s = chainOf(d, sessions.first_cluster, &chain)[0..2].*;
         try damageFat(d, cached, s[1], s[0]);
         setEntry(d, up, .first_cluster, data_dir.first_cluster);
@@ -686,7 +686,7 @@ test "a directory grows to FAT's limit of 65,536 entries, and no further" {
         try fullDirectory(d, cached, "data/big", limit - 1);
         try d.vol.writeFile("data/big/one-more.md", "fits");
         try d.expectFile("data/big/one-more.md", "fits");
-        var chain: [4200]u16 = undefined;
+        var chain: [4200]fat16.Cluster = undefined;
         try testing.expectEqual(limit, chainOf(d, (try d.vol.open("data/big")).first_cluster, &chain).len);
         // "one-more.md" took two of the new cluster's sixteen entries (a long
         // part and the short entry); seven more such names take the other

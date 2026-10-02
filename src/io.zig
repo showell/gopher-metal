@@ -396,7 +396,7 @@ pub const AccessOptions = struct {};
 
 pub const Dir = struct {
     /// The cluster this directory starts at; zero is the root.
-    cluster: u16 = 0,
+    cluster: fat16.Cluster = 0,
     /// The volume it is on, which is where `iterate` lists it.
     place: Place = .site,
 

@@ -206,7 +206,7 @@ pub const Disk = struct {
     }
 
     /// The names in a directory, joined by spaces, "." and ".." left out.
-    pub fn names(d: *Disk, dir_cluster: u16, buf: []u8) ![]const u8 {
+    pub fn names(d: *Disk, dir_cluster: fat16.Cluster, buf: []u8) ![]const u8 {
         const Collect = struct {
             buf: []u8,
             len: usize = 0,
@@ -233,7 +233,7 @@ pub const Report = struct {
         problem: fat16.Problem,
         path: [256]u8 = undefined,
         path_len: usize = 0,
-        cluster: u16,
+        cluster: fat16.Cluster,
         count: u32,
 
         pub fn text(f: *const Found) []const u8 {
@@ -255,7 +255,7 @@ pub const Report = struct {
     }
 
     /// One finding, as a test expects it.
-    pub const Want = struct { problem: fat16.Problem, path: []const u8 = "", cluster: u16, count: u32 = 0 };
+    pub const Want = struct { problem: fat16.Problem, path: []const u8 = "", cluster: fat16.Cluster, count: u32 = 0 };
 
     /// Exactly these findings, in this order.
     pub fn expect(r: *const Report, want: []const Want) !void {
