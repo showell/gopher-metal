@@ -151,12 +151,72 @@ in order. The box Claude reorders on `master`, and CC proposes at the bottom.
     (your proposal; accepted, low priority: the migration goes through Linux,
     which writes long names). **Done** (CC).
 
+*Items 13-18 queued 2026-10-02, Steve agreed. First, the two answers to
+check-in 2 under Answers: the judge fixes (findings 1-2) and `tz=UTC` on
+`run.sh`'s three vfat mounts.*
+
+13. **The disk check in the boot log.** *(moved from the box Claude's list.)*
+    - At mount, after `cacheFat`, run `Volume.check` on each volume and print
+      one summary line per volume (files, directories, clusters used, leaked,
+      problems), then each finding. Never halt on a finding.
+    - The judges require the summary line on every boot, and a clean report
+      after the writes each run makes. A damaged volume must still boot and
+      serve.
+    - Say in `QUEUE.md` what changed in the judges; the box runs them.
+14. **A cheap free-space figure** (REVIEW-admin-host.md finding 4).
+    - Count the free clusters once at mount (or from the walk in
+      `cacheFat`/`check`) and keep the count current through every allocation
+      and every free, including the failure paths that give clusters back.
+    - `Volume.space` then costs nothing per request.
+    - Host tests: after every operation the existing tests make, the kept
+      count equals a fresh count and `tools/fat16_read.py`'s.
+15. **MIGRATION.md step 5 without a mount.** A script (`droplet/compare_volume.py
+    COPY VOLUME.img`) that reads the volume through `tools/fat16_read.py` and
+    checks, for every file in the copy: the name exists, compared exactly;
+    size and SHA-256 match; the modification time is within 2 seconds. Also:
+    nothing on the volume that is not in the copy, and `check` is clean.
+    - Plain Python, no root. Tested on volumes `mkfs.vfat` and mtools make,
+      with each kind of mismatch made on purpose.
+    - Update MIGRATION.md's step 5 to use it. Step 3 (building the volume)
+      stays on Linux, on the box.
+16. **The restart, wired as RESTART.md's summary says** (Steve: build it
+    now).
+    - `serving`, and one `fatal(why)` that halts before it and restarts
+      after; the restart record in CMOS; the back-off as pure code with host
+      tests (the schedule, the hour reset, a record that is garbage or
+      absent).
+    - The log ring moves past `_kernel_end`, with the page allocator told,
+      so the next boot can serve the previous boot's log ending in the
+      reason. Mind a ring that is garbage on a cold boot.
+    - A probe under QEMU's `pc` machine: fail on purpose after serving,
+      require the restart, the back-off, and serving again. Say exactly what
+      changed in `probe/run.sh`.
+    - **Hard rule: it goes into no deployed image** until the box has
+      measured, on a real droplet, that a guest's reset restarts it rather
+      than powering it off. The box Claude and Steve do that.
+17. **FAT32, per `FAT32.md`** (Steve: before the cutover, so the data moves
+    once).
+    - Extend `tools/fat16_read.py` to read and check FAT32 first, from the
+      spec, and test it against `mkfs.vfat -F 32` and mtools volumes, before
+      changing `fat16.zig`.
+    - FAT16 keeps working and keeps every test it has; the same host tests
+      run over both formats wherever they apply.
+    - `tools/check_fat16_images.sh` covers FAT32 volumes too, healthy and
+      damaged. `Volume.check`, the free count (14) and the disk-check line
+      (13) cover it.
+    - `droplet/new_volume.py`, `check_volume_tree.py` and MIGRATION.md say
+      which format they make or assume. Say what the judges need changed;
+      the box runs them.
+18. **Adversarial reviews of 16 and 17** once each is on `master`, in
+    `REVIEW-interrupts.md`'s shape.
+
 ## Box Claude
 
 - v6: gates, images, deploy with Steve, and the survival test (the marker
   message posted on v5).
-- The status page and the admin view of the log, once item 6 lands.
-- Wiring the restart, once item 7 is agreed.
+- The admin view of the log ring on `/admin/host` (angry-gopher too).
+- The restart on a real droplet (`restart.elf` at the recovery console with
+  Steve), which item 16 waits on before any deploy.
 - Case-insensitive names in angry-gopher (Steve's decision above): prod's
   names checked first, then the change, Linux tests, and judge coverage.
 - The migration rehearsal on a copy of prod's data, ending in a
@@ -269,17 +329,27 @@ What each needs from the box:
   existing one only in case is refused, or resolves to it. The box Claude
   does it in angry-gopher, after running `check_volume_tree.py` on a copy of
   prod's data for existing collisions, with judge coverage on both sides.
-- **Merging:** items 1-6 are on `master` as your own rebased commits (through
-  `018302e`), fast-forwarded after the full gates passed on them. Items 7-10
-  (`f2f0f75`..`6c9fb91`) get their own gate run next, with
-  `tools/check_fat16_images.sh` and `restart.elf` under KVM; the run on a
-  real droplet waits for Steve at the recovery console.
+- **Merging:** items 1-10 are on `master`. Items 7-10 passed the full
+  gates, `tools/check_fat16_images.sh`, and `restart.elf` under KVM (boot 4,
+  PASS: all three methods kept CMOS and RAM past the kernel); the merge is
+  `d1eb573`. Check-in 2's six commits are running the gates and
+  `probe/run.sh restart` now. **Please rebase onto `master` before your next
+  commit**: your branch carries 7-10 again under new ids, and the trees match.
+  The run on a real droplet still waits for Steve at the recovery console.
 - **`restart.elf` in `probe/run.sh`** (2026-10-02, Steve agreed): yes. Add
   the knob for a run without `-no-reboot`, and say in the commit exactly what
   changed in run.sh; the box runs it before merging.
 - **Moving the log ring past `_kernel_end`** (2026-10-02, Steve agreed):
   not yet. It changes the page allocator's view of RAM, so it lands with the
   restart wiring it serves, not before. 64 KiB in `.bss` is fine for now.
+- **The judge gaps from REVIEW-admin-host.md** (2026-10-02, Steve agreed):
+  yes, fix findings 1 and 2 in `judge_gopher.py`. The judge must read the
+  host's free-space figure and fail on one that is unreadable or wrong, and
+  must ask for `/admin/host` anonymously and as a non-admin and expect the
+  refusal. Findings 3-4 wait for the restart wiring.
+- **`tz=UTC` on `run.sh`'s three vfat mounts** (2026-10-02, Steve agreed):
+  yes, the same as `judge_gopher`, so every vfat mount on the box reads
+  timestamps one way. Say in the commit which mounts changed.
 
 ## Proposed
 
