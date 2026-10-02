@@ -2,7 +2,7 @@
 """Two hosts serving the same data, page by page (QUEUE.md item 28): the
 rehearsal's comparison, kept for the cutover day.
 
-    droplet/compare_hosts.py COPY A_URL B_URL [--uid 1] [--secret FILE] [--netns NAME]
+    droplet/compare_hosts.py COPY A_URL B_URL [--uid 1] [--secret FILE] [--netns NAME] [--writes]
     droplet/compare_hosts.py --self-test ZIG_SERVER_BINARY
 
 `COPY` is the data both hosts serve (it holds `data/` and `auth/`); it is
@@ -24,6 +24,16 @@ admin roster and the game roster. Not compared, on purpose: /admin/host
 (each host describes itself), /version (the build), a topic's `download`
 (an archive of file times, which FAT keeps in 2-second steps), and streams.
 
+**WITH `--writes`, AFTER THE MOVE (item 29):** after the comparison, on
+both hosts, the same writes as the user: a new topic in their DM with
+themselves (`<uid>_<uid>`, which no one else sees; `compare-hosts-<time>`,
+one name for both), a message in it, a small
+picture uploaded and shown in a second message, and a reaction to the
+first. Then every page is compared again, with the new topic's. What must
+differ is normalized before hashing: each host's own write times (any
+timestamp inside the seconds its writes took) and the upload's random
+name. The writes stay on both hosts, in the user's own data.
+
 **ASKING IS NOT READ-ONLY.** A topic page records it as the user's last
 topic (`data/chat/users/<uid>/last-conv` and `last-sessions/`), which
 `conversations` and `/chat` then show. Both hosts are asked the same pages
@@ -34,9 +44,11 @@ Exit status: 0 when every page is the same on both, 1 when any differs, 2
 for a usage error.
 """
 import base64
+import calendar
 import hashlib
 import hmac
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -97,35 +109,119 @@ def pages(copy: str, uid: str) -> list:
     return out
 
 
-def fetch(base: str, path: str, cookie: str, netns: str = None) -> tuple:
-    """(status, sha256 of the body) for `path` on `base`, by curl, redirects
-    not followed: a redirect is an answer to compare."""
-    cmd = ["curl", "-sS", "-o", "-", "-w", "\n%{http_code}", "-H", f"Cookie: {cookie}", base.rstrip("/") + path]
+def ask(base: str, path: str, cookie: str, netns: str = None, extra: list = ()) -> tuple:
+    """(status, body) for `path` on `base`, by curl, redirects not followed:
+    a redirect is an answer to compare. `extra` is more curl arguments (a
+    form, a header)."""
+    cmd = ["curl", "-sS", "-o", "-", "-w", "\n%{http_code}", "-H", f"Cookie: {cookie}", *extra,
+           base.rstrip("/") + path]
     if netns:
         cmd = ["ip", "netns", "exec", netns] + cmd
     r = subprocess.run(cmd, capture_output=True)
     if r.returncode != 0:
-        return ("no answer", "")
+        return ("no answer", b"")
     body, _, status = r.stdout.rpartition(b"\n")
-    return (status.decode(), hashlib.sha256(body).hexdigest())
+    return (status.decode(), body)
 
 
-def compare(copy: str, a: str, b: str, uid: str = "1", secret: bytes = None, netns: str = None) -> tuple:
-    """(how many pages, [(label, what differs)]), with no name from the data."""
+def fetch(base: str, path: str, cookie: str, netns: str = None) -> tuple:
+    """(status, sha256 of the body)."""
+    status, body = ask(base, path, cookie, netns)
+    return status, hashlib.sha256(body).hexdigest()
+
+
+RFC3339 = re.compile(rb"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z")
+
+
+class Written:
+    """What --writes did on one host: the seconds its writes took, and the
+    upload's name there, which are what may differ between the two."""
+
+    def __init__(self, start: int, end: int, upload: str):
+        self.start, self.end, self.upload = start, end, upload
+
+    def normalize(self, body: bytes) -> bytes:
+        def when(m):
+            t = calendar.timegm(time.strptime(m.group(0).decode(), "%Y-%m-%dT%H:%M:%SZ"))
+            return b"(written)" if self.start <= t <= self.end else m.group(0)
+        body = RFC3339.sub(when, body)
+        return body.replace(self.upload.encode(), b"(the upload)") if self.upload else body
+
+
+# A 1x1 PNG, the smallest picture the upload's sniffing takes.
+PNG = base64.b64decode("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==")
+
+
+def write_on(base: str, cookie: str, conv: str, topic: str, netns: str = None) -> Written:
+    """--writes on one host. Raises when a write is refused."""
+    start = int(time.time())
+
+    def must(path, extra, want=("200", "204", "303")):
+        status, body = ask(base, path, cookie, netns, extra)
+        if status not in want:
+            raise RuntimeError(f"a write was refused: {status}")
+        return body
+
+    url = f"/chat/c/{conv}/{topic}"
+    must(f"/chat/c/{conv}/new", ["--data", f"topic={topic}"])
+    must(f"{url}/send", ["-H", "X-Chat-Async: 1", "--data", "markdown=compare-hosts+checking+after+the+move&cid=w1"])
+    with tempfile.NamedTemporaryFile(suffix=".png") as pic:
+        pic.write(PNG)
+        pic.flush()
+        got = must(f"{url}/upload", ["-F", f"file=@{pic.name};type=image/png"])
+    import json
+    up = json.loads(got)["url"]
+    name = up.rsplit("/", 1)[-1]
+    must(f"{url}/send", ["-H", "X-Chat-Async: 1", "--data",
+                         "markdown=" + urllib.parse.quote(f"![a picture]({up})", safe="") + "&cid=w2"])
+    must(f"{url}/react", ["--data", "msg=1&emoji=%F0%9F%91%8D"])
+    return Written(start, int(time.time()), name)
+
+
+def compare(copy: str, a: str, b: str, uid: str = "1", secret: bytes = None, netns: str = None,
+            writes: bool = False) -> tuple:
+    """(how many pages, [(label, what differs)]), with no name from the data.
+    With `writes`, the comparison is made again after the writes."""
     if secret is None:
         with open(os.path.join(copy, "data", "chat", "_session_secret"), "rb") as f:
             secret = f.read()
     cookie = mint_session(secret, uid, int(time.time()))
     walked = pages(copy, uid)
+    n, differ = len(walked), walk(walked, a, b, cookie, netns)
+    if not writes:
+        return n, differ
+    conv = f"{uid}_{uid}"
+    topic = f"compare-hosts-{int(time.time())}"
+    try:
+        wa = write_on(a, cookie, conv, topic)
+        wb = write_on(b, cookie, conv, topic, netns)
+    except RuntimeError as e:
+        return n, differ + [("writes", str(e))]
+    base = f"/chat/c/{conv}/{topic}"
+    mine = [("the written topic", base), ("the written topic, raw", f"{base}/raw"),
+            ("the written topic, reactions", f"{base}/reactions")]
+    again = [(f"after the writes: {label}", path) for label, path in walked + mine]
+    differ += walk(again, a, b, cookie, netns, wa, wb)
+    # The picture itself, by each host's own name for it.
+    sa, ba = ask(a, f"{base}/uploads/{wa.upload}", cookie)
+    sb, bb = ask(b, f"{base}/uploads/{wb.upload}", cookie, netns)
+    if (sa, ba) != (sb, bb) or sa != "200":
+        differ.append(("after the writes: the written topic, the upload", f"status {sa} on A, {sb} on B"))
+    return n + len(again) + 1, differ
+
+
+def walk(walked: list, a: str, b: str, cookie: str, netns: str, wa: Written = None, wb: Written = None) -> list:
     differ = []
     for label, path in walked:
-        sa, ha = fetch(a, path, cookie)
-        sb, hb = fetch(b, path, cookie, netns)
+        sa, ba = ask(a, path, cookie)
+        sb, bb = ask(b, path, cookie, netns)
+        if wa:
+            ba, bb = wa.normalize(ba), wb.normalize(bb)
         if sa != sb:
             differ.append((label, f"status {sa} on A, {sb} on B"))
-        elif ha != hb:
+        elif hashlib.sha256(ba).digest() != hashlib.sha256(bb).digest():
             differ.append((label, f"status {sa} on both, the bodies differ"))
-    return len(walked), differ
+    return differ
 
 
 def report(n: int, differ: list) -> None:
@@ -138,6 +234,9 @@ def main(argv) -> int:
     if len(argv) == 3 and argv[1] == "--self-test":
         return self_test(argv[2])
     args = argv[1:]
+    writes = "--writes" in args
+    if writes:
+        args.remove("--writes")
     opts = {"--uid": "1", "--secret": None, "--netns": None}
     for flag in list(opts):
         if flag in args:
@@ -154,7 +253,7 @@ def main(argv) -> int:
     if opts["--secret"]:
         with open(opts["--secret"], "rb") as f:
             secret = f.read()
-    n, differ = compare(args[0], args[1], args[2], opts["--uid"], secret, opts["--netns"])
+    n, differ = compare(args[0], args[1], args[2], opts["--uid"], secret, opts["--netns"], writes)
     report(n, differ)
     return 1 if differ else 0
 
@@ -237,6 +336,31 @@ def self_test(binary: str) -> int:
             line = f.readline()
         with open(rx, "a") as f:
             f.write(line)
+        # --writes, on two fresh identical copies: the same writes on each,
+        # and every page, the written topic's among them, the same after.
+        for c in copies:
+            shutil.rmtree(c)
+            shutil.copytree(site, c)
+        servers = [G.LinuxServer(binary, c, os.path.join(d, f"writes-{i}.log")) for i, c in enumerate(copies)]
+        try:
+            n3, differ3 = compare(copies[0], *(f"http://127.0.0.1:{s.port}" for s in servers), writes=True)
+        finally:
+            for s in servers:
+                s.stop()
+        if differ3:
+            failures.append(f"identical copies differ after the same writes: {differ3}")
+        if n3 < 2 * n:
+            failures.append(f"only {n3} pages walked with --writes")
+        for c in copies:
+            up = os.path.join(c, "data/chat/1_1/sessions")
+            names = sorted(os.listdir(up)) if os.path.isdir(up) else []
+            if not any(x.endswith(".uploads") for x in names) or not any(x.endswith(".reactions.jsonl") for x in names):
+                failures.append(f"the writes did not all land: {names}")
+        for c in copies:
+            shutil.rmtree(c)
+            shutil.copytree(site, c)
+        with open(os.path.join(copies[1], "data/chat/1_2/sessions/secret-plans.reactions.jsonl"), "a") as f:
+            f.write(line)
         n2, differ = run("changed")
         labels = [l for l, _ in differ]
         if not any(l.endswith("reactions") for l in labels):
@@ -253,8 +377,9 @@ def self_test(binary: str) -> int:
     if failures:
         print("self-test FAILED:\n  " + "\n  ".join(failures))
         return 1
-    print(f"self-test passed: {n} pages of two identical copies identical; a reaction added to one "
-          f"copy found ({len(differ)} page(s) differ), and the report names nothing from the data")
+    print(f"self-test passed: {n} pages of two identical copies identical; with --writes, {n3} pages "
+          f"identical after the same writes on each; a reaction added to one copy found ({len(differ)} "
+          f"page(s) differ), and the report names nothing from the data")
     return 0
 
 
