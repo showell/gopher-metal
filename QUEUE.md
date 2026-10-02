@@ -397,7 +397,7 @@ queue full). After 17 and 18.*
 draws the seam, CC takes the tail). Background:
 http://143.244.172.148:9100/notes/a-web-server-in-a-box.md*
 
-21. **angry-gopher's Store: every disk call through one seam.** The box
+21. **angry-gopher's Store: every disk call through one seam.** *(CC, started 2026-10-02, on angry-gopher's branch `claude/elegant-keller-an3ccr` from `cd15276d`.)* The box
     Claude is adding `zig-server/src/store.zig` (read, write, replace,
     append, list, remove, removeTree, makeDir, stat, over `std.Io`) that also
     enforces FAT's rules on Linux: names FAT holds, at most 96 bytes, and
