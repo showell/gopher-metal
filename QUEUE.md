@@ -482,7 +482,7 @@ Answers below carry the detail. In this order:
     cookie already in browsers (prod has 19 players and 6 guests: are they
     re-identified, read-only, or let go?); the guest upgrade path; and the
     tests and judge cases that would prove it. Steve decides from it.
-24. **Store: `replace`, so a rewrite survives a crash.** Today a whole-file
+24. **Store: `replace`, so a rewrite survives a crash.** *(CC, done)* Today a whole-file
     write is truncate-then-write on Linux, and remove-then-write on metal
     (`fat16.writeFileIn`): a machine that stops between the two loses the
     file. Add `fat16` rename-within-a-directory (host-tested, oracle-
@@ -491,6 +491,25 @@ Answers below carry the detail. In this order:
     move the records that matter onto it: `.count` sidecars, `players/*/
     name`, `auth/*/name`, `next-id.txt` (counter.zig). Say what a crash at
     each point leaves.
+
+    **Done** (CC).
+    - **Here,** `fat16.rename` and `io.zig`'s `Dir.rename`, in one commit:
+      - the order is: unlink `from` keeping its chain, then point `to`'s
+        short entry at it in one sector write, then free `to`'s old chain;
+      - **a host test stops the disk after every request in turn**, and
+        `to` is always the old file or the new, whole, with only leaked
+        clusters left over (and FAT copies that differ, when a stop falls
+        between the two copies);
+      - two ordering mutants are caught;
+      - the oracle agrees on every stop's image.
+    - **On angry-gopher's branch** (head `7ec0fc9c`), five commits:
+      - `store.replace`: a temporary sibling `~<hash>.tmp`, then a rename.
+        Each stop is explained in its comment;
+      - the moves: `.count` sidecars, `players/*/name`, `auth/*/name`, and
+        every counter (`next-id.txt` and the game counters).
+    - **The counter mattered most:** a lost `next-id.txt` reads as 1, so
+      the next account was id 1 again, and its name was written over
+      account 1's.
 25. **Store: FAT's path limits on Linux too.** The Store refuses names FAT
     cannot hold, but not paths longer than `io.zig`'s `max_path` (256) or
     deeper than `fat16`'s removeTree cap (16). Enforce both in the Store,
