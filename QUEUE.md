@@ -205,6 +205,25 @@ check-in 2 under Answers: the judge fixes (findings 1-2) and `tz=UTC` on
     - `Volume.space` then costs nothing per request.
     - Host tests: after every operation the existing tests make, the kept
       count equals a fresh count and `tools/fat16_read.py`'s.
+
+    **Done** (CC).
+    - **The count:** `Volume.free_clusters` is counted once at `mount`, one
+      pass over the FAT a sector at a time. `fatSet`, the one place a FAT
+      entry changes, then moves it whenever an entry goes from free to used
+      or back, so every path keeps it, the failure paths included.
+      `space()` is now a field read, which also settles the review's
+      finding 4.
+    - **The tests:**
+      - every disk a test leaves healthy must have kept count == a fresh
+        count of the FAT on the disk;
+      - a dedicated test checks after every kind of operation, including a
+        write too big for the disk, an append that does not fit, a refused
+        name and a hole;
+      - `tools/check_fat16_images.sh` compares each healthy image's kept
+        count with the oracle's (27 images).
+    - **A rule this made explicit:** a `Volume` is a value, and its copies
+      share the held FAT but not the count. Only io.zig's copy writes, once
+      it has one; that is already so in `gopher.zig`.
 15. **MIGRATION.md step 5 without a mount.** A script (`droplet/compare_volume.py
     COPY VOLUME.img`) that reads the volume through `tools/fat16_read.py` and
     checks, for every file in the copy: the name exists, compared exactly;

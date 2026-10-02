@@ -39,6 +39,26 @@ for img in "$DIR"/*.img; do
 done
 echo "$n images checked by tools/fat16_read.py"
 
+# The kept free count (QUEUE.md item 14): each image a test left healthy has,
+# beside it, the count fat16.zig kept through every operation; the oracle's
+# count of free clusters in its first FAT must be the same number. A damaged
+# image is not compared: its damage was made under the volume's feet.
+k=0
+for img in "$DIR"/*.img; do
+    name="$(basename "$img" .img)"
+    case "$name" in damaged-*|limit-*) continue ;; esac
+    [ -f "$DIR/$name.free" ] || { echo "FAIL $name: no kept free count beside it"; failed=1; continue; }
+    kept="$(cat "$DIR/$name.free")"
+    counted="$(python3 -c "
+import sys; sys.path.insert(0, '$HERE')
+import fat16_read
+v = fat16_read.Volume(open('$img', 'rb').read())
+print(sum(1 for c in range(2, v.max_cluster + 1) if v.fat(c) == 0))")"
+    k=$((k + 1))
+    if [ "$kept" != "$counted" ]; then echo "FAIL $name: fat16.zig kept $kept free clusters, the oracle counts $counted"; failed=1; fi
+done
+echo "the kept free count is the oracle's on $k healthy images"
+
 # The names test writes data/chat/<name> for every length from 1 to
 # fat16.max_name, each name the first that many characters of a fixed
 # alphabet. The oracle must list each, whole: a name it read under its 8.3

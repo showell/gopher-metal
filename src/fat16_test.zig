@@ -734,3 +734,51 @@ test "a short name with the NT lower-case bits lists in lower case, and is found
         try testing.expectEqualStrings("topic.md", e.text());
     }
 }
+
+// ---- the kept free count (QUEUE item 14) -------------------------------------
+
+test "the kept free count follows every operation, the refused and failed ones included" {
+    for (both) |cached| {
+        const d = try Disk.make("keptfree", .{ .sectors = 4085 + 1 + 2 * 17 + 32 }, cached);
+        defer d.deinit();
+        try d.expectKept();
+        var data: [20_000]u8 = undefined;
+        _ = pattern(&data, 6);
+        try d.vol.writeFile("data/a", &data);
+        try d.expectKept();
+        try d.vol.writeFile("data/a", data[0..100]); // replaced, smaller
+        try d.expectKept();
+        try d.vol.writeFile("data/b", "");
+        try d.expectKept();
+        try d.vol.writeInto("data/b", 0, data[0..3000]); // an append that allocates
+        try d.expectKept();
+        try d.vol.writeInto("data/b", 100, "overwrite"); // inside: allocates nothing
+        try d.expectKept();
+        try testing.expectError(fat16.Error.BadChain, d.vol.writeInto("data/b", 5000, "hole"));
+        try d.expectKept();
+        try testing.expectError(fat16.Error.BadName, d.vol.writeFile("x" ** (fat16.max_name + 1), "x"));
+        try d.expectKept();
+        _ = try d.vol.makePath("data/deep/er/still");
+        try d.expectKept();
+        // Fill the disk: the write that does not fit takes clusters, then
+        // gives them all back.
+        const big = try testing.allocator.alloc(u8, 3 << 20);
+        defer testing.allocator.free(big);
+        try testing.expectError(fat16.Error.Full, d.vol.writeFile("data/too-big", big));
+        try d.expectKept();
+        try d.vol.writeFile("data/fits", big[0 .. 1 << 20]);
+        try d.expectKept();
+        try testing.expectError(fat16.Error.Full, d.vol.writeInto("data/fits", 1 << 20, big[0 .. 2 << 20]));
+        try d.expectKept();
+        try d.vol.remove("data/a");
+        try d.expectKept();
+        try d.vol.removeTree("data");
+        try d.expectKept();
+        // A fresh mount counts it again, to the same number.
+        const kept = d.vol.free_clusters;
+        try d.mount(cached);
+        try testing.expectEqual(kept, d.vol.free_clusters);
+        const sp = try d.vol.space();
+        try testing.expectEqual(@as(u64, kept) * 512, sp.free);
+    }
+}

@@ -250,6 +250,17 @@ pub const Volume = struct {
     data_start: u32,
     /// The highest cluster number the data region holds.
     max_cluster: u16,
+    /// **HOW MANY CLUSTERS ARE FREE, KEPT** (QUEUE.md item 14): counted once
+    /// at mount, then moved by `fatSet`, the one place a FAT entry changes,
+    /// whenever an entry goes from free to used or back. So every path that
+    /// takes or gives back clusters keeps it, the failure paths included, and
+    /// `space` is a field read instead of a walk of the FAT per request.
+    ///
+    /// **ONE COPY OF A VOLUME WRITES.** A `Volume` is a value, and its copies
+    /// share the held FAT (a slice) but not this count. So two copies that
+    /// both wrote would each count only their own writes. On this machine
+    /// only io.zig's copy writes once it has one (`mount`, `keepData`).
+    free_clusters: u32 = 0,
     /// **WHICH VOLUME THIS IS**: the serial number mkfs chose at random when it
     /// formatted it (the extended boot record's volume ID, offset 39), or null
     /// on a boot sector without one. Linux's `blkid` shows it as the UUID,
@@ -340,7 +351,7 @@ pub const Volume = struct {
         // read past its end, into the next copy or the root.
         if (sectors_per_fat * (sector_size / 2) < clusters + 2) return Error.BadBootSector;
 
-        return .{
+        var vol: Volume = .{
             .blk = blk,
             .scratch = scratch,
             .start_lba = start_lba,
@@ -356,6 +367,26 @@ pub const Volume = struct {
             // 0x29 says the extended boot record, and with it the serial, is there.
             .serial = if (b[38] == 0x29) le32(b[39..43]) else null,
         };
+        vol.free_clusters = try vol.countFree();
+        return vol;
+    }
+
+    /// Free clusters, counted in the first FAT on the disk a sector at a
+    /// time: `sectors_per_fat` reads, not one per cluster.
+    fn countFree(self: *Volume) Error!u32 {
+        var free: u32 = 0;
+        var s: u32 = 0;
+        while (s < self.sectors_per_fat) : (s += 1) {
+            try self.readSector(self.fat_start + s, self.scratch);
+            var i: u32 = 0;
+            while (i < sector_size / 2) : (i += 1) {
+                const c = s * (sector_size / 2) + i;
+                if (c < 2) continue;
+                if (c > self.max_cluster) return free;
+                if (le16(self.scratch[i * 2 ..][0..2]) == 0) free += 1;
+            }
+        }
+        return free;
     }
 
     fn readSector(self: *Volume, lba: u32, into: *[sector_size]u8) Error!void {
@@ -581,16 +612,16 @@ pub const Volume = struct {
     }
 
     /// How many bytes the data region holds, and how many of them no file
-    /// has: every cluster whose FAT entry is zero. A walk of the whole FAT,
-    /// which is a memory read per cluster once the FAT is cached.
+    /// has: the kept count (`free_clusters`), so a field read.
     pub fn space(self: *Volume) Error!struct { total: u64, free: u64 } {
         const cluster_bytes: u64 = @as(u64, self.sectors_per_cluster) * sector_size;
-        var free: u64 = 0;
-        var c: u32 = 2;
-        while (c <= self.max_cluster) : (c += 1) {
-            if (try self.fatGet(@intCast(c)) == 0) free += 1;
-        }
-        return .{ .total = (@as(u64, self.max_cluster) - 1) * cluster_bytes, .free = free * cluster_bytes };
+        return .{ .total = (@as(u64, self.max_cluster) - 1) * cluster_bytes, .free = @as(u64, self.free_clusters) * cluster_bytes };
+    }
+
+    /// The free count afresh, from the FAT on the disk: what `free_clusters`
+    /// must always equal. For tests, and for a check that wants to say so.
+    pub fn countFreeAgain(self: *Volume) Error!u32 {
+        return self.countFree();
     }
 
     /// The FAT entry for a cluster.
@@ -611,6 +642,7 @@ pub const Volume = struct {
             // The cached sector is the truth — cacheFat checked every copy
             // agreed with it — so it is written to each copy whole, and no
             // copy is read back first.
+            self.keepCount(le16(fat[at..][0..2]), value);
             fat[at] = @truncate(value);
             fat[at + 1] = @truncate(value >> 8);
             const sector = fat[in_sector * sector_size ..][0..sector_size];
@@ -624,10 +656,20 @@ pub const Volume = struct {
         while (copy < self.num_fats) : (copy += 1) {
             const lba = self.fat_start + copy * self.sectors_per_fat + in_sector;
             try self.readSector(lba, self.scratch);
+            // The first copy is the one every read here follows.
+            if (copy == 0) self.keepCount(le16(self.scratch[at % sector_size ..][0..2]), value);
             self.scratch[at % sector_size] = @truncate(value);
             self.scratch[at % sector_size + 1] = @truncate(value >> 8);
             try self.writeSector(lba, self.scratch);
         }
+    }
+
+    /// Moves the kept free count for one FAT entry going from `old` to `new`.
+    /// Saturating: a count that went wrong must not stop the machine; the
+    /// host tests compare it with a fresh one after every operation.
+    fn keepCount(self: *Volume, old: u16, new: u16) void {
+        if (old == 0 and new != 0) self.free_clusters -|= 1;
+        if (old != 0 and new == 0) self.free_clusters += 1;
     }
 
     /// A chain of `count` clusters, linked and terminated. Answers its first.

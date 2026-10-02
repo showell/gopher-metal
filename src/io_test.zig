@@ -35,7 +35,20 @@ const Two = struct {
         return .{ .site = site, .volume = volume };
     }
 
+    /// After a test writes to a disk directly, through its own copy of the
+    /// volume: io's copies take it, so that one copy, io's, is again the one
+    /// that writes and keeps the free count (see `deinit`).
+    fn resync(t: Two, with_volume: bool) void {
+        io_mod.mount(t.site.vol);
+        io_mod.keepData(&data_dirs, if (with_volume) t.volume.vol else null);
+    }
+
+    /// io holds its own copies of the volumes (io.mount and io.keepData take
+    /// them by value), and those are the ones the writes moved: the kept free
+    /// count among them. They come back before the disks are checked.
     fn deinit(t: Two) void {
+        if (io_mod.siteVolume()) |v| t.site.vol = v.*;
+        if (io_mod.dataVolume()) |v| t.volume.vol = v.*;
         t.site.deinit();
         t.volume.deinit();
     }
@@ -130,6 +143,7 @@ test "with a volume attached, data/ is read from it, never from the site's disk"
     try t.site.vol.writeFile("data/only-here", "stale");
     try t.site.vol.writeFile("index.html", "<p>site</p>");
     try t.volume.vol.writeFile("data/x", "current, on the volume");
+    t.resync(true);
 
     const x = try cwd.readFileAlloc(io, "data/x", testing.allocator, .limited(100));
     defer testing.allocator.free(x);
@@ -180,6 +194,7 @@ test "a directory opened under data/ lists the volume's entries, and deleting a 
     defer t.deinit();
     const empty = t.volume.free();
     try t.site.vol.writeFile("data/players/stale", "x");
+    t.resync(true);
     try cwd.writeFile(io, .{ .sub_path = "data/players/p1/name", .data = "Ada" });
     try cwd.writeFile(io, .{ .sub_path = "data/players/p2/name", .data = "Lin" });
 
