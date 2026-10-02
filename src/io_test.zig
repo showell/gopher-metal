@@ -360,3 +360,73 @@ test "a folder of 600 sessions lists whole, on FAT16 and FAT32: the iterator sto
     try manyEntries(test_disk.small);
     try manyEntries(test_disk.small32);
 }
+
+// ── the site's files, kept after their first read (QUEUE.md item 61) ─────────
+
+test "a site file is read from the disk once, then from memory; a data file every time" {
+    const t = try Two.make(true);
+    defer t.deinit();
+    try t.site.vol.writeFile("pages/home.txt", "the home page");
+    t.resync(true);
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const cache = io_mod.siteCache();
+    const hits = cache.hits;
+
+    try testing.expectEqualStrings("the home page", try cwd.readFileAlloc(io, "pages/home.txt", a, .unlimited));
+    const after_first = t.site.blk.requests;
+    // Again, and in another case, as FAT names match: no disk request at all.
+    try testing.expectEqualStrings("the home page", try cwd.readFileAlloc(io, "pages/home.txt", a, .unlimited));
+    try testing.expectEqualStrings("the home page", try cwd.readFileAlloc(io, "PAGES/Home.txt", a, .unlimited));
+    try testing.expectEqual(after_first, t.site.blk.requests);
+    try testing.expectEqual(hits + 2, cache.hits);
+    // The limit still holds for a kept file.
+    try testing.expectError(io_mod.Error.StreamTooLong, cwd.readFileAlloc(io, "pages/home.txt", a, .limited(4)));
+
+    // A data file changes, so it is read every time.
+    try cwd.writeFile(io, .{ .sub_path = "data/chat/x", .data = "one" });
+    try testing.expectEqualStrings("one", try cwd.readFileAlloc(io, "data/chat/x", a, .unlimited));
+    try cwd.writeFile(io, .{ .sub_path = "data/chat/x", .data = "two" });
+    try testing.expectEqualStrings("two", try cwd.readFileAlloc(io, "data/chat/x", a, .unlimited));
+    try testing.expectEqual(hits + 2, cache.hits);
+}
+
+test "the data on the boot disk is never kept, nor anything before the data is named" {
+    // No volume: the data directories are on the site's own disk.
+    const t = try Two.make(false);
+    defer t.deinit();
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    try cwd.writeFile(io, .{ .sub_path = "data/n", .data = "1" });
+    _ = try cwd.readFileAlloc(io, "data/n", a, .unlimited);
+    try cwd.writeFile(io, .{ .sub_path = "data/n", .data = "2" });
+    try testing.expectEqualStrings("2", try cwd.readFileAlloc(io, "data/n", a, .unlimited));
+
+    // A machine that has not named its data (a probe) writes anywhere, so
+    // keeps nothing.
+    io_mod.keepData(&.{}, null);
+    try cwd.writeFile(io, .{ .sub_path = "pages/p", .data = "a" });
+    _ = try cwd.readFileAlloc(io, "pages/p", a, .unlimited);
+    try cwd.writeFile(io, .{ .sub_path = "pages/p", .data = "b" });
+    try testing.expectEqualStrings("b", try cwd.readFileAlloc(io, "pages/p", a, .unlimited));
+    io_mod.keepData(&data_dirs, null);
+}
+
+test "a site file larger than the cache keeps is read from the disk each time, and still whole" {
+    const t = try Two.make(true);
+    defer t.deinit();
+    const big = try testing.allocator.alloc(u8, io_mod.SiteCache.largest + 1);
+    defer testing.allocator.free(big);
+    for (big, 0..) |*c, i| c.* = @truncate(i);
+    try t.site.vol.writeFile("gallery/big.webp", big);
+    t.resync(true);
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    try testing.expectEqualSlices(u8, big, try cwd.readFileAlloc(io, "gallery/big.webp", a, .unlimited));
+    const before = t.site.blk.requests;
+    try testing.expectEqualSlices(u8, big, try cwd.readFileAlloc(io, "gallery/big.webp", a, .unlimited));
+    try testing.expect(t.site.blk.requests > before);
+}

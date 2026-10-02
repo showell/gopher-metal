@@ -1199,6 +1199,10 @@ fn metalFacts(io: Io, alloc: std.mem.Allocator) anyerror![]const router.host_sta
     if (Io.dataVolume()) |v| {
         try addVolume(&facts, alloc, "the volume (chat's data)", v);
     } else try add(&facts, alloc, "the volume (chat's data)", "none attached: the data is on the boot disk", .{});
+    const kept = Io.siteCache();
+    try add(&facts, alloc, "site files in memory", "{d} kept, {d} KB of {d} KB; {d} reads answered from them", .{
+        kept.count, kept.used >> 10, @as(usize, Io.SiteCache.capacity) >> 10, kept.hits,
+    });
     const work = diskWork();
     try add(&facts, alloc, "disk requests", "{d}, busy {d} ms in all", .{ work.requests, @divTrunc(Io.ticksToNs(work.ticks), std.time.ns_per_ms) });
     try add(&facts, alloc, "NMIs", "{d}", .{interrupts.nmis});

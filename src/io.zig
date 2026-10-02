@@ -76,6 +76,7 @@ var data_dirs: []const []const u8 = &.{};
 /// directories that are the application's data.
 pub fn mount(v: fat16.Volume) void {
     site = v;
+    site_cache.clear(); // what it kept was another volume's
     // **THE FILESYSTEM GETS THIS MACHINE'S CLOCK.** FAT16 entries carry a date,
     // and the application's "recent activity" is built entirely out of file
     // modification times. fat16.zig has no clock of its own and must not invent
@@ -130,6 +131,73 @@ fn volumeAt(place: Place) Error!*fat16.Volume {
         if (data) |*d| return d;
     }
     return &(site orelse return Error.FileNotFound);
+}
+
+/// **THE SITE'S OWN FILES, KEPT AFTER THEIR FIRST READ** (QUEUE.md item 61).
+/// A page read from a file (the home page's text, the resume, a picture) cost
+/// four disk requests every time: under QEMU about 0.4 ms of each answer,
+/// where an embedded page costs none. Once `keepData` has named the data
+/// directories, nothing outside them is written (`writing` refuses it), so a
+/// site file read once is the same file until the next image, and keeping it
+/// can never go stale. Data files are never kept.
+///
+/// Bounded and fixed: `capacity` bytes in all, files of up to `largest`, and
+/// `slots` of them, first come; past that a file is read from the disk as
+/// before. No allocator, so it is here from the boot, in `.bss`.
+pub const SiteCache = struct {
+    pub const capacity = 4 << 20;
+    pub const largest = 512 << 10;
+    pub const slots = 64;
+
+    bytes: [capacity]u8 = undefined,
+    used: usize = 0,
+    names: [slots][max_path]u8 = undefined,
+    name_lens: [slots]u16 = undefined,
+    starts: [slots]usize = undefined,
+    sizes: [slots]usize = undefined,
+    count: usize = 0,
+    /// Reads answered from here, for a host's report and the tests.
+    hits: u64 = 0,
+
+    /// The kept bytes for `path`, matched as FAT matches names: ignoring case.
+    fn find(self: *SiteCache, path: []const u8) ?[]const u8 {
+        for (0..self.count) |i| {
+            if (std.ascii.eqlIgnoreCase(self.names[i][0..self.name_lens[i]], path))
+                return self.bytes[self.starts[i]..][0..self.sizes[i]];
+        }
+        return null;
+    }
+
+    /// Keeps `bytes` as `path`'s, if they fit.
+    fn keep(self: *SiteCache, path: []const u8, bytes: []const u8) void {
+        if (self.count >= slots or path.len > max_path or bytes.len > largest) return;
+        if (self.used + bytes.len > capacity) return;
+        @memcpy(self.names[self.count][0..path.len], path);
+        self.name_lens[self.count] = @intCast(path.len);
+        self.starts[self.count] = self.used;
+        self.sizes[self.count] = bytes.len;
+        @memcpy(self.bytes[self.used..][0..bytes.len], bytes);
+        self.used += bytes.len;
+        self.count += 1;
+    }
+
+    fn clear(self: *SiteCache) void {
+        self.used = 0;
+        self.count = 0;
+    }
+};
+
+var site_cache: SiteCache = .{};
+
+/// The site cache, for a host's report and the tests.
+pub fn siteCache() *SiteCache {
+    return &site_cache;
+}
+
+/// Whether `path` is a site file that cannot change: one outside the data
+/// directories, once there are data directories to be outside of.
+fn cacheable(path: []const u8) bool {
+    return data_dirs.len != 0 and placeOf(path) == .site;
 }
 
 /// The volume to read `path` from.
@@ -445,14 +513,23 @@ pub const Dir = struct {
     /// `gpa` and the caller owns them.
     pub fn readFileAlloc(self: Dir, ignored: Self, sub_path: []const u8, gpa: std.mem.Allocator, limit: Limit) Error![]u8 {
         self.fromRoot();
+        _ = ignored;
+        const keepable = cacheable(sub_path);
+        if (keepable) if (site_cache.find(sub_path)) |kept| {
+            if (kept.len > @intFromEnum(limit)) return Error.StreamTooLong;
+            const out = gpa.alloc(u8, kept.len) catch return Error.OutOfMemory;
+            @memcpy(out, kept);
+            site_cache.hits += 1;
+            return out;
+        };
         const v = try reading(sub_path);
         const e = v.open(sub_path) catch return Error.FileNotFound;
         if (e.isDirectory()) return Error.IsDir;
         if (e.size > @intFromEnum(limit)) return Error.StreamTooLong;
-        _ = ignored;
 
         const out = gpa.alloc(u8, e.size) catch return Error.OutOfMemory;
         const n = v.readFile(e, out) catch return Error.ReadFailed;
+        if (keepable) site_cache.keep(sub_path, out[0..n]);
         return out[0..n];
     }
 
