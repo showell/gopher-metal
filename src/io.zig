@@ -301,50 +301,42 @@ pub const Entry = struct {
 /// Walking a directory. The names it hands out point into the iterator, so a
 /// caller that wants to keep one copies it -- which is what
 /// `std.Io.Dir.Iterator` also requires.
+///
+/// **A CURSOR, WITH NO CEILING.** This decoded the whole directory up front
+/// into 256 slots and stopped the machine past them, which the application
+/// reaches: a player may keep 500 game sessions in one folder, and nothing
+/// bounds the players (QUEUE.md item 50). It now reads the directory as it is
+/// asked (fat16's `Lister`), so its size is one sector and one name whatever
+/// the directory holds, and a directory that will not read says so at the
+/// entry it fails on.
 pub const Iterator = struct {
+    lister: ?fat16.Volume.Lister = null,
     /// **THE LONG NAME, NOT THE 8.3 ALIAS.** This stored `e.name` -- the alias
     /// -- and the application read its own directories back in upper case:
     /// chat's topic list came out `GENERAL` instead of `general`, so /chat
     /// resumed to a conversation that does not exist. The alias is an artifact
     /// of how FAT16 stores a name; `text()` is the name the file was created
     /// with, and the name every other operation here matches on.
-    names: [capacity][fat16.max_name]u8 = undefined,
-    lens: [capacity]u8 = undefined,
-    kinds: [capacity]Kind = undefined,
-    count: usize = 0,
-    at: usize = 0,
-
-    /// How many entries one listing holds. The whole directory is decoded
-    /// up front because fat16's walker is a callback rather than a cursor, so
-    /// this is a real ceiling -- and a directory that reaches it is a
-    /// listing with files missing from it, which nothing downstream could
-    /// detect. It stops the machine instead.
-    pub const capacity = 256;
+    name: [fat16.max_name]u8 = undefined,
 
     pub fn next(self: *Iterator, _: Self) Error!?Entry {
-        if (self.at >= self.count) return null;
-        const i = self.at;
-        self.at += 1;
-        return .{ .name = self.names[i][0..self.lens[i]], .kind = self.kinds[i] };
-    }
-
-    fn take(self: *Iterator, e: fat16.Entry) void {
-        // **"." AND ".." ARE NOT ENTRIES A DIRECTORY ITERATOR RETURNS.** Every
-        // FAT16 subdirectory holds them, and `std.Io.Dir.Iterator` on Linux
-        // does not report them -- so the application, which recurses into every
-        // directory a listing hands it, recursed into "." forever. That is not
-        // a hang: it walks the stack past its end, through `.bss` and into the
-        // page tables, and the machine triple-faults with nothing in the log.
-        // fat16.zig's own removeTree already knew this; the knowledge just did
-        // not reach the layer that hands names to the application.
-        const name = e.text();
-        if (std.mem.eql(u8, name, ".") or std.mem.eql(u8, name, "..")) return;
-        if (self.count >= capacity)
-            serial.fail("a directory holds more entries than this machine's iterator can list, and a short listing is a wrong answer");
-        @memcpy(self.names[self.count][0..name.len], name);
-        self.lens[self.count] = @intCast(name.len);
-        self.kinds[self.count] = if (e.isDirectory()) .directory else .file;
-        self.count += 1;
+        const l = if (self.lister) |*l| l else return null;
+        while (true) {
+            const e = (l.next() catch return Error.ReadFailed) orelse return null;
+            // **"." AND ".." ARE NOT ENTRIES A DIRECTORY ITERATOR RETURNS.**
+            // Every FAT16 subdirectory holds them, and `std.Io.Dir.Iterator` on
+            // Linux does not report them -- so the application, which recurses
+            // into every directory a listing hands it, recursed into "."
+            // forever. That is not a hang: it walks the stack past its end,
+            // through `.bss` and into the page tables, and the machine
+            // triple-faults with nothing in the log. fat16.zig's own removeTree
+            // already knew this; the knowledge just did not reach the layer
+            // that hands names to the application.
+            const name = e.text();
+            if (std.mem.eql(u8, name, ".") or std.mem.eql(u8, name, "..")) continue;
+            @memcpy(self.name[0..name.len], name);
+            return .{ .name = self.name[0..name.len], .kind = if (e.isDirectory()) .directory else .file };
+        }
     }
 };
 
@@ -577,9 +569,10 @@ pub const Dir = struct {
         v.removeTree(sub_path) catch return Error.WriteFailed;
     }
 
-    /// Everything in this directory, read in one pass. The application lists
-    /// small directories and keeps nothing open across requests, so reading
-    /// them whole is simpler than a cursor and costs the same.
+    /// This directory, a cursor over it: see `Iterator`. A directory whose
+    /// first sector cannot be found answers empty, which is what `list`
+    /// always did for a cluster it cannot follow; one that fails later says
+    /// so at that entry.
     ///
     /// **NO `io` HERE**, because std's `Dir.iterate()` takes none and the
     /// application calls it bare: `var it = dir.iterate();`. The io arrives one
@@ -587,10 +580,6 @@ pub const Dir = struct {
     /// compiled against it — the same way `writeFile`'s options struct and the
     /// four shapes in a1c2492 were all wrong, and for the same reason: the only
     /// callers were this machine's own probes.
-    ///
-    /// It also cannot fail here, since the whole listing is read eagerly; a
-    /// directory that will not read answers empty, which is what `list` already
-    /// does for a cluster it cannot follow.
     ///
     /// `cwd().iterate()` lists the boot disk's root, so with a volume attached
     /// `data` and `auth` are not in it. The application never lists the root.
@@ -606,9 +595,7 @@ pub const Dir = struct {
         if (stack.nearTheEnd())
             serial.fail("a directory walk has recursed to within the stack's guard: the tree is deeper than this machine can walk");
         const v = volumeAt(self.place) catch return .{};
-        var it = Iterator{};
-        v.list(self.cluster, &it, Iterator.take) catch return .{};
-        return it;
+        return .{ .lister = v.lister(self.cluster) catch null };
     }
 };
 

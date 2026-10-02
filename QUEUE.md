@@ -666,16 +666,27 @@ check-ins 8 and 9, accepted; 47-50 keep the queue full. In this order.*
     every session), whether it is cached or logged anywhere on either
     host, and what streaming 250 MB does to metal's other connections.
     REVIEW shape, nothing fixed.
+    **Done (CC):** REVIEW-admin-backup.md. Worst: a stolen admin session
+    (a year, not revocable) is one GET from the secret, which now mints
+    players' cookies too; ask the password again. A cut-off archive reads
+    as complete (measured: GNU tar and Python, exit 0). On metal a backup
+    through Caddy stops the site for its download. **Also: prod's
+    Caddyfile has no `log` directive, so there is no access log for item
+    48 to read** until one is added.
 48. **`droplet/replay.py`: real traffic as the judge's input.** Read a
     Caddy access log (JSON lines, as prod's Caddy writes them), keep the
     GETs without credentials, and replay them against two hosts on the
     same data, compared like `compare_hosts.py` (counts and anonymised
     labels only). Test with a log you write; the box feeds it prod's.
+    **Done (CC):** `droplet/replay.py`, with `--self-test`. Needs a
+    `log { format json }` in prod's Caddyfile first (item 47).
 49. **A Lyn Rummy story in the judge.** Metal serves the games too, and
     the judge's game story is gone ("These four came from the Lyn Rummy
     story, which is gone"). A player arrives by name, starts a game and a
     puzzle, makes moves, reloads, and the roster shows them, on both
     hosts; the files they write compared like chat's.
+    **Done (CC):** judge gate `lynrummy`, 17 requests; rehearsed on
+    Linux. The two-host run is the box's.
 50. **The Store's listings in metal's memory.** `store.list` allocates
     every name in a folder; on metal that is the request's memory. Measure
     the largest listing the application makes (prod's biggest folder is in
@@ -683,6 +694,12 @@ check-ins 8 and 9, accepted; 47-50 keep the queue full. In this order.*
     fits the request budget, with a host test at that size. (Prod, today:
     the largest folder holds 70 entries, an uploads folder; the next, 65
     sessions.)
+    **Done (CC):** the memory fits by far (70 entries: under 16 KiB). But
+    **metal's directory iterator stopped the machine at a 257th entry**,
+    and item 52 allows 500 sessions in one folder, with players unbounded;
+    a lookup of a missing name in such a folder was enough. Fixed: io.zig
+    lists by a cursor now (commit `io: a directory is listed by a
+    cursor`), host-tested at 70 and at 600 on FAT16 and FAT32.
 
 *Items 51-52 queued 2026-10-02: Steve's decisions on DESIGN-signed-uid.md
 and GROWTH-game-store.md. After 43-46, before 47-50: they close holes.*
@@ -792,6 +809,25 @@ and GROWTH-game-store.md. After 43-46, before 47-50: they close holes.*
     prod's, from item 39) to what it checks, and say how a failure shows.
     Tested locally against two servers, one stopped.
 
+    **Done (CC), 53-56:**
+    - 53: REVIEW-signed-uid-and-limits.md. The worst three:
+      - inside the window, one GET per id signs every legacy player, and
+        now locks the owner out;
+      - the re-sign's redirect echoes the request target (measured:
+        `//evil.example/x`);
+      - the marker is written before the cookie arrives, so one lost
+        answer loses a player.
+      Nothing fixed, per the shape.
+    - 54: angry-gopher `9f3124f4`. lint_portable refuses `Io.Dir.cwd()`
+      outside store.zig in the route table's reach. A test's own private
+      helpers are exempt (Zig compiles them only for tests), and 9 new
+      tests cover it.
+    - 55: `droplet/RESTART-TEST.md`.
+    - 56: angry-gopher `7313d43d`. The watchdog's `metal` and
+      `metal-clock` checks, with `deploy/test_watchdog.py`. **It needs
+      `~/metal-url` on prod**, one line with metal's private address,
+      which CC did not write.
+
 *Items 57-61 queued 2026-10-02 evening (box Claude, keeping the queue
 full). After 53 and 55.*
 
@@ -852,6 +888,29 @@ full). After 53 and 55.*
 ## Questions
 
 *(CC writes here; the box Claude or Steve answers under Answers.)*
+
+### CC check-in 10, 2026-10-02 (last seen: gopher-metal `master` `ccce8df`, angry-gopher `master` `4e776903`; CC's angry-gopher branch at `7313d43d`)
+
+**51, 52, 47-50 and 53-56 are done**, each noted at its item. CC's queue
+is empty. What is yours:
+1. **Run the judge**: `uids`, `caps` and `lynrummy` are new gates, and the
+   staging changed (p1, guest 7, players' next-id 2). CC rehearsed each
+   story against Linux alone; it has no loop mount. The judge's Linux side
+   now runs with `GOPHER_GAME_FLOOR=off` (item 52's note says why).
+2. **Before metal serves anyone through Caddy:** write
+   `droplet/trusted-proxy` (prod's private address), or 5 new players an
+   hour is the whole site's. Also `~/metal-url` on prod, for the
+   watchdog.
+3. **Item 50 found and fixed a machine stop:** metal's directory
+   iterator halted the machine at a folder's 257th entry. That is
+   reachable: item 52 allows 500 sessions in one folder, and the players
+   folder is unbounded. Worth a boot and the full judge on that commit
+   (`io: a directory is listed by a cursor`).
+4. **Prod's Caddyfile has no `log` directive**, so there is nothing for
+   `replay.py` (item 48) to read until one is added.
+5. Item 53's findings 1-3 are small fixes, if you want them queued: a
+   per-address count on re-signs, a sanitized redirect, and marking the
+   id on its first signed use.
 
 ### CC check-in 9, 2026-10-02 (last seen: gopher-metal `master` `ea8b567`, angry-gopher `master` `44575ee1`; CC's angry-gopher branch at `30350218`)
 

@@ -201,17 +201,21 @@ test "a directory opened under data/ lists the volume's entries, and deleting a 
     var dir = try cwd.openDir(io, "data/players", .{ .iterate = true });
     defer dir.close(io);
     var it = dir.iterate();
-    var seen: [2][]const u8 = undefined;
+    // A name is good until the next `next` (it is the iterator's, as std's
+    // is), so each is copied out, as store.list does.
+    var seen: [2][8]u8 = undefined;
+    var lens: [2]usize = undefined;
     var n: usize = 0;
     while (try it.next(io)) |e| {
         try testing.expect(n < 2);
         try testing.expectEqual(io_mod.Kind.directory, e.kind);
-        seen[n] = e.name;
+        @memcpy(seen[n][0..e.name.len], e.name);
+        lens[n] = e.name.len;
         n += 1;
     }
     try testing.expectEqual(@as(usize, 2), n);
-    try testing.expectEqualStrings("p1", seen[0]);
-    try testing.expectEqualStrings("p2", seen[1]);
+    try testing.expectEqualStrings("p1", seen[0][0..lens[0]]);
+    try testing.expectEqualStrings("p2", seen[1][0..lens[1]]);
 
     try cwd.deleteTree(io, "data/players");
     try testing.expectError(io_mod.Error.FileNotFound, cwd.statFile(io, "data/players/p1/name", .{}));
@@ -244,4 +248,115 @@ test "a file written over a directory is IsDir, as on Linux, and the directory s
     try cwd.writeFile(io, .{ .sub_path = "data/chat/1_2/sessions/topic.md", .data = "x" });
     try testing.expectError(io_mod.Error.IsDir, cwd.writeFile(io, .{ .sub_path = "data/chat/1_2/Sessions", .data = "a file" }));
     try t.volume.expectFile("data/chat/1_2/sessions/topic.md", "x");
+}
+
+// ── listings, at the sizes the application makes (QUEUE.md item 50) ──────────
+
+/// An upload's name as chat stores it: 32 hex digits and an extension.
+fn uploadName(buf: *[40]u8, n: usize) []const u8 {
+    return std.fmt.bufPrint(buf, "{x:0>32}.webp", .{n *% 0x9E3779B97F4A7C15}) catch unreachable;
+}
+
+/// What angry-gopher's store.list keeps of a listing, in the request's
+/// arena: every name copied, and the entries in a growing list. Done here as
+/// store.list does it, since the application is not built into these tests.
+fn listLikeStore(alloc: std.mem.Allocator, path: []const u8) ![]io_mod.Entry {
+    var d = try cwd.openDir(io, path, .{ .iterate = true });
+    defer d.close(io);
+    var out: std.ArrayList(io_mod.Entry) = .empty;
+    var it = d.iterate();
+    while (try it.next(io)) |e| {
+        try out.append(alloc, .{ .name = try alloc.dupe(u8, e.name), .kind = e.kind });
+    }
+    return out.items;
+}
+
+/// An allocator that counts what is asked of it, over an arena as a request's is.
+const Counting = struct {
+    arena: std.heap.ArenaAllocator,
+    asked: usize = 0,
+
+    fn allocator(self: *Counting) std.mem.Allocator {
+        return .{ .ptr = self, .vtable = &.{ .alloc = alloc, .resize = resize, .remap = remap, .free = free } };
+    }
+    fn alloc(ctx: *anyopaque, n: usize, a: std.mem.Alignment, ra: usize) ?[*]u8 {
+        const self: *Counting = @ptrCast(@alignCast(ctx));
+        self.asked += n;
+        return self.arena.allocator().rawAlloc(n, a, ra);
+    }
+    fn resize(ctx: *anyopaque, m: []u8, a: std.mem.Alignment, n: usize, ra: usize) bool {
+        const self: *Counting = @ptrCast(@alignCast(ctx));
+        const ok = self.arena.allocator().rawResize(m, a, n, ra);
+        if (ok and n > m.len) self.asked += n - m.len;
+        return ok;
+    }
+    fn remap(_: *anyopaque, _: []u8, _: std.mem.Alignment, _: usize, _: usize) ?[*]u8 {
+        return null;
+    }
+    fn free(ctx: *anyopaque, m: []u8, a: std.mem.Alignment, ra: usize) void {
+        const self: *Counting = @ptrCast(@alignCast(ctx));
+        self.arena.allocator().rawFree(m, a, ra);
+    }
+};
+
+test "prod's largest folder, 70 uploads, listed as store.list does, takes a few KiB of the request's memory" {
+    const t = try Two.make(true);
+    defer t.deinit();
+    var buf: [40]u8 = undefined;
+    var path: [80]u8 = undefined;
+    for (0..70) |n| {
+        const p = try std.fmt.bufPrint(&path, "data/chat/c/1_2/uploads/{s}", .{uploadName(&buf, n)});
+        try cwd.writeFile(io, .{ .sub_path = p, .data = "" });
+    }
+    var counting = Counting{ .arena = std.heap.ArenaAllocator.init(testing.allocator) };
+    defer counting.arena.deinit();
+    const got = try listLikeStore(counting.allocator(), "data/chat/c/1_2/uploads");
+    try testing.expectEqual(@as(usize, 70), got.len);
+    for (got, 0..) |e, i| {
+        try testing.expectEqual(io_mod.Kind.file, e.kind);
+        try testing.expectEqual(@as(usize, 37), e.name.len);
+        for (got[0..i]) |o| try testing.expect(!std.mem.eql(u8, o.name, e.name));
+    }
+    // 70 names of 37 bytes is 2,590; the entries and the list's growth are
+    // the rest. The request heap keeps 32 MiB (probe/gopher.zig), and grows.
+    try testing.expect(counting.asked < 16 * 1024);
+    // And the iterator itself, on the stack, is a sector and a name, not a
+    // listing: it held 256 names of 96 bytes before.
+    try testing.expect(@sizeOf(io_mod.Iterator) < 2 * 1024);
+}
+
+fn manyEntries(shape: test_disk.Shape) !void {
+    const site = try Disk.make("io-many-site", test_disk.small, false);
+    defer site.deinit();
+    const volume = try Disk.make("io-many-volume", shape, false);
+    defer volume.deinit();
+    io_mod.mount(site.vol);
+    io_mod.keepData(&data_dirs, volume.vol);
+    defer {
+        if (io_mod.siteVolume()) |v| site.vol = v.*;
+        if (io_mod.dataVolume()) |v| volume.vol = v.*;
+    }
+    // 600 sessions: past the 256 the iterator stopped the machine at, and
+    // past the 500 a player may keep (angry-gopher's game_limits.zig).
+    var path: [80]u8 = undefined;
+    for (1..601) |n| {
+        const p = try std.fmt.bufPrint(&path, "data/lynrummy/p1/puzzle/sessions/{d}", .{n});
+        try cwd.createDirPath(io, p);
+    }
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const got = try listLikeStore(arena.allocator(), "data/lynrummy/p1/puzzle/sessions");
+    try testing.expectEqual(@as(usize, 600), got.len);
+    var seen = [_]bool{false} ** 601;
+    for (got) |e| {
+        try testing.expectEqual(io_mod.Kind.directory, e.kind);
+        const n = try std.fmt.parseInt(usize, e.name, 10);
+        try testing.expect(!seen[n]);
+        seen[n] = true;
+    }
+}
+
+test "a folder of 600 sessions lists whole, on FAT16 and FAT32: the iterator stopped the machine at 257" {
+    try manyEntries(test_disk.small);
+    try manyEntries(test_disk.small32);
 }
