@@ -68,6 +68,8 @@ const lapic_tpr = 0x080;
 const lapic_eoi = 0x0B0;
 const lapic_svr = 0x0F0;
 const lapic_lvt_timer = 0x320;
+const lapic_lvt_lint0 = 0x350;
+const lvt_masked: u32 = 1 << 16;
 const msr_apic_base: u32 = 0x1B;
 const msr_tsc_deadline: u32 = 0x6E0;
 
@@ -226,7 +228,7 @@ fn lapicRead(reg: usize) u32 {
 }
 
 /// Why the local APIC could not be used, for the log.
-pub const Refusal = enum { no_apic, no_tsc_deadline, apic_elsewhere };
+pub const Refusal = enum { no_apic, no_tsc_deadline, apic_elsewhere, x2apic };
 
 /// The local APIC, ready to take interrupts and to time a rest: its ID, which
 /// an MSI-X message names as its destination.
@@ -236,18 +238,46 @@ pub fn startApic() union(enum) { id: u8, refused: Refusal } {
     if (features.ecx & (1 << 24) == 0) return .{ .refused = .no_tsc_deadline };
     const base = rdmsr(msr_apic_base);
     if (base & 0xFFFF_F000 != lapic_base) return .{ .refused = .apic_elsewhere };
+    // In x2APIC mode the registers below are not in memory at all (SDM
+    // §11.12): every write here, the handler's EOI among them, would go
+    // nowhere, and the first rest would never wake.
+    if (base & (1 << 10) != 0) return .{ .refused = .x2apic };
     wrmsr(msr_apic_base, base | (1 << 11)); // globally enabled
 
-    // **THE BIOS'S OLD INTERRUPT CONTROLLER IS SILENCED.** It still runs the
+    // **THE BIOS'S OLD INTERRUPT CONTROLLER IS CUT OFF.** It still runs the
     // 18.2 Hz BIOS tick on vector 8, which in long mode is the double-fault
-    // exception: the first rest would take it as one.
+    // exception. Masking its lines is not enough: a request that drops before
+    // it is acknowledged still arrives, as a spurious IRQ 7 (vector 15). So
+    // it is moved to vectors 0x20-0x2F, where nothing it sends is an
+    // exception, then masked, and the APIC's LINT0, its one way in, is masked
+    // too. LINT1, the NMI, is left alone.
+    pic8259Remap(0x20, 0x28);
     port.outb(0x21, 0xFF);
     port.outb(0xA1, 0xFF);
+    lapicWrite(lapic_lvt_lint0, lvt_masked);
 
     lapicWrite(lapic_svr, 0x100 | @as(u32, spurious_vector));
     lapicWrite(lapic_tpr, 0);
     lapicWrite(lapic_lvt_timer, @as(u32, timer_vector) | (2 << 17)); // TSC-deadline mode
+    // The mode switch above is a store, the first deadline a WRMSR, and the
+    // two are not ordered (SDM §11.5.4.1): a deadline that lands first is
+    // ignored, and the first rest would have no timer.
+    asm volatile ("mfence" ::: .{ .memory = true });
     return .{ .id = @truncate(lapicRead(lapic_id) >> 24) };
+}
+
+/// The initialization sequence (ICW1-ICW4) for both 8259s: the master's IRQs
+/// on `master..master+7`, the slave's on `slave..slave+7`, the slave on the
+/// master's IRQ 2, 8086 mode.
+fn pic8259Remap(master: u8, slave: u8) void {
+    port.outb(0x20, 0x11);
+    port.outb(0xA0, 0x11);
+    port.outb(0x21, master);
+    port.outb(0xA1, slave);
+    port.outb(0x21, 1 << 2);
+    port.outb(0xA1, 2);
+    port.outb(0x21, 0x01);
+    port.outb(0xA1, 0x01);
 }
 
 /// The address and data an MSI-X entry carries to interrupt this processor on
