@@ -297,6 +297,7 @@ pub fn kmain() noreturn {
 
     // ── the host contract ───────────────────────────────────────────────────
     router.host_status.provide(metalFacts);
+    router.host_status.provideLog(metalLog);
     router.roots.point(base, .{ .data_dir = data_dir, .auth_dir = auth_dir }) catch
         serial.fail("roots.point could not allocate the store paths");
     var hub = Hub.init(io, base);
@@ -1135,6 +1136,15 @@ fn readConfig(io: Io, alloc: std.mem.Allocator) Config {
     }
     if (!said_anything) serial.fail(config_path ++ " is present but says nothing");
     return conf;
+}
+
+/// **THE LOG, FOR /admin/host**: what the serial ring holds (its last 64 KiB),
+/// oldest first from its first whole line. Its secrets were taken out as it
+/// was written (log_ring.zig's Redactor), so it is shown as it is.
+fn metalLog(io: Io, alloc: std.mem.Allocator) anyerror!?[]const u8 {
+    _ = io;
+    const buf = try alloc.alloc(u8, serial.ring.len());
+    return serial.ring.read(buf);
 }
 
 /// **WHAT THIS MACHINE SAYS ABOUT ITSELF**, for /admin/host: what a Linux

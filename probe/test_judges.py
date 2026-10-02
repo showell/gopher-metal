@@ -223,8 +223,9 @@ class Differences(unittest.TestCase):
         # A whole volume row, as metalFacts writes one: the judge now reads
         # the free-space figure (REVIEW-admin-host.md finding 1).
         m = app + (b"<tr><td>host</td><td>gopher-metal, with no operating system</td></tr>"
-                   b"<tr><td>the boot disk (the site)</td><td>FAT16, serial 92DE-8831: 30 MB free of 62 MB</td></tr>")
-        l = app + b"<tr><td>host</td><td>Linux, zig-server, pid 7</td></tr>"
+                   b"<tr><td>the boot disk (the site)</td><td>FAT16, serial 92DE-8831: 30 MB free of 62 MB</td></tr>"
+                   + self.METAL_LOG)
+        l = app + b"<tr><td>host</td><td>Linux, zig-server, pid 7</td></tr>" + self.LINUX_LOG
         self.assertEqual(G.host_page_differences(m, l), [])
         self.assertTrue(G.host_page_differences(l, l))
         self.assertTrue(G.host_page_differences(m.replace(b"<h2>The host</h2>", b""), l))
@@ -232,11 +233,30 @@ class Differences(unittest.TestCase):
         self.assertTrue(G.host_page_differences(extra + m[len(app):], l))
 
     HOST_APP = b"<h2>The application</h2><table><tr><td>version</td><td>0.1</td></tr></table><h2>The host</h2>"
-    LINUX = HOST_APP + b"<table><tr><td>host</td><td>Linux, zig-server, pid 7</td></tr></table>"
+    METAL_LOG = b'<h2>The log</h2>\n<p class="muted">The newest 60 lines.</p>\n<pre class="log">  disk check, the boot disk: 3 files\n  GET /chat 200</pre>\n'
+    LINUX_LOG = b'<h2>The log</h2>\n<p class="muted">This host keeps no log of its own to show here.</p>\n'
+    LINUX = HOST_APP + b"<table><tr><td>host</td><td>Linux, zig-server, pid 7</td></tr></table>" + LINUX_LOG
 
-    def metal_page(self, *rows):
+    def metal_page(self, *rows, log=None):
         cells = b"".join(b"<tr><td>%s</td><td>%s</td></tr>" % r for r in rows)
-        return self.HOST_APP + b"<table><tr><td>host</td><td>gopher-metal, with no operating system</td></tr>" + cells + b"</table>"
+        return (self.HOST_APP + b"<table><tr><td>host</td><td>gopher-metal, with no operating system</td></tr>" + cells
+                + b"</table>" + (self.METAL_LOG if log is None else log))
+
+    def test_the_log_section_is_checked_for_its_shape_and_for_secrets(self):
+        good = (b"the boot disk (the site)", b"FAT16, serial 92DE-8831: 30 MB free of 62 MB")
+        self.assertEqual(G.host_page_differences(self.metal_page(good), self.LINUX), [])
+        # Missing on either host, or empty on metal.
+        self.assertTrue(G.host_page_differences(self.metal_page(good, log=b""), self.LINUX))
+        self.assertTrue(G.host_page_differences(self.metal_page(good), self.LINUX.replace(self.LINUX_LOG, b"")))
+        empty = b'<h2>The log</h2>\n<pre class="log">  \n</pre>'
+        self.assertTrue(G.host_page_differences(self.metal_page(good, log=empty), self.LINUX))
+        # A secret the ring should have taken out.
+        for leak in (b"cookie: gopher_auth=MQ.1758000000.abc", b"hash $2a$10$abcdefghijk"):
+            log = b'<h2>The log</h2>\n<pre class="log">GET /chat\n' + leak + b"</pre>"
+            got = G.host_page_differences(self.metal_page(good, log=log), self.LINUX)
+            self.assertTrue(any("cookie or a password hash" in g for g in got), got)
+        # Linux may show a log too, once it keeps one.
+        self.assertEqual(G.host_page_differences(self.metal_page(good), self.LINUX.replace(self.LINUX_LOG, self.METAL_LOG)), [])
 
     def test_the_host_page_s_disk_figures_must_be_sane(self):
         good = (b"the boot disk (the site)", b"FAT16, serial 92DE-8831: 30 MB free of 62 MB")

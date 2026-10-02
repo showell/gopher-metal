@@ -1027,6 +1027,19 @@ def host_page_differences(metal: bytes, linux: bytes, image: str = None, boot_di
         out.append("/admin/host on Linux does not say it is Linux")
     if b"serial " not in metal:
         out.append("/admin/host on metal names no volume serial")
+    # **THE LOG** (QUEUE.md item 32): its shape, not its lines. Metal shows
+    # the serial ring's newest lines; Linux keeps none to show yet, and says
+    # so. Neither may show a secret the ring was meant to take out.
+    for name, body in (("metal", metal), ("Linux", linux)):
+        if b"<h2>The log</h2>" not in body:
+            out.append(f"/admin/host on {name} has no log section")
+    shown = re.search(rb'<pre class="log">(.*?)</pre>', metal, re.S)
+    if not shown or not shown.group(1).strip():
+        out.append("/admin/host on metal shows no log lines")
+    elif b"gopher_auth=" in shown.group(1) or b"$2a$" in shown.group(1) or b"$2b$" in shown.group(1):
+        out.append("/admin/host on metal shows a session cookie or a password hash in its log")
+    if b'<pre class="log">' not in linux and b"keeps no log of its own" not in linux:
+        out.append("/admin/host on Linux neither shows a log nor says it keeps none")
 
     host = metal.split(b"<h2>The host</h2>")[-1]
     figures = {}
