@@ -133,7 +133,7 @@ in order. The box Claude reorders on `master`, and CC proposes at the bottom.
 
 8. **Raise `fat16.max_name` to 96** (your proposal; accepted). The
    application makes names up to 96 characters. FAT allows 255; host tests
-   at the new bound, read back by `tools/fat16_read.py` too.
+   at the new bound, read back by `tools/fat16_read.py` too. **Done** (CC).
 9. **Stop directory growth at FAT's 65,536-entry limit** (your proposal;
    accepted), with a host test that fills a directory to the limit.
 10. **`zig fmt` the three files, then make `zig fmt --check src` part of
