@@ -35,7 +35,7 @@ other hazards would have to come from something other than the application.
 
 From angry-gopher's own code (`roots.zig`, `chat_store.zig`, `users.zig`,
 `player.zig`, `storage.zig`, `docs_store.zig`, `chat_upload.zig`,
-`chat_state.zig`):
+`chat_state.zig`, `chat_links.zig`):
 
 | part of a path | rule (from the validator) | where it appears |
 |---|---|---|
@@ -44,7 +44,8 @@ From angry-gopher's own code (`roots.zig`, `chat_store.zig`, `users.zig`,
 | doc slug | `[a-z0-9]+(-[a-z0-9]+)*`, 1–80, lower case (`validDocSlug`) | `data/chat/users/<uid>/docs/<slug>.md` |
 | upload | 16 random bytes in hex, `.` extension | `<sid>.uploads/<32 hex>.<ext>` |
 | user, player, conversation | digits; `p<n>`; `<a>_<b>` | `auth/<id>/`, `data/players/<id>/`, `data/chat/<a>_<b>/` |
-| fixed names | `_session_secret`, `next-id.txt`, `last-seen`, `upload-bytes`, `api-key`, `password`, `name`, `code.md`, `images.md`, `last-conv` | |
+| fixed names | `_session_secret`, `next-id.txt`, `last-seen` (users and players), `upload-bytes`, `admin`, `api-key`, `password`, `name`, `code.md`, `images.md`, `last-conv` | |
+| placed by hand | `links.md`: `chat_links.zig` reads it, and nothing in the application writes it | `data/chat/users/<uid>/links.md` |
 
 Every name is ASCII from `[A-Za-z0-9._-]`. No name ends in a dot or a space.
 The deepest path is about 200 bytes and seven levels:
@@ -139,6 +140,28 @@ in all.
 
 The application's `Io` has no call that makes any of these.
 
+### Paths the application does not build — decide whether they move
+
+Nothing is wrong with them on FAT, but something other than the application
+wrote them, so they move only if someone decides they should. The checker
+reports each such tree once, at its top (`not-the-apps`).
+
+On prod, 2026-10-02, there were two kinds:
+
+- **`data/chat/blog-comments/`**: the retired blog's comments (angry-gopher
+  `9f91713c`, `246d82de`). Deleted from prod that day, with the deploy
+  directory's old `blog/`, at Steve's direction; a copy is in
+  `~/prod-archive/blog-2026-10-02.tgz` on the development box.
+- **`data/users/r/` and `data/users/y/`**, one `last-seen` each, written
+  2026-06-23 16:01 UTC, 14 seconds apart. That is the chunked-body identity
+  bug: a user id read from request memory that the body read had just
+  overwritten, fixed 41 minutes later (`e2610edd`). `touchUser` made a
+  directory under whatever id it was handed.
+
+**Run the checker on a real copy** (`rsync -a`, without `-H`), not on a
+hard-linked view of prod's tree: every file in such a view has two names, and
+each is reported as a hard link.
+
 ### How many entries a directory holds
 
 - **The size of a name on disk.** An entry is 32 bytes. A name that is not
@@ -169,7 +192,8 @@ with 32 KiB clusters. Every file and directory takes whole clusters:
 - 801 files waste at most 801 × 32 KiB ≈ 26 MB;
 - with 215 MB of data, that is well inside 2 GiB.
 
-The checker adds it up for the real tree.
+The checker adds it up for the real tree. On prod, 2026-10-02: 835 files and
+275 directories take 251 MB on the volume, 12% of it.
 
 ### What survives, changed
 

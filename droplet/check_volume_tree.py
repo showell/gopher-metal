@@ -62,7 +62,8 @@ DEFAULT_CLUSTER = 32 << 10
 # ── what the application builds ─────────────────────────────────────────────
 #
 # Read from angry-gopher's own code (roots.zig, chat_store.zig, users.zig,
-# player.zig, storage.zig, docs_store.zig, chat_upload.zig, chat_state.zig):
+# player.zig, storage.zig, docs_store.zig, chat_upload.zig, chat_state.zig,
+# chat_links.zig):
 #
 #   - a session id matches validSessionID: [A-Za-z0-9]+(-[A-Za-z0-9]+)*, up to
 #     80 characters, upper AND lower case, chosen in the URL;
@@ -99,10 +100,13 @@ APP_PATHS = [
     (rf"data/chat/users/{ID}/docs/{SLUG}\.md", "a user's doc", True, False),
     (rf"data/chat/users/{ID}(?:/docs|/last-sessions|/pinned-sessions)?", "a user's chat state", False, False),
     (rf"data/chat/users/{ID}/(?:code\.md|images\.md|last-conv)", "a user's chat state", False, False),
+    # chat_links.zig reads it; nothing in the application writes it: the admin
+    # puts it there by hand.
+    (rf"data/chat/users/{ID}/links\.md", "a user's links page, placed by hand", False, False),
     (rf"data/chat/users/{ID}/(?:last|pinned)-sessions/(?:{CONV}|{CHANNEL})", "a user's chat state", False, True),
     (r"data/chat/_session_secret", "the session secret", False, False),
-    (rf"data/users/{ID}(?:/last-seen|/upload-bytes)?", "a user's record", False, False),
-    (rf"data/players/{ID}(?:/name)?", "a player", False, False),
+    (rf"data/users/{ID}(?:/last-seen|/upload-bytes|/admin)?", "a user's record", False, False),
+    (rf"data/players/{ID}(?:/name|/last-seen)?", "a player", False, False),
     (r"data/players/next-id\.txt", "the player counter", False, False),
     (r"data/lynrummy(?:/.*)?", "game and puzzle sessions (storage.zig)", False, False),
     (rf"auth/{ID}(?:/[a-z_-]+)?", "an account", False, False),
@@ -205,6 +209,12 @@ def check(root, volume=DEFAULT_VOLUME, cluster=DEFAULT_CLUSTER):
             full = os.path.join(top, n)
             rel = os.path.join(rel_top, n)
             st = os.lstat(full)
+            # Not a path the application builds: nothing is wrong with it on
+            # FAT, but something other than the application wrote it, so it
+            # moves only if someone decides it should. Found once, at the top
+            # of a tree the application does not know.
+            if app_kind(rel) is None and (at_root or app_kind(rel_top) is not None):
+                add(rel, "not-the-apps", "not a path angry-gopher builds: decide whether it moves at all")
             if stat.S_ISLNK(st.st_mode):
                 add(rel, "symlink", "FAT has no symlinks; shutil.copytree follows it "
                     "(a link to a directory copies that tree again; a dangling one fails the copy)")
@@ -314,6 +324,10 @@ def self_test():
         put(deep)                                                 # deep
         put("data/" + "/".join(["x" * 60] * 5) + "/f")            # long-path
         put("auth/1/api-key")                                     # clean
+        put("data/users/1/admin")                                 # clean
+        put("data/players/3/last-seen")                           # clean
+        put("data/chat/users/1/links.md")                         # clean
+        put("data/users/r/last-seen")                             # not-the-apps, at data/users/r
 
         findings, _ = check(d)
         got = {}
@@ -321,7 +335,7 @@ def self_test():
             got.setdefault(f.rule, []).append(f)
         want = {"case-collision": 1, "long-name": 1, "forbidden-character": 1,
                 "trailing-dot-or-space": 1, "non-ascii": 1, "date": 1, "symlink": 1,
-                "hard-link": 2}
+                "hard-link": 2, "not-the-apps": 4}
         # A deep or long path is also found at each directory on the way down
         # that is already too deep or too long: at least one, ending at "f".
         at_least = {"deep": deep, "long-path": "data/" + "/".join(["x" * 60] * 5) + "/f"}
@@ -341,8 +355,19 @@ def self_test():
             failed.append("a name past the application's longest should be one it cannot produce")
         if not got["forbidden-character"][0].app.startswith("no"):
             failed.append("a forbidden character should be one the app cannot produce")
+        # Each tree the application does not know is found once, at its top.
+        strays = sorted(f.path for f in got.get("not-the-apps", []))
+        want_strays = sorted(["data/notes", "data/d", "data/" + "x" * 60, "data/users/r"])
+        if strays != want_strays:
+            failed.append(f"not-the-apps: wanted {want_strays}, got {strays}")
 
-        clean, _ = check(os.path.join(d, "auth"))
+    with tempfile.TemporaryDirectory() as d:
+        for rel in ["auth/1/api-key", "auth/next-id.txt", "data/users/1/admin",
+                    "data/players/3/last-seen", "data/chat/users/1/links.md",
+                    "data/chat/1_2/sessions/topic.md"]:
+            os.makedirs(os.path.dirname(os.path.join(d, rel)), exist_ok=True)
+            open(os.path.join(d, rel), "wb").close()
+        clean, _ = check(d)
         if clean:
             failed.append(f"a clean tree had findings: {[f.rule for f in clean]}")
 
