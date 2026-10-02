@@ -267,6 +267,53 @@ http://143.244.172.148:9100/notes/a-web-server-in-a-box.md*
       the box runs it and the gopher judge before merging. Item 20's review
       reads better after this: path checks move into the Store.
 
+### CC's order of work (box Claude, 2026-10-02 afternoon; Steve: keep it long)
+
+Answers below carry the detail. In this order:
+
+1. **The droplet judge's two checks read the volume as the boot disk**
+   (Answers, "Check-in 4 gated"). Nothing of 13-17 merges until the
+   droplet judge is green.
+2. **Metal re-cases a name on a whole-file rewrite** (Answers), with the
+   judge's three case steps.
+3. **Item 21's tail** on your angry-gopher branch (storage, counter and
+   player are done; thanks).
+4. **Item 22**, then **23-26** below, then **18** once 16 and 17 are on
+   `master`.
+
+*Items 22-26 queued 2026-10-02 (box Claude, keeping the queue full).*
+
+22. **Fix REVIEW-request-paths findings 3, 4 and 5 in angry-gopher**
+    (your branch, a commit each, with a test that fails without it):
+    `chatKeyParticipant` checks both halves of a DM key; `allDigits` (or
+    the Store's refusal) wherever an id from an API key or the admin
+    enters a path. Finding 1 is fixed by the box (`/logout` refuses a
+    release for a cookie that names an account; angry-gopher
+    `releaseTarget`, landing shortly). Finding 2 is item 23.
+23. **Design: signing `gopher_uid`** (findings 1-2's root). A design note,
+    `angry-gopher/docs/` or here, not code yet: the cookie signed with the
+    session secret as `gopher_auth` is; what happens to every unsigned
+    cookie already in browsers (prod has 19 players and 6 guests: are they
+    re-identified, read-only, or let go?); the guest upgrade path; and the
+    tests and judge cases that would prove it. Steve decides from it.
+24. **Store: `replace`, so a rewrite survives a crash.** Today a whole-file
+    write is truncate-then-write on Linux, and remove-then-write on metal
+    (`fat16.writeFileIn`): a machine that stops between the two loses the
+    file. Add `fat16` rename-within-a-directory (host-tested, oracle-
+    checked), the same on Linux through `std.Io`'s rename, and
+    `store.replace` = write a sibling temp name, then rename over. Then
+    move the records that matter onto it: `.count` sidecars, `players/*/
+    name`, `auth/*/name`, `next-id.txt` (counter.zig). Say what a crash at
+    each point leaves.
+25. **Store: FAT's path limits on Linux too.** The Store refuses names FAT
+    cannot hold, but not paths longer than `io.zig`'s `max_path` (256) or
+    deeper than `fat16`'s removeTree cap (16). Enforce both in the Store,
+    tested, so Linux refuses what metal would.
+26. **Finding 6 (unbounded disk growth from the game store): options for
+    Steve.** A short note: what grows, how fast a client could fill 2 GiB
+    and a FAT32 volume, and three shapes of limit (per player, per
+    address, global) with what each costs a real player. No code.
+
 ## Box Claude
 
 - v6: gates, images, deploy with Steve, and the survival test (the marker
