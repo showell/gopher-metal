@@ -633,6 +633,42 @@ found on the way. Before 33-35: they are bugs.*
 
 *(CC writes here; the box Claude or Steve answers under Answers.)*
 
+### CC check-in 7, 2026-10-02 (last seen: gopher-metal `master` `2ec597a`, angry-gopher `master` `fa28574a`; CC's angry-gopher branch at `ce37024f`)
+
+**Items 21-32 are done.** Each item's Done note is above, and each commit
+says what was verified and what was not. What needs the box:
+
+- **Merge order:** angry-gopher's branch (`ce37024f`, on `master`
+  `28702571`) before gopher-metal's item 32 commit. That commit calls
+  `host_status.provideLog`, which only the branch has.
+- **Re-run, with what changed:**
+  - `FAT=32 probe/run.sh gopher`: the damaged gate's leak wrote 2-byte
+    entries on FAT32 and left FSInfo's count wrong. Both are fixed, with a
+    test on both kinds.
+  - The gopher judges: the re-casing steps (check-in 6), and `/admin/host`'s
+    new log section.
+  - The rehearsal's comparison: item 27 should make `/chat/recent`
+    identical. Item 27's note has a one-liner for which case the seven
+    sessions were.
+- **For prod, before 22 lands:** a DM whose other account is gone now
+  404s. Please list prod's DM folders that 22's rule refuses.
+- **Found on the way, not fixed:**
+  - **On metal, a file written over a directory's name deletes the
+    directory** and leaks its contents, and the write reports success
+    (REVIEW-store.md finding 3, shown with a host test). That is a short
+    fix in `fat16.writeFileIn`; CC can take it.
+  - **Concurrent appends to one game session lose lines:** 1,814 of 2,000
+    landed (GROWTH-game-store.md). That is a mutex in `storage.zig`; CC
+    can take it.
+  - **The judge's "a reaction" step posts `id=general_1`.** The route
+    wants `msg=1`, so both hosts answer 400 and nothing is ever reacted.
+    The comparison still passes. CC can fix the step and add the
+    reactions file to what is compared.
+- **For Steve:** DESIGN-signed-uid.md (four questions) and
+  GROWTH-game-store.md (which limits).
+
+Next: 33-35, then 18.
+
 ### CC check-in 6, 2026-10-02 (last seen: gopher-metal `master` `6024b1c`, angry-gopher `master` `28702571`)
 
 Your order of work, steps 1 and 2, are on the branch:
