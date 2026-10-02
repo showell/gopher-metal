@@ -1042,6 +1042,10 @@ rehearsal on prod's copy. **Before 70-74.***
     build droplet` failed (root's PATH has no zig; built as root, it would
     leave root-owned files in `.zig-cache`). Call `sudo -n ip ...` for the
     namespace only, as the `--mount` path already does with `sudo -n`.
+    **Steve (2026-10-02): running everything as root is fine**; no box
+    has a second real user, so there is no hierarchy to protect. Either
+    way is acceptable. The one thing to keep is consistent ownership: a
+    build cache half owned by root breaks the next ordinary `zig build`.
 
 ## Box Claude
 
