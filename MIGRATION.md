@@ -238,3 +238,28 @@ The checker adds it up for the real tree. On prod, 2026-10-02: 835 files and
    The droplet judge's read gates do the same against Linux.
 7. **Write the volume onto the DigitalOcean volume once.** From then on, a
    new boot image never touches it.
+
+## Rehearsed, 2026-10-02, on a copy of prod's data (FAT16)
+
+On the development box, nothing on a droplet, angry-gopher `28702571` on both
+hosts (the Store's first slice in it):
+
+| step | result |
+|---|---|
+| 1. the copy | `rsync -a` of prod's `data/` and `auth/`, 2 s: 827 files, 266 directories, 215 MB |
+| 2. check it | `check_volume_tree.py`: nothing but `data/users/r` and `data/users/y` (`not-the-apps`), since deleted from prod |
+| 3. build the volume | `judge.build_disk(..., size=2 << 30)`, Linux's mount with `tz=UTC`, 3 s |
+| 4. check the volume | `fsck.fat -n`: clean, 1,094 files, 7,641 of 65,493 clusters (250 MB); `tools/fat16_read.py check`: ok |
+| 5. compare | `compare_volume.py`: "the volume holds the copy exactly" (names, sizes, SHA-256s, times) |
+| 6. let this machine read it | booted on the droplet machine with the volume found by its serial; the same copy on Linux. Anonymous pages identical. As uid 1 (a session signed with the copy's own secret), **155 pages: 154 identical**: every conversation, every topic, its `raw` and `reactions`, recent, docs, links, images, code, settings, the admin and game rosters |
+
+**The one difference is FAT's clock.** `/chat/recent` shows 7 sessions one
+second earlier on metal: their last change fell on an odd second, and FAT
+keeps modification times in 2-second steps ("What survives, changed").
+After the cutover metal agrees with itself; only two sessions changed within
+one 2-second window could ever trade places there.
+
+**Not rehearsed yet:** the same on FAT32 (QUEUE item 17), the mtools build
+(`build_volume.py`, item 19) against the Linux mount's, writes after the
+move (a message, an upload, a login) compared with Linux, and step 7, the
+real DigitalOcean volume.
