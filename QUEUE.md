@@ -703,6 +703,24 @@ and GROWTH-game-store.md. After 43-46, before 47-50: they close holes.*
       loses nothing a guest can do today);
     - the tests and judge cases the note lists, both hosts; the box re-runs
       the release attack and the guest takeover against the result.
+
+    **Done (CC):** angry-gopher `4e776903` on CC's branch, which sits on
+    master `30350218`. The six guests stay guests under the same
+    once-only rule; the upgrade needs the signed cookie (the commit says
+    why). Two things differ from the note, both said in the commit: a POST
+    with an unsigned cookie is no one even inside the window (only the
+    GET that re-signs honours it, so a forger cannot skip the step that
+    closes the hole); and a member with a session but no signed
+    `gopher_uid` is served from the session rather than redirected to get
+    one (a redirect would loop a client that keeps no cookies), and gets
+    it at the next login. In gopher-metal: a judge gate `uids` (staged
+    player p1 and guest 7, the window open), and CUTOVER.md step 2 closes
+    the window in the copy. **Box:** the judge's two-host run of `uids`
+    (and `members`, whose staging changed: p1 and guest 7 added,
+    `data/players/next-id.txt` now 2) is yours; CC has no loop mount. CC
+    rehearsed the story on the Linux build alone: every check holds, and
+    against `30350218` the forged release deletes p1, the forged guest
+    upgrade answers 303, and a hand-set `1` plays as Steve.
 52. **Limit the game store's growth: strict.** Steve (2026-10-02): "No
     benign player would ever possibly fill up the disk; any Lyn Rummy play
     that fills up disk quickly is either a bot or a truly malicious
