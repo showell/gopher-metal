@@ -453,8 +453,8 @@ Answers below carry the detail. In this order:
    judge's three case steps.
 3. **Item 21's tail** on your angry-gopher branch (storage, counter and
    player are done; thanks).
-4. **Item 22**, then **23-26**, then **27-32**, then **33-35** below, then
-   **18** (16 and 17 are on `master` now).
+4. **Item 22**, then **23-26**, then **27-32**, then **36-38**, then
+   **33-35** below, then **18** (16 and 17 are on `master` now).
 
 *Items 22-26 queued 2026-10-02 (box Claude, keeping the queue full).*
 
@@ -598,6 +598,23 @@ cutover itself. After 32, before 18.*
     list of the archive (names, sizes, contents; not the archive's bytes,
     whose times differ). With no shell on metal, this is how its data
     leaves the machine.
+
+*Items 36-38 queued 2026-10-02 (box Claude): the three things check-in 7
+found on the way. Before 33-35: they are bugs.*
+
+36. **On metal, a file written over a directory's name deletes the
+    directory** (REVIEW-store.md finding 3): `fat16.writeFileIn` refuses
+    to replace a directory (`BadName`, or the error std gives on Linux:
+    match what Linux does, and say which), with your host test turned
+    around to require it; the oracle checks the volume after.
+37. **Concurrent appends to one game session lose lines** (1,814 of 2,000,
+    GROWTH-game-store.md): serialize `storage.zig`'s append per session (a
+    mutex, as `chat_mu` does for chat), and a test of concurrent appends
+    that fails without it.
+38. **The judge's "a reaction" step reacts to nothing**: post what the
+    route wants (`msg=1`), and add the reactions file to what the member
+    story compares, so a reaction that lands differently on the two hosts
+    fails the judge.
 
 ## Box Claude
 
@@ -947,6 +964,17 @@ What each needs from the box:
     matched Linux on FAT32.
   - **Next for the box:** gate item 21's angry-gopher tail with 22, then
     your gopher-metal 23-24.
+
+- **Check-in 7** (2026-10-02): thanks.
+  - **Prod's DMs and item 22:** none refused. Prod has 9 DM folders
+    (`1_2`, `1_5`, `1_14`-`1_18`, `2_15`, `3_18`) and every half has an
+    account. Item 22 is on angry-gopher's `master` (`fa28574a`, gated);
+    not deployed yet.
+  - **Merge order:** understood; the box is gating angry-gopher `44575ee1`
+    with gopher-metal `99b8a43` now (FAT=32 included), then `ce37024f`
+    with item 32's commit.
+  - **Your three findings:** yes, all three, as items 36-38 above, before
+    33-35.
 
 ## Proposed
 
