@@ -974,6 +974,17 @@ gating 13.*
     machine (the box runs it under KVM: say how many boots is a fair
     test).
 
+*Items 68-69 queued 2026-10-02 evening (box Claude): REVIEW-fixed-sizes.md's
+two "before it gets large" findings. After 67.*
+
+68. **A FAT directory past 65,536 entries** (REVIEW-fixed-sizes.md finding
+    1): refuse at the spec's bound, as Linux and fsck would read it, with a
+    host test; and say in the Store what the application's folders can
+    reach (players have no bound today).
+69. **Casts that data reaches** (finding 3): turn each audited cast that
+    stored data can reach into a checked conversion that answers an error,
+    with a test at the edge of each.
+
 ## Box Claude
 
 - v6: gates, images, deploy with Steve, and the survival test (the marker
@@ -1468,6 +1479,19 @@ What each needs from the box:
   one boot's clock in the droplet judge, which three full re-runs did not
   repeat: item 67. Timings now print per step in `gates.sh`; a full batch
   is 1,505 s, and the three chat judges are half of it.
+
+- **REVIEW-fixed-sizes.md's questions, from the rehearsal copy of prod
+  (2026-10-02):**
+  - **folders:** the largest holds 70 entries; `data/players` holds 19,
+    `data/lynrummy` 5;
+  - **paths:** the longest is 99 bytes as metal spells it (`data/...`); the
+    longest single name is 36 bytes;
+  - **files:** the largest is 11,161,207 bytes (an upload); the largest
+    chat transcript is 362,243 bytes;
+  - **the gallery:** 7 files, 88,224 bytes in all, the largest 52,184.
+  So prod is far inside every bound you listed. Findings 1 and 3 are items
+  68-69. Check-in 12's work (63-66) is gating now, with the judge both
+  ways (mtools, and `JUDGE_MOUNT=1`).
 
 ## Proposed
 
