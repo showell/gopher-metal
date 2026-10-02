@@ -274,6 +274,43 @@ class Differences(unittest.TestCase):
             self.assertTrue(G.host_page_differences(self.metal_page(row(free - 3, total)), self.LINUX, img))
             self.assertTrue(G.host_page_differences(self.metal_page(row(free, total - 1)), self.LINUX, img))
 
+    @unittest.skipUnless(shutil.which("mkfs.vfat") and shutil.which("sgdisk"), "needs mkfs.vfat and sgdisk")
+    def test_on_the_droplet_machine_each_row_is_checked_against_its_own_disk(self):
+        # There the judge's image is chat's data volume, and the boot disk is
+        # the site, on partition 2 of the disk the kernel booted from. Sizes
+        # that differ, so a row read against the wrong disk is caught.
+        with tempfile.TemporaryDirectory() as d:
+            volume = os.path.join(d, "v.img")
+            subprocess.run(["mkfs.vfat", "-F", "16", "-S", "512", "-s", "4", "-C", volume, str(64 * 1024)],
+                           check=True, capture_output=True)
+            boot = os.path.join(d, "droplet.img")
+            with open(boot, "wb") as f:
+                f.truncate(40 << 20)
+            subprocess.run(["sgdisk", "-o", "-n", "1:2048:4095", "-n", "2:4096:0", boot],
+                           check=True, capture_output=True)
+            base = G.gpt_partition_base(boot, 2)
+            self.assertEqual(base, 4096 * 512)
+            blocks = ((40 << 20) - base - 34 * 512) // 1024
+            subprocess.run(["mkfs.vfat", "-F", "16", "-S", "512", "--offset", "4096", boot, str(blocks)],
+                           check=True, capture_output=True)
+            site_free, site_total = G.oracle_megabytes(boot, base)
+            vol_free, vol_total = G.oracle_megabytes(volume)
+            self.assertNotEqual(site_total, vol_total)
+            site = lambda f, t: (b"the boot disk (the site)", b"FAT16, serial 92DE-8831: %d MB free of %d MB" % (f, t))
+            vol = lambda f, t: (b"the volume (chat&#39;s data)", b"FAT16, serial 1234-5678: %d MB free of %d MB" % (f, t))
+            ok = self.metal_page(site(site_free, site_total), vol(vol_free, vol_total))
+            self.assertEqual(G.host_page_differences(ok, self.LINUX, volume, boot), [])
+            swapped = self.metal_page(site(vol_free, vol_total), vol(site_free, site_total))
+            got = G.host_page_differences(swapped, self.LINUX, volume, boot)
+            self.assertTrue(any(g.startswith("/admin/host on metal: the boot disk is") for g in got), got)
+            self.assertTrue(any(g.startswith("/admin/host on metal: the volume is") for g in got), got)
+            # The failure the droplet judge reported: the site's row against
+            # the volume, as on microvm.
+            self.assertTrue(G.host_page_differences(ok, self.LINUX, volume))
+            no_volume = self.metal_page(site(site_free, site_total))
+            got = G.host_page_differences(no_volume, self.LINUX, volume, boot)
+            self.assertTrue(any("no free space for the volume" in g for g in got), got)
+
     def test_the_checkout_commit_reads_as_build_zig_writes_it(self):
         here = os.path.dirname(os.path.abspath(__file__))
         got = G.checkout_commit(here)
@@ -364,6 +401,10 @@ class DiskCheckLines(unittest.TestCase):
         self.assertEqual(G.disk_check_lines(self.CLEAN)["the boot disk"],
                          {"files": 18, "directories": 17, "used": 52, "leaked": 0, "problems": 0})
         self.assertEqual(G.disk_check_differences(self.CLEAN), [])
+
+    def test_the_judge_s_image_is_the_volume_only_on_the_droplet_machine(self):
+        self.assertEqual(G.image_disk(self.CLEAN), "the boot disk")
+        self.assertEqual(G.image_disk("chat's data: the volume, FAT16 at LBA 2048\n"), "the volume")
 
     def test_a_problem_fails_unless_the_disk_was_damaged_on_purpose(self):
         log = self.CLEAN.replace("0 leaked, 0 problems", "1 leaked, 1 problems") \

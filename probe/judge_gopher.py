@@ -711,6 +711,13 @@ def disk_check_lines(log: str) -> dict:
             for m in DISK_CHECK.finditer(log)}
 
 
+def image_disk(log: str) -> str:
+    """Which `disk check` line is about the judge's own disk image: the volume
+    on the droplet machine, where the image is chat's data and the boot disk is
+    the site split off it; the boot disk everywhere else."""
+    return "the volume" if "chat's data: the volume" in log else "the boot disk"
+
+
 def disk_check_differences(log: str, damaged: bool = False) -> list:
     """What is wrong with a boot's disk-check lines: a mounted disk with none,
     a check that did not run, or (unless `damaged`) a problem found."""
@@ -890,7 +897,7 @@ def differences(c: dict, metal: dict, linux: dict) -> list:
     elif c["path"] == "/admin/host" and metal["status"] == 200:
         # A refusal (no session, not the admin) is an ordinary page, compared
         # whole below; only the page itself differs on purpose.
-        out += host_page_differences(metal["body"], linux["body"], metal.get("image"))
+        out += host_page_differences(metal["body"], linux["body"], metal.get("image"), metal.get("boot_disk"))
     else:
         mb = normalize(metal["body"], metal["window"])
         lb = normalize(linux["body"], linux["window"])
@@ -937,7 +944,36 @@ def checkout_commit(root: str) -> str:
     return head.stdout.strip() + ("+dirty" if status.strip() else "")
 
 
-def host_page_differences(metal: bytes, linux: bytes, image: str = None) -> list:
+def gpt_partition_base(path: str, n: int) -> int:
+    """The byte offset of partition `n` (from 1) on a GPT disk image."""
+    with open(path, "rb") as f:
+        f.seek(SECTOR)
+        header = f.read(SECTOR)
+        if header[:8] != b"EFI PART":
+            raise RuntimeError(f"{path} has no GPT header")
+        entries_lba, count, size = struct.unpack_from("<QII", header, 72)
+        if not 1 <= n <= count:
+            raise RuntimeError(f"{path} has no partition {n}")
+        f.seek(entries_lba * SECTOR + (n - 1) * size)
+        first_lba = struct.unpack_from("<Q", f.read(size), 32)[0]
+    if first_lba == 0:
+        raise RuntimeError(f"{path}'s partition {n} is empty")
+    return first_lba * SECTOR
+
+
+def oracle_megabytes(path: str, base: int = None) -> tuple:
+    """(free, total) in MB, as tools/fat16_read.py counts the FAT at `base` in
+    `path` (or the volume it finds there)."""
+    sys.path.insert(0, TOOLS_DIR)
+    import fat16_read
+    with open(path, "rb") as f:
+        v = fat16_read.Volume(f.read(), base)
+    total = ((v.max_cluster - 1) * v.cluster_bytes) >> 20
+    free = (sum(1 for c in range(2, v.max_cluster + 1) if v.fat(c) == 0) * v.cluster_bytes) >> 20
+    return free, total
+
+
+def host_page_differences(metal: bytes, linux: bytes, image: str = None, boot_disk: str = None) -> list:
     """**/admin/host DIFFERS ON PURPOSE**: its second table is each host's own
     account of itself. So what is compared is its shape: both have the
     application's half, with the same rows, and each says which host it is.
@@ -953,7 +989,11 @@ def host_page_differences(metal: bytes, linux: bytes, image: str = None) -> list
         must be what tools/fat16_read.py makes of that image, and its free
         space within 2 MB of the oracle's count of the image at the end of
         the story: the page is asked for early, and what the story writes
-        after it is kilobytes."""
+        after it is kilobytes.
+      - **ON THE DROPLET MACHINE** (`boot_disk`, the disk it booted from),
+        `image` is chat's data volume, so the volume's row is checked against
+        `image` and the boot disk's against the site on `boot_disk`'s
+        partition 2. Both rows must be there."""
     rows = lambda body: re.findall(rb"<tr><td>(.*?)</td><td>", body)
     out = []
     for name, body in (("metal", metal), ("Linux", linux)):
@@ -979,23 +1019,29 @@ def host_page_differences(metal: bytes, linux: bytes, image: str = None) -> list
         m = re.search(rb"(\d+) MB free of (\d+) MB", value)
         if m:
             free, total = int(m.group(1)), int(m.group(2))
-            figures[label] = (free, total)
+            figures[label.replace(b"&#39;", b"'")] = (free, total)
             if total == 0 or free > total:
                 out.append(f"/admin/host on metal: {label.decode('latin-1')}: {free} MB free of {total} MB")
     if not figures:
         out.append("/admin/host on metal gives no volume's free space")
-    site = figures.get(b"the boot disk (the site)")
-    if image and site:
-        sys.path.insert(0, TOOLS_DIR)
-        import fat16_read
-        with open(image, "rb") as f:
-            v = fat16_read.Volume(f.read())
-        total = ((v.max_cluster - 1) * v.cluster_bytes) >> 20
-        free = (sum(1 for c in range(2, v.max_cluster + 1) if v.fat(c) == 0) * v.cluster_bytes) >> 20
-        if site[1] != total:
-            out.append(f"/admin/host on metal: the boot disk is {site[1]} MB, and the oracle reads {total} MB")
-        if abs(site[0] - free) > 2:
-            out.append(f"/admin/host on metal: the boot disk has {site[0]} MB free, and the oracle "
+    if not image:
+        return out
+    if boot_disk:
+        checks = [(b"the boot disk (the site)", "the boot disk", boot_disk, gpt_partition_base(boot_disk, 2)),
+                  (b"the volume (chat's data)", "the volume", image, None)]
+    else:
+        checks = [(b"the boot disk (the site)", "the boot disk", image, None)]
+    for label, name, path, base in checks:
+        row = figures.get(label)
+        if row is None:
+            if boot_disk:
+                out.append(f"/admin/host on metal gives no free space for {name}")
+            continue
+        free, total = oracle_megabytes(path, base)
+        if row[1] != total:
+            out.append(f"/admin/host on metal: {name} is {row[1]} MB, and the oracle reads {total} MB")
+        if abs(row[0] - free) > 2:
+            out.append(f"/admin/host on metal: {name} has {row[0]} MB free, and the oracle "
                        f"counts {free} MB at the story's end")
     return out
 
@@ -1143,7 +1189,8 @@ def run_story(elf, linux_bin, content, pristine, work, mnt, steps, label, report
         report(f"FAIL  {label}: the kernel exited {code} after the story: "
                + " | ".join(log.splitlines()[-3:]))
     for s, m, l in zip(steps, metal_answers, linux_answers):
-        m = dict(m, guest_exit=1, window=metal_window, serial=log, image=image)
+        m = dict(m, guest_exit=1, window=metal_window, serial=log, image=image,
+                 boot_disk=os.path.join(scratch, "droplet.img") if DROPLET else None)
         l = dict(l, window=linux_window)
         diffs = differences(s, m, l)
         if diffs:
@@ -2545,7 +2592,8 @@ def main() -> int:
         answer = ask_kernel(elf, image, case("index, on a damaged disk", "GET", "/"), scratch,
                             damaged=True)
         log = answer.get("serial", "")
-        got = disk_check_lines(log).get("the boot disk")
+        # The leak is on `image`, which on the droplet machine is the volume.
+        got = disk_check_lines(log).get(image_disk(log))
         if answer.get("status") != 200:
             failures += 1
             print(f"FAIL  damaged: a disk with a leaked cluster was not served from ({answer.get('status')})")
