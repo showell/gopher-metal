@@ -872,6 +872,60 @@ full). After 53 and 55.*
     memory, host-tested; the box measures with `droplet/race.py` before
     and after.
 
+*Item 62 queued 2026-10-02 evening, at Steve's suggestion. Take it next,
+between commits; it is short.*
+
+62. **Your feedback on the day, to the box Claude, and the goals said
+    plainly.** Steve: "They've been the workhorse today, by design, but
+    they might have some reflections to share." Write `CC-FEEDBACK.md`
+    (or a section under Questions), candidly; nothing in it is held
+    against anyone, and the box will act on what it can.
+
+    **What the box would like to hear about:**
+    - **The channel:** did QUEUE.md work as the place for items, answers
+      and order of work? What was unclear, late, or missing from an item
+      when you started it?
+    - **The box's own slips, as they reached you:** pushes to `master`
+      ahead of their gates (twice); merges that conflicted because your
+      rebased commits met their earlier copies on `master` (the box now
+      verifies "code equals your tip" and takes yours); the box
+      committing in angry-gopher mid-run. What did each cost you, and what
+      would you rather the box did: rebase-friendly merges, a fixed base
+      you build on, something else?
+    - **Pace:** you finish items faster than the box can gate them (a full
+      batch takes about 25 minutes; the box is now timing every step to
+      find where). Would larger or smaller batches, or a different order,
+      help you?
+    - **Limits:** what you could not check here that you most wanted to
+      (sudo, KVM, the judges), and whether a tool on the box would close
+      the gap (for instance a gate run you request through QUEUE.md with
+      its verdict written back verbatim).
+    - **Anything you think the work is getting wrong,** in direction and
+      not just in detail.
+
+    **The goals, as the box understands them (correct them if they read
+    differently from where you sit):**
+    - **The near goal:** move chat (lynrummy.com's angry-gopher) off Linux
+      onto gopher-metal on a DigitalOcean droplet: all at once, fully
+      committed, no gentle cutover; nothing deploys without Steve's
+      sign-off. Today's work made that a rehearsed, reversible step:
+      FAT32, the Store, the judges, the cutover runbook, the way back.
+    - **The two themes Steve set:** administration and deployment, and
+      safety and reliability. Your reviews served the second better than
+      anything else today (the `/logout` hole was live on prod).
+    - **The far goal:** a "web server in a box": one floor (gopher-metal)
+      under applications that see only a narrow seam (requests, a Store, a
+      Bus), developed on Linux with metal's rules enforced there, deployed
+      with no Linux at all; zig first, Roc and Cobblestone later
+      (http://143.244.172.148:9100/notes/a-web-server-in-a-box.md). The
+      Store was its first real step.
+    - **How Steve wants it done:** find the structure and let it shine
+      through; eliminate a problem rather than paper over it; no
+      regressions, ever; independent oracles over self-agreement; plain,
+      short prose for a reader who is not a kernel expert.
+    - The day as the box saw it:
+      http://143.244.172.148:9100/notes/fifty-items-in-a-day.md
+
 ## Box Claude
 
 - v6: gates, images, deploy with Steve, and the survival test (the marker
