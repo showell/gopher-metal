@@ -96,13 +96,22 @@ pub fn keepData(dirs: []const []const u8, on: ?fat16.Volume) void {
 
 const Place = enum { site, data };
 
-fn placeOf(path: []const u8) Place {
-    var at: usize = 0;
-    while (at < path.len and path[at] == '/') at += 1;
-    var end = at;
-    while (end < path.len and path[end] != '/') end += 1;
+/// **THE DISK IS CHOSEN THE WAY FAT16 WILL RESOLVE THE PATH**, or the path is
+/// refused. fat16 matches names ignoring case, so the first directory is
+/// compared the same way; and it resolves `.` and `..` as real entries, so a
+/// path holding either could be routed by its first directory and land
+/// somewhere else — `data/../x` at the volume's root, past the refusal in
+/// `writing`. The application never spells a path that way, so such a path is
+/// refused (null) rather than interpreted.
+fn placeOf(path: []const u8) ?Place {
+    var parts = std.mem.tokenizeScalar(u8, path, '/');
+    while (parts.next()) |part| {
+        if (std.mem.eql(u8, part, ".") or std.mem.eql(u8, part, "..")) return null;
+    }
+    parts.reset();
+    const first = parts.next() orelse return .site;
     for (data_dirs) |dir| {
-        if (std.mem.eql(u8, dir, path[at..end])) return .data;
+        if (std.ascii.eqlIgnoreCase(dir, first)) return .data;
     }
     return .site;
 }
@@ -116,12 +125,17 @@ fn volumeAt(place: Place) Error!*fat16.Volume {
 
 /// The volume to read `path` from.
 fn reading(path: []const u8) Error!*fat16.Volume {
-    return volumeAt(placeOf(path));
+    return volumeAt(placeOf(path) orelse return Error.FileNotFound);
 }
 
 /// The volume to change `path` on, or a refusal: see `keepData`.
 fn writing(path: []const u8) Error!*fat16.Volume {
-    const place = placeOf(path);
+    const place = placeOf(path) orelse {
+        serial.put("  refused: a write to a path with . or ..: ");
+        serial.put(path);
+        serial.put("\n");
+        return Error.WriteFailed;
+    };
     if (place == .site and data_dirs.len != 0) {
         serial.put("  refused: a write outside the data directories: ");
         serial.put(path);
@@ -383,9 +397,20 @@ pub const Dir = struct {
 
     pub fn close(_: Dir, _: Self) void {}
 
+    /// **EVERY PATH HERE IS FROM THE ROOT**, whatever `Dir` it is asked of:
+    /// the application spells every call `Io.Dir.cwd().…`, and uses a `Dir`
+    /// it opened only to `iterate` it. A path asked of any other `Dir` would
+    /// be resolved from the root of whichever disk its first directory names
+    /// — the wrong file, perhaps on the wrong disk — so it stops the machine
+    /// instead, saying why.
+    fn fromRoot(self: Dir) void {
+        if (self.cluster != 0 or self.place != .site)
+            @panic("a path was asked of a Dir opened below the root; on this machine only cwd() resolves paths");
+    }
+
     pub fn openDir(self: Dir, _: Self, sub_path: []const u8, _: OpenOptions) Error!Dir {
-        _ = self;
-        const place = placeOf(sub_path);
+        self.fromRoot();
+        const place = placeOf(sub_path) orelse return Error.FileNotFound;
         const v = try volumeAt(place);
         const e = v.open(sub_path) catch return Error.FileNotFound;
         if (!e.isDirectory()) return Error.NotDir;
@@ -393,7 +418,7 @@ pub const Dir = struct {
     }
 
     pub fn openFile(self: Dir, _: Self, sub_path: []const u8, _: OpenFileOptions) Error!File {
-        _ = self;
+        self.fromRoot();
         const v = try reading(sub_path);
         const e = v.open(sub_path) catch return Error.FileNotFound;
         if (e.isDirectory()) return Error.IsDir;
@@ -401,7 +426,7 @@ pub const Dir = struct {
     }
 
     pub fn statFile(self: Dir, _: Self, sub_path: []const u8, _: StatFileOptions) Error!Stat {
-        _ = self;
+        self.fromRoot();
         const v = try reading(sub_path);
         const e = v.open(sub_path) catch return Error.FileNotFound;
         return .{
@@ -418,7 +443,7 @@ pub const Dir = struct {
     /// The call the application makes 42 times. The bytes are allocated from
     /// `gpa` and the caller owns them.
     pub fn readFileAlloc(self: Dir, ignored: Self, sub_path: []const u8, gpa: std.mem.Allocator, limit: Limit) Error![]u8 {
-        _ = self;
+        self.fromRoot();
         const v = try reading(sub_path);
         const e = v.open(sub_path) catch return Error.FileNotFound;
         if (e.isDirectory()) return Error.IsDir;
@@ -448,7 +473,7 @@ pub const Dir = struct {
     /// and the caller must not be told it was. What protects that file on this
     /// machine is that there is no other process to read it.
     pub fn writeFile(self: Dir, _: Self, options: WriteFileOptions) Error!void {
-        _ = self;
+        self.fromRoot();
         // A whole-file write that keeps the old tail is a different operation,
         // and nothing in the application asks for it. Refuse rather than
         // quietly replacing the file anyway.
@@ -466,7 +491,7 @@ pub const Dir = struct {
     /// not exist yet. fat16.makePath already walks and creates, so this is a
     /// rename with error translation.
     pub fn createDirPath(self: Dir, _: Self, sub_path: []const u8) Error!void {
-        _ = self;
+        self.fromRoot();
         const v = try writing(sub_path);
         _ = v.makePath(sub_path) catch |e| switch (e) {
             error.BadName => return Error.NameTooLong,
@@ -506,7 +531,7 @@ pub const Dir = struct {
     /// `catch {}` — it is clearing a bookmark or an api-key, and a file that is
     /// already gone is the outcome it wanted.
     pub fn deleteFile(self: Dir, _: Self, sub_path: []const u8) Error!void {
-        _ = self;
+        self.fromRoot();
         const v = try writing(sub_path);
         v.remove(sub_path) catch |e| switch (e) {
             error.NotFound => return Error.FileNotFound,
@@ -518,7 +543,7 @@ pub const Dir = struct {
     /// account's game data, a deleted player. See fat16.removeTree for why it
     /// re-lists each round instead of walking a snapshot.
     pub fn deleteTree(self: Dir, _: Self, sub_path: []const u8) Error!void {
-        _ = self;
+        self.fromRoot();
         const v = try writing(sub_path);
         v.removeTree(sub_path) catch return Error.WriteFailed;
     }
@@ -537,6 +562,10 @@ pub const Dir = struct {
     /// It also cannot fail here, since the whole listing is read eagerly; a
     /// directory that will not read answers empty, which is what `list` already
     /// does for a cluster it cannot follow.
+    ///
+    /// `cwd().iterate()` lists the boot disk's root, so with a volume attached
+    /// `data` and `auth` are not in it. The application never lists the root.
+    ///
     /// **EVERY DIRECTORY WALK CHECKS THAT THERE IS STACK LEFT.** The
     /// application recurses through the trees it lists -- the admin roster sums
     /// a player's disk usage that way -- and how deep a tree goes is data, not

@@ -310,6 +310,15 @@ def build_disk(image: str, content: str, mnt: str, size: int = 64 << 20) -> None
         umount(mnt)
 
 
+def fat_serial(image: str) -> str:
+    """The FAT serial of `image`'s first partition, as `blkid` spells it
+    (`92DE-8831`): the boot sector's volume ID, offset 39."""
+    with open(image, "rb") as f:
+        f.seek(PART_FIRST * SECTOR + 39)
+        n = int.from_bytes(f.read(4), "little")
+    return f"{n >> 16:04X}-{n & 0xFFFF:04X}"
+
+
 def mount(image: str, mnt: str, writable: bool) -> None:
     os.makedirs(mnt, exist_ok=True)
     opts = f"loop,offset={PART_FIRST * SECTOR},noexec,nosuid,nodev,uid={os.getuid()},gid={os.getgid()}"
@@ -431,9 +440,10 @@ def set_request_limit(image: str, n: int, mnt: str, idle_timeout_ms: int = 10000
     try:
         with open(os.path.join(mnt, "gopher-metal.conf"), "w") as f:
             f.write(f"requests = {n}\nidle_timeout_ms = {idle_timeout_ms}\n")
-            # On the droplet machine, the card chat will really serve on.
+            # On the droplet machine, the card chat will really serve on, and
+            # the volume it must find: the judge's own disk, by its serial.
             if DROPLET:
-                f.write("card = private\n")
+                f.write(f"card = private\nvolume = {fat_serial(image)}\n")
             if streams is not None:
                 f.write(f"streams = {streams}\n")
             if lose_one_sent_in is not None:
@@ -2037,6 +2047,17 @@ def lagging_stream_failures(elf, pristine, work, mnt, report) -> int:
         deadline = time.time() + 30
         while bulk_name(sent) not in got["reader"] and time.time() < deadline:
             time.sleep(0.1)
+        # **THE IGNORED STREAM IS ENDED ONLY ONCE IT HAS BEEN STUCK FOR THE
+        # IDLE TIME**, and closing it first would end it as gone instead. A
+        # machine fast enough to deliver all sixty before then (the droplet's,
+        # once MSI-X stopped costing an ISR read per frame) must not fail for
+        # it, so the judge waits for the kernel to say so, bounded.
+        deadline = time.time() + idle_ms / 1000 + 10
+        while time.time() < deadline:
+            with open(serial, "rb") as seen:
+                if b"stream ended: its client is not keeping up" in seen.read():
+                    break
+            time.sleep(0.1)
         stop.set()
         t.join()
     finally:
@@ -2048,8 +2069,9 @@ def lagging_stream_failures(elf, pristine, work, mnt, report) -> int:
     if code != 1:
         fail(f"the kernel exited {code}")
     if log.count("stream ended: its client is not keeping up") != 1:
+        endings = [l.strip() for l in log.splitlines() if "stream ended:" in l]
         fail(f"{log.count('stream ended: its client is not keeping up')} streams ended as not keeping "
-             f"up after {sent} messages, want 1")
+             f"up after {sent} messages, want 1; the kernel ended: {endings}")
     missing = [n for n in range(1, sent + 1) if bulk_name(n) not in got["reader"]]
     if missing:
         # The evidence stays: what the reader got, beside the kernel's log.

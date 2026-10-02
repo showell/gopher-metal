@@ -411,18 +411,29 @@ class Conf(unittest.TestCase):
     def tearDown(self):
         G.DROPLET = self.droplet
 
-    def test_on_the_droplet_machine_the_private_card_is_named(self):
+    def test_on_the_droplet_machine_the_private_card_and_the_volume_are_named(self):
         G.DROPLET = True
         with tempfile.TemporaryDirectory() as d:
-            real_mount, real_umount = G.mount, G.umount
+            real = G.mount, G.umount, G.fat_serial
             G.mount, G.umount = lambda *a, **k: None, lambda m: None
+            G.fat_serial = lambda image: "92DE-8831"
             try:
                 G.set_request_limit("unused.img", 1, d)
-                text = open(os.path.join(d, "gopher-metal.conf")).read()
+                with open(os.path.join(d, "gopher-metal.conf")) as f:
+                    text = f.read()
             finally:
-                G.mount, G.umount = real_mount, real_umount
-        # Spelled as probe/gopher.zig's `Card` enum spells it.
+                G.mount, G.umount, G.fat_serial = real
+        # Spelled as probe/gopher.zig's `Card` enum and `parseSerial` spell them.
         self.assertIn("\ncard = private\n", text)
+        self.assertIn("\nvolume = 92DE-8831\n", text)
+
+    def test_the_serial_is_read_as_blkid_spells_it(self):
+        with tempfile.TemporaryDirectory() as d:
+            image = os.path.join(d, "disk.img")
+            with open(image, "wb") as f:
+                f.seek(G.PART_FIRST * G.SECTOR + 39)
+                f.write((0x92DE8831).to_bytes(4, "little"))
+            self.assertEqual(G.fat_serial(image), "92DE-8831")
 
     def test_both_keys_are_written_and_spelled_as_the_kernel_reads_them(self):
         import re as _re

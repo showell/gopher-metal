@@ -27,9 +27,13 @@ droplet through our own BIOS loader.
   `gallery/`, `gopher-metal.conf`) on the boot disk, where each new image
   updates them. The kernel mounts both and sends each path to one by its first
   directory (`src/io.zig`); it refuses, and logs, any write outside `data/` and
-  `auth/`. With no volume attached the data stays on the boot disk; a volume
-  it cannot read stops the machine. `droplet/chat.py` builds both images; the
-  volume image was written once, from DigitalOcean's recovery console.
+  `auth/`. **It serves one volume by name:** the boot image's
+  `gopher-metal.conf` says `volume = 92DE-8831` (the FAT serial `blkid`
+  shows; `droplet/volume-serial`), and the machine stops rather than serve
+  with that volume missing or another one attached, either of which would
+  answer as an empty site and lose what was written. A path with `.` or `..`
+  is refused. The volume image was written once, from DigitalOcean's recovery
+  console (`droplet/new_volume.py`).
   **Not yet shown:** that the data survives a rebuild. A marker message was
   posted on v5, to be read back after the next image. FAT16 limits a volume to
   2 GB; prod's data is 215 MB (2026-10-01), and each user may upload 1 GiB
@@ -60,10 +64,17 @@ neighbours vary.
 
 **A deploy** is by hand:
 
-1. `droplet/chat.py <out.img>` builds the disk: the loader, `probe/gopher.elf`,
-   and the test site's files in partition 2.
+1. `droplet/chat.py <out.img>` builds the boot disk: the loader,
+   `probe/gopher.elf`, and the site's own files in partition 2, with a
+   `gopher-metal.conf` naming the volume in `droplet/volume-serial`.
 2. gzip it, and serve it somewhere DigitalOcean can fetch it.
-3. Import it as a custom image, and rebuild the droplet from it.
+3. Import it as a custom image, and rebuild the droplet from it. The volume
+   stays attached and is not touched.
+
+**A new volume** is once, by hand: `droplet/new_volume.py <out.img>` builds the
+image and prints its serial; write it onto the volume from the recovery console
+(the command is in the script); put the serial in `droplet/volume-serial`; then
+deploy as above.
 
 **Known and open:**
 

@@ -53,6 +53,8 @@ In order of severity.
 
 ### 1. No volume means an empty site, and the writes made then are lost
 
+**Fixed, with #2:** `volume = <FAT serial>` in `gopher-metal.conf`; the machine stops when that volume is missing.
+
 **Where:** `gopher.zig`, `dataVolume` → `Io.keepData(&data_dirs, null)`.
 
 **The problem:**
@@ -84,6 +86,8 @@ them is an error the machine notices.
 
 ### 2. Any FAT16 disk on the SCSI bus is taken as chat's data
 
+**Fixed:** the identity is the FAT serial mkfs chose (as `blkid` shows it), so the live volume needed no marker file. A volume with another serial stops the machine.
+
 **Where:** `dataVolume` takes the first disk `scsi.bring` finds, at any
 target and LUN. `mountFat` asks only that its first data partition be FAT16.
 
@@ -112,6 +116,8 @@ added later for any reason.
   easier to inspect from Linux.
 
 ### 3. The disk is chosen by the path as spelled, and fat16 resolves it differently
+
+**Fixed:** `placeOf` refuses any path with a `.` or `..` component, for reads and writes, and compares the first directory ignoring case.
 
 **Where:** `placeOf` looks at the raw first component and compares it
 exactly. `fat16.Volume.open` then walks the whole path:
@@ -169,6 +175,8 @@ fat16 resolves it to `x` at the *volume's* root.
 
 ### 4. A `Dir` other than `cwd()` resolves from the root of whichever disk the name picks
 
+**Fixed:** `Dir.fromRoot` panics, saying why, when a path is asked of any `Dir` but `cwd()`.
+
 **Where:** every `Dir` method except `iterate` starts with `_ = self;`.
 
 - It resolves `sub_path` from the root of the volume that `placeOf(sub_path)`
@@ -196,6 +204,8 @@ application would break.
   carry a place anyway.
 
 ### 5. Listing the root lists only the boot disk
+
+**Recorded** in `Dir.iterate`'s comment.
 
 **Where:** `cwd().iterate()` lists the site volume's root.
 

@@ -215,19 +215,42 @@ pub fn kmain() noreturn {
     serial.put(" pages\n");
 
     // ── the disks ───────────────────────────────────────────────────────────
-    // The boot disk holds the site, and no boot disk is a failure. A volume,
-    // when one is attached, holds the application's data; without one the
-    // data is on the boot disk too.
+    // The boot disk holds the site and this machine's settings, and no boot
+    // disk is a failure. The settings say whether the application's data is
+    // on a volume, and which one (`volume = 92DE-8831`); without that line a
+    // volume is used if one is attached, and the boot disk otherwise.
     var boot_disk = bootDisk();
     disks[0] = &boot_disk;
     Io.mount(mountFat(&boot_disk, &sector, "the boot disk"));
+    const io = Io.io();
+    const base = router.mem_meter.init(gpa.allocator());
+    const conf = readConfig(io, base);
     var volume_disk: virtio.Block = undefined;
     if (dataVolume()) |b| {
         volume_disk = b;
         disks[1] = &volume_disk;
-        Io.keepData(&data_dirs, mountFat(&volume_disk, &volume_sector, "the volume"));
+        const vol = mountFat(&volume_disk, &volume_sector, "the volume");
+        serial.put("  its serial: ");
+        putSerial(vol.serial);
+        serial.put("\n");
+        if (conf.volume) |want| if (vol.serial != want) {
+            serial.put("  " ++ config_path ++ " names volume ");
+            putSerial(want);
+            serial.put("\n");
+            serial.fail("the volume attached is not the one this machine serves");
+        };
+        Io.keepData(&data_dirs, vol);
         serial.put("  chat's data: the volume\n");
     } else {
+        // **A VOLUME THAT WAS NAMED AND IS MISSING STOPS THE MACHINE.** Serving
+        // on would answer with no accounts and no conversations, and keep what
+        // was written meanwhile on the boot disk, which the next image erases.
+        if (conf.volume) |want| {
+            serial.put("  " ++ config_path ++ " names volume ");
+            putSerial(want);
+            serial.put("\n");
+            serial.fail("the volume this machine serves is not attached");
+        }
         Io.keepData(&data_dirs, null);
         serial.put("  chat's data: the boot disk\n");
     }
@@ -252,15 +275,12 @@ pub fn kmain() noreturn {
     serial.put(" Hz, wall clock ");
     serial.putDec(@intCast(clock.unix));
     serial.put("\n");
-    const io = Io.io();
 
     // ── the host contract ───────────────────────────────────────────────────
-    const base = router.mem_meter.init(gpa.allocator());
     router.roots.point(base, .{ .data_dir = data_dir, .auth_dir = auth_dir }) catch
         serial.fail("roots.point could not allocate the store paths");
     var hub = Hub.init(io, base);
 
-    const conf = readConfig(io, base);
     const limit = conf.requests;
     serial.put("  a connection may make no progress for ");
     serial.putDec(conf.idle_ns / std.time.ns_per_ms);
@@ -912,6 +932,11 @@ fn logRequest(number: u64, what: []const u8, outcome: []const u8) void {
 ///                             A droplet's are public then private in PCI slot
 ///                             order; chat there belongs on the private one,
 ///                             behind prod's Caddy.
+///     volume = 92DE-8831      the FAT serial (as `blkid` shows it) of the
+///                             DigitalOcean volume the application's data is
+///                             on. Set, that volume must be attached or the
+///                             machine stops; absent, any volume is used, or
+///                             the boot disk when there is none.
 ///
 /// A key that is not one of those is a misconfiguration, and stops the machine
 /// rather than being ignored: a timeout that was silently not applied is how a
@@ -927,6 +952,10 @@ const Config = struct {
     /// turned away. The rest of the slots are for requests.
     streams: usize = max_connections - reserved_for_requests,
     card: Card = .public,
+    /// The FAT serial of the volume the application's data is on, as `blkid`
+    /// spells it: `volume = 92DE-8831`. When it is set, a volume with exactly
+    /// that serial must be attached, or the machine stops.
+    volume: ?u32 = null,
 };
 
 /// A droplet's two network cards, in PCI slot order: what `virtio.findNth` is
@@ -982,12 +1011,35 @@ fn readConfig(io: Io, alloc: std.mem.Allocator) Config {
         } else if (std.mem.eql(u8, key, "card")) {
             conf.card = std.meta.stringToEnum(Card, value) orelse
                 serial.fail(config_path ++ ": `card` is `public` or `private`");
+        } else if (std.mem.eql(u8, key, "volume")) {
+            conf.volume = parseSerial(value) orelse
+                serial.fail(config_path ++ ": `volume` is a FAT serial, as blkid shows it: 92DE-8831");
         } else {
-            serial.fail(config_path ++ ": the keys are `requests`, `idle_timeout_ms`, `streams`, `keepalive_ms`, `lose_one_sent_in` and `card`");
+            serial.fail(config_path ++ ": the keys are `requests`, `idle_timeout_ms`, `streams`, `keepalive_ms`, `lose_one_sent_in`, `card` and `volume`");
         }
     }
     if (!said_anything) serial.fail(config_path ++ " is present but says nothing");
     return conf;
+}
+
+/// `92DE-8831`: two halves of four hex digits, high half first.
+fn parseSerial(text: []const u8) ?u32 {
+    if (text.len != 9 or text[4] != '-') return null;
+    const high = std.fmt.parseInt(u16, text[0..4], 16) catch return null;
+    const low = std.fmt.parseInt(u16, text[5..9], 16) catch return null;
+    return (@as(u32, high) << 16) | low;
+}
+
+fn putSerial(serial_number: ?u32) void {
+    const n = serial_number orelse return serial.put("none");
+    const digits = "0123456789ABCDEF";
+    var text: [9]u8 = undefined;
+    for (0..8) |k| {
+        const at = if (k < 4) k else k + 1;
+        text[at] = digits[@as(u4, @truncate(n >> @intCast(28 - 4 * k)))];
+    }
+    text[4] = '-';
+    serial.put(&text);
 }
 
 pub const panic = std.debug.FullPanic(panicImpl);

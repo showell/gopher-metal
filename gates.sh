@@ -22,8 +22,17 @@ zig build gopher 2>&1 | grep error
 r=$(probe/run.sh 2>&1)
 echo "probes: $(echo "$r" | grep -c "^PASS") PASS"
 echo "$r" | grep "^FAIL"
-probe/run.sh gopher 2>&1 | tail -1
-JUDGE_DROPLET=1 probe/run.sh gopher 2>&1 | tail -1
+# The chat judges: the verdict line and, on a failure, every line after it.
+# Each verdict is kept whole, by machine, since the next run overwrites
+# run.sh's copy.
+VERDICTS="${GATES_VERDICTS:-$HOME/build/gopher-metal/gates}"
+mkdir -p "$VERDICTS"
+for machine in microvm droplet; do
+    [ $machine = droplet ] && export JUDGE_DROPLET=1
+    probe/run.sh gopher 2>&1 | sed -n '/^\(PASS\|FAIL\|    \) *gopher/,$p'
+    cp "$HOME/build/gopher-metal/probe/gopher.verdict" "$VERDICTS/gopher-$machine.verdict" 2>/dev/null
+    unset JUDGE_DROPLET
+done
 echo "droplet boot: $(droplet/boot.sh 2>&1 | grep -c PASS) PASS"
 echo "droplet hello: $(droplet/hello.sh 2>&1 | grep -c PASS) PASS"
 droplet/screen.sh 2>&1 | tail -1

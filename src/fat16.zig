@@ -190,6 +190,11 @@ pub const Volume = struct {
     data_start: u32,
     /// The highest cluster number the data region holds.
     max_cluster: u16,
+    /// **WHICH VOLUME THIS IS**: the serial number mkfs chose at random when it
+    /// formatted it (the extended boot record's volume ID, offset 39), or null
+    /// on a boot sector without one. Linux's `blkid` shows it as the UUID,
+    /// `92DE-8831`, high half first.
+    serial: ?u32 = null,
 
     /// **THE FAT, HELD IN MEMORY**, once the host has given it somewhere to
     /// live. Without it every FAT lookup is a device read — and a soak of
@@ -285,6 +290,8 @@ pub const Volume = struct {
             .root_sectors = root_sectors,
             .root_entries = root_entries,
             .data_start = data_start,
+            // 0x29 says the extended boot record, and with it the serial, is there.
+            .serial = if (b[38] == 0x29) le32(b[39..43]) else null,
         };
     }
 
@@ -730,7 +737,6 @@ pub const Volume = struct {
             if (!(try walk.next())) return;
         }
     }
-
 
     /// Writes the long-name run and the short entry that closes it.
     /// The date to stamp on an entry being written now.
