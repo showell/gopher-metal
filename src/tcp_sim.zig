@@ -827,30 +827,35 @@ const Sim = struct {
             \\  scenario: request {d} B, answer {d} B, loss {d:.2} until {d} ms, duplicate {d:.2}, corrupt {d:.2},
             \\            delay {d} us + {d} us jitter, delayed ACK {d} ms, half-close {any}, host stalls {d} ms,
             \\            client stalls {d} ms, vanishes {?d} ms, host announces {any}
+            \\
+        , .{
+            self.seed,                                                 what,
+            sc.request_len,                                            sc.answer_len,
+            sc.loss,                                                   @divTrunc(sc.lossy_until, ns_per_ms),
+            sc.duplicate,                                              sc.corrupt,
+            @divTrunc(sc.delay_ns, 1000),                              @divTrunc(sc.jitter_ns, 1000),
+            @divTrunc(sc.delayed_ack_ns, ns_per_ms),                   sc.half_close,
+            @divTrunc(sc.host_stall_ns, ns_per_ms),                    @divTrunc(sc.client_stall_ns, ns_per_ms),
+            if (sc.vanish_at) |at| @divTrunc(at, ns_per_ms) else null, sc.host_announces,
+        });
+        // Two calls: one holds at most 32 arguments.
+        std.debug.print(
             \\  at {d} ms: client {s} (aborted {any}, gone {any}), received {d}, peer FIN {any}, probes {d};
             \\            host read {d}, queued {d}, finished {any}, let go {any};
             \\            table given up {d}, retransmits {d}, probes {d}, window updates {d}, damaged {d};
             \\            network sent {d}, lost {d}, duplicated {d}, corrupted {d}, overflowed {d}
             \\
         , .{
-            self.seed,                                      what,
-            sc.request_len,                                 sc.answer_len,
-            sc.loss,                                        @divTrunc(sc.lossy_until, ns_per_ms),
-            sc.duplicate,                                   sc.corrupt,
-            @divTrunc(sc.delay_ns, 1000),                   @divTrunc(sc.jitter_ns, 1000),
-            @divTrunc(sc.delayed_ack_ns, ns_per_ms),        sc.half_close,
-            @divTrunc(sc.host_stall_ns, ns_per_ms),         @divTrunc(sc.client_stall_ns, ns_per_ms),
-            if (sc.vanish_at) |at| @divTrunc(at, ns_per_ms) else null, sc.host_announces,
-            @divTrunc(self.now, ns_per_ms),                 @tagName(self.client.state),
-            self.client.aborted,                            self.client.gone,
-            self.client.received,                           self.client.peer_fin,
-            self.client.probes,                             self.host.consumed,
-            self.host.queued,                               self.host.finished,
-            self.host.let_go,                               self.table.given_up,
-            self.table.retransmits,                         self.table.probes,
-            self.table.window_updates,                      self.table.damaged,
-            self.net.sent,                                  self.net.lost,
-            self.net.duplicated,                            self.net.corrupted,
+            @divTrunc(self.now, ns_per_ms), @tagName(self.client.state),
+            self.client.aborted,            self.client.gone,
+            self.client.received,           self.client.peer_fin,
+            self.client.probes,             self.host.consumed,
+            self.host.queued,               self.host.finished,
+            self.host.let_go,               self.table.given_up,
+            self.table.retransmits,         self.table.probes,
+            self.table.window_updates,      self.table.damaged,
+            self.net.sent,                  self.net.lost,
+            self.net.duplicated,            self.net.corrupted,
             self.net.overflowed,
         });
         return error.SimulationFailed;
