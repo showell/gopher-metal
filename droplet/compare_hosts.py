@@ -133,12 +133,23 @@ def fetch(base: str, path: str, cookie: str, netns: str = None) -> tuple:
 RFC3339 = re.compile(rb"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z")
 
 
+# **A SECOND EITHER SIDE**, as the judge's windows have (judge_gopher's
+# `window`, int(before) - 1 to now + 1). The window is this machine's clock;
+# a host stamps its writes with its own. Metal reads its clock at a second's
+# edge at boot, so it is within a second of this one on a droplet, but
+# under QEMU without KVM its rate drifts a little, and a write in the
+# window's first instant was stamped the second before it (seen once in
+# the first two FAT32 rehearsals, item 59). A clock further off than this is
+# still a difference, and droplet/drift.py measures it.
+CLOCK_SLACK_S = 1
+
+
 class Written:
     """What --writes did on one host: the seconds its writes took, and the
     upload's name there, which are what may differ between the two."""
 
     def __init__(self, start: int, end: int, upload: str):
-        self.start, self.end, self.upload = start, end, upload
+        self.start, self.end, self.upload = start - CLOCK_SLACK_S, end + CLOCK_SLACK_S, upload
 
     def normalize(self, body: bytes) -> bytes:
         def when(m):
