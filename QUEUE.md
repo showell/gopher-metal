@@ -295,7 +295,7 @@ check-in 2 under Answers: the judge fixes (findings 1-2) and `tz=UTC` on
     - A new step, `backoff`, runs `backoff.elf` with `RESTARTS=1`, on
       `MACHINE=pc` and then on microvm. Each must report restarts 1 to 4
       and then "serving again".
-17. **FAT32, per `FAT32.md`** (Steve: before the cutover, so the data moves
+17. **FAT32, per `FAT32.md`** *(CC, started 2026-10-02.)* (Steve: before the cutover, so the data moves
     once).
     - Extend `tools/fat16_read.py` to read and check FAT32 first, from the
       spec, and test it against `mkfs.vfat -F 32` and mtools volumes, before
