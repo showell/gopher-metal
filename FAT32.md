@@ -7,8 +7,9 @@ stays, and how the result is judged against Linux.
 
 FAT16 is defined by its cluster count: fewer than 65,525. With 32 KiB
 clusters, the largest size every implementation agrees on, that is a 2 GiB
-volume. Prod's data is 215 MB today, and each user may upload 1 GiB, so a
-handful of users fills a FAT16 volume.
+volume. Prod's data is 215 MB today, and each user may store up to 1 GiB
+over their lifetime, so two users at the cap fill a FAT16 volume. A volume
+for N users at the cap is N GiB, plus everything else.
 
 FAT32 raises three limits, and leaves one where it is:
 
@@ -16,15 +17,13 @@ FAT32 raises three limits, and leaves one where it is:
 - **A volume:** with 32 KiB clusters, larger than this machine can address.
   The real ceiling is our own sector numbers (below): 2 TiB.
 - **A file:** still at most 4 GiB − 1. The directory entry's size field is
-  32 bits in both formats, so a 1 GiB upload fits, and `writeInto`'s
-  existing `reach > 0xFFFF_FFFF` check stays exactly as it is.
+  32 bits in both formats. Caddy caps one upload at 110 MB
+  (`droplet/metal.lynrummy.com.caddy`), so files stay far below that, and
+  `writeInto`'s existing `reach > 0xFFFF_FFFF` check stays exactly as it is.
 
-**Not a FAT problem, but in the way of 1 GiB uploads.** `writeFile` takes the
-whole file as one slice, and an upload's body sits in the request heap, which
-is 32 MiB (`probe/gopher.zig`). A 1 GiB upload needs a body read in pieces and
-written with `writeInto` as it arrives. That is a change to the upload route
-and to how the host hands it a body, and it is bigger than FAT32. It is listed
-here so that nobody expects FAT32 alone to make 1 GiB uploads work.
+What grows is the number and total size of files, not the size of any one
+of them. So FAT32's work is about the volume: the FAT's size in memory
+(§9), the free-cluster search (§8), and the sector-number ceiling (§10).
 
 ## What changes in `src/fat16.zig`
 
@@ -272,9 +271,14 @@ FAT32 gets the same judges, plus cases FAT16 cannot have.
   `RootClus` out of range, and a volume past sector 2^32 (a sparse image).
   Each is refused at mount with its own error, like `realunset`'s "refused
   as it must".
-- **Scale:** one 1 GiB file written and read back (sparse image), timed like
-  `ladder`. It reports the FAT cache's size and the free-cluster search's
-  cost with the cursor in place.
+- **Scale:** a sparse image of tens of GiB, filled the way chat fills it:
+  - many users' worth of uploads up to Caddy's 110 MB, and many small files
+    between them;
+  - then deletes, and more writes into the gaps.
+
+  It is timed like `ladder`, and it reports the FAT cache's size and the
+  free-cluster search's cost with the cursor in place, at each step of the
+  fill.
 
 **Then the chat judge.** `probe/run.sh gopher` against Linux, serving from a
 FAT32 volume, with every gate the same. This is what says the port does not
@@ -301,7 +305,5 @@ Each step is a commit, and each keeps every FAT16 probe green.
 3. FAT32 writes: the rest of §4, §5's `grow`, §6's writers, §7 (invalidate).
    Judge: fsck, Linux, and the FAT32-only probes.
 4. The free-cluster cursor (§8), then the FAT cache budget and run reads
-   (§9). Judge: the 1 GiB ladder.
+   (§9). Judge: the scale ladder.
 5. The data move (above), on the droplet.
-6. Separately, and larger: streaming uploads, so that a 1 GiB body never
-   sits in memory.
