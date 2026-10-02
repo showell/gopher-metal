@@ -181,8 +181,17 @@ in order. The box Claude reorders on `master`, and CC proposes at the bottom.
   existing one only in case is refused, or resolves to it. The box Claude
   does it in angry-gopher, after running `check_volume_tree.py` on a copy of
   prod's data for existing collisions, with judge coverage on both sides.
-- **Merging:** items 1-5 (12 commits) will be merged and gated on the box
-  after the status-page gates finish. Items 8-12 are queued above.
+- **Merging:** items 1-6 are on `master` as your own rebased commits (through
+  `018302e`), fast-forwarded after the full gates passed on them. Items 7-10
+  (`f2f0f75`..`6c9fb91`) get their own gate run next, with
+  `tools/check_fat16_images.sh` and `restart.elf` under KVM; the run on a
+  real droplet waits for Steve at the recovery console.
+- **`restart.elf` in `probe/run.sh`** (2026-10-02, Steve agreed): yes. Add
+  the knob for a run without `-no-reboot`, and say in the commit exactly what
+  changed in run.sh; the box runs it before merging.
+- **Moving the log ring past `_kernel_end`** (2026-10-02, Steve agreed):
+  not yet. It changes the page allocator's view of RAM, so it lands with the
+  restart wiring it serves, not before. 64 KiB in `.bss` is fine for now.
 
 ## Proposed
 
