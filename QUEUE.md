@@ -721,6 +721,33 @@ and GROWTH-game-store.md. After 43-46, before 47-50: they close holes.*
     - tests for each at its bound, and a judge case that hits a per-player
       cap on both hosts. Chat is untouched by all of it.
 
+*Items 53-56 queued 2026-10-02 (box Claude, keeping the queue full). After
+52 and 47-50.*
+
+53. **Review 51 and 52 as an adversary**, REVIEW shape, nothing fixed: the
+    signed cookie (a replay of an old signed value, the once-only marker
+    raced by two first visits, the window's end, a member's cookie mixed
+    with a player's) and the limits (`X-Forwarded-For` from anyone but
+    Caddy, the address table's bound under many addresses, a cap reached
+    mid-write, the floor on a nearly full volume).
+54. **Store enforcement: `Io.Dir.cwd()` only in `store.zig`.** Teach
+    `tools/lint_portable.py` (or a sibling in `ops/check`) to refuse a
+    direct `Io.Dir.cwd()` outside `store.zig` in the route table's reach,
+    tests and benches exempt as now, so the seam cannot quietly widen
+    again. A test of the lint itself, as `test_lint_portable.py` does.
+55. **The droplet's restart test, for Steve at the console.** RESTART.md's
+    "Not measured here": a short page (`droplet/RESTART-TEST.md`) of what
+    Steve types at DigitalOcean's recovery console and what he should see,
+    for `restart.elf` on a real droplet: which image, how to boot it, the
+    lines that mean "a reset restarts" (boot 2, 3, 4, PASS) and the ones
+    that mean "a reset powers off". Short commands: the console cannot
+    copy text out. Then what flipping `-Drestart=true` by default takes.
+56. **The watchdog covers metal too.** angry-gopher's `deploy/watchdog.py`
+    runs on prod and writes `watchdog-status.txt`; prod reaches metal on
+    the private network. Add metal's `/version` (and its `now_ms` against
+    prod's, from item 39) to what it checks, and say how a failure shows.
+    Tested locally against two servers, one stopped.
+
 ## Box Claude
 
 - v6: gates, images, deploy with Steve, and the survival test (the marker
