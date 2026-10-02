@@ -51,8 +51,7 @@ def extract(image: str, out: str, anyway: bool = False) -> tuple:
     """Writes `image`'s tree under `out`. Answers (files, folders, warnings)."""
     if os.path.exists(out) and os.listdir(out):
         raise Refused(f"{out} is not empty")
-    with open(image, "rb") as f:
-        v = fat16_read.Volume(f.read())
+    v = fat16_read.load(image)
     problems = []
     walked = v.walk(problems)
     if problems and not anyway:

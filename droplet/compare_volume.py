@@ -47,8 +47,7 @@ TIME_SLACK = 2
 
 def compare(copy: str, image: str) -> list:
     """Every finding, as (kind, path, why), paths from the copy's root."""
-    with open(image, "rb") as f:
-        v = fat16_read.Volume(f.read())
+    v = fat16_read.load(image)
     findings = [("check", "", p) for p in v.check()]
 
     # One walk, and each file read from the chain it found: v.read(path)
@@ -88,14 +87,25 @@ def compare(copy: str, image: str) -> list:
             if v_size != st.st_size:
                 findings.append(("size", rel, f"{st.st_size} bytes in the copy, {v_size} on the volume"))
                 continue
+            # Both sides a block at a time: neither file is held whole.
+            h = hashlib.sha256()
             with open(src, "rb") as f:
-                want = hashlib.sha256(f.read()).hexdigest()
+                for block in iter(lambda: f.read(1 << 20), b""):
+                    h.update(block)
+            want = h.hexdigest()
+            h = hashlib.sha256()
             try:
-                data = b"" if v_size == 0 else b"".join(v.cluster(c) for c in v.chain(v_first))[:v_size]
+                left = v_size
+                for c in (v.chain(v_first) if v_size else ()):
+                    if left <= 0:
+                        break
+                    block = v.cluster(c)[:left]
+                    h.update(block)
+                    left -= len(block)
             except fat16_read.Problem as p:
                 findings.append(("content", rel, f"its chain will not read: {p}"))
                 continue
-            got = hashlib.sha256(data).hexdigest()
+            got = h.hexdigest()
             if want != got:
                 findings.append(("content", rel, f"SHA-256 {want[:16]}... in the copy, {got[:16]}... on the volume"))
             vt = v.mtime.get(rel)

@@ -20,6 +20,7 @@ three readers that are not mtools: `compare_volume.py` against the copy,
 
 Needs sgdisk, mkfs.vfat and mtools; no root.
 """
+import errno
 import os
 import shutil
 import subprocess
@@ -72,8 +73,7 @@ def build(copy: str, out: str, fat: int = 16, size: int = 2 << 30, cluster_secto
     # too few clusters without complaint (1 GiB at 32 KiB clusters: 32,768).
     # Linux calls that FAT32; the spec, and this machine, count clusters and
     # call it FAT16, and the mount refuses it (REVIEW-restart-fat32.md F2).
-    with open(out, "rb") as f:
-        kind = fat16_read.Volume(f.read()).kind
+    kind = fat16_read.load(out).kind
     if kind != f"FAT{fat}":
         raise Refused(f"mkfs.vfat made a FAT{fat} layout of {size >> 20} MiB that the spec's cluster count calls "
                       f"{kind}, which this machine refuses; FAT32 needs 65,525 clusters (--gib 3 or more at "
@@ -86,16 +86,49 @@ def build(copy: str, out: str, fat: int = 16, size: int = 2 << 30, cluster_secto
     return judge_gopher.fat_serial(out)
 
 
+def copy_sparse(image: str, start: int, out: str) -> None:
+    """`image` from byte `start` to its end, into `out`, leaving holes where
+    it has them or is zero (QUEUE.md item 75). fsck.fat takes no offset, so it
+    is handed the partition as a file of its own; written whole, a 16 GiB
+    volume would be 16 GiB more in the scratch folder, which may be memory
+    (tmpfs). The image's own holes are skipped without reading them
+    (SEEK_DATA), and a block of zeros in what is read is left a hole too."""
+    chunk = 1 << 20
+    with open(image, "rb") as src, open(out, "wb") as dst:
+        end = os.fstat(src.fileno()).st_size
+        pos = start
+        while pos < end:
+            try:
+                data = os.lseek(src.fileno(), pos, os.SEEK_DATA)
+                hole = os.lseek(src.fileno(), data, os.SEEK_HOLE)
+            except OSError as e:
+                if e.errno == errno.ENXIO:  # nothing but a hole from here to the end
+                    break
+                data, hole = pos, end  # a filesystem without SEEK_DATA: read it all
+            src.seek(data)
+            dst.seek(data - start)
+            at = data
+            while at < hole:
+                block = src.read(min(chunk, hole - at))
+                if not block:
+                    break
+                if block.count(0) == len(block):
+                    dst.seek(len(block), os.SEEK_CUR)
+                else:
+                    dst.write(block)
+                at += len(block)
+            pos = hole
+        dst.truncate(end - start)
+
+
 def judge(copy: str, image: str) -> list:
     """What the three readers that are not mtools say: nothing, for a good
     volume."""
     problems = [f"compare_volume: {k} {p}: {w}" for k, p, w in compare_volume.compare(copy, image)]
-    problems += [f"fat16_read: {p}" for p in fat16_read.Volume(open(image, "rb").read()).check()]
+    problems += [f"fat16_read: {p}" for p in fat16_read.load(image).check()]
     with tempfile.TemporaryDirectory() as d:
         part = os.path.join(d, "part.img")
-        with open(image, "rb") as src, open(part, "wb") as dst:
-            src.seek(PART_FIRST * SECTOR)
-            shutil.copyfileobj(src, dst)
+        copy_sparse(image, PART_FIRST * SECTOR, part)
         fsck = subprocess.run(["fsck.fat", "-n", part], capture_output=True, text=True)
         if fsck.returncode != 0:
             problems.append("fsck.fat: " + " | ".join(fsck.stdout.splitlines()[1:4]))
@@ -187,6 +220,43 @@ def make_tree(root: str) -> None:
         os.utime(path, (t, t))
 
 
+# **A LARGE VOLUME, IN LITTLE MEMORY** (QUEUE.md item 75): the FAT32 rehearsal
+# on a 3 GiB volume grew to 7.4 GB and was killed, because the readers held
+# the image whole, two at a time. Now they map it (fat16_read.open_image), and
+# fsck's copy of the partition is sparse. Measured in a process of its own, so
+# its peak is its own: getrusage's RUSAGE_CHILDREN is the largest of the
+# children waited for, and their own children (mkfs.vfat, mcopy, fsck.fat).
+LARGE_GIB = 16
+LARGE_PEAK_MB = 256
+
+
+def large_volume_memory() -> list:
+    import resource
+    with tempfile.TemporaryDirectory() as d:
+        copy = os.path.join(d, "copy")
+        make_tree(copy)
+        out = os.path.join(d, "large.img")
+        code = (f"import sys; sys.path.insert(0, {HERE!r}); import build_volume as b\n"
+                f"b.build({copy!r}, {out!r}, 32, {LARGE_GIB} << 30)\n"
+                f"p = b.judge({copy!r}, {out!r})\n"
+                f"print(len(p)); sys.exit(1 if p else 0)\n")
+        before = resource.getrusage(resource.RUSAGE_CHILDREN).ru_maxrss
+        r = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True)
+        peak_mb = resource.getrusage(resource.RUSAGE_CHILDREN).ru_maxrss >> 10  # KiB, on Linux
+        on_disk_mb = (os.stat(out).st_blocks * 512) >> 20 if os.path.exists(out) else 0
+    failures = []
+    if r.returncode != 0:
+        failures.append(f"a {LARGE_GIB} GiB FAT32 volume did not build and judge clean: "
+                        f"{(r.stdout + r.stderr).strip()[-300:]}")
+    if peak_mb > LARGE_PEAK_MB and peak_mb > before >> 10:
+        failures.append(f"building and judging a {LARGE_GIB} GiB volume peaked at {peak_mb} MB, "
+                        f"over {LARGE_PEAK_MB} MB")
+    if on_disk_mb > 256:
+        failures.append(f"the {LARGE_GIB} GiB volume took {on_disk_mb} MB on disk; it should be sparse")
+    print(f"  a {LARGE_GIB} GiB FAT32 volume: built and judged, peak {peak_mb} MB, {on_disk_mb} MB on disk")
+    return failures
+
+
 def self_test() -> int:
     missing = [t for t in ("sgdisk", "mkfs.vfat", "mcopy", "fsck.fat") if shutil.which(t) is None]
     if missing:
@@ -208,7 +278,7 @@ def self_test() -> int:
             except Refused as e:
                 failures.append(f"FAT{fat}: refused a good tree: {e}")
                 continue
-            kind = fat16_read.Volume(open(out, "rb").read()).kind
+            kind = fat16_read.load(out).kind
             if kind != f"FAT{fat}":
                 failures.append(f"FAT{fat}: made {kind}")
             problems = judge(copy, out)
@@ -240,12 +310,14 @@ def self_test() -> int:
         os.utime(os.path.join(copy, "data/players/p3/name"), (NOW, NOW))
         if not any("content" in p for p in judge(copy, os.path.join(d, "v16.img"))):
             failures.append("the judge did not find a file that changed after the build")
+    failures += large_volume_memory()
     if failures:
         print("self-test FAILED:\n  " + "\n  ".join(failures))
         return 1
     print("self-test passed: every name shape the application makes, and dates at both ends of "
           "FAT's range, built on FAT16 and FAT32 without root and read back exactly by "
-          "compare_volume.py, fat16_read.py and fsck.fat; a tree with findings refused")
+          "compare_volume.py, fat16_read.py and fsck.fat; a tree with findings refused; a 16 GiB "
+          "volume built and judged in little memory and little disk")
     return 0
 
 

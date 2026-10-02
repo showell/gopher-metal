@@ -1183,8 +1183,7 @@ def oracle_megabytes(path: str, base: int = None) -> tuple:
     `path` (or the volume it finds there)."""
     sys.path.insert(0, TOOLS_DIR)
     import fat16_read
-    with open(path, "rb") as f:
-        v = fat16_read.Volume(f.read(), base)
+    v = fat16_read.Volume(fat16_read.open_image(path), base)
     total = ((v.max_cluster - 1) * v.cluster_bytes) >> 20
     free = (sum(1 for c in range(2, v.max_cluster + 1) if v.fat(c) == 0) * v.cluster_bytes) >> 20
     return free, total

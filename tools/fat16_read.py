@@ -41,6 +41,7 @@ Plain Python, standard library only, no mounting.
 """
 import calendar
 import datetime
+import mmap
 import os
 import shutil
 import struct
@@ -394,9 +395,20 @@ def lfn_checksum(short):
 
 # ── the command line ────────────────────────────────────────────────────────
 
-def load(path):
+def open_image(path):
+    """**AN IMAGE, MAPPED, NOT READ** (QUEUE.md item 75): the file's bytes as a
+    read-only mmap, which slices and `struct.unpack_from` take like bytes. The
+    kernel's page cache holds what is touched (the FAT, the directories, the
+    files read) and can drop it again, so a 16 GiB volume costs this process
+    megabytes, not gigabytes. An empty file maps to nothing, so it is b""."""
     with open(path, "rb") as f:
-        return Volume(f.read())
+        if os.fstat(f.fileno()).st_size == 0:
+            return b""
+        return mmap.mmap(f.fileno(), 0, access=mmap.ACCESS_READ)
+
+
+def load(path):
+    return Volume(open_image(path))
 
 
 def main(argv):
