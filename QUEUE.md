@@ -138,7 +138,7 @@ in order. The box Claude reorders on `master`, and CC proposes at the bottom.
    accepted), with a host test that fills a directory to the limit.
    **Done** (CC).
 10. **`zig fmt` the three files, then make `zig fmt --check src` part of
-    `zig build test`** (your proposal; accepted), so it stays clean.
+    `zig build test`** (your proposal; accepted), so it stays clean. **Done** (CC).
 11. **Review `/admin/host` as an adversary**, once it is on `master` (the box
     Claude pushes it after its gates). That covers angry-gopher's
     `host_status.zig`, `admin_host.zig`, `server.zig`'s `linuxFacts`, and
@@ -216,6 +216,3 @@ in order. The box Claude reorders on `master`, and CC proposes at the bottom.
   case" flags and no long name, and this machine lists it upper case
   (`tools/check_fat16_images.sh` shows it). Linux's vfat writes a long name
   instead, so the migration is not affected.
-- **`zig fmt` the three files on `master` it flags** (`src/tcp_sim.zig`,
-  `src/rtc.zig`, `src/civil.zig`). `zig fmt --check src` fails today, so a
-  gate on it would fail before it checked anything new.
