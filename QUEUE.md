@@ -350,6 +350,22 @@ queue full). After 17 and 18.*
       dates near both ends of FAT's range.
     - MIGRATION.md's step 3 then uses it. The box builds the same copy both
       ways once (mtools here, the Linux mount there) and compares.
+
+    **Done** (CC, `0bd4b90`): `droplet/build_volume.py COPY OUT.img [--fat 32
+    --gib N]`.
+    - **Its self-test** builds a tree of every name shape MIGRATION.md
+      lists: an 80-character mixed-case session id with all its sidecars
+      (`.reactions.jsonl` at 96 characters), an upload, a channel, an
+      80-character doc slug, and the user, player and account files.
+    - **Two dates** sit at the ends of FAT's range: 1980-01-01T00:00:02Z
+      and 2107-12-31T23:59:58Z.
+    - **On FAT16 and FAT32** (64 MiB each), compare_volume, fat16_read and
+      fsck.fat must all find nothing.
+    - **And:** a tree with a finding must be refused, and a file changed
+      after the build must be found.
+    - **By hand,** a 2 GiB FAT16 build of the same tree took 43 s and judged
+      clean.
+    - MIGRATION.md steps 2–4 use it.
 20. **Review, as an adversary: every path angry-gopher builds from a value a
     request carries** (`REVIEW-interrupts.md`'s shape, nothing fixed).
     - The class: on 2026-10-02 prod held `data/users/r` and `data/users/y`,
