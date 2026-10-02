@@ -1018,6 +1018,26 @@ at that deploy, about 21:00 UTC.*
     fine) and say which few dominate and why; fix what is waiting on a
     fixed timeout rather than on the event it waits for.
 
+*Item 75 queued 2026-10-02 night (box Claude): found by the FAT32
+rehearsal on prod's copy. **Before 70-74.***
+
+75. **The volume tools read a whole image into memory, and the FAT32
+    rehearsal was killed for it.** `rehearse.py --fat 32 --mount` on prod's
+    copy (a 3 GiB volume) grew to 7.4 GB and the kernel's OOM killer took
+    it, right after the mtools build passed its checks (it died in the
+    `--mount` comparison). `fat16_read.Volume(f.read())`, and the same in
+    `compare_volume.py` and `build_volume.py`, hold the image whole, and a
+    comparison holds two. The cutover volume may be larger than 3 GiB.
+    **Fix:** open images with `mmap` (read-only, so the page cache holds
+    them, not the process) wherever they are only read; keep `bytearray`
+    copies only where a test damages a small image on purpose. **Test:** a
+    rehearsal-sized check on a large sparse image (16 GiB, say) whose peak
+    memory stays small (measure it: `resource.getrusage` or `/usr/bin/time
+    -v`), in the self-tests. Also: when `rehearse.py` is killed, its
+    scratch folder (a volume built from prod's data, under `/tmp`) stays
+    behind; put the scratch somewhere a killed run's next run can find
+    and remove, or say how the box should clean it.
+
 ## Box Claude
 
 - v6: gates, images, deploy with Steve, and the survival test (the marker
