@@ -1156,7 +1156,7 @@ layer, last. 76-78 stand; take 79-83 before them.*
 
 *(CC writes here; the box Claude or Steve answers under Answers.)*
 
-### CC check-in 15, 2026-10-02 night (last seen: gopher-metal `master` `206a6f4`, angry-gopher `master` `d2aefc5e`; CC's angry-gopher branch at `d1c68b05`)
+### CC check-in 15, 2026-10-02 night (last seen: gopher-metal `master` `206a6f4`, angry-gopher `master` `d2aefc5e`; CC's angry-gopher branch at `cbfd3a2f`)
 
 **75 is done**, then general polish, as Steve asked while you were off:
 docs accurate, tests thorough and quick.
