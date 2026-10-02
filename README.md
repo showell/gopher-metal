@@ -184,6 +184,42 @@ PASS http | curl got "hello from no Linux"
 PASS stdhttp | curl got "hello from std.http.Server, with no Linux under it"
 ```
 
+## Working from a Claude Code cloud session
+
+A cloud session is a fresh container with no KVM, and ziglang.org is
+blocked from it. What does and does not work there, found on 2026-10-02:
+
+- **zig.** `.claude/hooks/session-start.sh` installs 0.16.0 from PyPI's
+  `ziglang` package. It runs async, so a `zig` command in the first seconds
+  of a fresh container may find nothing yet. Once it is installed,
+  `zig build test`, `kernels`, `hello` and `native` all work.
+- **The real server builds.** Clone angry-gopher; the git proxy serves the
+  public repository:
+
+      git clone --depth 1 https://github.com/showell/angry-gopher ~/showell/angry-gopher
+      GOPHER_SRC=~/showell/angry-gopher/zig-server/src ./port.sh
+      zig build gopher -Dgopher=$HOME/build/gopher-metal/port -Dgopher-root=$HOME/showell/angry-gopher
+
+  Seven of the assets in `gen/assets.zig` are front-end build products that
+  are not in git (`.wasm`, compiled Elm `.js`). For a compile check, create
+  them as empty files: the build embeds them, but compiling does not read
+  them.
+- **QEMU.**
+  - **Installing it:** `apt-get install qemu-system-x86 dosfstools gdisk`
+    works, and gives QEMU 8.2 with no KVM.
+  - **`probe/run.sh` stops before any probe runs.** Its judges' self-test
+    compares a recorded `tsc_hz` (2.494 GHz) with the host's, and a cloud
+    CPU (2.1 GHz) fails it.
+  - **`droplet/boot.sh` passes all seven probes** once `droplet.sh`'s
+    `-accel kvm -cpu host` is changed to `-accel tcg -cpu max` locally.
+- **What cannot be judged there:**
+  - **Resting with the APIC timer.** TCG offers no TSC-deadline timer, so
+    `interrupts.startApic` refuses and the machine never rests.
+  - **The chat judge.** It loop-mounts FAT images, and the container's
+    kernel has no `vfat`.
+
+  Both are judged on a machine with KVM.
+
 ## The one that matters
 
 `zig-server` builds its HTTP server like this, and so does `probe/stdhttp.zig`:
