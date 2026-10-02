@@ -22,7 +22,7 @@ droplet through our own BIOS loader.
   to it, from `droplet/metal.lynrummy.com.caddy`, installed by hand in
   `/etc/caddy/sites/`.
 - **Its data is on a DigitalOcean volume** (2 GiB, nyc2), since v5
-  (2026-10-02): chat's data (`data/`, `auth/`) on the volume, which a new
+  (2026-10-02; v6 is live): chat's data (`data/`, `auth/`) on the volume, which a new
   image does not touch (`src/scsi.zig`), and the site's own files (`pages/`,
   `gallery/`, `gopher-metal.conf`) on the boot disk, where each new image
   updates them. The kernel mounts both and sends each path to one by its first
@@ -34,8 +34,8 @@ droplet through our own BIOS loader.
   answer as an empty site and lose what was written. A path with `.` or `..`
   is refused. The volume image was written once, from DigitalOcean's recovery
   console (`droplet/new_volume.py`).
-  **Not yet shown:** that the data survives a rebuild. A marker message was
-  posted on v5, to be read back after the next image. FAT16 limits a volume to
+  **It survives a rebuild:** a marker message posted on v5 was read back on
+  v6 (2026-10-02), after the droplet was rebuilt from the new image. FAT16 limits a volume to
   2 GB; prod's data is 215 MB (2026-10-01), and each user may upload 1 GiB
   over their lifetime, so FAT32 is the eventual next step (`FAT32.md`).
 - **Its data is test data.** The volume is the chat judge's test site, whose
