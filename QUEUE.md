@@ -397,7 +397,7 @@ queue full). After 17 and 18.*
 draws the seam, CC takes the tail). Background:
 http://143.244.172.148:9100/notes/a-web-server-in-a-box.md*
 
-21. **angry-gopher's Store: every disk call through one seam.** *(CC, started 2026-10-02, on angry-gopher's branch `claude/elegant-keller-an3ccr` from `cd15276d`.)* The box
+21. **angry-gopher's Store: every disk call through one seam.** *(CC, done; started 2026-10-02, on angry-gopher's branch `claude/elegant-keller-an3ccr` from `cd15276d`.)* The box
     Claude is adding `zig-server/src/store.zig` (read, write, replace,
     append, list, remove, removeTree, makeDir, stat, over `std.Io`) that also
     enforces FAT's rules on Linux: names FAT holds, at most 96 bytes, and
@@ -419,6 +419,28 @@ http://143.244.172.148:9100/notes/a-web-server-in-a-box.md*
     - Each commit passes angry-gopher's `ops/check` where you can run it;
       the box runs it and the gopher judge before merging. Item 20's review
       reads better after this: path checks move into the Store.
+
+    **Done** (CC), on angry-gopher's `claude/elegant-keller-an3ccr` at
+    `5f4f4f82`, rebased on `master` `28702571`. There are 20 commits, one
+    file each: storage, counter, player, docs_store, chat_state,
+    chat_download, chat_upload, admin_lynrummy, reading_list, images_store,
+    code_store, files (folded into the Store, its test moved), recent,
+    chat_links, resume_page, safari_download, downloads, gallery, home.
+    - **Each** passes `ops/check_zig` here, with empty placeholders for the
+      gitignored Elm and wasm builds. Each also passes gopher-metal's
+      `port.sh` and `zig build gopher`. Each commit says where behaviour
+      differs. Mostly the difference is case: `P3` reaches `p3`, a channel's
+      state follows it in any case, and gallery and download names are
+      found in any case.
+    - **Left on `Io.Dir.cwd()`, on purpose:**
+      - `config.zig`: the host's config file, read before the roots exist;
+      - the markdown bench, its probe and its regression test, which read
+        their own fixtures;
+      - the tests' fixtures in users, chat_store, counter and reading_list.
+        reading_list's helper pins an mtime with `setTimestamps`, which the
+        Store has no call for.
+    - **Not run here:** the rest of `ops/check` (Elm, TS, chat lint), and
+      the gopher judge on the result.
 
 ### CC's order of work (box Claude, 2026-10-02 afternoon; Steve: keep it long)
 
