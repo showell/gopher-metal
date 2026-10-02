@@ -590,6 +590,21 @@ def split_site_off(image: str, scratch: str) -> str:
     return fat
 
 
+def restore_site(image: str, site: str, mnt: str) -> None:
+    """Puts back on `image` the site files split_site_off moved from it into
+    `site`: copied, since the story's own split keeps its copy."""
+    mount(image, mnt, writable=True)
+    try:
+        for entry in os.listdir(site):
+            src, dst = os.path.join(site, entry), os.path.join(mnt, entry)
+            if os.path.isdir(src):
+                shutil.copytree(src, dst)
+            else:
+                shutil.copy(src, dst)
+    finally:
+        umount(mnt)
+
+
 def droplet_start(elf: str, image: str, scratch: str, port: int, serial_log):
     disk = os.path.join(scratch, "droplet.img")
     run([os.path.join(DROPLET_DIR, "image.sh"), elf, disk, split_site_off(image, scratch)])
@@ -1127,12 +1142,20 @@ def run_story(elf, linux_bin, content, pristine, work, mnt, steps, label, report
         failures += 1
         report(f"FAIL  {label}: after the story, tools/fat16_read.py finds the disk inconsistent: "
                + " | ".join(oracle.stdout.splitlines()[1:4]))
-    recheck = os.path.join(scratch, "recheck.img")
+    # **A SCRATCH OF ITS OWN**: on the droplet machine a boot splits the
+    # site off into its scratch (split_site_off), and the story's boot already
+    # did that in this one. And there the story's disk now holds only chat's
+    # data, so the site that boot moved off is put back on this copy first,
+    # for this boot to split off in turn.
+    rscratch = tempfile.mkdtemp(dir=scratch)
+    recheck = os.path.join(rscratch, "recheck.img")
     shutil.copy(image, recheck)
+    if DROPLET:
+        restore_site(recheck, os.path.join(scratch, "site"), mnt)
     set_request_limit(recheck, 1, mnt)
-    rq, rport, rserial = start_kernel(elf, recheck, scratch)
+    rq, rport, rserial = start_kernel(elf, recheck, rscratch)
     ask(rport, case("the version, on a boot of the written disk", "GET", "/version"),
-        os.path.join(scratch, "recheck"))
+        os.path.join(rscratch, "recheck"))
     _, rlog = finish_kernel(rq, rserial)
     if "the boot disk" not in disk_check_lines(rlog):
         failures += 1
