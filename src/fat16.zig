@@ -1019,6 +1019,12 @@ pub const Volume = struct {
     /// straddles a cluster edge needs a directory of sixty-odd entries, and a
     /// player's session folder can have that.
     fn removeEntry(self: *Volume, dir_cluster: Cluster, name: []const u8) Error!void {
+        return self.unlinkEntry(dir_cluster, name, true);
+    }
+
+    /// removeEntry's work. With `free` false the entry goes and its chain
+    /// stays allocated, for `rename`, which hands the chain to another entry.
+    fn unlinkEntry(self: *Volume, dir_cluster: Cluster, name: []const u8, free: bool) Error!void {
         const Pos = struct { lba: u32, at: u32 };
         var walk = try Walk.start(self, dir_cluster);
         var parts: [max_long_parts]Pos = undefined;
@@ -1090,7 +1096,7 @@ pub const Volume = struct {
                     }
 
                     // 3. and only now, the data
-                    if (chain >= 2) try self.freeChain(chain);
+                    if (free and chain >= 2) try self.freeChain(chain);
                     return;
                 }
                 long_ok = false;
@@ -1536,6 +1542,61 @@ pub const Volume = struct {
         const dir = try self.open(trimmed[0..at]);
         if (!dir.isDirectory()) return Error.NotFat16;
         return .{ .cluster = dir.first_cluster, .name = trimmed[at + 1 ..] };
+    }
+
+    /// **RENAMES A FILE WITHIN ITS DIRECTORY, OVER ANY FILE OF THE NEW NAME.**
+    /// It is how a whole file is replaced without a moment when neither the
+    /// old nor the new is there: the new is written under another name, then
+    /// renamed over the old (angry-gopher's `store.replace`).
+    ///
+    /// The order, and what a machine that stops at each point leaves:
+    ///   1. `from`'s entry goes; its chain stays allocated. Stopped here: `to`
+    ///      is the old file, whole, and `from`'s clusters are leaked (the disk
+    ///      check reports them).
+    ///   2. when `to` exists, its short entry is pointed at `from`'s chain and
+    ///      size, in one sector write. Stopped here: `to` is the new file,
+    ///      whole, and its old clusters are leaked.
+    ///   3. and only now `to`'s old chain is freed.
+    /// When `to` does not exist, step 2 writes a new entry instead, and a
+    /// machine that stops before it has lost a file nobody had yet.
+    /// Never two entries on one chain, never a `to` that is neither file.
+    ///
+    /// `to` keeps the name it has (as a whole-file write does); a new `to`
+    /// takes the case it is given. Both must be files in the same directory.
+    pub fn rename(self: *Volume, from: []const u8, to: []const u8) Error!void {
+        const a = try self.parentOf(from);
+        const b = try self.parentOf(to);
+        if (a.cluster != b.cluster) return Error.BadName;
+        if (b.name.len == 0 or b.name.len > max_name) return Error.BadName;
+        const src = (try self.find(a.cluster, a.name)) orelse return Error.NotFound;
+        if (src.isDirectory()) return Error.BadName;
+        if (eqlFold(src.text(), b.name)) return; // the same file
+        const dst = try self.find(b.cluster, b.name);
+        if (dst) |d| if (d.isDirectory()) return Error.BadName;
+
+        try self.unlinkEntry(a.cluster, a.name, false);
+
+        if (dst) |d| {
+            try self.readSector(d.lba, self.scratch);
+            const e = self.scratch[d.slot..][0..dirent_size];
+            putCluster(e, src.first_cluster);
+            e[28] = @truncate(src.size);
+            e[29] = @truncate(src.size >> 8);
+            e[30] = @truncate(src.size >> 16);
+            e[31] = @truncate(src.size >> 24);
+            const when = self.stamp();
+            putLe16(e[18..20], when.date); // last access date
+            putDos(e[22..26], when); // write time, write date
+            try self.writeSector(d.lba, self.scratch);
+            if (d.first_cluster >= 2) try self.freeChain(d.first_cluster);
+            return;
+        }
+
+        const short = try self.aliasFor(b.cluster, b.name);
+        const needs_long = needsLongName(b.name);
+        const parts: u32 = if (needs_long) longParts(b.name) else 0;
+        const run = try self.findRun(b.cluster, parts + 1);
+        try self.writeEntry(run, if (needs_long) b.name else b.name[0..0], short, 0x20, src.first_cluster, src.size);
     }
 
     /// Deletes one file, or one directory that is already empty. removeEntry

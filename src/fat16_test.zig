@@ -825,6 +825,118 @@ test "a file rewritten under a name in another case keeps the name and alias it 
     }
 }
 
+// ---- rename, for a replace that survives a crash (QUEUE item 24) -------------
+
+test "rename moves a file to a new name, and over a file, keeping that file's name" {
+    for (configs) |cfg| {
+        const shape, const cached = .{ cfg.shape, cfg.cached };
+        const d = try Disk.make("rename", shape, cached);
+        defer d.deinit();
+        var big: [3000]u8 = undefined;
+        try d.vol.writeFile("data/old.count", pattern(&big, 7));
+        try d.vol.writeFile("data/tmp1", "new contents");
+        const before = d.free();
+
+        // Over a file: `to` holds the new bytes under its own name, and its
+        // old clusters (six of them) are free again; `from` is gone.
+        try d.vol.rename("data/tmp1", "data/OLD.COUNT");
+        try d.expectFile("data/old.count", "new contents");
+        try testing.expectError(fat16.Error.NotFound, d.vol.open("data/tmp1"));
+        try testing.expectEqual(before + 6, d.free());
+        const data_dir = try d.vol.open("data");
+        var buf: [256]u8 = undefined;
+        try testing.expectEqualStrings("old.count", try d.names(data_dir.first_cluster, &buf));
+
+        // To a name nobody has: the case given, no cluster moved.
+        try d.vol.writeFile("data/tmp2", "x");
+        const mid = d.free();
+        try d.vol.rename("data/tmp2", "data/Fresh-Name.md");
+        try d.expectFile("data/fresh-name.md", "x");
+        try testing.expectEqual(mid, d.free());
+        try testing.expectEqualStrings("old.count Fresh-Name.md", try d.names(data_dir.first_cluster, &buf));
+
+        // An empty file renames too.
+        try d.vol.writeFile("data/empty", "");
+        try d.vol.rename("data/empty", "data/old.count");
+        try d.expectFile("data/old.count", "");
+
+        // Refused: across directories, a directory either side, a missing
+        // `from`. Renaming a file to its own name in another case does nothing.
+        try d.vol.writeFile("data/a", "a");
+        try d.vol.writeFile("other/b", "b");
+        try testing.expectError(fat16.Error.BadName, d.vol.rename("data/a", "other/a"));
+        _ = try d.vol.makePath("data/sub");
+        try testing.expectError(fat16.Error.BadName, d.vol.rename("data/a", "data/sub"));
+        try testing.expectError(fat16.Error.BadName, d.vol.rename("data/sub", "data/c"));
+        try testing.expectError(fat16.Error.NotFound, d.vol.rename("data/nothing", "data/a"));
+        try d.vol.rename("data/a", "data/A");
+        try d.expectFile("data/a", "a");
+
+        try d.mount(cached);
+        try d.expectFile("data/old.count", "");
+        try d.expectFile("data/fresh-name.md", "x");
+        try d.expectKept();
+        try testing.expect(d.fatsAgree());
+    }
+}
+
+test "a rename stopped at any point leaves the old file or the new, whole, and at worst leaked clusters" {
+    for (configs) |cfg| {
+        const shape, const cached = .{ cfg.shape, cfg.cached };
+        var stop: u64 = 0;
+        var finished = false;
+        while (!finished) : (stop += 1) {
+            // Labelled by what the stop left, once it is known: a disk with
+            // leaked clusters is damaged-*, and the oracle must find that; a
+            // clean one must check clean. Every stop is kept on FAT16 with
+            // the FAT on the disk; elsewhere only the last, to save room.
+            var label_buf: [48]u8 = undefined;
+            const d = try Disk.make("limit-rename-stop", shape, cached);
+            defer d.deinit();
+            var big: [3000]u8 = undefined;
+            const old = pattern(&big, 3);
+            try d.vol.writeFile("data/rec", old);
+            try d.vol.writeFile("data/rec.tmp", "the new record");
+
+            d.blk.fail_after = d.blk.requests + stop;
+            if (d.vol.rename("data/rec.tmp", "data/rec")) |_| {
+                finished = true;
+            } else |_| {}
+            d.blk.fail_after = null;
+            // Read back from the FAT on the disk: a held FAT refuses copies
+            // that differ at mount (FatsDisagree), which a stop can leave.
+            try d.mount(false);
+
+            const got = try d.read("data/rec");
+            defer testing.allocator.free(got);
+            const is_old = std.mem.eql(u8, got, old);
+            const is_new = std.mem.eql(u8, got, "the new record");
+            if (!is_old and !is_new) {
+                std.debug.print("stopped after {d} requests: data/rec is neither file ({d} bytes)\n", .{ stop, got.len });
+                return error.TestUnexpectedResult;
+            }
+            if (finished) try testing.expect(is_new);
+            // Whatever is left over is leaked clusters, never a cross-link,
+            // a short file or a broken chain. And FAT copies that differ:
+            // every FAT update writes the first copy, then the second, so a
+            // stop between the two leaves them apart, rename or not.
+            const r = try d.check();
+            for (r.found[0..r.len]) |f| {
+                if (f.problem != .leaked and f.problem != .fats_differ) {
+                    std.debug.print("stopped after {d} requests: {s} at {s}\n", .{ stop, @tagName(f.problem), f.text() });
+                    return error.TestUnexpectedResult;
+                }
+            }
+            if (shape.kind == .fat16 and !cached) {
+                const kind = if (r.health.clean()) "" else "damaged-";
+                d.label = try std.fmt.bufPrint(&label_buf, "{s}rename-stop-{d:0>2}", .{ kind, stop });
+            }
+        }
+        // It took more than one request, so the loop did stop it part-way.
+        try testing.expect(stop > 2);
+    }
+}
+
 // ---- the kept free count (QUEUE item 14) -------------------------------------
 
 test "the kept free count follows every operation, the refused and failed ones included" {

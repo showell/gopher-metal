@@ -548,6 +548,24 @@ pub const Dir = struct {
         };
     }
 
+    /// rename moves a file to another name in the same directory, over any
+    /// file of that name: how angry-gopher's `store.replace` makes a rewrite
+    /// survive a stop (fat16.rename says what each stop leaves). std.Io's
+    /// shape, `io` last; both paths from the root, on one volume, in one
+    /// directory.
+    pub fn rename(self: Dir, old_sub_path: []const u8, new_dir: Dir, new_sub_path: []const u8, _: Self) Error!void {
+        self.fromRoot();
+        new_dir.fromRoot();
+        const v = try writing(old_sub_path);
+        if (try writing(new_sub_path) != v) return Error.WriteFailed;
+        v.rename(old_sub_path, new_sub_path) catch |e| switch (e) {
+            error.NotFound => return Error.FileNotFound,
+            error.BadName => return Error.NameTooLong,
+            error.Full, error.DirectoryFull => return Error.NoSpaceLeft,
+            else => return Error.WriteFailed,
+        };
+    }
+
     /// deleteTree removes a directory and everything under it — a released
     /// account's game data, a deleted player. See fat16.removeTree for why it
     /// re-lists each round instead of walking a snapshot.

@@ -220,3 +220,20 @@ test "a directory opened under data/ lists the volume's entries, and deleting a 
     // The boot disk's stale copy was not the one removed.
     try t.site.expectFile("data/players/stale", "x");
 }
+
+test "rename replaces a file on the volume, as std.Io spells it, and refuses what fat16.rename does" {
+    const t = try Two.make(true);
+    defer t.deinit();
+    try cwd.writeFile(io, .{ .sub_path = "data/chat/1_2/sessions/topic.count", .data = "4\n" });
+    try cwd.writeFile(io, .{ .sub_path = "data/chat/1_2/sessions/~0a1b2c3d.tmp", .data = "5\n" });
+    try cwd.rename("data/chat/1_2/sessions/~0a1b2c3d.tmp", cwd, "data/chat/1_2/sessions/topic.count", io);
+    try t.volume.expectFile("data/chat/1_2/sessions/topic.count", "5\n");
+    try expectAbsent(t.volume, "data/chat/1_2/sessions/~0a1b2c3d.tmp");
+
+    try testing.expectError(io_mod.Error.FileNotFound, cwd.rename("data/chat/nothing", cwd, "data/chat/x", io));
+    // Across directories: fat16.rename moves within one only.
+    try testing.expectError(io_mod.Error.NameTooLong, cwd.rename("data/chat/1_2/sessions/topic.count", cwd, "data/topic.count", io));
+    // Off the volume, or onto the site: refused as every write there is.
+    try testing.expectError(io_mod.Error.WriteFailed, cwd.rename("data/chat/1_2/sessions/topic.count", cwd, "index.html", io));
+    try t.volume.expectFile("data/chat/1_2/sessions/topic.count", "5\n");
+}
