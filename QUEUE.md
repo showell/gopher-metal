@@ -155,7 +155,7 @@ in order. The box Claude reorders on `master`, and CC proposes at the bottom.
 check-in 2 under Answers: the judge fixes (findings 1-2) and `tz=UTC` on
 `run.sh`'s three vfat mounts.*
 
-13. **The disk check in the boot log.** *(moved from the box Claude's list.)*
+13. **The disk check in the boot log.** *(moved from the box Claude's list; CC, started 2026-10-02.)*
     - At mount, after `cacheFat`, run `Volume.check` on each volume and print
       one summary line per volume (files, directories, clusters used, leaked,
       problems), then each finding. Never halt on a finding.
