@@ -139,7 +139,7 @@ in order. The box Claude reorders on `master`, and CC proposes at the bottom.
    **Done** (CC).
 10. **`zig fmt` the three files, then make `zig fmt --check src` part of
     `zig build test`** (your proposal; accepted), so it stays clean. **Done** (CC).
-11. **Review `/admin/host` as an adversary** *(CC, started 2026-10-02.)*, once it is on `master` (the box
+11. **Review `/admin/host` as an adversary** *(CC; done: `REVIEW-admin-host.md`. The page holds up. Findings 1–2 are judge gaps worth fixing now, 3–4 are latent.)*, once it is on `master` (the box
     Claude pushes it after its gates). That covers angry-gopher's
     `host_status.zig`, `admin_host.zig`, `server.zig`'s `linuxFacts`, and
     `probe/gopher.zig`'s `metalFacts`. Look for:
