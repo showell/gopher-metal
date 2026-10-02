@@ -89,7 +89,7 @@ in order. The box Claude reorders on `master`, and CC proposes at the bottom.
        mtools made, healthy and damaged, and requires the oracle's verdict.
    - **Box Claude, for the boot log:** print `problems`, `leaked` and each
      finding; never halt on one.
-6. **The log ring.**
+6. **The log ring.** *(CC, started 2026-10-02.)*
    - A fixed-size ring buffer holding the last N KB of everything
      `serial.put` writes, so a status page can serve it later.
    - Pure code, host-tested. Mind wraparound, and lines longer than the ring.
