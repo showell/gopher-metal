@@ -1398,7 +1398,11 @@ const long_offsets = [_]u8{ 1, 3, 5, 7, 9, 14, 16, 18, 20, 22, 24, 28, 30 };
 /// first -- so each is written at its sequence number's place.
 fn takeLongPart(e: []const u8, out: *[max_name]u8, len: *usize, sum: *u8, ok: *bool) void {
     const seq = e[0] & 0x1F;
-    if (seq == 0 or seq > max_name / 13) {
+    // As many parts as a name of max_name characters needs, which is what
+    // writeFileIn accepts: max_name / 13 rounded DOWN refused the last part
+    // of every name from 53 to 64 characters, so such a file was written and
+    // then found only under its 8.3 alias.
+    if (seq == 0 or seq > (max_name + 12) / 13) {
         ok.* = false;
         return;
     }
@@ -1633,4 +1637,50 @@ test "on disk the time word comes first, then the date word" {
     try testing.expectEqual(when.time, le16(e[22..24]));
     try testing.expectEqual(when.date, le16(e[24..26]));
     try testing.expectEqual(@as(i64, 1789641532), decode(&e).mtime_unix);
+}
+
+/// The long-name entries a name is written as, last part first, as they sit
+/// in a directory: what `writeEntry` writes, built here for the reader alone.
+fn longEntriesFor(name: []const u8, sum: u8, out: [][32]u8) usize {
+    const parts = longParts(name);
+    var k: usize = 0;
+    var seq: usize = parts;
+    while (seq >= 1) : (seq -= 1) {
+        var e = [_]u8{0xFF} ** 32;
+        e[0] = @intCast(seq);
+        if (seq == parts) e[0] |= 0x40;
+        e[11] = attr_long_name;
+        e[12] = 0;
+        e[13] = sum;
+        e[26] = 0;
+        e[27] = 0;
+        for (long_offsets, 0..) |off, i| {
+            const at = (seq - 1) * 13 + i;
+            const c: u16 = if (at < name.len) name[at] else if (at == name.len) 0 else 0xFFFF;
+            e[off] = @truncate(c);
+            e[off + 1] = @truncate(c >> 8);
+        }
+        out[k] = e;
+        k += 1;
+    }
+    return k;
+}
+
+test "every name the writer accepts, the reader reads back whole" {
+    // writeFileIn takes names up to max_name; the reader must take as many
+    // long-name parts as such a name needs.
+    var buf: [max_name]u8 = undefined;
+    for (1..max_name + 1) |len| {
+        for (buf[0..len], 0..) |*c, i| c.* = 'a' + @as(u8, @intCast(i % 26));
+        const name = buf[0..len];
+        var entries: [8][32]u8 = undefined;
+        const n = longEntriesFor(name, 0x5A, &entries);
+        var long: [max_name]u8 = undefined;
+        var long_len: usize = 0;
+        var sum: u8 = 0;
+        var ok = false;
+        for (entries[0..n]) |*e| takeLongPart(e, &long, &long_len, &sum, &ok);
+        try testing.expect(ok);
+        try testing.expectEqualStrings(name, long[0..long_len]);
+    }
 }
