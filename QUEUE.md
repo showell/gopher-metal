@@ -210,6 +210,36 @@ check-in 2 under Answers: the judge fixes (findings 1-2) and `tz=UTC` on
 18. **Adversarial reviews of 16 and 17** once each is on `master`, in
     `REVIEW-interrupts.md`'s shape.
 
+*Items 19-20 queued 2026-10-02 (box Claude, Steve's go-ahead to keep the
+queue full). After 17 and 18.*
+
+19. **Build the volume without root: `droplet/build_volume.py`.**
+    MIGRATION.md step 3 mounts the volume with sudo, which only the box can
+    do. Build it with mtools instead: `build_volume.py COPY OUT.img`, with
+    the format (FAT16 or FAT32) and size as options, laid out as
+    `new_volume.py` lays it out (GPT, one partition), printing the serial.
+    - Keep modification times (`mcopy -m`, `TZ=UTC`), and refuse a tree
+      `check_volume_tree.py` finds anything in.
+    - Judge it by `compare_volume.py` against the copy, `fsck.fat -n` on
+      the partition, and `tools/fat16_read.py check`; test with trees that
+      carry each name shape the application makes (MIGRATION.md's table) and
+      dates near both ends of FAT's range.
+    - MIGRATION.md's step 3 then uses it. The box builds the same copy both
+      ways once (mtools here, the Linux mount there) and compares.
+20. **Review, as an adversary: every path angry-gopher builds from a value a
+    request carries** (`REVIEW-interrupts.md`'s shape, nothing fixed).
+    - The class: on 2026-10-02 prod held `data/users/r` and `data/users/y`,
+      made by `touchUser` from a user id read out of request memory the body
+      read had overwritten (the bug `e2610edd` fixed). `touchUser` made a
+      directory under whatever id it was given. The box fixed that one
+      (angry-gopher `496bdca3`: `touchUser` and `reserveUploadBytes` refuse
+      an id that is not all digits).
+    - Find every other `path.join` (and `createDirPath`, `writeFile`,
+      `deleteTree`) whose parts come from a request: ids, session ids,
+      channel names, doc slugs, upload names, player ids, `next` and the
+      like. For each: is it validated before the join, by what, and what
+      would a bad value make or remove on disk? `deleteTree` first.
+
 ## Box Claude
 
 - v6: gates, images, deploy with Steve, and the survival test (the marker
@@ -372,6 +402,20 @@ What each needs from the box:
   `chat/users/<uid>/links.md`, and reports a path the application does not
   build as `not-the-apps`. MIGRATION.md has what prod held on 2026-10-02.
   Rebase over it; item 17 touches the same files.
+
+- **Check-in 4** (2026-10-02): thanks. The box gates 13-16, the re-check
+  fix and FAT32 steps 0-3 together now. `gates.sh` now exits with the
+  verdict (`c7fd48d`): its last line is `GATES: PASS` or `GATES: FAIL
+  (steps)`.
+- **Prod's data, read 2026-10-02** (as `steve`, no root, names, sizes and
+  dates only): 835 files, 275 directories, 251 MB on a 2 GiB FAT16 volume
+  (12%). No FAT hazard: no case collisions, no long names, no bad dates.
+  Since then, at Steve's direction, the retired blog's comments and
+  `users/r`, `users/y` are deleted from prod (copies on the box), and a
+  copy of prod's data is on the box for the rehearsal. MIGRATION.md has the
+  detail. FAT32 stays before the cutover: the per-user cap, not today's
+  size, is why.
+- **More work:** items 19 and 20 above, after 17 and 18.
 
 ## Proposed
 
