@@ -278,8 +278,8 @@ Answers below carry the detail. In this order:
    judge's three case steps.
 3. **Item 21's tail** on your angry-gopher branch (storage, counter and
    player are done; thanks).
-4. **Item 22**, then **23-26** below, then **18** once 16 and 17 are on
-   `master`.
+4. **Item 22**, then **23-26**, then **27-32** below, then **18** once 16
+   and 17 are on `master`.
 
 *Items 22-26 queued 2026-10-02 (box Claude, keeping the queue full).*
 
@@ -314,11 +314,49 @@ Answers below carry the detail. In this order:
     and a FAT32 volume, and three shapes of limit (per player, per
     address, global) with what each costs a real player. No code.
 
+*Items 27-32 queued 2026-10-02 (box Claude, keeping the queue full). After
+26, before 18. The rehearsal they build on is in MIGRATION.md, "Rehearsed".*
+
+27. **`/chat/recent` from the message's own date, not the file's.** The
+    rehearsal's only difference: 7 sessions shown one second earlier on
+    metal, because their time came from a modification time and FAT keeps
+    2-second steps. Find which sessions take the file's time (no sidecar
+    date? an older transcript?) and make recent use the date in the
+    transcript or sidecar, so the two hosts agree exactly and a migration
+    changes nothing visible. A test over a transcript whose mtime is odd.
+28. **`droplet/compare_hosts.py`: the rehearsal's page comparison, kept.**
+    The box compared 155 pages as uid 1 with a throwaway script. Make it a
+    tool for the cutover day: two base URLs (the second optionally reached
+    through `ip netns exec NAME`), a session minted from a given secret
+    (`judge_gopher.mint_session`), every conversation, topic, `raw`,
+    `reactions`, recent, docs, links, images, code, settings and the admin
+    pages walked from a data copy, compared by status and SHA-256. **It
+    prints counts and anonymised labels only** (the data is real: no topic
+    names, no contents). Test it on the judge's staged site with two Linux
+    servers, one with a file changed on purpose.
+29. **Writes after the move, in the same tool:** an optional mode that, on
+    both hosts, logs in, posts a message to a new topic, uploads a small
+    picture and reacts, then compares the pages again. That is the
+    rehearsal step not done yet.
+30. **`GOPHER_BIND` in angry-gopher's `server.zig`**: the listen address,
+    default `0.0.0.0` (prod's firewall keeps 9001 private today; Caddy
+    reaches it on localhost). A test that `127.0.0.1` binds there only.
+    The box will then run every rehearsal with real data on loopback.
+31. **Review `store.zig` as an adversary** (`REVIEW-interrupts.md`'s shape,
+    nothing fixed): case resolution under two writers racing to create
+    case-variants; a miss in a directory of thousands; symlinks and `..` on
+    Linux; what `resolve` does with an absolute root; errors swallowed into
+    "not found"; whether any caller's behaviour changed when it moved.
+32. **The log ring on `/admin/host`** (from the box's list; you can push to
+    both repos now): the host half of the page shows the newest lines of
+    `serial.ring` on metal and of the server's own log on Linux (or says
+    there is none), admin only, secrets already stripped on the way in. The
+    judge checks the shape, not the lines.
+
 ## Box Claude
 
 - v6: gates, images, deploy with Steve, and the survival test (the marker
   message posted on v5).
-- The admin view of the log ring on `/admin/host` (angry-gopher too).
 - The restart on a real droplet (`restart.elf` at the recovery console with
   Steve), which item 16 waits on before any deploy.
 - Case-insensitive names in angry-gopher (Steve's decision above): prod's
