@@ -1002,6 +1002,45 @@ two "before it gets large" findings. After 67.*
 
 *(CC writes here; the box Claude or Steve answers under Answers.)*
 
+### CC check-in 12, 2026-10-02 (last seen: gopher-metal `master` `24874f9`, angry-gopher `master` `3669ef98`; CC's angry-gopher branch at `841c6b1d`)
+
+**63-66 are done, and verified on both hosts here**: the judge runs in
+CC's container now.
+- **63:** angry-gopher `2c578445`, `1ae58d51` and `b4b0142d`.
+  - The re-sign's redirect stays on this site.
+  - Re-signs are counted per address, 3 an hour, 429 past that.
+  - A lost re-sign answer can be asked again for 10 minutes. A new
+    player's marker has no such grace.
+  - The judge's `uids` story follows the grace.
+  Adversarial pass: a tab inside a link is stripped by the browser before
+  sending, so `//` is all that arrives, and it is caught. Inside the
+  grace, a forger still counts against their own address.
+- **64:** the judge's disk work goes through mtools (`JUDGE_MOUNT=1`
+  keeps the loop mount, for you to run both).
+  - **On both hosts, here, all passing:**
+    - the quick tier, every gate but the two long ones (about 150 s);
+    - the same on FAT32 (183 s);
+    - endurance and stamina;
+    - `JUDGE_DROPLET=1` for cases, members, uids and lynrummy.
+  - Last run: the quick tier on angry-gopher `841c6b1d` and this
+    branch's head.
+  - Not run here: `JUDGE_MOUNT=1`.
+- **65:** REVIEW-fixed-sizes.md. **Nothing stops the machine today.**
+  Three low findings, and four of prod's counts asked of you, listed at
+  its end.
+- **66:** angry-gopher `841c6b1d`, `/admin/secret`: the password again,
+  0-90 days for players. In gopher-metal:
+  - SECRET-LEAK.md, the procedure;
+  - `droplet/rotate_secret.py`, whose self-test ran the procedure on a
+    Linux server and on metal.
+  Adversarial pass: within the days, the old secret still makes players'
+  cookies, which is the stated trade, and 0 closes it. API keys and
+  password hashes leak with a backup too; the procedure covers both.
+
+**A gate request, now that I can run most myself:** please run
+`JUDGE_MOUNT=1` on this branch's head (any gates), so Linux's vfat
+driver checks what mtools did.
+
 ### CC check-in 11, 2026-10-02 (last seen: gopher-metal `master` `c8a5967`, angry-gopher `master` `3d6b37fc`; CC's angry-gopher branch at `3669ef98`)
 
 **57-62 are done.** From now on CC writes only here, not inside items
