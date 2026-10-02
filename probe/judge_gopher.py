@@ -289,10 +289,11 @@ def partition_last(image: str) -> int:
     return int(next(l for l in info.splitlines() if l.startswith("Last sector")).split()[2])
 
 
-def build_disk(image: str, content: str, mnt: str) -> None:
-    """A GPT disk whose first partition is FAT16, holding `content`."""
+def build_disk(image: str, content: str, mnt: str, size: int = 64 << 20) -> None:
+    """A GPT disk of `size` bytes whose first partition is FAT16, holding
+    `content`. FAT16 holds at most 2 GiB, which is as large as this goes."""
     with open(image, "wb") as f:
-        f.truncate(64 * 1024 * 1024)
+        f.truncate(size)
     run(["sgdisk", "-o", "-n", f"1:{PART_FIRST}:0", "-t", "1:0700", "-c", "1:gopher", image])
     blocks = (partition_last(image) - PART_FIRST + 1) // 2
     run(["mkfs.vfat", "-F", "16", "-S", "512", "-n", "GOPHER",
@@ -486,11 +487,13 @@ CAPTURE = bool(os.environ.get("JUDGE_CAPTURE"))
 
 
 # **JUDGE_DROPLET=1: THE SAME JUDGE, ON A DROPLET'S MACHINE.** Every boot
-# builds a droplet boot disk holding only the loader and the kernel
-# (droplet/image.sh), and attaches the judge's own disk, a GPT disk with its
-# FAT16 partition, as a DigitalOcean volume: a disk on the SCSI controller in
-# slot 05. That is where the kernel finds chat's files on a real droplet, and
-# QEMU writes to the judge's disk in place, so there is nothing to copy back.
+# splits the judge's disk in two, as a droplet's are (`split_site_off`). The
+# site's own files and the kernel's settings go on a droplet boot disk, as its
+# partition 2 after the loader and the kernel (droplet/image.sh). The judge's
+# own disk, now holding only `data/` and `auth/`, is attached as a
+# DigitalOcean volume: a disk on the SCSI controller in slot 05. That is where
+# the kernel keeps chat's data on a real droplet, and QEMU writes to the
+# judge's disk in place, so there is nothing to copy back.
 # It boots on droplet/droplet.sh's machine (a PC, devices on PCI, the BIOS
 # reading the disk), on its private card (`card = private`, as the droplet's
 # chat image says). Nothing else in the judge knows: every answer and every
@@ -505,9 +508,48 @@ droplet_boots = {}
 loader_boots = 0
 
 
+# The application's data: what the kernel keeps on the volume, and all that
+# `tree` compares. Everything else on the judge's disk is the site's own.
+DATA_DIRS = ("data", "auth")
+
+
+def split_site_off(image: str, scratch: str) -> str:
+    """**TWO DISKS, AS ON A DROPLET.** Moves everything that is not the
+    application's data off `image` (the volume) into a FAT16 filesystem image
+    for the boot disk's partition 2, and returns its path. Moved, not copied:
+    a kernel that looked for a page or its settings on the volume must find
+    nothing there."""
+    mnt = os.path.join(scratch, "split")
+    site = os.path.join(scratch, "site")
+    os.makedirs(site)
+    mount(image, mnt, writable=True)
+    try:
+        for entry in os.listdir(mnt):
+            if entry not in DATA_DIRS:
+                shutil.move(os.path.join(mnt, entry), os.path.join(site, entry))
+    finally:
+        umount(mnt)
+    if not os.listdir(site):
+        raise RuntimeError(f"nothing but data on {image}: was its site split off already?")
+    fat = os.path.join(scratch, "site.fat")
+    run(["mkfs.vfat", "-F", "16", "-S", "512", "-n", "SITE", "-C", fat, str(32 * 1024)])
+    os.makedirs(mnt, exist_ok=True)
+    run(["sudo", "-n", "mount", "-o", f"loop,uid={os.getuid()},gid={os.getgid()}", fat, mnt])
+    try:
+        for entry in os.listdir(site):
+            src, dst = os.path.join(site, entry), os.path.join(mnt, entry)
+            if os.path.isdir(src):
+                shutil.copytree(src, dst)
+            else:
+                shutil.copy(src, dst)
+    finally:
+        umount(mnt)
+    return fat
+
+
 def droplet_start(elf: str, image: str, scratch: str, port: int, serial_log):
     disk = os.path.join(scratch, "droplet.img")
-    run([os.path.join(DROPLET_DIR, "image.sh"), elf, disk])
+    run([os.path.join(DROPLET_DIR, "image.sh"), elf, disk, split_site_off(image, scratch)])
     # The judge's requests arrive on the private card, which is the one
     # `card = private` (set_request_limit) has the kernel serve.
     env = dict(os.environ, DISK=disk, VOLUME=image, PRIVATE_FWD=str(port), MEMORY="512")
@@ -582,7 +624,7 @@ def finish_kernel(qemu, serial: str):
         said = open(serial, "rb").read()
         if b"gopher-metal loader" not in said:
             raise RuntimeError(f"a droplet boot that never printed the loader's line: {serial}")
-        if b"chat's files: the volume" not in said:
+        if b"chat's data: the volume" not in said:
             raise RuntimeError(f"a droplet boot that did not serve from the volume: {serial}")
         loader_boots += 1
     text = open(serial, "rb").read().decode("latin-1", "replace")
@@ -2284,7 +2326,7 @@ def main() -> int:
     names = " ".join(g for g in GATES if g in chosen)
     took = f"{lap.total():.0f} s"
     if DROPLET:
-        took += f"; on the droplet machine, {loader_boots} boot(s) through the boot loader, chat's files on a SCSI volume"
+        took += f"; on the droplet machine, {loader_boots} boot(s) through the boot loader, the site on the boot disk and chat's data on a SCSI volume"
     if failures:
         print(f"{failures} failure(s) over: {names} ({took})")
     elif chosen == set(GATES):

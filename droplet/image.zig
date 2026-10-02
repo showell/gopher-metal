@@ -12,8 +12,8 @@
 //!                  empty, DigitalOcean's import took the disk for a bare
 //!                  filesystem and wrapped it in a new disk whose boot code
 //!                  was zeros. gpt.zig mounts the first partition that is not
-//!                  this type, so chat's volume can go in entry 2.
-//!   then           chat's volume, GPT entry 2, when one is given: a FAT16
+//!                  this type, so the site's files can go in entry 2.
+//!   then           the site's files, GPT entry 2, when one is given: a FAT16
 //!                  filesystem image copied in whole, typed "basic data"
 //!                  (what sgdisk calls 0700, as the judge's disks are)
 //!   the end        the backup entries and header
@@ -206,7 +206,7 @@ fn kernelSectors(kernel: *const Kernel) usize {
     return used;
 }
 
-/// Where chat's volume starts: the megabyte after the kernel partition.
+/// Where the site's files start: the megabyte after the kernel partition.
 fn dataFirstLba(kernel: *const Kernel) usize {
     return kernel_first_lba + mib(kernelSectors(kernel));
 }
@@ -419,7 +419,7 @@ test "a loader whose second stage would reach the first partition is refused" {
     try testing.expectError(error.LoaderTooBig, build(disk, loader, &kernel, ""));
 }
 
-test "chat's volume is entry 2, a megabyte after the kernel, copied whole" {
+test "the site's files are entry 2, a megabyte after the kernel, copied whole" {
     var loader: [sector + 3]u8 = @splat(0x90);
     var kernel = Kernel{ .entry = 0x100020 };
     kernel.segments[0] = .{ .paddr = 0x100000, .bytes = "k", .memsz = 1 };

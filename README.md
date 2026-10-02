@@ -21,16 +21,18 @@ droplet through our own BIOS loader.
   (10.100.0.4). prod's Caddy (the lynrummy.com droplet) proxies the test name
   to it, from `droplet/metal.lynrummy.com.caddy`, installed by hand in
   `/etc/caddy/sites/`.
-- **Its data does not survive.** Every new image replaces the droplet's whole
-  disk, chat's files included. That is accepted until much more testing has
-  been done (Steve, 2026-10-01). **The fix is built and not yet deployed:** a
-  DigitalOcean volume, which a new image does not touch (`src/scsi.zig`; the
-  kernel serves from a volume whenever one is attached). Still to do before it
-  goes live: the site's own files (`pages/`, `gallery/`) and
-  `gopher-metal.conf` belong with the image, not the volume, so the kernel is
-  to mount both disks, sending each path to the right one. FAT16 limits a
-  volume to 2 GB; prod's data is 215 MB (2026-10-01), and each user may upload
-  1 GiB, so FAT32 is the eventual next step.
+- **Its data does not survive yet.** Every new image replaces the droplet's
+  whole disk, chat's data included. That is accepted until much more testing
+  has been done (Steve, 2026-10-01). **The fix is built and judged, not yet
+  deployed:** chat's data (`data/`, `auth/`) on a DigitalOcean volume, which a
+  new image does not touch (`src/scsi.zig`), and the site's own files
+  (`pages/`, `gallery/`, `gopher-metal.conf`) on the boot disk, where each new
+  image updates them. The kernel mounts both and sends each path to one by its
+  first directory (`src/io.zig`); it refuses, and logs, any write outside
+  `data/` and `auth/`. With no volume attached the data stays on the boot
+  disk, as now. `droplet/chat.py` builds both images. FAT16 limits a volume to
+  2 GB; prod's data is 215 MB (2026-10-01), and each user may upload 1 GiB
+  over their lifetime, so FAT32 is the eventual next step (`FAT32.md`).
 - **Its data is test data.** The volume is the chat judge's test site, whose
   accounts' password is in this repo, so anyone who reads the repo can log in
   to them.
@@ -99,7 +101,7 @@ droplet, booted from a custom image
 | virtio-blk over MMIO | **works** — reads, writes, and reads back |
 | virtio-net over MMIO | **works** |
 | virtio over PCI | **works** — disk and network found on a PC's bus, as a droplet has them |
-| a DigitalOcean volume (virtio-SCSI) | **works on the droplet-shaped QEMU** — found at any target and LUN; the chat judge serves from one and matches Linux. Not yet tried on a real volume |
+| a DigitalOcean volume (virtio-SCSI) | **works on the droplet-shaped QEMU** — found at any target and LUN; the chat judge keeps chat's data on one, the site on the boot disk, and matches Linux. Not yet tried on a real volume |
 | DHCP | **works** — from QEMU's server and DigitalOcean's, asking again with RFC 2131's backoff |
 | ARP | **works** — answers, which is what makes the address reachable |
 | TCP | **works** — 256 connections; the peer's window and segment size respected, lost segments sent again, silent peers given up on; received in order only |
@@ -338,14 +340,15 @@ the contract any host meets before calling the route table:
 
     mem_meter.init(base)        base: std's general-purpose allocator, on this
                                 machine's pages
-    roots.point(base, …)        data/ and auth/, on the volume
+    roots.point(base, …)        data/ and auth/: on the DigitalOcean volume
+                                when one is attached, else the boot disk
     a Bus over base
     an arena per request
 
 — with the site on a GPT disk whose first partition is FAT16, and clocks from
 its own hardware. Then it calls `router.route`: the application's real
 dispatch, every page — one connection at a time, in a loop, each request with
-its own heap that is reset afterwards. `gopher-metal.conf` on the volume says
+its own heap that is reset afterwards. `gopher-metal.conf` on the boot disk says
 how many requests to serve (`requests = N`); without it, forever. A request
 that fails is logged and survived, as it is on Linux.
 

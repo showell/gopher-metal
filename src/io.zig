@@ -59,17 +59,76 @@ pub fn random(_: Self, buf: []u8) void {
     rng.fill(buf);
 }
 
-/// The volume every path is resolved against. One machine, one disk.
-var volume: ?fat16.Volume = null;
+/// **TWO DISKS, ONE TREE.** The site's own files (its pages, its pictures,
+/// this machine's settings) come with each new image, and the application's
+/// data must outlive that image. So a path is sent to a volume by its first
+/// directory: one named in `data_dirs` goes to `data`, everything else to
+/// `site`. The application still sees one tree and spells every path as it
+/// does on Linux.
+///
+/// With no data volume, the data directories are on the site's volume, as
+/// they were when the machine had one disk.
+var site: ?fat16.Volume = null;
+var data: ?fat16.Volume = null;
+var data_dirs: []const []const u8 = &.{};
 
+/// The volume every path is resolved against, until `keepData` names the
+/// directories that are the application's data.
 pub fn mount(v: fat16.Volume) void {
-    volume = v;
+    site = v;
     // **THE FILESYSTEM GETS THIS MACHINE'S CLOCK.** FAT16 entries carry a date,
     // and the application's "recent activity" is built entirely out of file
     // modification times. fat16.zig has no clock of its own and must not invent
     // one, so it asks this — which answers null until the host has read the RTC,
     // and files written before then honestly carry no date.
-    volume.?.clock = realUnixOrNull;
+    site.?.clock = realUnixOrNull;
+}
+
+/// **THE APPLICATION'S DATA: `dirs`, on `on`** (null: on the site's volume).
+/// From here on nothing outside `dirs` is written: whatever is there is the
+/// site's, and on a droplet the next image replaces it, so a write there would
+/// be lost without anyone being told. Such a write is refused and logged.
+pub fn keepData(dirs: []const []const u8, on: ?fat16.Volume) void {
+    data_dirs = dirs;
+    data = on;
+    if (data) |*d| d.clock = realUnixOrNull;
+}
+
+const Place = enum { site, data };
+
+fn placeOf(path: []const u8) Place {
+    var at: usize = 0;
+    while (at < path.len and path[at] == '/') at += 1;
+    var end = at;
+    while (end < path.len and path[end] != '/') end += 1;
+    for (data_dirs) |dir| {
+        if (std.mem.eql(u8, dir, path[at..end])) return .data;
+    }
+    return .site;
+}
+
+fn volumeAt(place: Place) Error!*fat16.Volume {
+    if (place == .data) {
+        if (data) |*d| return d;
+    }
+    return &(site orelse return Error.FileNotFound);
+}
+
+/// The volume to read `path` from.
+fn reading(path: []const u8) Error!*fat16.Volume {
+    return volumeAt(placeOf(path));
+}
+
+/// The volume to change `path` on, or a refusal: see `keepData`.
+fn writing(path: []const u8) Error!*fat16.Volume {
+    const place = placeOf(path);
+    if (place == .site and data_dirs.len != 0) {
+        serial.put("  refused: a write outside the data directories: ");
+        serial.put(path);
+        serial.put("\n");
+        return Error.WriteFailed;
+    }
+    return volumeAt(place);
 }
 
 /// The wall clock in whole seconds, or null if nothing has set it yet. Unlike
@@ -181,7 +240,7 @@ pub const File = struct {
     /// It re-opens by PATH rather than trusting the entry captured at open: an
     /// append since then has moved the size, and a read must see it.
     pub fn readPositionalAll(self: File, _: Self, buffer: []u8, offset: u64) Error!usize {
-        const v = try Dir.vol();
+        const v = try reading(self.path[0..self.path_len]);
         const e = v.open(self.path[0..self.path_len]) catch return Error.FileNotFound;
         if (e.isDirectory()) return Error.IsDir;
         if (offset >= e.size) return 0;
@@ -201,7 +260,7 @@ pub const File = struct {
     /// held. See fat16.writeInto.
     pub fn writePositionalAll(self: File, _: Self, bytes: []const u8, offset: u64) Error!void {
         if (offset > 0xFFFF_FFFF) return Error.NoSpaceLeft;
-        const v = try Dir.vol();
+        const v = try writing(self.path[0..self.path_len]);
         v.writeInto(self.path[0..self.path_len], @intCast(offset), bytes) catch |e| switch (e) {
             error.NotFound => return Error.FileNotFound,
             error.BadName => return Error.NameTooLong,
@@ -315,6 +374,8 @@ pub const AccessOptions = struct {};
 pub const Dir = struct {
     /// The cluster this directory starts at; zero is the root.
     cluster: u16 = 0,
+    /// The volume it is on, which is where `iterate` lists it.
+    place: Place = .site,
 
     pub fn cwd() Dir {
         return .{ .cluster = 0 };
@@ -322,21 +383,18 @@ pub const Dir = struct {
 
     pub fn close(_: Dir, _: Self) void {}
 
-    fn vol() Error!*fat16.Volume {
-        return &(volume orelse return Error.FileNotFound);
-    }
-
     pub fn openDir(self: Dir, _: Self, sub_path: []const u8, _: OpenOptions) Error!Dir {
         _ = self;
-        const v = try vol();
+        const place = placeOf(sub_path);
+        const v = try volumeAt(place);
         const e = v.open(sub_path) catch return Error.FileNotFound;
         if (!e.isDirectory()) return Error.NotDir;
-        return .{ .cluster = e.first_cluster };
+        return .{ .cluster = e.first_cluster, .place = place };
     }
 
     pub fn openFile(self: Dir, _: Self, sub_path: []const u8, _: OpenFileOptions) Error!File {
         _ = self;
-        const v = try vol();
+        const v = try reading(sub_path);
         const e = v.open(sub_path) catch return Error.FileNotFound;
         if (e.isDirectory()) return Error.IsDir;
         return File.at(e, sub_path);
@@ -344,7 +402,7 @@ pub const Dir = struct {
 
     pub fn statFile(self: Dir, _: Self, sub_path: []const u8, _: StatFileOptions) Error!Stat {
         _ = self;
-        const v = try vol();
+        const v = try reading(sub_path);
         const e = v.open(sub_path) catch return Error.FileNotFound;
         return .{
             .size = e.size,
@@ -361,7 +419,7 @@ pub const Dir = struct {
     /// `gpa` and the caller owns them.
     pub fn readFileAlloc(self: Dir, ignored: Self, sub_path: []const u8, gpa: std.mem.Allocator, limit: Limit) Error![]u8 {
         _ = self;
-        const v = try vol();
+        const v = try reading(sub_path);
         const e = v.open(sub_path) catch return Error.FileNotFound;
         if (e.isDirectory()) return Error.IsDir;
         if (e.size > @intFromEnum(limit)) return Error.StreamTooLong;
@@ -395,7 +453,7 @@ pub const Dir = struct {
         // and nothing in the application asks for it. Refuse rather than
         // quietly replacing the file anyway.
         if (!options.flags.truncate) @panic("writeFile with .flags.truncate = false is not implemented on this machine");
-        const v = try vol();
+        const v = try writing(options.sub_path);
         v.writeFile(options.sub_path, options.data) catch |e| switch (e) {
             error.BadName => return Error.NameTooLong,
             error.Full, error.DirectoryFull => return Error.NoSpaceLeft,
@@ -409,7 +467,7 @@ pub const Dir = struct {
     /// rename with error translation.
     pub fn createDirPath(self: Dir, _: Self, sub_path: []const u8) Error!void {
         _ = self;
-        const v = try vol();
+        const v = try writing(sub_path);
         _ = v.makePath(sub_path) catch |e| switch (e) {
             error.BadName => return Error.NameTooLong,
             error.Full, error.DirectoryFull => return Error.NoSpaceLeft,
@@ -427,7 +485,7 @@ pub const Dir = struct {
         // Checked HERE as well as in File.at: this call has a side effect, and a
         // path too long for a handle must be refused before the file is made.
         if (sub_path.len > max_path) return Error.NameTooLong;
-        const v = try vol();
+        const v = try writing(sub_path);
         const truncate = opts.truncate;
 
         const existing: ?fat16.Entry = v.open(sub_path) catch null;
@@ -449,7 +507,7 @@ pub const Dir = struct {
     /// already gone is the outcome it wanted.
     pub fn deleteFile(self: Dir, _: Self, sub_path: []const u8) Error!void {
         _ = self;
-        const v = try vol();
+        const v = try writing(sub_path);
         v.remove(sub_path) catch |e| switch (e) {
             error.NotFound => return Error.FileNotFound,
             else => return Error.WriteFailed,
@@ -461,7 +519,7 @@ pub const Dir = struct {
     /// re-lists each round instead of walking a snapshot.
     pub fn deleteTree(self: Dir, _: Self, sub_path: []const u8) Error!void {
         _ = self;
-        const v = try vol();
+        const v = try writing(sub_path);
         v.removeTree(sub_path) catch return Error.WriteFailed;
     }
 
@@ -489,7 +547,7 @@ pub const Dir = struct {
     pub fn iterate(self: Dir) Iterator {
         if (stack.nearTheEnd())
             serial.fail("a directory walk has recursed to within the stack's guard: the tree is deeper than this machine can walk");
-        const v = vol() catch return .{};
+        const v = volumeAt(self.place) catch return .{};
         var it = Iterator{};
         v.list(self.cluster, &it, Iterator.take) catch return .{};
         return it;

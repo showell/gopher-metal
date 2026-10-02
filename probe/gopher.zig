@@ -10,7 +10,7 @@
 //! host must, with what this machine has instead of Linux:
 //!
 //!   1. mem_meter.init(base)   base is a bump allocator over a static block
-//!   2. roots.point(base, …)   data/ and auth/, on the volume
+//!   2. roots.point(base, …)   data/ and auth/, on the DigitalOcean volume if one is attached
 //!   3. a Hub over base        each request gets a Bus handle on it
 //!   4. store.backfillAll(…)   every chat session's last-message record, once
 //!   5. serve what was kept    a table of held streams, drained every turn
@@ -23,7 +23,7 @@
 //! them. Each request gets its own heap, reset afterwards, the
 //! way server.zig gives each request an arena it frees wholesale. How many
 //! requests to serve is host configuration, read from `gopher-metal.conf` on
-//! the volume (`requests = N`); without it, forever.
+//! the boot disk (`requests = N`); without it, forever.
 //!
 //! **A FAILED REQUEST IS NOT A FAILED MACHINE.** On Linux, an error from the
 //! route table is logged and the connection closed; so it is here. A panic
@@ -113,12 +113,13 @@ var gpa: std.heap.DebugAllocator(.{
 
 var blk_mem: virtio.BlockMemory align(4096) = .{};
 var volume_mem: virtio.BlockMemory align(4096) = .{};
-/// The block device, for the per-request log: how many requests it served and
-/// how long they took. Set once the device is up.
-var disk: ?*virtio.Block = null;
+/// The disks, for the per-request log: how many requests they served and how
+/// long they took. The boot disk, then the volume if one is attached.
+var disks: [2]?*virtio.Block = .{ null, null };
 var nic_mem: net.Memory align(4096) = .{};
 var rng_mem: rng.Memory align(4096) = .{};
 var sector: [fat16.sector_size]u8 align(4096) = undefined;
+var volume_sector: [fat16.sector_size]u8 align(4096) = undefined;
 var dhcp_frame: [net.buffer_size]u8 align(16) = undefined;
 var dhcp_reply: [1024]u8 align(16) = undefined;
 var tcp_out: [net.buffer_size]u8 align(16) = undefined;
@@ -177,6 +178,14 @@ const request_heap_bytes = 32 * 1024 * 1024;
 
 const config_path = "gopher-metal.conf";
 
+/// **THE APPLICATION'S DATA**: the two directories `router.roots.point` is
+/// given, and the only ones this machine writes. On a droplet they are on the
+/// volume, which outlives every new image; everything else is the site's own,
+/// on the boot disk, and comes with the image.
+const data_dir = "data";
+const auth_dir = "auth";
+const data_dirs = [_][]const u8{ data_dir, auth_dir };
+
 pub fn kmain() noreturn {
     serial.init();
     interrupts.install();
@@ -205,30 +214,23 @@ pub fn kmain() noreturn {
     serial.putDec(carved.pages_total);
     serial.put(" pages\n");
 
-    // ── the volume. This host serves from it, so no disk is a failure. ──────
-    var blk = chatDisk();
-    disk = &blk;
-    const part = gpt.dataPartition(&blk, &sector) catch
-        serial.fail("the disk has no GPT partition to serve from");
-    var vol = fat16.Volume.mount(&blk, &sector, part.first_lba) catch
-        serial.fail("the first partition is not FAT16");
-    // The FAT, in memory: without it every lookup is a device read, and the
-    // free-cluster search re-reads its way past every cluster in use on each
-    // small file the application replaces.
-    const fat_cache = pages.allocator.alloc(u8, vol.fatBytes()) catch
-        serial.fail("no memory to hold the FAT");
-    vol.cacheFat(fat_cache) catch |e| {
-        serial.put("  fat cache: ");
-        serial.put(@errorName(e));
-        serial.put("\n");
-        serial.fail("the FAT could not be held in memory");
-    };
-    Io.mount(vol);
-    serial.put("  volume mounted at LBA ");
-    serial.putDec(part.first_lba);
-    serial.put(", FAT held in memory (");
-    serial.putDec(vol.fatBytes());
-    serial.put(" bytes)\n");
+    // ── the disks ───────────────────────────────────────────────────────────
+    // The boot disk holds the site, and no boot disk is a failure. A volume,
+    // when one is attached, holds the application's data; without one the
+    // data is on the boot disk too.
+    var boot_disk = bootDisk();
+    disks[0] = &boot_disk;
+    Io.mount(mountFat(&boot_disk, &sector, "the boot disk"));
+    var volume_disk: virtio.Block = undefined;
+    if (dataVolume()) |b| {
+        volume_disk = b;
+        disks[1] = &volume_disk;
+        Io.keepData(&data_dirs, mountFat(&volume_disk, &volume_sector, "the volume"));
+        serial.put("  chat's data: the volume\n");
+    } else {
+        Io.keepData(&data_dirs, null);
+        serial.put("  chat's data: the boot disk\n");
+    }
 
     const clock = metal.wallclock.start() catch |e| {
         serial.put("  wallclock: ");
@@ -254,7 +256,7 @@ pub fn kmain() noreturn {
 
     // ── the host contract ───────────────────────────────────────────────────
     const base = router.mem_meter.init(gpa.allocator());
-    router.roots.point(base, .{ .data_dir = "data", .auth_dir = "auth" }) catch
+    router.roots.point(base, .{ .data_dir = data_dir, .auth_dir = auth_dir }) catch
         serial.fail("roots.point could not allocate the store paths");
     var hub = Hub.init(io, base);
 
@@ -527,8 +529,7 @@ fn serveOne(
     }) catch "(unprintable)";
 
     const head_at = Io.awakeNs() orelse 0;
-    const disk_requests = if (disk) |d| d.requests else 0;
-    const disk_ticks = if (disk) |d| d.busy_ticks else 0;
+    const disk_before = diskWork();
 
     var outcome: []const u8 = "ok";
     var bus = Bus.of(hub);
@@ -569,12 +570,11 @@ fn serveOne(
     serial.put(" us, answered in ");
     serial.putDec(@intCast(@divTrunc(done_at - head_at, 1000)));
     serial.put(" us, ");
-    if (disk) |d| {
-        serial.putDec(d.requests - disk_requests);
-        serial.put(" disk requests taking ");
-        serial.putDec(@intCast(@divTrunc(Io.ticksToNs(d.busy_ticks -% disk_ticks), 1000)));
-        serial.put(" us\n");
-    } else serial.put("no disk\n");
+    const disk_after = diskWork();
+    serial.putDec(disk_after.requests - disk_before.requests);
+    serial.put(" disk requests taking ");
+    serial.putDec(@intCast(@divTrunc(Io.ticksToNs(disk_after.ticks -% disk_before.ticks), 1000)));
+    serial.put(" us\n");
     if (kept_open) return;
     // A client that stopped taking the response has had its idle time
     // already: it is reset rather than waited on again for a goodbye.
@@ -794,39 +794,88 @@ fn restBetweenFrames(nic: *net.Net, tsc_hz: u64) void {
     }
 }
 
-/// **CHAT'S FILES ARE ON A VOLUME WHEN ONE IS ATTACHED**, and on the boot
-/// disk's data partition otherwise. A volume survives a new image; the boot
-/// disk does not, which is why the volume wins. A droplet has the SCSI
-/// controller volumes attach to whether or not one is attached, so finding
-/// no disk on it is ordinary and said; a controller or a disk that will not
-/// work stops the machine instead of quietly serving the boot disk's copy.
-fn chatDisk() virtio.Block {
-    if (virtio.find(scsi.device_id)) |controller| {
-        if (scsi.bring(controller, &volume_mem)) |b| {
-            const at = b.address.?;
-            serial.put("  chat's files: the volume (SCSI target ");
-            serial.putDec(at.target);
-            serial.put(", LUN ");
-            serial.putDec(at.lun);
-            serial.put(", ");
-            serial.putDec(b.capacity / 2048);
-            serial.put(" MB)\n");
-            return b;
-        } else |e| switch (e) {
-            error.NoDisk => serial.put("  no volume attached\n"),
-            else => {
-                serial.put("  the SCSI controller: ");
-                serial.put(@errorName(e));
-                serial.put("\n");
-                serial.fail("the volume controller or its disk would not come up");
-            },
-        }
-    }
+/// Every request the disks have served, and the time they took, so far.
+fn diskWork() struct { requests: u64, ticks: u64 } {
+    var requests: u64 = 0;
+    var ticks: u64 = 0;
+    for (disks) |d| if (d) |b| {
+        requests += b.requests;
+        ticks +%= b.busy_ticks;
+    };
+    return .{ .requests = requests, .ticks = ticks };
+}
+
+/// The disk the machine was booted from, which holds the site.
+fn bootDisk() virtio.Block {
     const base = virtio.find(virtio.device_id_block) orelse
         serial.fail("no disk: this kernel serves the site from a FAT16 volume");
-    const b = blk_mem.bring(base) catch serial.fail("the block device would not come up");
-    serial.put("  chat's files: the boot disk\n");
-    return b;
+    return blk_mem.bring(base) catch serial.fail("the block device would not come up");
+}
+
+/// **A DIGITALOCEAN VOLUME**, if one is attached: a disk on the SCSI
+/// controller a droplet has whether or not one is, so finding no disk on it is
+/// ordinary and said. A controller or a disk that will not work stops the
+/// machine instead of quietly keeping the data on the boot disk, where the
+/// next image would erase it.
+fn dataVolume() ?virtio.Block {
+    const controller = virtio.find(scsi.device_id) orelse return null;
+    if (scsi.bring(controller, &volume_mem)) |b| {
+        const at = b.address.?;
+        serial.put("  a volume: SCSI target ");
+        serial.putDec(at.target);
+        serial.put(", LUN ");
+        serial.putDec(at.lun);
+        serial.put(", ");
+        serial.putDec(b.capacity / 2048);
+        serial.put(" MB\n");
+        return b;
+    } else |e| switch (e) {
+        error.NoDisk => {
+            serial.put("  no volume attached\n");
+            return null;
+        },
+        else => {
+            serial.put("  the SCSI controller: ");
+            serial.put(@errorName(e));
+            serial.put("\n");
+            serial.fail("the volume controller or its disk would not come up");
+        },
+    }
+}
+
+/// The FAT16 filesystem in `blk`'s first data partition, with its FAT held in
+/// memory: without that every lookup is a device read, and the free-cluster
+/// search re-reads its way past every cluster in use on each small file the
+/// application replaces.
+fn mountFat(blk: *virtio.Block, scratch: *[fat16.sector_size]u8, what: []const u8) fat16.Volume {
+    const part = gpt.dataPartition(blk, scratch) catch {
+        serial.put("  ");
+        serial.put(what);
+        serial.put(": no GPT partition\n");
+        serial.fail("a disk has no partition to serve from");
+    };
+    var vol = fat16.Volume.mount(blk, scratch, part.first_lba) catch {
+        serial.put("  ");
+        serial.put(what);
+        serial.put(": its first partition is not FAT16\n");
+        serial.fail("a disk's partition is not FAT16");
+    };
+    const fat_cache = pages.allocator.alloc(u8, vol.fatBytes()) catch
+        serial.fail("no memory to hold the FAT");
+    vol.cacheFat(fat_cache) catch |e| {
+        serial.put("  fat cache: ");
+        serial.put(@errorName(e));
+        serial.put("\n");
+        serial.fail("the FAT could not be held in memory");
+    };
+    serial.put("  ");
+    serial.put(what);
+    serial.put(": FAT16 at LBA ");
+    serial.putDec(part.first_lba);
+    serial.put(", FAT held in memory (");
+    serial.putDec(vol.fatBytes());
+    serial.put(" bytes)\n");
+    return vol;
 }
 
 fn logRequest(number: u64, what: []const u8, outcome: []const u8) void {
@@ -846,10 +895,10 @@ fn logRequest(number: u64, what: []const u8, outcome: []const u8) void {
     serial.put(")\n");
 }
 
-/// **HOST CONFIGURATION, FROM THE VOLUME.** What a Linux host would read from
+/// **HOST CONFIGURATION, FROM THE BOOT DISK.** What a Linux host would read from
 /// a config file or the environment, this reads from `gopher-metal.conf` on the
-/// disk it serves — the two things that are about this machine rather than
-/// about the site:
+/// boot disk, which comes with each image — the things that are about this
+/// machine rather than about the site:
 ///
 ///     requests = N            serve N and stop; absent, serve until stopped
 ///     idle_timeout_ms = N     how long a connection may make no progress
