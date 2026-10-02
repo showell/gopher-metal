@@ -240,6 +240,33 @@ queue full). After 17 and 18.*
       like. For each: is it validated before the join, by what, and what
       would a bad value make or remove on disk? `deleteTree` first.
 
+*Item 21 queued 2026-10-02 (Steve: do the essay's "subtraction"; box Claude
+draws the seam, CC takes the tail). Background:
+http://143.244.172.148:9100/notes/a-web-server-in-a-box.md*
+
+21. **angry-gopher's Store: every disk call through one seam.** The box
+    Claude is adding `zig-server/src/store.zig` (read, write, replace,
+    append, list, remove, removeTree, makeDir, stat, over `std.Io`) that also
+    enforces FAT's rules on Linux: names FAT holds, at most 96 bytes, and
+    case-insensitive identity with case kept for display (Steve's option 1).
+    It moves `users.zig` and `chat_store.zig` onto it first, which fixes the
+    seam's shape.
+    - **First, a question:** can you push to angry-gopher (a branch is
+      fine)? Answer under Questions. If not, say so and skip to 17/18;
+      the box does the tail.
+    - **Then, once the box's first slice is on angry-gopher's `master`:**
+      move the remaining files that call `Io.Dir.cwd()` onto the Store, one
+      file per commit, with no change of behaviour: `storage.zig`,
+      `docs_store.zig`, `chat_state.zig`, `player.zig`, `counter.zig`,
+      `chat_download.zig`, `admin_lynrummy.zig`, `reading_list.zig`,
+      `images_store.zig`, `code_store.zig`, `chat_upload.zig`,
+      `resume_page.zig`, `recent.zig`, `gallery.zig`, `files.zig` and the
+      rest `grep -l 'Io.Dir.cwd()'` finds. Tests and benches that read their
+      own fixtures may stay as they are; say which.
+    - Each commit passes angry-gopher's `ops/check` where you can run it;
+      the box runs it and the gopher judge before merging. Item 20's review
+      reads better after this: path checks move into the Store.
+
 ## Box Claude
 
 - v6: gates, images, deploy with Steve, and the survival test (the marker
