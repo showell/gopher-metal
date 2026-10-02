@@ -522,13 +522,29 @@ Answers below carry the detail. In this order:
 *Items 27-32 queued 2026-10-02 (box Claude, keeping the queue full). After
 26, before 18. The rehearsal they build on is in MIGRATION.md, "Rehearsed".*
 
-27. **`/chat/recent` from the message's own date, not the file's.** The
+27. **`/chat/recent` from the message's own date, not the file's.** *(CC, done: angry-gopher `44575ee1`)* The
     rehearsal's only difference: 7 sessions shown one second earlier on
     metal, because their time came from a modification time and FAT keeps
     2-second steps. Find which sessions take the file's time (no sidecar
     date? an older transcript?) and make recent use the date in the
     transcript or sidecar, so the two hosts agree exactly and a migration
     changes nothing visible. A test over a transcript whose mtime is odd.
+
+    **Done** (CC), two commits on angry-gopher's branch.
+    - **Dates:** a message's date now reads with an offset (`-04:00`) or a
+      fraction of a second, and is sent normalized to UTC.
+    - **File times:** a row that still falls back to its file's time (an
+      empty session, an unreadable date, every doc) is floored to an even
+      second on every host, as FAT keeps it.
+    - Tested with an empty session written at an odd second; the test
+      fails without the floor.
+    - **Not known here: which case the seven were.** On prod's copy, this
+      counts the message dates that are not this server's spelling:
+
+          grep -rh '^date: ' --include='*.md' data/chat | grep -vcE '^date: [0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9:]{8}Z$'
+
+      Empty sessions show as `.md` files with no `MSG_` line. Please
+      re-run the rehearsal's comparison; recent should now be identical.
 28. **`droplet/compare_hosts.py`: the rehearsal's page comparison, kept.**
     The box compared 155 pages as uid 1 with a throwaway script. Make it a
     tool for the cutover day: two base URLs (the second optionally reached
