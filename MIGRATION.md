@@ -282,7 +282,8 @@ The FAT16 run's one difference (recent's two-second clock) is gone: recent
 now takes its times from the messages (QUEUE item 27).
 
 **Not rehearsed yet:**
-- the same build through Linux's own vfat driver (`--mount`): the first
-  attempt was killed for memory, because the volume tools held the 3 GiB
-  image whole (QUEUE item 75);
+- the same build through Linux's own vfat driver (`--mount`). The first
+  attempt was killed for memory: the volume tools held the 3 GiB image
+  whole. They now map it, and judge a 16 GiB volume in about 40 MB
+  (QUEUE item 75);
 - writing the real DigitalOcean volume (CUTOVER.md, step 8).
