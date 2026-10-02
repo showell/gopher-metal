@@ -1273,7 +1273,8 @@ pub const Volume = struct {
         const run = try self.findRun(dir_cluster, parts + 1);
 
         const per_cluster = self.sectors_per_cluster * sector_size;
-        const clusters = (@as(u32, @intCast(bytes.len)) + per_cluster - 1) / per_cluster;
+        if (bytes.len > 0xFFFF_FFFF) return Error.TooBig;
+        const clusters: u32 = @intCast((@as(u64, bytes.len) + per_cluster - 1) / per_cluster);
         const first = try self.allocChain(clusters);
         if (bytes.len > 0) try self.writeChain(first, bytes);
 
@@ -1375,8 +1376,11 @@ pub const Volume = struct {
         if (reach > 0xFFFF_FFFF) return Error.TooBig;
         const new_size: u32 = @max(old_size, @as(u32, @intCast(reach)));
 
-        const have: u32 = (old_size + cluster_bytes - 1) / cluster_bytes;
-        const need: u32 = (new_size + cluster_bytes - 1) / cluster_bytes;
+        // **IN 64 BITS**: rounding a size near 4 GiB up to whole clusters
+        // overflows 32, which panicked where it should answer TooBig
+        // (REVIEW-restart-fat32.md F1).
+        const have: u32 = @intCast((@as(u64, old_size) + cluster_bytes - 1) / cluster_bytes);
+        const need: u32 = @intCast((@as(u64, new_size) + cluster_bytes - 1) / cluster_bytes);
 
         // An empty file has no chain at all (first_cluster 0), so the first
         // append is also the allocation.
