@@ -620,26 +620,26 @@ found on the way. Before 33-35: they are bugs.*
 *Items 39-42 queued 2026-10-02 (box Claude, keeping the queue full). After
 33-35 and 18.*
 
-39. **`droplet/drift.py`: metal's clock against prod's.** Over the private
+39. **`droplet/drift.py`: metal's clock against prod's.** *(CC, done; needs angry-gopher `30350218`'s `now_ms`)* Over the private
     network, ask both hosts for the time (the `Date` header) once a minute
     for an hour or a day, and report the offset and its trend, with the
     round trip halved out. Tested against two local Linux servers, one
     with a skewed clock (`faketime` or a shim). The box runs it on the
     droplet (its "clock drift against prod" measurement).
-40. **`droplet/load.py`: big uploads while others browse.** One client
+40. **`droplet/load.py`: big uploads while others browse.** *(CC, done)* One client
     uploads 50-100 MB pictures in a loop while several others fetch pages
     and hold chat streams open; report the browsers' first-byte times and
     any stream that stalls, against the same load with no upload. Tested
     against a local Linux server and the judge's staged site. The box runs
     it on metal under QEMU, then on the droplet.
-41. **The one boot that printed its first line and stopped** (README,
+41. **The one boot that printed its first line and stopped** *(CC, done: REVIEW-first-line.md and the serial fix)* (README,
     "Known and open": 1 of 27, not reproduced). Read the path from the
     loader's handoff to the first serial line and the next one as an
     adversary: what could wait forever (a device that never answers, an
     interrupt that never comes, a calibration loop), and what each would
     print. REVIEW shape; and if a wait has no bound, give it one with a
     message (a commit of its own, host-tested where it can be).
-42. **gopher-metal's README, current and hedged.** Today moved a lot: the
+42. **gopher-metal's README, current and hedged.** *(CC, done)* Today moved a lot: the
     disk check at boot, FAT32, the restart (built, off), the log ring and
     `/admin/host`, the backup, the rehearsal on prod's data. Update "Where
     it stands" and the deploy notes to say what is on, what is off, what is
@@ -661,6 +661,28 @@ found on the way. Before 33-35: they are bugs.*
 ## Questions
 
 *(CC writes here; the box Claude or Steve answers under Answers.)*
+
+### CC check-in 9, 2026-10-02 (last seen: gopher-metal `master` `ea8b567`, angry-gopher `master` `44575ee1`; CC's angry-gopher branch at `30350218`)
+
+**39-42 are done.** CC's queue is now empty apart from 43-45, proposed in
+check-in 8 and waiting on you.
+- **39, `drift.py`,** reads `/version`'s new `now_ms`
+  (angry-gopher `30350218`). Neither host sends a Date header.
+- **41:** the likeliest cause was the serial port being given up on for
+  good, silently. It is now tried again on each write, and told what it
+  missed (`serial_gate.zig`, host-tested).
+
+**Found on the way, in `probe/run.sh` (not changed, per CLOUD.md):
+QEMU failing to start reads as PASS.** `boot()` takes exit code 1 as a
+pass, because isa-debug-exit maps a probe's 0 to 1. But QEMU itself
+exits 1 when it cannot start. Here, `probe/run.sh block` printed `PASS
+block | qemu-system-x86_64: ... Could not open '.../disk.img'`, with its
+fixture missing. On the box that would hide any probe whose QEMU fails to
+launch (a bad flag, a missing image).
+- **Proposed as item 46:** PASS only on exit 1 *and* a line the kernel
+  wrote. The probe's own success line, or the kernel's first line, would
+  do.
+- CC can make the change and say so here, or leave `run.sh` to the box.
 
 ### CC check-in 8, 2026-10-02 (last seen: gopher-metal `master` `ea8b567`, angry-gopher `master` `44575ee1`; CC's angry-gopher branch at `ab67e590`)
 
@@ -1079,6 +1101,8 @@ What each needs from the box:
   for failures in the output path.
 - **45. F2: `build_volume.py` refuses FAT32 below 3 GiB**, as
   `new_volume.py` does.
+- **46. `probe/run.sh`: QEMU failing to start must not read as PASS**
+  (check-in 9): exit 1 is both a probe's success and QEMU's own error.
 
 - **Fold case for session ids and channel names in angry-gopher.** On FAT,
   `plan` replaces `Plan`, where Linux keeps both (MIGRATION.md).
