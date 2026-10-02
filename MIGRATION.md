@@ -26,9 +26,10 @@ tree before anything is copied.
    with the source. Then boot this machine on it and let the chat judge's
    read gates look.
 
-The application can produce exactly two of the hazards below: **names that
-differ only in case** and **names too long for `fat16.zig`**. The other
-hazards would have to come from something other than the application.
+The application can produce exactly one of the hazards below: **names that
+differ only in case**. It could also produce **names too long for
+`fat16.zig`** until `max_name` went from 64 to 96 (QUEUE.md item 8). The
+other hazards would have to come from something other than the application.
 
 ## What the application builds
 
@@ -70,26 +71,25 @@ application: fold session ids and channel names to one case, or refuse one
 that differs from an existing one only in case. Until then, the checker
 says whether prod has any.
 
-### Names too long for this machine — **the application can produce these**
+### Names too long for this machine — **the application could produce these, before `max_name` was 96**
 
 - **Linux** allows 255 bytes. **VFAT** allows 255 UTF-16 characters, so the
   copy succeeds.
-- **`fat16.zig` reads and writes names up to `max_name` = 64.** A longer name
-  is refused on write, and on read is found only under its 8.3 alias
-  (`SESSIO~1.JSO`), so the application cannot open it by name, and a listing
-  shows the alias.
-  - Before `d1c7364`, the reader stopped at **52**: a name of 53–64
-    characters was written fine and then could not be read back by name.
-    Kernels from before that commit should not serve a migrated volume.
-- **The application can produce them.** `<sid>.reactions.jsonl` is 16
-  characters longer than the session id, so **any session id over 48
-  characters** makes a name this machine cannot hold. A doc slug over 61
-  does the same. Both are legal at up to 80.
+- **`fat16.zig` reads and writes names up to `max_name` = 96.** A longer
+  name is refused on write, and on read is found only under its 8.3 alias
+  (`SESSIO~1.JSO`), so the application cannot open it by name, and a
+  listing shows the alias.
+- **The application's longest name is 96 characters.**
+  `<sid>.reactions.jsonl` is 16 characters longer than the session id, and
+  a session id may be 80. A doc slug may be 80 too, making `<slug>.md` 83.
+- **It was 64 until QUEUE.md item 8.** Then any session id over 48
+  characters, or a doc slug over 61, made a name this machine could not
+  hold. Kernels from before item 8 should not serve a migrated volume.
+  Nor should kernels from before `d1c7364`, whose reader stopped at 52.
 
-**What to do:** raise `max_name` to 96, which covers the application's
-longest name. That costs about 32 bytes of buffer per name in flight. Or cap
-session ids and slugs at 48 in the application. The checker lists any name
-over 64 in prod's data.
+**What to do:** nothing, on a kernel with `max_name` = 96. The checker
+still lists any name over 96 in prod's data, which only something other
+than the application could have made.
 
 **Paths and depth are fine:**
 

@@ -105,11 +105,22 @@ in order. The box Claude reorders on `master`, and CC proposes at the bottom.
      (`?password=` from a client; an upload's random id in its path). Nothing
      logs headers, bodies, hashes or the session secret, and the
      application's `std.log` has no sink on this machine.
-   - **The ring's header is in `.data`, its bytes in `.bss`,** which the
-     loader does not zero. That matters for item 7: after a reset that keeps
-     RAM, `.bss` holds the last boot's values, and `serial_dead` and
-     `tss_loaded` assume it is zero.
-7. **Design: restart on failure while serving** (`RESTART.md`).
+   - **The ring's header is in `.data`, its bytes in `.bss`.** Both loaders
+     zero `.bss` on every boot and restart (measured for item 7), so the
+     ring starts empty after a restart. RESTART.md says where it should go
+     to survive one.
+7. **Design: restart on failure while serving** (`RESTART.md`). **Done**
+   (CC): `RESTART.md`, with `probe/restart.elf`, which restarts the machine
+   each of the three ways and reports what survived.
+   - **The droplet's QEMU machine:** all three ways restart it.
+   - **`microvm`:** only the triple fault does.
+   - **What survives:** CMOS and RAM past the kernel survive every one;
+     `.data` is reloaded and `.bss` zeroed.
+   - **With `-no-reboot`,** a restart ends QEMU with status 0, apart from
+     the door's 1 and 3.
+   - **Measured under TCG only.** Box Claude: run it under KVM, and above
+     all on a real droplet, where a guest's reset might power it off
+     (RESTART.md, "Not measured here").
    - Today every fatal error halts the machine for good. On a droplet that
      means down until Steve reboots by hand.
    - Separate refusals at boot (keep halting: wrong volume, bad config) from
@@ -122,11 +133,12 @@ in order. The box Claude reorders on `master`, and CC proposes at the bottom.
 
 8. **Raise `fat16.max_name` to 96** (your proposal; accepted). The
    application makes names up to 96 characters. FAT allows 255; host tests
-   at the new bound, read back by `tools/fat16_read.py` too.
+   at the new bound, read back by `tools/fat16_read.py` too. **Done** (CC).
 9. **Stop directory growth at FAT's 65,536-entry limit** (your proposal;
    accepted), with a host test that fills a directory to the limit.
+   **Done** (CC).
 10. **`zig fmt` the three files, then make `zig fmt --check src` part of
-    `zig build test`** (your proposal; accepted), so it stays clean.
+    `zig build test`** (your proposal; accepted), so it stays clean. **Done** (CC).
 11. **Review `/admin/host` as an adversary**, once it is on `master` (the box
     Claude pushes it after its gates). That covers angry-gopher's
     `host_status.zig`, `admin_host.zig`, `server.zig`'s `linuxFacts`, and
@@ -156,14 +168,59 @@ in order. The box Claude reorders on `master`, and CC proposes at the bottom.
 
 *(CC writes here; the box Claude or Steve answers under Answers.)*
 
-- **`probe/run.sh` fails before any probe on a CPU it was not recorded on.**
-  - The judges' self-test compares a recorded `tsc_hz` (2.494 GHz) with the
-    host's; a cloud CPU at 2.1 GHz fails it, and run.sh exits there.
-  - Should the clock judge's self-test take the rate as a parameter? CLOUD.md
-    says run.sh is not CC's to change.
-- **`judge_gopher.build_disk` mounts without `tz=UTC`.** On a host not set to
-  UTC, every copied file's time shifts, and chat's "recent" with it.
-  MIGRATION.md tells the migration to add it. Should build_disk add it too?
+### CC check-in, 2026-10-02 (branch at `6c9fb91`, on `master` `7db2603`)
+
+The two earlier questions (the TSC self-test, `tz=UTC`) are answered below,
+and both are next on CC's list.
+
+**Ready to merge: items 1–10.** 18 commits, one topic each. Every one
+compiles; `zig build test` runs 627 tests plus the fmt check, and `zig build
+kernels` and `gopher` both build (gopher against angry-gopher `be16d28`).
+What each needs from the box:
+
+- **Items 3–5, 8, 9 (fat16, io):** run `tools/check_fat16_images.sh`, which
+  needs dosfstools and mtools. It checks 51 images with the oracle, plus 7
+  mkfs/mtools volumes judged by both readers. `fat16.zig` changes behaviour
+  in five ways:
+  - a looped or out-of-range chain is now `BadChain`, not a hang or a write
+    past the volume;
+  - `mount` refuses a FAT too short for its clusters;
+  - `max_name` is 96;
+  - directories stop at 65,536 entries;
+  - `Volume.check` is new, and not wired.
+
+  The QEMU gates should see none of the five on a healthy volume.
+- **Item 6 (the log ring):** `serial.put` now also writes `serial.ring`
+  (64 KiB, secrets redacted). Nothing reads it yet. The port and the screen
+  are unchanged.
+- **Item 7 (RESTART.md):** design only, plus a new kernel,
+  `probe/restart.elf` (`zig build restart`). **One thing only the box can
+  settle:** does a guest's reset restart a real droplet, or power it off?
+  - Boot `droplet/image.sh probe/restart.elf` on a droplet and watch the
+    recovery console. It should reach `boot 4` and `PASS`.
+  - Under TCG here it does that on the droplet-shaped QEMU, and on microvm
+    it reaches `boot 2`.
+  - Also worth a run under KVM: a copy of `droplet.sh` without
+    `-no-reboot`.
+- **Item 10:** `zig build test` now fails on a mis-formatted file in `src/`.
+  The three files were formatted, and `tcp_sim`'s seed list split so it
+  stays readable; the seeds run are the same.
+
+**Next, in order, unless you reorder:**
+1. item 11 (review `/admin/host`);
+2. the TSC self-test;
+3. `tz=UTC` in `build_disk`;
+4. item 12 (NT case bits).
+
+**Questions:**
+- **May CC add `restart.elf` to `probe/run.sh`?** It needs a run without
+  `-no-reboot`, which run.sh's loop has no knob for. CLOUD.md says to ask
+  before changing run.sh. If not, it stays a manual measurement.
+- **Is the log ring's 64 KiB in `.bss` fine for the droplet's memory
+  budget?** RESTART.md proposes moving it to a fixed region past
+  `_kernel_end`, so that the previous boot's log survives a restart. That
+  is a change to the page allocator's view of RAM. Should CC do it, or
+  wait for the restart wiring?
 
 ## Answers
 
@@ -197,19 +254,10 @@ in order. The box Claude reorders on `master`, and CC proposes at the bottom.
 
 *(CC adds items here, one line on why each.)*
 
-- **Raise `fat16.max_name` to 96, or cap session ids and doc slugs at 48 in
-  angry-gopher.** The application can make names up to 96 characters
-  (`<sid>.reactions.jsonl` at an 80-character sid), and this machine holds 64
-  (MIGRATION.md).
 - **Fold case for session ids and channel names in angry-gopher.** On FAT,
   `plan` replaces `Plan`, where Linux keeps both (MIGRATION.md).
-- **Stop `fat16.zig`'s `grow` at 65,536 directory entries.** It grows past
-  FAT's limit today, and `fsck.fat` would then reject the volume.
 - **Read the NT case bits (byte 12 of a short entry) in `fat16.zig`'s
   `decode`.** mtools and Windows store `topic.md` as `TOPIC.MD` with "lower
   case" flags and no long name, and this machine lists it upper case
   (`tools/check_fat16_images.sh` shows it). Linux's vfat writes a long name
   instead, so the migration is not affected.
-- **`zig fmt` the three files on `master` it flags** (`src/tcp_sim.zig`,
-  `src/rtc.zig`, `src/civil.zig`). `zig fmt --check src` fails today, so a
-  gate on it would fail before it checked anything new.

@@ -909,8 +909,11 @@ pub fn runSeed(seed: u64) !void {
 
 /// The seeds `zig build test` runs. A seed that once failed and was fixed
 /// stays here, named, as a regression test.
-const seeds = [_]u64{
-    1, 2, 3, 4, 5, 6, 7, 8,
+const seeds = [_]u64{ 1, 2, 3, 4, 5, 6, 7, 8 } ++ regressions;
+
+/// Seeds that once failed, kept apart from the eight plain ones so that
+/// `zig fmt` keeps one to a line, each under the comment that names it.
+const regressions = [_]u64{
     // A half-closed client: the table re-marked a window as owed after the
     // peer's FIN, every turn it sent data (fixed in tcp.zig's emit).
     125,

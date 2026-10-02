@@ -32,7 +32,9 @@ import time
 # ── the limits ──────────────────────────────────────────────────────────────
 
 # src/fat16.zig: the longest name it reads or writes (max_name).
-MAX_NAME = 64
+MAX_NAME = 96
+# The application's longest name: <sid>.reactions.jsonl at a session id of 80.
+APP_LONGEST_NAME = 96
 # src/io.zig: the longest path a File remembers (max_path).
 MAX_PATH = 256
 # src/fat16.zig: removeTree's recursion cap (max_tree_depth).
@@ -71,11 +73,10 @@ DEFAULT_CLUSTER = 32 << 10
 #   - user, player and conversation ids are digits ("p<n>" for players,
 #     "<a>_<b>" for a conversation).
 #
-# So the application can produce, and only produce:
-#   - names longer than MAX_NAME: <sid>.reactions.jsonl is 96 characters
-#     at a sid of 80, <slug>.md is 83;
-#   - names that differ only in case: two sessions "Plan" and "plan" in one
-#     conversation, two channels "Dev" and "dev".
+# So the application can produce, and only produce, names that differ only
+# in case: two sessions "Plan" and "plan" in one conversation, two channels
+# "Dev" and "dev". Its longest name, <sid>.reactions.jsonl at a sid of 80, is
+# 96 characters, which fat16.zig holds (it held 64 until QUEUE item 8).
 # It cannot produce a forbidden or non-ASCII character, a trailing dot or
 # space, a symlink, a file over 4 GiB (Caddy caps an upload at 110 MB and a
 # user at 1 GiB in all), or a path past MAX_PATH (its deepest is about 200).
@@ -152,7 +153,9 @@ def app_says(rel, rule):
     if kind is None:
         return "no: not a path angry-gopher builds; something else wrote it"
     what, long_ok, case_ok = kind
-    if rule == "long-name" and long_ok:
+    # Its longest name is <sid>.reactions.jsonl at a sid of 80: 96, which
+    # fat16.zig holds since max_name went from 64 to 96.
+    if rule == "long-name" and long_ok and MAX_NAME < APP_LONGEST_NAME:
         return f"yes: {what}; session ids and doc slugs may be 80 characters"
     if rule == "case-collision" and case_ok:
         return f"yes: {what}; session ids and channel names keep their case"
@@ -298,8 +301,8 @@ def self_test():
         put(f"{sess}/topic.md")                                   # clean
         put(f"{sess}/Plan.md")
         put(f"{sess}/plan.md")                                    # case-collision (app: yes)
-        long_sid = "a" * 60
-        put(f"{sess}/{long_sid}.reactions.jsonl")                 # long-name (app: yes)
+        put(f"{sess}/{'a' * 80}.reactions.jsonl")                 # the app's longest: clean
+        put(f"{sess}/{'a' * 81}.reactions.jsonl")                 # long-name (app: no)
         put("data/notes/what?.txt")                               # forbidden-character (app: no)
         put("data/notes/trailing.")                               # trailing-dot-or-space
         put("data/notes/café.txt")                           # non-ascii
@@ -334,8 +337,8 @@ def self_test():
                 failed.append(f"unexpected {rule}: {[f.path for f in got[rule]]}")
         if "yes" not in got["case-collision"][0].app:
             failed.append("a session case collision should be one the app can produce")
-        if "yes" not in got["long-name"][0].app:
-            failed.append("a long session sidecar name should be one the app can produce")
+        if not got["long-name"][0].app.startswith("no"):
+            failed.append("a name past the application's longest should be one it cannot produce")
         if not got["forbidden-character"][0].app.startswith("no"):
             failed.append("a forbidden character should be one the app cannot produce")
 

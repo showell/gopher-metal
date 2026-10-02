@@ -63,10 +63,13 @@ fn le32(b: []const u8) u32 {
     return @as(u32, b[0]) | (@as(u32, b[1]) << 8) | (@as(u32, b[2]) << 16) | (@as(u32, b[3]) << 24);
 }
 
-/// The longest name this filesystem will hold. VFAT allows 255; the
-/// application's longest is `_session_secret` at fifteen, and a buffer per
-/// entry is a buffer on a machine with a bump allocator.
-pub const max_name: usize = 64;
+/// The longest name this filesystem will hold. VFAT allows 255. The
+/// application's longest is 96: `<sid>.reactions.jsonl` at a session id of
+/// 80, which it allows (MIGRATION.md). At 64 such a file could be written by
+/// Linux and then found here only under its 8.3 alias. A buffer per entry is
+/// a buffer on a machine with a bump allocator, so it is the application's
+/// longest and no more: 8 long-name parts.
+pub const max_name: usize = 96;
 
 /// **A FAT16 DIRECTORY ENTRY CARRIES A DATE, AND THIS MACHINE WRITES IT.**
 ///
@@ -731,7 +734,15 @@ pub const Volume = struct {
 
     /// Adds one zeroed cluster to the end of a directory's chain.
     fn grow(self: *Volume, dir_cluster: u16) Error!void {
-        const last = try self.lastCluster(dir_cluster);
+        const end = try self.chainEnd(dir_cluster);
+        // **FAT'S LIMIT ON A DIRECTORY: 65,536 ENTRIES**, 2 MiB. Past it
+        // fsck.fat calls the directory broken, and Linux, which would have to
+        // read the volume after this machine wrote it, may refuse it. So a
+        // directory stops growing there, and the write that needed the room
+        // is refused as a full directory, as a full root is.
+        const per_cluster = self.sectors_per_cluster * (sector_size / dirent_size);
+        if ((end.clusters + 1) * per_cluster > max_dir_entries) return Error.DirectoryFull;
+        const last = end.last;
 
         const fresh = try self.allocChain(1);
         var s: u32 = 0;
@@ -741,6 +752,10 @@ pub const Volume = struct {
         }
         try self.fatSet(last, fresh);
     }
+
+    /// The most entries a directory may hold (Microsoft's FAT specification:
+    /// a directory is at most 2 MiB, of 32-byte entries).
+    pub const max_dir_entries: u32 = 65536;
 
     /// The most parts a VFAT long name can have: 255 characters, 13 per part.
     const max_long_parts = 20;
@@ -1128,15 +1143,22 @@ pub const Volume = struct {
 
     /// The last cluster of a chain — where an extension links on.
     fn lastCluster(self: *Volume, first: u16) Error!u16 {
+        return (try self.chainEnd(first)).last;
+    }
+
+    /// A chain's last cluster, and how many clusters it holds.
+    fn chainEnd(self: *Volume, first: u16) Error!struct { last: u16, clusters: u32 } {
         if (!self.inData(first)) return Error.BadChain;
         var cluster = first;
+        var clusters: u32 = 1;
         var loop = Loop{};
         try loop.pass(first);
         while (try self.nextCluster(cluster)) |next| {
             try loop.pass(next);
             cluster = next;
+            clusters += 1;
         }
-        return cluster;
+        return .{ .last = cluster, .clusters = clusters };
     }
 
     /// Writes `bytes` into a chain at byte `offset`, which the chain must
