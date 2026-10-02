@@ -126,17 +126,27 @@ pub fn forget() void {
 /// **THE RESTART PATH.** Something has already gone wrong, so it leans on as
 /// little as it can: interrupts off, no allocation, plain stores and port
 /// writes. A fault inside it triple-faults, which restarts anyway.
+///
+/// **THE RECORD FIRST.** The back-off is for a crash loop, and the failure
+/// being handled may be in the very paths a report goes through: the
+/// serial port, the screen, the ring, the clock. So the record is written
+/// before any of them is touched, with the time unknown (which only ever
+/// waits longer), then again with the time once the clock has answered.
+/// A fault while reporting still resets, but now with the restart counted
+/// (REVIEW-restart-fat32.md R1).
 fn fatal(reason: restart.Reason, why: []const u8) noreturn {
     asm volatile ("cli");
     serial.on_fatal = null; // a failure in here halts rather than loops
+    const previous = restart.Record.decode(cmosRead());
+    cmosWrite(restart.recordRestart(previous, null, reason).encode());
+    const now = restart.minutesSince2020(if (clock) |c| c() else null);
+    cmosWrite(restart.recordRestart(previous, now, reason).encode());
     serial.put("RESTART: ");
     serial.put(reason.text());
     serial.put(": ");
     serial.put(why);
     serial.put("\n");
     if (kept) |*k| k.seal(&serial.ring);
-    const now = restart.minutesSince2020(if (clock) |c| c() else null);
-    cmosWrite(restart.recordRestart(restart.Record.decode(cmosRead()), now, reason).encode());
     // A reset on real hardware need not write back the caches; the sealed
     // header is in one.
     asm volatile ("wbinvd" ::: .{ .memory = true });
