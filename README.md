@@ -179,7 +179,7 @@ droplet, booted from a custom image
 | a rewrite that survives a stop | **works on the host** — `fat16.rename` and the Store's `replace`: the disk stopped after every request in turn leaves the old record or the new, whole |
 | restarting on failure | **built, off** — CMOS record, back-off, the last boot's log kept past the kernel; measured on QEMU's pc and microvm. Waits on a real droplet |
 | the kept free count | **works** — `/admin/host`'s free space is a field read, equal to the oracle's count after every operation |
-| `/admin/backup` | **works against Linux** — everything the Store keeps as one streamed tar; the judge compares both hosts' archives member by member. Not yet downloaded from metal |
+| `/admin/backup` | **works against Linux** — everything the Store keeps as one streamed tar, after the admin's password again, ending with a manifest that `droplet/check_backup.py` holds it to; the judge compares both hosts' archives member by member. Not yet downloaded from metal; take it from prod over the private network (CUTOVER.md) |
 | the log on `/admin/host` | **built** — the serial ring's newest lines; the judge checks its shape. Not yet seen on the droplet |
 
     zig build test         # host unit tests for the pure parts of src/

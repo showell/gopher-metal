@@ -357,10 +357,14 @@ class Differences(unittest.TestCase):
 
 class Backup(unittest.TestCase):
     @staticmethod
-    def tar(files, mtime=0):
+    def tar(files, mtime=0, manifest=True):
+        """An archive as /admin/backup writes one: the members, then (from
+        QUEUE.md item 57) the manifest of every file."""
+        import hashlib
         import io
         import tarfile
         buf = io.BytesIO()
+        lines, total, n = [], 0, 0
         with tarfile.open(fileobj=buf, mode="w", format=tarfile.USTAR_FORMAT) as t:
             for name, data in files.items():
                 if data is None:
@@ -373,7 +377,25 @@ class Backup(unittest.TestCase):
                 info.size = len(data)
                 info.mtime = mtime
                 t.addfile(info, io.BytesIO(data))
+                lines.append(f"{hashlib.sha256(data).hexdigest()} {len(data)} {name}")
+                total, n = total + len(data), n + 1
+            if manifest:
+                text = "".join(f"{x}\n" for x in (["gopher-backup manifest 1"] if n else []) + lines
+                               + [f"end: {n} files, {total} bytes"]).encode()
+                info = tarfile.TarInfo("backup-manifest.txt")
+                info.size = len(text)
+                t.addfile(info, io.BytesIO(text))
         return buf.getvalue()
+
+    def test_an_archive_cut_short_or_without_its_manifest_is_not_whole(self):
+        import tarfile
+        import io
+        base = {"data": None, "data/a": b"one", "data/b": b"two"}
+        whole = self.tar(base)
+        last = tarfile.open(fileobj=io.BytesIO(whole)).getmembers()[-1].offset
+        for name, broken in (("cut", whole[:last]), ("old", self.tar(base, manifest=False))):
+            got = G.backup_differences(whole, broken)
+            self.assertTrue(any("on Linux is not whole" in g for g in got), (name, got))
 
     def test_two_archives_of_the_same_data_agree_though_their_times_differ(self):
         # Each host wrote the message at its own time, inside its own window.
