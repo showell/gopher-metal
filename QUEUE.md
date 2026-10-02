@@ -559,11 +559,11 @@ Answers below carry the detail. In this order:
     both hosts, logs in, posts a message to a new topic, uploads a small
     picture and reacts, then compares the pages again. That is the
     rehearsal step not done yet.
-30. **`GOPHER_BIND` in angry-gopher's `server.zig`**: the listen address,
+30. **`GOPHER_BIND` in angry-gopher's `server.zig`** *(CC, done: angry-gopher `60b3d812`)*: the listen address,
     default `0.0.0.0` (prod's firewall keeps 9001 private today; Caddy
     reaches it on localhost). A test that `127.0.0.1` binds there only.
     The box will then run every rehearsal with real data on loopback.
-31. **Review `store.zig` as an adversary** (`REVIEW-interrupts.md`'s shape,
+31. **Review `store.zig` as an adversary** *(CC, done: `REVIEW-store.md`)* (`REVIEW-interrupts.md`'s shape,
     nothing fixed): case resolution under two writers racing to create
     case-variants; a miss in a directory of thousands; symlinks and `..` on
     Linux; what `resolve` does with an absolute root; errors swallowed into

@@ -42,7 +42,8 @@ exact path is missing.
 - **A miss is not rare.** It happens for every file that does not exist
   yet: a topic with no reactions (its `reactions` page), a conversation
   with no pins, a session's transcript before its first message
-  (`appendMessage` reads it), a user's `upload-bytes` before their first
+  (`openStream` reads it and `messageCount` stats it), a user's
+  `upload-bytes` before their first
   upload, and the reading list before its first save.
 - **Each miss lists the whole folder.** A topic's sidecars live four to a
   topic in `sessions/`, so a DM with 500 topics has a 2,000-entry folder.
@@ -58,7 +59,7 @@ exact path is missing.
 conversations grow, on metal twice over. Nothing breaks.
 
 **How likely:** certain, in proportion to folder size. It is cheap today:
-prod's largest folders are small (MIGRATION.md's survey: 835 files in
+all of prod is small (MIGRATION.md's survey, 2026-10-02: 835 files in
 total).
 
 **Fix shape:**
