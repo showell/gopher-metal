@@ -1242,11 +1242,19 @@ pub const Volume = struct {
     }
 
     /// Writes a whole file into `dir_cluster`, replacing one of the same name.
-    pub fn writeFileIn(self: *Volume, dir_cluster: Cluster, name: []const u8, bytes: []const u8) Error!void {
-        if (name.len == 0 or name.len > max_name) return Error.BadName;
-        try self.removeEntry(dir_cluster, name);
+    ///
+    /// **A REWRITE KEEPS THE NAME THE FILE HAS.** Names are matched without
+    /// case, so `PLAN.md` replaces `plan.md`; the file stays `plan.md`, with
+    /// the same 8.3 alias, as an append keeps it and as Linux's vfat keeps it
+    /// on a truncating open. Only a new file takes the case it was given.
+    pub fn writeFileIn(self: *Volume, dir_cluster: Cluster, given: []const u8, bytes: []const u8) Error!void {
+        if (given.len == 0 or given.len > max_name) return Error.BadName;
+        const old = try self.find(dir_cluster, given);
+        const kept = if (old) |*e| !e.isDirectory() else false;
+        const name = if (kept) old.?.text() else given;
+        try self.removeEntry(dir_cluster, given);
 
-        const short = try self.aliasFor(dir_cluster, name);
+        const short = if (kept) old.?.short else try self.aliasFor(dir_cluster, name);
         const needs_long = needsLongName(name);
         const parts: u32 = if (needs_long) longParts(name) else 0;
         const run = try self.findRun(dir_cluster, parts + 1);

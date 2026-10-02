@@ -788,6 +788,43 @@ test "a short name with the NT lower-case bits lists in lower case, and is found
     }
 }
 
+// ---- a rewrite keeps the name (the box's judge, 2026-10-02) ------------------
+
+test "a file rewritten under a name in another case keeps the name and alias it has" {
+    for (configs) |cfg| {
+        const shape, const cached = .{ cfg.shape, cfg.cached };
+        const d = try Disk.make("recase", shape, cached);
+        defer d.deinit();
+        // A long name, as the Store writes a topic's sidecar; a name that
+        // needs no long one; and one that fits 8.3 only in upper case.
+        try d.vol.writeFile("data/metal-talk.count", "1");
+        try d.vol.writeFile("data/plan.md", "one");
+        try d.vol.writeFile("data/KEEP.MD", "a");
+        const alias = (try d.vol.open("data/metal-talk.count")).alias();
+        var alias_buf: [12]u8 = undefined;
+        const kept_alias = alias_buf[0..alias.len];
+        @memcpy(kept_alias, alias);
+
+        try d.vol.writeFile("data/Metal-Talk.count", "2");
+        try d.vol.writeFile("data/PLAN.md", "two");
+        try d.vol.writeFile("data/keep.md", "b");
+        const data_dir = try d.vol.open("data");
+        var buf: [256]u8 = undefined;
+        try testing.expectEqualStrings("metal-talk.count plan.md KEEP.MD", try d.names(data_dir.first_cluster, &buf));
+        try testing.expectEqualStrings(kept_alias, (try d.vol.open("data/METAL-TALK.COUNT")).alias());
+        try d.expectFile("data/metal-talk.count", "2");
+        try d.expectFile("data/plan.md", "two");
+        try d.expectFile("data/KEEP.MD", "b");
+
+        // A new file still takes the case it is given.
+        try d.vol.writeFile("data/New-Topic.md", "x");
+        try testing.expectEqualStrings("metal-talk.count plan.md KEEP.MD New-Topic.md", try d.names(data_dir.first_cluster, &buf));
+        try d.mount(cached);
+        try testing.expectEqualStrings("metal-talk.count plan.md KEEP.MD New-Topic.md", try d.names(data_dir.first_cluster, &buf));
+        try testing.expect(d.fatsAgree());
+    }
+}
+
 // ---- the kept free count (QUEUE item 14) -------------------------------------
 
 test "the kept free count follows every operation, the refused and failed ones included" {

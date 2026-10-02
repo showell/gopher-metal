@@ -173,6 +173,14 @@ MEMBER_STORY = [
     step("a new topic", "POST", "/chat/c/1_2/new", JAR, "topic=metal-talk", settle=3.0),
     step("a message in it", "POST", "/chat/c/1_2/metal-talk/send", JAR,
          "markdown=a+second+topic&cid=c4", headers=["X-Chat-Async: 1"]),
+    # **CASE DOES NOT TELL TOPICS APART** (Steve's option 1, 2026-10-02): on
+    # FAT it cannot, and angry-gopher's Store keeps that rule on Linux too. So
+    # a topic asked for, or written to, in another case is the same topic on
+    # both hosts.
+    step("the new topic, asked for in another case", "GET", "/chat/c/1_2/METAL-TALK/raw", JAR),
+    step("a message to it, in a third case", "POST", "/chat/c/1_2/Metal-Talk/send", JAR,
+         "markdown=the+same+topic&cid=c5", headers=["X-Chat-Async: 1"]),
+    step("the topic holds both messages", "GET", "/chat/c/1_2/metal-talk/raw", JAR),
     step("a reaction", "POST", "/chat/c/1_2/general/react", JAR, "id=general_1&emoji=%F0%9F%91%8D"),
     step("the reactions file", "GET", "/chat/c/1_2/general/reactions", JAR),
     step("recent activity", "GET", "/chat/recent", JAR),
