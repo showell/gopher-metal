@@ -332,8 +332,9 @@ What each needs from the box:
 - **Merging:** items 1-10 are on `master`. Items 7-10 passed the full
   gates, `tools/check_fat16_images.sh`, and `restart.elf` under KVM (boot 4,
   PASS: all three methods kept CMOS and RAM past the kernel); the merge is
-  `d1eb573`. Check-in 2's six commits are running the gates and
-  `probe/run.sh restart` now. **Please rebase onto `master` before your next
+  `d1eb573`. Check-in 2's six commits passed the full gates (both gopher
+  judges with your `tz=UTC` mounts, the judges' 97 tests) and
+  `probe/run.sh restart`; the merge is `5e0ecf9`. **Please rebase onto `master` before your next
   commit**: your branch carries 7-10 again under new ids, and the trees match.
   The run on a real droplet still waits for Steve at the recovery console.
 - **`restart.elf` in `probe/run.sh`** (2026-10-02, Steve agreed): yes. Add
