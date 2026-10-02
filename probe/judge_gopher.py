@@ -251,6 +251,21 @@ UID_STORY = [
 ]
 
 
+# **A PLAYER AT THE GAME STORE'S BOUND** (QUEUE.md item 52): one player's
+# games may take 16 MiB. New games of 250,000 bytes each, until the store
+# says no: every one before the bound is saved on both hosts, the first past
+# it is a 507 that says why, and so is every one after. The trees then
+# compare equal, so the bound fell at the same game on both.
+CAP_GAME = "x" * 250_000
+CAP_TRIES = 70  # 16 MiB / 250,000 bytes is 67 and a bit
+P1_SIGNED = "$P1_SIGNED"
+
+CAP_STORY = [step(f"new game {n + 1}", "POST", "/game/new-session", P1_SIGNED, CAP_GAME)
+             for n in range(CAP_TRIES)] + [
+    step("the player's games, listed", "GET", "/game/sessions", P1_SIGNED),
+]
+
+
 # ENDURANCE: the writes, over and over, READ BACK EVERY ROUND.
 #
 # **STAMINA BELOW ONLY READS, AND A READ CANNOT LOSE ANYTHING.** Three GETs
@@ -594,7 +609,7 @@ QUICK = bool(os.environ.get("JUDGE_QUICK"))
 # answerable in one of those minutes. `JUDGE_ONLY=uploads` (probe/run.sh gopher
 # uploads) runs that gate and nothing else. An unknown name is an error, not a
 # silently complete run.
-GATES = ["cases", "members", "uids", "streams-linux", "streams-metal", "budget", "churn",
+GATES = ["cases", "members", "uids", "caps", "streams-linux", "streams-metal", "budget", "churn",
          "bulk", "uploads", "slow", "lagging", "concurrent", "timeouts",
          "damaged", "endurance", "stamina"]
 # The boots that exist to be long. The quick tier leaves them out; asking for
@@ -850,7 +865,12 @@ class LinuxServer:
             # be a difference between two hosts' configuration rather than
             # between two answers.
             f.write("data_dir = data\nauth_dir = auth\n")
-        env = dict(os.environ, GOPHER_CONFIG=conf, GOPHER_PORT=str(self.port))
+        # **NO FLOOR ON LINUX'S SIDE.** angry-gopher stops game writes when the
+        # data's volume is under a quarter free (QUEUE.md item 52). Here that
+        # volume is whatever disk this machine's temporary folder is on, which
+        # says nothing about the server under test, and a full development
+        # disk would refuse what the kernel, on its own image, takes.
+        env = dict(os.environ, GOPHER_CONFIG=conf, GOPHER_PORT=str(self.port), GOPHER_GAME_FLOOR="off")
         self.log = open(log, "wb")
         # Popen gives the server's OWN pid, so stopping it stops it — not a
         # shell that happens to be its parent.
@@ -2685,6 +2705,31 @@ def main() -> int:
                   f"nothing, a hand-set and a wrongly signed cookie named no one, and a legacy cookie "
                   f"was re-signed once and refused after")
         lap("uid story")
+
+    # ── a player at the game store's bound ──────────────────────────────────
+    if running("caps"):
+        minted = {P1_SIGNED: mint_uid("p1", int(time.time()))}
+        f, _, answers, files = run_story(elf, linux_bin, content, pristine, work, mnt,
+                                         CAP_STORY, "caps", print, minted)
+        failures += f
+        statuses = [a.get("status") for a in answers[:CAP_TRIES]]
+        saved = statuses.index(507) if 507 in statuses else len(statuses)
+        wrong = []
+        if saved < 60 or saved == len(statuses):
+            wrong.append(f"{saved} games saved before a 507, of {CAP_TRIES} tried: {statuses}")
+        elif any(st != 200 for st in statuses[:saved]) or any(st != 507 for st in statuses[saved:]):
+            wrong.append(f"not every game before the bound saved and every one after refused: {statuses}")
+        elif b"16 MiB" not in (answers[saved].get("body") or b""):
+            wrong.append(f"the 507 did not say why: {answers[saved].get('body')!r}")
+        if answers[CAP_TRIES].get("status") != 200:
+            wrong.append(f"the list of games answered {answers[CAP_TRIES].get('status')} at the bound")
+        for w in wrong:
+            failures += 1
+            print(f"FAIL  caps: {w}")
+        if not f and not wrong:
+            print(f"ok    the cap story: {saved} games of 250,000 bytes saved and the next "
+                  f"{CAP_TRIES - saved} refused (507, saying why) on both hosts alike, all {files} files agree")
+        lap("cap story")
 
     # ── a live stream, on both ───────────────────────────────────────────────
     if running("streams-linux"):
