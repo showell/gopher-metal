@@ -251,7 +251,12 @@ UID_STORY = [
     step("and is that player, signed", "GET", "/play", JAR),
     step("a legacy cookie's first visit is re-signed", "GET", "/play?next=/play", "gopher_uid=p1"),
     step("and the re-signed cookie is that player", "GET", "/play", JAR),
-    step("the same unsigned cookie again is no one", "GET", "/play", "gopher_uid=p1"),
+    # Within ten minutes the same unsigned cookie is re-signed again, so an
+    # answer lost on the way recovers (item 63); a player named since item 51
+    # never had an unsigned cookie, and its unsigned spelling is no one.
+    step("the same unsigned cookie again, inside the grace, is re-signed again", "GET", "/play?next=/play",
+         "gopher_uid=p1"),
+    step("a new player's unsigned spelling is no one", "GET", "/play", "gopher_uid=p2"),
 ]
 
 
@@ -2720,7 +2725,7 @@ def main() -> int:
         if upgrade.get("status") != 200 or UPGRADE_HEADING in (upgrade.get("body") or b""):
             wrong.append(f"the guest upgrade answered {upgrade.get('status')}, not the stranger's form")
         for name, who in (("a member's id, hand-set", "Steve"), ("a signature from another secret", "Nikhil"),
-                          ("the same unsigned cookie again is no one", "Nikhil")):
+                          ("a new player's unsigned spelling is no one", "Debbie")):
             if playing(by_name[name], who) or set_uid(by_name[name]):
                 wrong.append(f"{name}: answered as {who}, or set a cookie")
         named = set_uid(by_name["a player names themselves"])
@@ -2736,14 +2741,17 @@ def main() -> int:
                          "(and so p1 did not survive the forged release)")
         if not playing(by_name["and the re-signed cookie is that player"], "Nikhil"):
             wrong.append("the re-signed cookie did not name p1")
+        again = by_name["the same unsigned cookie again, inside the grace, is re-signed again"]
+        if again.get("status") != 303 or not set_uid(again) or not set_uid(again).group(1).startswith("p1."):
+            wrong.append(f"the legacy cookie inside its grace answered {again.get('status')}, not re-signed again")
         for w in wrong:
             failures += 1
             print(f"FAIL  uids: {w}")
         if not f and not wrong:
             print(f"ok    the uid story: {len(UID_STORY)} requests to ONE boot, each answered as Linux "
                   f"answered, all {files} files agree; a forged release and a forged guest upgrade did "
-                  f"nothing, a hand-set and a wrongly signed cookie named no one, and a legacy cookie "
-                  f"was re-signed once and refused after")
+                  f"nothing, a hand-set, a wrongly signed and a new player's unsigned cookie named no one, and a legacy cookie "
+                  f"was re-signed, and again inside its grace")
         lap("uid story")
 
     # ── a player at the game store's bound ──────────────────────────────────
