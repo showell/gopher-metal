@@ -684,6 +684,43 @@ check-ins 8 and 9, accepted; 47-50 keep the queue full. In this order.*
     the largest folder holds 70 entries, an uploads folder; the next, 65
     sessions.)
 
+*Items 51-52 queued 2026-10-02: Steve's decisions on DESIGN-signed-uid.md
+and GROWTH-game-store.md. After 43-46, before 47-50: they close holes.*
+
+51. **Sign `gopher_uid`, as DESIGN-signed-uid.md proposes.** Steve
+    (2026-10-02): **re-identify once**, and all of CC's recommendations
+    stand. So:
+    - the cookie signed with the session secret, as `gopher_auth` is;
+    - **the window:** until the cutover or 30 days after this deploys,
+      whichever is first;
+    - **the once-only marker** (`{player_root}/<id>/signed`), so the hole
+      closes for each id at its owner's first visit;
+    - members never re-identified by an unsigned cookie; a valid
+      `gopher_auth` with no or an unsigned `gopher_uid` simply gets a
+      signed one;
+    - **the six guests:** your call, said in the commit (turning them into
+      players and removing `.upgrade` is welcome if it is simpler and
+      loses nothing a guest can do today);
+    - the tests and judge cases the note lists, both hosts; the box re-runs
+      the release attack and the guest takeover against the result.
+52. **Limit the game store's growth: strict.** Steve (2026-10-02): "No
+    benign player would ever possibly fill up the disk; any Lyn Rummy play
+    that fills up disk quickly is either a bot or a truly malicious
+    entity." CC's three recommendations, all of them, and stricter:
+    - **no write on a `GET`**: a puzzle session is made on its first move;
+    - **per player:** 500 sessions and 16 MiB (prod's largest player, uid
+      1, is 75 files and 1.3 MB), past which a write answers 507 and says
+      why;
+    - **per address, now, not "if abuse is seen":** 5 new players and 20 MB
+      of game writes an hour, from Caddy's `X-Forwarded-For` trusted only
+      from Caddy's address (on metal, from prod's private address), 429
+      past it; an in-memory table, expired hourly, bounded in size;
+    - **a global floor:** game writes stop (507) when the volume's free
+      space falls below a quarter of it (on prod, below 2 GiB), while
+      chat, accounts and uploads carry on;
+    - tests for each at its bound, and a judge case that hits a per-player
+      cap on both hosts. Chat is untouched by all of it.
+
 ## Box Claude
 
 - v6: gates, images, deploy with Steve, and the survival test (the marker
