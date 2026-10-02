@@ -51,9 +51,12 @@ def compare(copy: str, image: str) -> list:
         v = fat16_read.Volume(f.read())
     findings = [("check", "", p) for p in v.check()]
 
+    # One walk, and each file read from the chain it found: v.read(path)
+    # walks the whole volume again on every call, which on a folder of
+    # 65,000 files is 65,000 walks of 65,000 entries.
     on_volume = {}
-    for full, is_dir, _, size in v.walk([]):
-        on_volume[full] = (is_dir, size)
+    for full, is_dir, first, size in v.walk([]):
+        on_volume[full] = (is_dir, size, first)
     by_fold = {}
     for full in on_volume:
         by_fold.setdefault(full.casefold(), []).append(full)
@@ -75,7 +78,7 @@ def compare(copy: str, image: str) -> list:
                     findings.append(("missing", rel, "not on the volume"))
                 continue
             seen.add(rel)
-            v_dir, v_size = on_volume[rel]
+            v_dir, v_size, v_first = on_volume[rel]
             if v_dir != is_dir:
                 findings.append(("missing", rel, "a directory on one side and a file on the other"))
                 continue
@@ -87,7 +90,12 @@ def compare(copy: str, image: str) -> list:
                 continue
             with open(src, "rb") as f:
                 want = hashlib.sha256(f.read()).hexdigest()
-            got = hashlib.sha256(v.read(rel)).hexdigest()
+            try:
+                data = b"" if v_size == 0 else b"".join(v.cluster(c) for c in v.chain(v_first))[:v_size]
+            except fat16_read.Problem as p:
+                findings.append(("content", rel, f"its chain will not read: {p}"))
+                continue
+            got = hashlib.sha256(data).hexdigest()
             if want != got:
                 findings.append(("content", rel, f"SHA-256 {want[:16]}... in the copy, {got[:16]}... on the volume"))
             vt = v.mtime.get(rel)
