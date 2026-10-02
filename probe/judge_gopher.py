@@ -181,7 +181,11 @@ MEMBER_STORY = [
     step("a message to it, in a third case", "POST", "/chat/c/1_2/Metal-Talk/send", JAR,
          "markdown=the+same+topic&cid=c5", headers=["X-Chat-Async: 1"]),
     step("the topic holds both messages", "GET", "/chat/c/1_2/metal-talk/raw", JAR),
-    step("a reaction", "POST", "/chat/c/1_2/general/react", JAR, "id=general_1&emoji=%F0%9F%91%8D"),
+    # `msg` is the message's number in its topic. This step once posted
+    # `id=general_1`, which both hosts refused alike (400), so it reacted to
+    # nothing and still compared equal; the members story now requires it to
+    # land (QUEUE.md item 38).
+    step("a reaction", "POST", "/chat/c/1_2/general/react", JAR, "msg=1&emoji=%F0%9F%91%8D"),
     step("the reactions file", "GET", "/chat/c/1_2/general/reactions", JAR),
     step("recent activity", "GET", "/chat/recent", JAR),
     step("docs", "GET", "/chat/docs", JAR),
@@ -2558,6 +2562,15 @@ def main() -> int:
             if got != want:
                 failures += 1
                 print(f"FAIL  members: {name} answered {got}, want {want}")
+        # The reaction landed, not merely the same on both sides: two hosts
+        # that both refused it agreed for months. Its file is in the data
+        # tree compared at the end of the story.
+        if by_name["a reaction"].get("status") != 204:
+            failures += 1
+            print(f"FAIL  members: the reaction answered {by_name['a reaction'].get('status')}, want 204")
+        if "\N{THUMBS UP SIGN}".encode() not in (by_name["the reactions file"].get("body") or b""):
+            failures += 1
+            print("FAIL  members: the reactions file does not hold the reaction")
         # /admin/host: the admin gets the page; nobody else does, whatever both
         # sides agree on.
         if by_name["the running server, as the admin"].get("status") != 200:

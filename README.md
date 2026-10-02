@@ -37,7 +37,14 @@ droplet through our own BIOS loader.
   **It survives a rebuild:** a marker message posted on v5 was read back on
   v6 (2026-10-02), after the droplet was rebuilt from the new image. FAT16 limits a volume to
   2 GB; prod's data is 215 MB (2026-10-01), and each user may upload 1 GiB
-  over their lifetime, so FAT32 is the eventual next step (`FAT32.md`).
+  over their lifetime. **This machine now mounts FAT32 as well**
+  (`FAT32.md`, QUEUE item 17), decided by cluster count as the spec says.
+  That is judged under QEMU only, and is not yet on a real volume. The test
+  site's volume is still FAT16; the cutover plans a new FAT32 one
+  (`CUTOVER.md`).
+- **Each boot checks both disks** before serving (QUEUE item 13): files,
+  folders, clusters in use, leaked clusters and problems, one line per disk
+  in the log. A damaged disk is served from and reported, not refused.
 - **How to see it:** `/admin/host` (admin login) shows the running server,
   the same page on Linux and on metal. Its first half is the application's
   (version, angry-gopher's commit, base heap, refused requests), and its
@@ -45,7 +52,10 @@ droplet through our own BIOS loader.
   - this repo's commit, the boot time, uptime and clock;
   - requests, connections and streams;
   - memory, both disks' serials and free space;
-  - disk work and NMIs.
+  - disk work and NMIs;
+  - **the log:** the newest 60 lines of the serial ring, with secrets taken
+    out as they were written (QUEUE item 32). Linux's page says it keeps no
+    log to show yet.
 
   Each host hands its half over through angry-gopher's `host_status.provide`.
   **Not yet on the droplet**, and not yet on lynrummy.com. The public
@@ -83,6 +93,17 @@ neighbours vary.
 3. Import it as a custom image, and rebuild the droplet from it. The volume
    stays attached and is not touched.
 
+**The cutover**, lynrummy.com itself onto metal, is planned step by step in
+[`CUTOVER.md`](CUTOVER.md), with a go/no-go line at each step and the way
+back. Its tools are all here, all without root:
+- `droplet/check_volume_tree.py` checks a copy of the data, and
+  `build_volume.py` builds the volume;
+- `compare_volume.py` compares a volume with its copy;
+- `compare_hosts.py` compares two hosts page by page, with `--writes`;
+- `extract_volume.py` turns a volume back into a Linux tree;
+- `drift.py` compares two hosts' clocks, and `load.py` measures uploads
+  while others browse.
+
 **A new volume** is once, by hand: `droplet/new_volume.py <out.img>` builds the
 image and prints its serial; write it onto the volume from the recovery console
 (the command is in the script); put the serial in `droplet/volume-serial`; then
@@ -91,7 +112,15 @@ deploy as above.
 **Known and open:**
 
 - one boot here printed its first line and then nothing for a minute (1 of
-  27, not reproduced since).
+  27, not reproduced since). [`REVIEW-first-line.md`](REVIEW-first-line.md)
+  finds nothing on that path that can wait. The likeliest cause was the
+  serial port being given up on for good, silently, after one slow drain.
+  A port given up on is now tried again on each write, and told how much
+  of the log it missed when it drains.
+- **The restart on failure is built but off** (`-Drestart`, RESTART.md).
+  It waits on one measurement on a real droplet: that a guest's reset
+  restarts it rather than powering it off. Until then, a failure while
+  serving halts the machine with its reason on the screen.
 
 [`TCP_TESTING.md`](TCP_TESTING.md) is the plan for finding the TCP table's
 bugs systematically rather than by reading.
@@ -145,6 +174,13 @@ droplet, booted from a custom image
 | many connections, one loop | **works** — a request is served once the whole of it has arrived |
 | chat's live streams | **works** — held by the loop, pinged, budgeted, and ended when their tab leaves or stops reading |
 | uploads | **works** — a picture stored on the volume and read back byte for byte, judged against Linux; the request heap grows past what it keeps |
+| the disk check at boot | **works** — both disks, every boot, judged by the oracle's count; a leaked cluster is reported and the disk still served |
+| FAT32 | **works under QEMU** — mount, read, write, root chain, FSInfo; agrees with the oracle and fsck on 103 images and 19 mtools volumes; the chat judge served from it under TCG. Not yet on a real volume |
+| a rewrite that survives a stop | **works on the host** — `fat16.rename` and the Store's `replace`: the disk stopped after every request in turn leaves the old record or the new, whole |
+| restarting on failure | **built, off** — CMOS record, back-off, the last boot's log kept past the kernel; measured on QEMU's pc and microvm. Waits on a real droplet |
+| the kept free count | **works** — `/admin/host`'s free space is a field read, equal to the oracle's count after every operation |
+| `/admin/backup` | **works against Linux** — everything the Store keeps as one streamed tar; the judge compares both hosts' archives member by member. Not yet downloaded from metal |
+| the log on `/admin/host` | **built** — the serial ring's newest lines; the judge checks its shape. Not yet seen on the droplet |
 
     zig build test         # host unit tests for the pure parts of src/
     zig build kernels      # every kernel into probe/
@@ -230,9 +266,9 @@ blocked from it. What does and does not work there, found on 2026-10-02:
 - **QEMU.**
   - **Installing it:** `apt-get install qemu-system-x86 dosfstools gdisk`
     works, and gives QEMU 8.2 with no KVM.
-  - **`probe/run.sh` stops before any probe runs.** Its judges' self-test
-    compares a recorded `tsc_hz` (2.494 GHz) with the host's, and a cloud
-    CPU (2.1 GHz) fails it.
+  - **`probe/run.sh` runs.** The judges' self-test reads the host's TSC
+    rate (`HOST_TSC_HZ` overrides it). Probes that need the Cobblestone
+    checkout's fixtures (`block`, for one) cannot find them here.
   - **`droplet/boot.sh` passes all seven probes** once `droplet.sh`'s
     `-accel kvm -cpu host` is changed to `-accel tcg -cpu max` locally.
 - **What cannot be judged there:**

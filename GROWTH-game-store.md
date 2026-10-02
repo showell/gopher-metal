@@ -42,10 +42,10 @@ FAT's directory limit (65,536 entries a folder) stops one player's
 `sessions/` at about 65,000 sessions. That comes after the 2 GiB volume
 is full, and it does not slow an attacker who mints players.
 
-**Where it applies.** At the cutover Lyn Rummy stays on the Linux
-droplet, so today this is prod's own disk, shared with everything else
-on it. If metal ever serves the game, it is the data volume, and **a
-full volume is chat unable to write.**
+**Where it applies.** Today, prod's own disk, shared with everything else
+on it. After the cutover, the data volume: metal serves every app with
+chat (Steve, 2026-10-01; the README), and the game's data is under `data/`
+with chat's. **A full volume is chat unable to write.**
 
 ## Three shapes of limit
 

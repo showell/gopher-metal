@@ -490,6 +490,7 @@ pub const Dir = struct {
         const v = try writing(options.sub_path);
         v.writeFile(options.sub_path, options.data) catch |e| switch (e) {
             error.BadName => return Error.NameTooLong,
+            error.IsDirectory => return Error.IsDir,
             error.Full, error.DirectoryFull => return Error.NoSpaceLeft,
             else => return Error.WriteFailed,
         };
@@ -560,6 +561,7 @@ pub const Dir = struct {
         if (try writing(new_sub_path) != v) return Error.WriteFailed;
         v.rename(old_sub_path, new_sub_path) catch |e| switch (e) {
             error.NotFound => return Error.FileNotFound,
+            error.IsDirectory => return Error.IsDir,
             error.BadName => return Error.NameTooLong,
             error.Full, error.DirectoryFull => return Error.NoSpaceLeft,
             else => return Error.WriteFailed,

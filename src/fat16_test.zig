@@ -825,6 +825,26 @@ test "a file rewritten under a name in another case keeps the name and alias it 
     }
 }
 
+// ---- a file never replaces a directory (QUEUE item 36) -----------------------
+
+test "a file written over a directory's name is refused, and the directory and its contents stay" {
+    for (configs) |cfg| {
+        const shape, const cached = .{ cfg.shape, cfg.cached };
+        const d = try Disk.make("file-over-dir", shape, cached);
+        defer d.deinit();
+        try d.vol.writeFile("data/plan/inside.md", "kept");
+        const before = d.free();
+        // In its own case and in another: FAT matches either.
+        try testing.expectError(fat16.Error.IsDirectory, d.vol.writeFile("data/plan", "a file"));
+        try testing.expectError(fat16.Error.IsDirectory, d.vol.writeFile("data/Plan", "a file"));
+        try d.expectFile("data/plan/inside.md", "kept");
+        try testing.expectEqual(before, d.free());
+        try testing.expect((try d.vol.open("data/plan")).isDirectory());
+        try d.mount(cached);
+        try d.expectFile("data/plan/inside.md", "kept");
+    }
+}
+
 // ---- rename, for a replace that survives a crash (QUEUE item 24) -------------
 
 test "rename moves a file to a new name, and over a file, keeping that file's name" {
@@ -866,7 +886,7 @@ test "rename moves a file to a new name, and over a file, keeping that file's na
         try d.vol.writeFile("other/b", "b");
         try testing.expectError(fat16.Error.BadName, d.vol.rename("data/a", "other/a"));
         _ = try d.vol.makePath("data/sub");
-        try testing.expectError(fat16.Error.BadName, d.vol.rename("data/a", "data/sub"));
+        try testing.expectError(fat16.Error.IsDirectory, d.vol.rename("data/a", "data/sub"));
         try testing.expectError(fat16.Error.BadName, d.vol.rename("data/sub", "data/c"));
         try testing.expectError(fat16.Error.NotFound, d.vol.rename("data/nothing", "data/a"));
         try d.vol.rename("data/a", "data/A");
