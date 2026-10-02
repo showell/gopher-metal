@@ -91,6 +91,9 @@ var bss_marker: u64 = 0;
 
 pub fn kmain() noreturn {
     serial.init();
+    // The pause after each method is measured once the clock is running
+    // (reset.pause); without it, a fixed loop, as before.
+    if (metal.pit.calibrate()) |hz| metal.io.startClock(hz) else |_| serial.put("  the clock did not start: each pause is a fixed loop\n");
     const raw = cmosRead(cmos_stage);
     const stage: usize = if (raw >= stage_base and raw < stage_base + methods.len + 1) raw - stage_base else 0;
     const c = carry();

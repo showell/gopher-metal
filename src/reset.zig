@@ -4,7 +4,9 @@
 //! restart tries all three in that order, as Linux does, each followed by a
 //! pause long enough for it to land.
 
+const std = @import("std");
 const port = @import("port.zig");
+const io = @import("io.zig");
 
 pub const Method = struct { name: []const u8, run: *const fn () void };
 
@@ -53,9 +55,23 @@ fn tripleFault() void {
         : .{ .memory = true });
 }
 
+/// **HOW LONG A RESET IS GIVEN TO LAND.** A reset by the chipset lands
+/// within microseconds (Linux waits 50 µs between its methods); this gives it
+/// a hundred milliseconds, measured, so a method that does nothing on this
+/// machine costs that and no more. On `microvm` the first two do nothing, so
+/// every restart there waits twice.
+pub const pause_ns: i96 = 100 * std.time.ns_per_ms;
+
 /// Gives a reset a moment to land: on hardware the reset is not
-/// instantaneous after the write.
+/// instantaneous after the write. Measured on the timestamp counter when its
+/// rate is known. Before then (no restart is armed before the clock starts,
+/// but the restart probe may run without it) a fixed loop, which takes about
+/// ten seconds under TCG and is not a measure of anything.
 pub fn pause() void {
+    if (io.awakeNs()) |start| {
+        while (io.awakeNs().? - start < pause_ns) asm volatile ("pause");
+        return;
+    }
     var i: u32 = 0;
     while (i < 50_000_000) : (i += 1) asm volatile ("pause");
 }
