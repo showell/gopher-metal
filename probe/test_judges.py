@@ -437,15 +437,27 @@ class DiskCheckLines(unittest.TestCase):
 
     @unittest.skipUnless(shutil.which("mkfs.vfat"), "needs mkfs.vfat (dosfstools) to make a volume")
     def test_leaking_a_cluster_is_what_the_oracle_calls_a_leak(self):
-        with tempfile.TemporaryDirectory() as d:
-            img = os.path.join(d, "v.img")
-            subprocess.run(["mkfs.vfat", "-F", "16", "-S", "512", "-C", img, str(32 * 1024)],
-                           check=True, capture_output=True)
-            leaked = G.leak_a_cluster(img)
-            out = subprocess.run([sys.executable, os.path.join(G.TOOLS_DIR, "fat16_read.py"), "check", img],
-                                 capture_output=True, text=True).stdout
-            self.assertIn("leaked", out)
-            self.assertIn(str(leaked), out)
+        # On both kinds, and nothing but the leak: on FAT32 a 2-byte write
+        # once hit half of another cluster's entry, and FSInfo's count was
+        # left wrong, so the damaged gate saw two problems (box, 2026-10-02).
+        for fat, kib, spc in (("16", 32 * 1024, None), ("32", 40 * 1024, "1")):
+            with tempfile.TemporaryDirectory() as d:
+                img = os.path.join(d, "v.img")
+                subprocess.run(["mkfs.vfat", "-F", fat, "-S", "512", *(["-s", spc] if spc else []), "-C", img, str(kib)],
+                               check=True, capture_output=True)
+                sys.path.insert(0, G.TOOLS_DIR)
+                import fat16_read
+                with open(img, "rb") as f:
+                    before = fat16_read.Volume(f.read())
+                self.assertEqual(before.kind, "FAT" + fat)
+                leaked = G.leak_a_cluster(img)
+                with open(img, "rb") as f:
+                    v = fat16_read.Volume(f.read())
+                problems = v.check()
+                self.assertEqual(len(problems), 1, problems)
+                self.assertIn("leaked", problems[0])
+                self.assertIn(str(leaked), problems[0])
+                self.assertEqual(v.free_clusters(), before.free_clusters() - 1)
 
 
 class FatSerial(unittest.TestCase):

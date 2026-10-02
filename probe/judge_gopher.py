@@ -343,16 +343,27 @@ def build_disk(image: str, content: str, mnt: str, size: int = 64 << 20,
 def leak_a_cluster(image: str) -> int:
     """Marks the last free cluster of `image`'s volume in use in both FATs,
     with nothing holding it: what a write that stopped before its directory
-    entry leaves behind. Answers the cluster."""
+    entry leaves behind. Answers the cluster.
+
+    **ON FAT32, AS THIS MACHINE'S OWN STOPPED WRITE WOULD LEAVE IT:** the
+    entry is four bytes and the end mark 0x0FFFFFFF, and FSInfo's free count
+    and hint are marked unknown in both copies, which fat16.zig does on the
+    first write a mount makes (forgetFsInfo). Left as mkfs set it, the count
+    is wrong by one, and the check rightly says so as a second problem."""
     sys.path.insert(0, TOOLS_DIR)
     import fat16_read
     with open(image, "rb") as f:
         data = bytearray(f.read())
     v = fat16_read.Volume(bytes(data))
     leaked = max(c for c in range(2, v.max_cluster + 1) if v.fat(c) == 0)
+    end = 0x0FFFFFFF if v.kind == "FAT32" else 0xFFFF
     for k in range(v.nfats):
-        at = v.base + (v.fat_start + k * v.fat_sectors) * SECTOR + leaked * 2
-        data[at:at + 2] = (0xFFFF).to_bytes(2, "little")
+        at = v.base + (v.fat_start + k * v.fat_sectors) * SECTOR + leaked * v.entry_bytes
+        data[at:at + v.entry_bytes] = end.to_bytes(v.entry_bytes, "little")
+    if v.kind == "FAT32":
+        for lba in (v.fsinfo_sector, v.backup_boot + 1):
+            at = v.base + lba * SECTOR + 488
+            data[at:at + 8] = b"\xff" * 8
     with open(image, "wb") as f:
         f.write(data)
     return leaked
