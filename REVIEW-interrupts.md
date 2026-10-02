@@ -216,6 +216,11 @@ matters because it hides that other thing.
 
 ### 7. Queue vectors are set after the device is live
 
+**Fixed:** `Net.init` turns MSI-X on with entry 0 masked (`virtio.prepareMsix`)
+after `negotiate`'s reset, and `Queue.setup` sets each queue's vector before
+`queue_enable`, reading it back into `Queue.vectored`. `routeToProcessor`
+now only aims and unmasks entry 0.
+
 **Where:** `routeToProcessor` is called from `restBetweenFrames`. That is
 after `Net.init` has enabled both queues and set DRIVER_OK, and after DHCP.
 
@@ -237,6 +242,8 @@ portability risk.
 then be configured before the queues come up.
 
 ### 8. Every frame sent reads the ISR, which MSI-X makes pointless
+
+**Fixed:** `virtio.ack` skips the ISR read on a device whose MSI-X is on.
 
 **Where:** `Net.send` and `Net.poll` call `virtio.ack`, and on PCI that reads
 the ISR status register.

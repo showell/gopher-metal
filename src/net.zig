@@ -80,8 +80,11 @@ pub const Net = struct {
     /// Frames sent since the device came up.
     sent: u64 = 0,
 
-    pub fn init(device: virtio.Device, mem: *Memory) virtio.Error!Net {
-        const st = try virtio.negotiate(device, feature_mac);
+    pub fn init(found: virtio.Device, mem: *Memory) virtio.Error!Net {
+        const st = try virtio.negotiate(found, feature_mac);
+        // After negotiate's reset and before the queues: their vectors must be
+        // set before they are enabled.
+        const device = virtio.prepareMsix(found);
         var rx = try Q.setup(device, 0, &mem.rx_ring);
         const tx = try Q.setup(device, 1, &mem.tx_ring);
 
@@ -133,7 +136,8 @@ pub const Net = struct {
     /// they have something: a frame arrived, or a frame was taken. False on a
     /// card that cannot (mmio, or no MSI-X), which goes on being polled.
     pub fn interruptOnFrames(self: *Net, address: u32, vector: u8) bool {
-        return virtio.routeToProcessor(self.device, &.{ 0, 1 }, address, vector);
+        if (!self.rx.vectored or !self.tx.vectored) return false;
+        return virtio.routeToProcessor(self.device, address, vector);
     }
 
     /// The next frame the device has delivered, or null. The slice points into

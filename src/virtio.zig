@@ -55,6 +55,9 @@ pub const Pci = struct {
     notify_multiplier: u32,
     isr: usize,
     device: usize,
+    /// MSI-X table entry 0, once `prepareMsix` has turned MSI-X on. From then
+    /// the device never uses the ISR for its queues (virtio §4.1.4.5).
+    msix_entry: ?usize = null,
 };
 
 // ---- the mmio register window --------------------------------------------
@@ -393,6 +396,9 @@ pub fn Queue(comptime size: u16) type {
 
         device: Device,
         index: u16,
+        /// The device took MSI-X entry 0 as this queue's vector, before the
+        /// queue was enabled.
+        vectored: bool = false,
         ring: *RingType,
         last_used: u16 = 0,
         /// Where this queue's doorbell is: one register for every queue on
@@ -406,6 +412,7 @@ pub fn Queue(comptime size: u16) type {
             const avail_addr = ring_addr + @offsetOf(RingType, "avail_flags");
             const used_addr = ring_addr + @offsetOf(RingType, "used_flags");
             var doorbell: usize = undefined;
+            var vectored = false;
             switch (device) {
                 .mmio => |base| {
                     mmioWrite(base, .queue_sel, index);
@@ -431,6 +438,15 @@ pub fn Queue(comptime size: u16) type {
                     write64(p.common + common_queue_device, used_addr);
                     const off = read16(p.common + common_queue_notify_off);
                     doorbell = p.notify + @as(usize, off) * p.notify_multiplier;
+                    // **THE VECTOR BEFORE THE QUEUE IS ENABLED** (virtio
+                    // §4.1.5.1.3), as Linux sets it: a device may read it only
+                    // then. Entry 0 is still masked; `routeToProcessor` aims
+                    // and unmasks it later. A device that would not take it
+                    // reads back NO_VECTOR, and the queue goes on polled.
+                    if (p.msix_entry != null) {
+                        write16(p.common + common_queue_msix_vector, 0);
+                        vectored = read16(p.common + common_queue_msix_vector) == 0;
+                    }
                     write16(p.common + common_queue_enable, 1);
                 },
             }
@@ -438,7 +454,7 @@ pub fn Queue(comptime size: u16) type {
             ring.avail_flags = 0;
             ring.avail_idx = 0;
             ring.used_idx = 0;
-            return .{ .device = device, .index = index, .ring = ring, .doorbell = doorbell };
+            return .{ .device = device, .index = index, .vectored = vectored, .ring = ring, .doorbell = doorbell };
         }
 
         /// Puts the chain starting at descriptor `head` on the available ring.
@@ -526,52 +542,69 @@ pub fn driverOk(d: Device, st: u32) Error!void {
 
 /// The interrupt this device raised, acknowledged. Polling drivers still have
 /// to do this or the device stops raising them. On pci, reading the ISR byte
-/// is the acknowledgement.
+/// is the acknowledgement — unless MSI-X is on, when the ISR says nothing
+/// about the queues and the read would only be a trip to the hypervisor per
+/// frame.
 pub fn ack(d: Device) void {
     switch (d) {
         .mmio => |base| {
             const s = mmioRead(base, .interrupt_status);
             if (s != 0) mmioWrite(base, .interrupt_ack, s);
         },
-        .pci => |p| _ = read8(p.isr),
+        .pci => |p| if (p.msix_entry == null) {
+            _ = read8(p.isr);
+        },
     }
 }
 
-/// **A QUEUE THAT INTERRUPTS THE PROCESSOR WHEN IT HAS SOMETHING.** On PCI a
-/// device raises an interrupt by writing a message to an address — MSI-X — and
-/// the table of messages it may write sits in one of its memory windows, named
-/// by its MSI-X capability (PCI 3.0 §6.8.2). Entry 0 is filled in with
-/// `address` and `vector`, unmasked, MSI-X turned on for the device, and each
-/// of `queues` pointed at entry 0 (virtio §4.1.4.3: the device reads back
-/// NO_VECTOR if it would not take it). False, and nothing is routed, on mmio or
-/// on a device without the capability.
-pub fn routeToProcessor(d: Device, queues: []const u16, address: u32, vector: u8) bool {
-    const p = switch (d) {
+/// **MSI-X TURNED ON, WITH NOTHING SENT YET.** On PCI a device raises an
+/// interrupt by writing a message to an address — MSI-X — and the table of
+/// messages it may write sits in one of its memory windows, named by its
+/// MSI-X capability (PCI 3.0 §6.8.2). Entry 0 is masked first, then MSI-X is
+/// enabled for the function: from here the device sends nothing (a masked
+/// entry only sets its pending bit) until `routeToProcessor` aims and
+/// unmasks it. Called after `negotiate`'s reset and before `Queue.setup`, so
+/// that each queue's vector is set before the queue is enabled. Answers the
+/// device unchanged on mmio, or when it has no MSI-X capability.
+pub fn prepareMsix(d: Device) Device {
+    var p = switch (d) {
         .pci => |p| p,
-        .mmio => return false,
+        .mmio => return d,
     };
     const f = p.function;
     var caps = f.capabilities();
     const cap = while (caps.nextOne()) |c| {
         if (c.id == 0x11) break c;
-    } else return false;
+    } else return d;
     const table = f.read32(cap.at + 4);
-    const window = f.bar(@truncate(table & 7)) orelse return false;
+    const window = f.bar(@truncate(table & 7)) orelse return d;
     const entry: usize = @intCast(window + (table & ~@as(u32, 7)));
-    write32(entry + 0, address);
+    write32(entry + 12, 1); // masked
+    write32(entry + 0, 0);
     write32(entry + 4, 0);
-    write32(entry + 8, vector);
-    write32(entry + 12, 0); // unmasked
+    write32(entry + 8, 0);
 
     // Enable (bit 15), and not masked as a whole (bit 14).
     const control = f.read16(cap.at + 2);
     f.write16(cap.at + 2, (control | 0x8000) & ~@as(u16, 0x4000));
+    p.msix_entry = entry;
+    return .{ .pci = p };
+}
 
-    for (queues) |q| {
-        write16(p.common + common_queue_select, q);
-        write16(p.common + common_queue_msix_vector, 0);
-        if (read16(p.common + common_queue_msix_vector) != 0) return false;
-    }
+/// **A DEVICE THAT INTERRUPTS THE PROCESSOR WHEN IT HAS SOMETHING.** MSI-X
+/// entry 0, which `prepareMsix` turned on masked and `Queue.setup` gave the
+/// queues, is aimed at `address` with `vector` and unmasked. A message the
+/// device wanted to send while it was masked is sent now. False, and nothing
+/// changed, on mmio or on a device `prepareMsix` found no MSI-X on.
+pub fn routeToProcessor(d: Device, address: u32, vector: u8) bool {
+    const entry = switch (d) {
+        .pci => |p| p.msix_entry orelse return false,
+        .mmio => return false,
+    };
+    write32(entry + 0, address);
+    write32(entry + 4, 0);
+    write32(entry + 8, vector);
+    write32(entry + 12, 0); // unmasked
     return true;
 }
 
