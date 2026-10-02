@@ -510,12 +510,12 @@ Answers below carry the detail. In this order:
     - **The counter mattered most:** a lost `next-id.txt` reads as 1, so
       the next account was id 1 again, and its name was written over
       account 1's.
-25. **Store: FAT's path limits on Linux too.** The Store refuses names FAT
+25. **Store: FAT's path limits on Linux too.** *(CC, done: angry-gopher `4233a319`)* The Store refuses names FAT
     cannot hold, but not paths longer than `io.zig`'s `max_path` (256) or
     deeper than `fat16`'s removeTree cap (16). Enforce both in the Store,
     tested, so Linux refuses what metal would.
 26. **Finding 6 (unbounded disk growth from the game store): options for
-    Steve.** A short note: what grows, how fast a client could fill 2 GiB
+    Steve.** *(CC, done: `GROWTH-game-store.md`)* A short note: what grows, how fast a client could fill 2 GiB
     and a FAT32 volume, and three shapes of limit (per player, per
     address, global) with what each costs a real player. No code.
 
