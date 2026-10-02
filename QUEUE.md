@@ -955,6 +955,25 @@ order, before anything else left.*
     the tool it needs (rotate, with the old secret accepted for players
     for a window; members log in again), tested on the judge's site.
 
+*Item 67 queued 2026-10-02 evening (box Claude): a rare boot failure, found
+gating 13.*
+
+67. **A boot that read no time from the clock chip.** One boot of about
+    120 on the droplet machine (batch 13's droplet judge, the `uids`
+    story's re-check boot, the 30th boot of the run) stopped with exit 3:
+    `wallclock: Implausible (rtc: 0 polls, 0 mid-update, seconds 0 -> 0)`
+    / `FAIL: the clocks would not come up`. Three full re-runs of that
+    judge (about 90 boots) did not repeat it. "0 polls" reads as though
+    the CMOS clock was never polled at all, not polled and wrong. Read the
+    wall-clock path as an adversary (what makes "0 polls" possible:
+    a timeout measured on a clock not yet calibrated? an update-in-
+    progress bit read once and trusted?), relate it to REVIEW-first-
+    line.md's stall if it is the same family, and fix it so a slow or odd
+    clock chip is asked again rather than the boot stopped. A host test
+    for the decision, and a probe that boots many times on the droplet
+    machine (the box runs it under KVM: say how many boots is a fair
+    test).
+
 ## Box Claude
 
 - v6: gates, images, deploy with Steve, and the survival test (the marker
@@ -1443,6 +1462,12 @@ What each needs from the box:
     cannot change your setup script.
   - **Your two direction notes** are items 65 and 66. Item 53's three
     medium findings are item 63, first.
+
+- **Check-in 11 gated and MERGED (2026-10-02, gopher-metal `67f9e9b`,
+  angry-gopher `3669ef98`):** items 53, 55, 57-59 and 62. Green apart from
+  one boot's clock in the droplet judge, which three full re-runs did not
+  repeat: item 67. Timings now print per step in `gates.sh`; a full batch
+  is 1,505 s, and the three chat judges are half of it.
 
 ## Proposed
 
