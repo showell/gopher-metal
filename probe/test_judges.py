@@ -307,12 +307,19 @@ class Timings(unittest.TestCase):
 
 
 class ClockJudge(unittest.TestCase):
-    def verdict(self, text, *args):
+    # **THE HOST'S RATE IS GIVEN, NOT READ.** These fixtures were recorded on
+    # a host whose TSC runs at 2,494.134 MHz. Read from the machine running
+    # the tests, the host's rate made every fixture fail on any other CPU, which
+    # tested the CPU and not the judge.
+    HOST_HZ = "2494134000"
+
+    def verdict(self, text, *args, host_hz=HOST_HZ):
         with tempfile.NamedTemporaryFile("w", suffix=".out", delete=False) as f:
             f.write(text)
         try:
             p = subprocess.run([sys.executable, os.path.join(HERE, "judge_clock.py"), f.name, *args],
-                               capture_output=True, text=True)
+                               capture_output=True, text=True,
+                               env={**os.environ, "HOST_TSC_HZ": host_hz})
         finally:
             os.remove(f.name)
         return p.returncode, p.stdout
@@ -346,6 +353,21 @@ class ClockJudge(unittest.TestCase):
         code, out = self.verdict(late, "0", "0", "2020-02-29T23:59:59")
         self.assertEqual(code, 1)
         self.assertIn("not just after the pinned", out)
+
+    def test_a_rate_off_the_hosts_by_more_than_half_a_percent_fails(self):
+        text = "tsc_hz 2494134000\nunix 1789600584\ncivil 2026-9-16 23:16:24\n"
+        code, out = self.verdict(text, "1789600582", "1789600591", host_hz=str(2494134000 * 1.01))
+        self.assertEqual(code, 1, out)
+        self.assertIn("FAIL tsc_hz", out)
+        code, out = self.verdict(text, "1789600582", "1789600591", host_hz=str(2494134000 * 1.004))
+        self.assertEqual(code, 0, out)
+        self.assertIn("ok   tsc_hz", out)
+
+    def test_a_host_rate_nobody_can_read_is_a_skip_said_aloud(self):
+        text = "tsc_hz 2494134000\nunix 1789600584\ncivil 2026-9-16 23:16:24\n"
+        code, out = self.verdict(text, "1789600582", "1789600591", host_hz="none")
+        self.assertEqual(code, 0, out)
+        self.assertIn("SKIP tsc_hz", out)
 
     def test_a_missing_line_fails(self):
         code, out = self.verdict("tsc_hz 2494000000\n", "0", "0")

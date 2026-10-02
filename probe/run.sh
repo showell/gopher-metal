@@ -94,10 +94,15 @@ boot() {
         return
     fi
     local out="$WORK/$name.out"
+    # RESTARTS=1 leaves out -no-reboot, so a reset the kernel asks for is a
+    # restart rather than QEMU ending (restart.elf, below). Every other kernel
+    # keeps -no-reboot: a restart it did not plan is a failure to see.
+    local reboot=-no-reboot
+    [ "${RESTARTS:-}" = 1 ] && reboot=
     timeout 60 qemu-system-x86_64 \
         -M microvm,rtc=on,pit=on \
         -kernel "$HERE/$name.elf" \
-        -nographic -no-reboot -m "${MEM:-512}" \
+        -nographic $reboot -m "${MEM:-512}" \
         -global virtio-mmio.force-legacy=false \
         -device isa-debug-exit,iobase=0xf4,iosize=0x04 \
         "$@" > "$out" 2>&1
@@ -521,6 +526,20 @@ if [ "$want" = all ] || [ "$want" = memory ]; then
             echo "     memory | -m $m: found $got bytes, $(( (want_bytes - got) / 1024 )) KB of it the firmware's"
         fi
     done
+fi
+
+# **WHAT A RESTART KEEPS** (RESTART.md). restart.elf restarts the machine
+# itself, each of three ways, and on each next boot says what survived; so it
+# runs without -no-reboot (RESTARTS=1). microvm has neither the reset control
+# register nor a keyboard controller, so here only the triple fault restarts
+# it, and the kernel must come back from that with CMOS and the RAM past it
+# intact: that is what a restart record and a surviving log would rest on.
+if [ "$want" = all ] || [ "$want" = restart ]; then
+    RESTARTS=1 boot restart
+    if ! grep -aq 'restarted by a triple fault: CMOS kept (stage 3); RAM past the kernel kept' "$WORK/restart.out"; then
+        echo "FAIL restart | it did not come back from the triple fault with CMOS and RAM kept; see $WORK/restart.out"
+        failed=1
+    fi
 fi
 
 if [ "$want" = all ] || [ "$want" = rng ]; then

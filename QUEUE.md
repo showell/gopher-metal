@@ -139,7 +139,7 @@ in order. The box Claude reorders on `master`, and CC proposes at the bottom.
    **Done** (CC).
 10. **`zig fmt` the three files, then make `zig fmt --check src` part of
     `zig build test`** (your proposal; accepted), so it stays clean. **Done** (CC).
-11. **Review `/admin/host` as an adversary**, once it is on `master` (the box
+11. **Review `/admin/host` as an adversary** *(CC; done: `REVIEW-admin-host.md`. The page holds up. Findings 1–2 are judge gaps worth fixing now, 3–4 are latent.)*, once it is on `master` (the box
     Claude pushes it after its gates). That covers angry-gopher's
     `host_status.zig`, `admin_host.zig`, `server.zig`'s `linuxFacts`, and
     `probe/gopher.zig`'s `metalFacts`. Look for:
@@ -149,7 +149,7 @@ in order. The box Claude reorders on `master`, and CC proposes at the bottom.
     - anything the judge's shape comparison misses.
 12. **Read the NT case bits** (byte 12 of a short entry) in `decode`
     (your proposal; accepted, low priority: the migration goes through Linux,
-    which writes long names).
+    which writes long names). **Done** (CC).
 
 ## Box Claude
 
@@ -168,7 +168,38 @@ in order. The box Claude reorders on `master`, and CC proposes at the bottom.
 
 *(CC writes here; the box Claude or Steve answers under Answers.)*
 
-### CC check-in, 2026-10-02 (branch at `6c9fb91`, on `master` `7db2603`)
+### CC check-in 2, 2026-10-02 (branch at `55300a2`, on `master` `9c39427`)
+
+Every CC item through 12 is done. Since check-in 1, six more commits, each
+compiled and tested here:
+
+- **`1bee8a3` run.sh:**
+  - a `RESTARTS=1` knob in `boot()`, the only boot without `-no-reboot`;
+  - a `restart` step: `restart.elf` must come back from a triple fault
+    with CMOS and RAM kept.
+  - **Here:** `probe/run.sh restart` passes end to end, and fails both ways
+    with `-no-reboot`.
+- **`bed4488` REVIEW-admin-host.md (item 11):** the page holds up.
+  - Findings 1–2 are judge gaps worth fixing now: the judge passes an
+    unreadable or wrong free-space figure, and never asks for
+    `/admin/host` without the admin.
+  - Findings 3–4 are latent.
+  - Nothing is fixed in that commit; say if CC should fix 1–2 in
+    `judge_gopher.py`.
+- **`05e928f` judge_clock:** `HOST_TSC_HZ` gives the host's rate, and the
+  judges' tests set it. `test_judges.py` passes here (97); before, it
+  failed on any CPU but yours. The real clock gate is unchanged.
+- **`9beacb0` judge_gopher:** `tz=UTC` on its two vfat mounts.
+  - **Not run here:** no sudo, no vfat.
+  - **Left alone:** `run.sh` has three vfat mounts without `tz=UTC`
+    (around lines 232, 281 and 415). Yours to decide.
+- **`55300a2` (item 12):** the NT case bits. The mtools volumes now list in
+  the case they were written.
+
+CC has nothing queued now. Proposed: the judge fixes from the review
+(1–2), and the review's findings 3–4 if you want them.
+
+### CC check-in 1, 2026-10-02 (branch at `6c9fb91`, on `master` `7db2603`)
 
 The two earlier questions (the TSC self-test, `tz=UTC`) are answered below,
 and both are next on CC's list.
@@ -256,8 +287,3 @@ What each needs from the box:
 
 - **Fold case for session ids and channel names in angry-gopher.** On FAT,
   `plan` replaces `Plan`, where Linux keeps both (MIGRATION.md).
-- **Read the NT case bits (byte 12 of a short entry) in `fat16.zig`'s
-  `decode`.** mtools and Windows store `topic.md` as `TOPIC.MD` with "lower
-  case" flags and no long name, and this machine lists it upper case
-  (`tools/check_fat16_images.sh` shows it). Linux's vfat writes a long name
-  instead, so the migration is not affected.

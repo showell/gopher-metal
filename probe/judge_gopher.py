@@ -321,8 +321,12 @@ def fat_serial(image: str) -> str:
 
 
 def mount(image: str, mnt: str, writable: bool) -> None:
+    """**tz=UTC**: vfat stores local times, and gopher-metal reads FAT times as
+    UTC. Without it, on a host whose zone is not UTC every file written or read
+    through this mount would be off by the host's offset, and chat's "recent",
+    which is ordered by modification time, with it (MIGRATION.md)."""
     os.makedirs(mnt, exist_ok=True)
-    opts = f"loop,offset={PART_FIRST * SECTOR},noexec,nosuid,nodev,uid={os.getuid()},gid={os.getgid()}"
+    opts = f"loop,offset={PART_FIRST * SECTOR},noexec,nosuid,nodev,tz=UTC,uid={os.getuid()},gid={os.getgid()}"
     if not writable:
         opts += ",ro"
     run(["sudo", "-n", "mount", "-o", opts, image, mnt])
@@ -545,7 +549,7 @@ def split_site_off(image: str, scratch: str) -> str:
     fat = os.path.join(scratch, "site.fat")
     run(["mkfs.vfat", "-F", "16", "-S", "512", "-n", "SITE", "-C", fat, str(32 * 1024)])
     os.makedirs(mnt, exist_ok=True)
-    run(["sudo", "-n", "mount", "-o", f"loop,uid={os.getuid()},gid={os.getgid()}", fat, mnt])
+    run(["sudo", "-n", "mount", "-o", f"loop,tz=UTC,uid={os.getuid()},gid={os.getgid()}", fat, mnt])
     try:
         for entry in os.listdir(site):
             src, dst = os.path.join(site, entry), os.path.join(mnt, entry)

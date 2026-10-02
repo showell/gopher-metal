@@ -1867,6 +1867,23 @@ fn decode(e: []const u8) Entry {
         }
     }
     out.name_len = @intCast(n);
+
+    // **THE NT CASE BITS** (byte 12): Windows and mtools store a name that
+    // fits 8.3 in one case, `topic.md` or `TOPIC.md`, as its upper-case alias
+    // and no long name. Bit 3 says the base was lower case, bit 4 the
+    // extension. The name to show and to list is then that, put in `long`; a
+    // real long name, when `list` finds one, replaces it. `alias()` stays
+    // the alias. Linux's vfat writes a long name instead, and so does this
+    // file, so only a volume another system wrote has these.
+    const lower_base = e[12] & 0x08 != 0;
+    const lower_ext = e[12] & 0x10 != 0;
+    if (lower_base or lower_ext) {
+        for (out.name[0..n], 0..) |c, i| {
+            const in_ext = i >= base;
+            out.long[i] = if ((in_ext and lower_ext) or (!in_ext and lower_base)) std.ascii.toLower(c) else c;
+        }
+        out.long_len = @intCast(n);
+    }
     return out;
 }
 

@@ -704,3 +704,33 @@ test "a directory grows to FAT's limit of 65,536 entries, and no further" {
         try d.vol.writeFile("data/small/x", "x");
     }
 }
+
+// ---- the NT case bits (QUEUE item 12) ---------------------------------------
+
+test "a short name with the NT lower-case bits lists in lower case, and is found either way" {
+    for (both) |cached| {
+        const d = try Disk.make("ntcase", small, cached);
+        defer d.deinit();
+        // Upper-case 8.3 names: one short entry each, no long name.
+        try d.vol.writeFile("data/TOPIC.MD", "both");
+        try d.vol.writeFile("data/NOTES.TXT", "base");
+        try d.vol.writeFile("data/README.MD", "ext");
+        try d.vol.writeFile("data/KEEP.MD", "neither");
+        const data_dir = try d.vol.open("data");
+        var buf: [256]u8 = undefined;
+        try testing.expectEqualStrings("TOPIC.MD NOTES.TXT README.MD KEEP.MD", try d.names(data_dir.first_cluster, &buf));
+        // As Windows or mtools would have written them.
+        for ([_]struct { []const u8, u8 }{ .{ "data/TOPIC.MD", 0x18 }, .{ "data/NOTES.TXT", 0x08 }, .{ "data/README.MD", 0x10 } }) |set| {
+            const e = try d.vol.open(set[0]);
+            d.bytes[e.lba * test_disk.sector + e.slot + 12] = set[1];
+        }
+        try d.mount(cached);
+        try testing.expectEqualStrings("topic.md notes.TXT README.md KEEP.MD", try d.names(data_dir.first_cluster, &buf));
+        // Found by any case, as every name is; the alias is still the alias.
+        try d.expectFile("data/topic.md", "both");
+        try d.expectFile("data/TOPIC.MD", "both");
+        const e = try d.vol.open("data/Topic.Md");
+        try testing.expectEqualStrings("TOPIC.MD", e.alias());
+        try testing.expectEqualStrings("topic.md", e.text());
+    }
+}
