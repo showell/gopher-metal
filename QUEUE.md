@@ -568,7 +568,7 @@ Answers below carry the detail. In this order:
     case-variants; a miss in a directory of thousands; symlinks and `..` on
     Linux; what `resolve` does with an absolute root; errors swallowed into
     "not found"; whether any caller's behaviour changed when it moved.
-32. **The log ring on `/admin/host`** (from the box's list; you can push to
+32. **The log ring on `/admin/host`** *(CC, done: angry-gopher `ce37024f` must merge before gopher-metal's commit, which calls its `provideLog`)* (from the box's list; you can push to
     both repos now): the host half of the page shows the newest lines of
     `serial.ring` on metal and of the server's own log on Linux (or says
     there is none), admin only, secrets already stripped on the way in. The
