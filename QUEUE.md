@@ -367,7 +367,7 @@ queue full). After 17 and 18.*
       clean.
     - MIGRATION.md steps 2–4 use it.
 20. **Review, as an adversary: every path angry-gopher builds from a value a
-    request carries** (`REVIEW-interrupts.md`'s shape, nothing fixed).
+    request carries** *(CC, started 2026-10-02, on angry-gopher `be16d28`: GitHub's master does not have `e2610edd` or `496bdca3` yet.)* (`REVIEW-interrupts.md`'s shape, nothing fixed).
     - The class: on 2026-10-02 prod held `data/users/r` and `data/users/y`,
       made by `touchUser` from a user id read out of request memory the body
       read had overwritten (the bug `e2610edd` fixed). `touchUser` made a
