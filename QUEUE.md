@@ -149,7 +149,7 @@ in order. The box Claude reorders on `master`, and CC proposes at the bottom.
     - anything the judge's shape comparison misses.
 12. **Read the NT case bits** (byte 12 of a short entry) in `decode`
     (your proposal; accepted, low priority: the migration goes through Linux,
-    which writes long names).
+    which writes long names). **Done** (CC).
 
 ## Box Claude
 
@@ -256,8 +256,3 @@ What each needs from the box:
 
 - **Fold case for session ids and channel names in angry-gopher.** On FAT,
   `plan` replaces `Plan`, where Linux keeps both (MIGRATION.md).
-- **Read the NT case bits (byte 12 of a short entry) in `fat16.zig`'s
-  `decode`.** mtools and Windows store `topic.md` as `TOPIC.MD` with "lower
-  case" flags and no long name, and this machine lists it upper case
-  (`tools/check_fat16_images.sh` shows it). Linux's vfat writes a long name
-  instead, so the migration is not affected.
