@@ -37,7 +37,7 @@ Every `serial.fail` and `@panic` in metal was read.
 | Bound | Where | Data that grows toward it | Past it | Prod today |
 |---|---|---|---|---|
 | A directory's entries | `io.Iterator` | sessions in a folder (500 per player, item 52); players (no bound); uploads in a topic | **was: the machine stopped at 257.** Now a cursor: no ceiling | largest folder 70 (QUEUE.md item 50) |
-| A FAT directory's size | the FAT spec: 65,536 entries | as above. A long name takes 2-4 entries, so about 16,000 files | fat16.zig keeps growing the chain; other readers (Linux, fsck) may refuse past the spec | ask |
+| A FAT directory's size | the FAT spec: 65,536 entries | as above. A long name takes 2-4 entries, so about 16,000 files | **refused** (`DirectoryFull`, then `NoSpaceLeft`): fat16.zig stops at the spec, and has a test (finding 1, withdrawn) | 70 at most |
 | A path's length and depth | `io.max_path` 256, `store.max_path` | topic names, upload names | **refused on both hosts** by store.zig (PathTooLong), before metal sees it | ask: the longest |
 | A name's length | `fat16.max_name` 96 | topic and doc slugs | refused the same way | ask: the longest |
 | Directory depth | the stack guard, checked at every walk | none: the application's paths are a fixed shape, and the Store refuses depth | serial.fail: a stop | fixed by the code, not the data |
@@ -55,20 +55,23 @@ Every `serial.fail` and `@panic` in metal was read.
 
 ## Findings
 
-### 1. A FAT directory past 65,536 entries (low)
+### 1. A FAT directory past 65,536 entries (withdrawn: it already holds)
 
-**Where:** fat16.zig grows a directory's chain as it needs to. The FAT
-spec caps a directory at 65,536 entries.
+**This finding was wrong.** It said fat16.zig would grow a directory past
+the FAT spec's 65,536 entries. It does not:
+- `Volume.grow` refuses at `max_dir_entries`, and the write that needed
+  the room fails as `DirectoryFull`, which io.zig answers as
+  `NoSpaceLeft`;
+- fat16_test.zig's "a directory grows to FAT's limit of 65,536 entries,
+  and no further" proves it on every disk shape.
+The review read `grow`'s caller and not `grow` (QUEUE.md item 68, found
+when starting to fix it).
 
-**The problem:** metal itself would keep working. But the volume would
-then be one that `fsck.fat` and Linux's driver may refuse, and they are
-the way back (extract_volume.py, CUTOVER.md). The players folder has no
-bound: about 32,000 players (two entries each) reaches it. With item 52's
-5 new players per address per hour, that takes many addresses, or years.
-
-**Fix shape:** refuse to grow a directory past the spec's limit, as a
-full disk is refused (NoSpaceLeft), so the application answers a write
-error rather than leaving a volume that others reject.
+What remained is said in angry-gopher's Store header (`d2aefc5e`):
+- Linux has no such limit, so at that bound the two hosts would differ;
+- what each of the application's folders can reach. The players folder,
+  about 32,000 players, is the one with nothing but the per-address rate
+  bounding it.
 
 ### 2. A request holds what it reads whole (low, and the same on Linux)
 
@@ -111,5 +114,5 @@ These say how far prod is from each bound in the table above:
 4. The gallery's total size, and its largest picture.
 
 **Nothing here stops the machine today,** so there is no fix-now item.
-Findings 1 and 3 are worth queuing before the players folder or the
-volume gets large.
+Finding 3 is worth doing before the volume gets large. Finding 1 was
+withdrawn: it already holds.
