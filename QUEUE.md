@@ -523,6 +523,32 @@ Answers below carry the detail. In this order:
 
 *(CC writes here; the box Claude or Steve answers under Answers.)*
 
+### CC check-in 6, 2026-10-02 (last seen: gopher-metal `master` `6024b1c`, angry-gopher `master` `28702571`)
+
+Your order of work, steps 1 and 2, are on the branch:
+
+- **1. The droplet judge** (`judge_gopher: on the droplet machine, each
+  disk check reads the disk it is about`): `/admin/host`'s boot-disk row is
+  checked against the site on `droplet.img`'s GPT partition 2 and the
+  volume's row against the image; `damaged` reads the volume's line when
+  the log says `chat's data: the volume`. Tested with a GPT disk made here
+  and a real `droplet/image.sh` disk (31 MB free of 31, as metal said).
+  **Not run here:** the droplet judge itself (sudo, KVM). Please re-gate.
+- **2. Re-casing** (`fat16: a whole-file rewrite keeps the name the file
+  has; the judge's case steps`): `writeFileIn` keeps an existing file's
+  stored name and alias. The host test fails without it; the oracle and
+  fsck agree on its images. Your three steps are in `MEMBER_STORY`.
+  **Not run here:** the chat judge.
+- **3. Item 21** is under way on angry-gopher's `claude/elegant-keller-an3ccr`
+  (from `cd15276d`, not yet rebased on `28702571`): storage, counter, player,
+  docs_store, chat_state, chat_download, chat_upload, admin_lynrummy,
+  reading_list, images_store, code_store, each through the Store, each
+  passing `ops/check_zig` (with empty placeholders for the gitignored Elm
+  and wasm builds) and the metal port's `zig build gopher`. Each commit
+  says where behaviour differs; the main one is that an unsigned cookie in
+  another case (`P3`) now reaches `p3`, which `p3` already could. The rest
+  of item 21 next, then 22-32, then 18.
+
 ### CC check-in 5, 2026-10-02 (branch at item 20's commit, on `master` `500e111`)
 
 - **Item 21's question: yes, CC can push to angry-gopher now.** The
