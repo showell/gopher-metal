@@ -42,16 +42,40 @@ lap "probes"
 # run.sh's copy.
 VERDICTS="${GATES_VERDICTS:-$HOME/build/gopher-metal/gates}"
 mkdir -p "$VERDICTS"
-for machine in microvm droplet; do
-    [ $machine = droplet ] && export JUDGE_DROPLET=1
-    v=$(probe/run.sh gopher 2>&1)
-    code=$?
+# **GATES_PARALLEL=1 RUNS THE TWO SIDE BY SIDE** (QUEUE.md item 72): each in
+# its own scratch (PROBE_WORK), on ports each judge asks the host for, with
+# its own verdict file. The Linux build they share is made once, first, so
+# the build each run.sh makes finds nothing to do. Off by default until the box has
+# measured that the clock gate and the timing stories hold under KVM with
+# two machines running at once. The output is the same either way, in the
+# same order.
+judge() {  # judge MACHINE: runs one chat judge, its output to $VERDICTS/MACHINE.run
+    local machine=$1
+    if [ "$machine" = droplet ]; then export JUDGE_DROPLET=1; else unset JUDGE_DROPLET; fi
+    PROBE_WORK="$HOME/build/gopher-metal/probe-$machine" probe/run.sh gopher > "$VERDICTS/gopher-$machine.run" 2>&1
+    echo $? > "$VERDICTS/gopher-$machine.code"
+}
+report() {  # report MACHINE: the verdict line and, on a failure, every line after it
+    local machine=$1 v code
+    v=$(cat "$VERDICTS/gopher-$machine.run")
+    code=$(cat "$VERDICTS/gopher-$machine.code")
     echo "$v" | sed -n '/^\(PASS\|FAIL\|    \) *gopher/,$p'
-    { [ $code = 0 ] && echo "$v" | grep -q "^PASS gopher"; } || failed+=("gopher-$machine")
-    cp "$HOME/build/gopher-metal/probe/gopher.verdict" "$VERDICTS/gopher-$machine.verdict" 2>/dev/null
-    lap "gopher judge, $machine"
-    unset JUDGE_DROPLET
-done
+    { [ "$code" = 0 ] && echo "$v" | grep -q "^PASS gopher"; } || failed+=("gopher-$machine")
+    cp "$HOME/build/gopher-metal/probe-$machine/gopher.verdict" "$VERDICTS/gopher-$machine.verdict" 2>/dev/null
+}
+if [ "${GATES_PARALLEL:-0}" = 1 ]; then
+    GOPHER_ROOT="${GOPHER_ROOT:-$HOME/showell_repos/angry-gopher}"
+    (cd "$GOPHER_ROOT/zig-server" && zig build) > "$VERDICTS/linux-build.txt" 2>&1
+    judge microvm & judge droplet & wait
+    for machine in microvm droplet; do report $machine; done
+    lap "gopher judges, microvm and droplet side by side"
+else
+    for machine in microvm droplet; do
+        judge $machine
+        report $machine
+        lap "gopher judge, $machine"
+    done
+fi
 b=$(droplet/boot.sh 2>&1) || failed+=(droplet-boot)
 echo "droplet boot: $(echo "$b" | grep -c PASS) PASS"
 echo "$b" | grep "^FAIL"

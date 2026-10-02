@@ -39,7 +39,9 @@ set -u
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 CHECKOUT="${CHECKOUT:-$HOME/showell_repos/cobblestone-u61}"
 IMAGE="${IMAGE:-$CHECKOUT/codex/test/fat16-write.disk}"
-WORK="$HOME/build/gopher-metal/probe"
+# PROBE_WORK gives a run its own scratch, so two can run at once (gates.sh's
+# GATES_PARALLEL=1, QUEUE.md item 72): every file a run writes is under it.
+WORK="${PROBE_WORK:-$HOME/build/gopher-metal/probe}"
 mkdir -p "$WORK"
 
 # **FAT=32 FORMATS THE PROBES' OWN VOLUMES AS FAT32** (QUEUE.md item 17):
