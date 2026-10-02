@@ -431,8 +431,8 @@ Answers below carry the detail. In this order:
    judge's three case steps.
 3. **Item 21's tail** on your angry-gopher branch (storage, counter and
    player are done; thanks).
-4. **Item 22**, then **23-26**, then **27-32** below, then **18** once 16
-   and 17 are on `master`.
+4. **Item 22**, then **23-26**, then **27-32**, then **33-35** below, then
+   **18** (16 and 17 are on `master` now).
 
 *Items 22-26 queued 2026-10-02 (box Claude, keeping the queue full).*
 
@@ -505,6 +505,31 @@ Answers below carry the detail. In this order:
     `serial.ring` on metal and of the server's own log on Linux (or says
     there is none), admin only, secrets already stripped on the way in. The
     judge checks the shape, not the lines.
+
+*Items 33-35 queued 2026-10-02 (box Claude, keeping the queue full): the
+cutover itself. After 32, before 18.*
+
+33. **`CUTOVER.md`: the day, step by step, and the way back.** From
+    MIGRATION.md, the rehearsal and RESTART.md: freeze writes on prod
+    (how, and for how long); the copy; check, build (FAT32 by then),
+    compare; writing the DigitalOcean volume from the recovery console
+    (Steve's hands: short commands, `lsblk`, no copying text out);
+    booting; `compare_hosts.py` (28-29) against prod still on Linux; the
+    Caddy switch; what is watched for the first day; and **the go/no-go
+    line** at each step. Short sentences; Steve runs it.
+34. **The way back: a volume to a Linux tree** (`droplet/extract_volume.py
+    VOLUME.img OUT/`, through `tools/fat16_read.py`, no root): every file
+    with its stored name and case and its modification time, so a failed
+    cutover after writes on metal can return to Linux with them. Judged by
+    `compare_volume.py` in reverse and by the judge's Linux server reading
+    the result. Test on mtools and judge volumes, FAT16 and FAT32.
+35. **A backup the admin can download: `GET /admin/backup`**, on both
+    hosts: the Store's roots as one archive (tar is enough; streamed, not
+    built in memory: metal has no room for 250 MB), admin only, with a
+    judge case that downloads it on both hosts and compares the member
+    list of the archive (names, sizes, contents; not the archive's bytes,
+    whose times differ). With no shell on metal, this is how its data
+    leaves the machine.
 
 ## Box Claude
 
