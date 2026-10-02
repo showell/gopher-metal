@@ -739,6 +739,32 @@ and GROWTH-game-store.md. After 43-46, before 47-50: they close holes.*
     - tests for each at its bound, and a judge case that hits a per-player
       cap on both hosts. Chat is untouched by all of it.
 
+    **Done (CC):** angry-gopher `6013d62e` (no write on a GET), `5ce088cd`
+    (per player, and the floor), `3d6b37fc` (per address), on CC's
+    branch, which sits on master `30350218`. gopher-metal: the kernel's
+    side (`Bus.peer`, the floor from the FAT's free count, and a new
+    `gopher-metal.conf` key, `trusted_proxy`), the judge's gate `caps`,
+    and chat.py/CUTOVER.md writing `trusted_proxy`. Choices said in the
+    commits: 500 sessions counts games and puzzles together; what a
+    player holds is measured once and counted up in a fixed table;
+    the X-Forwarded-For entry believed is the last, the one Caddy added.
+    **Box, three things:**
+    1. **Before metal serves anyone through Caddy,** put prod's private
+       address in `droplet/trusted-proxy` (CC did not: it names a real
+       machine). Without it, everyone through Caddy is one address, and
+       5 new players an hour is the whole site's.
+    2. **The judge's Linux side now runs with `GOPHER_GAME_FLOOR=off`**
+       (judge_gopher.py's LinuxServer): the floor there reads whatever
+       disk the judge's temporary folder is on, which says nothing about
+       the server, and this container's (under 1% free) refused every
+       game write. The kernel's floor stays on.
+    3. Run `JUDGE_ONLY=uids,caps` and the full judge; CC has no loop
+       mount. On Linux alone, `caps` saves 67 games of 250,000 bytes and
+       refuses the 68th. The staging changed for item 51 (p1, guest 7,
+       players' next-id 2), which every story sees.
+    Also: a GET still writes in one place, on purpose: item 51's
+    re-signing of a legacy cookie, once per id.
+
 *Items 53-56 queued 2026-10-02 (box Claude, keeping the queue full). After
 52 and 47-50.*
 
