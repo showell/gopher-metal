@@ -28,6 +28,8 @@ IMAGE is a bare FAT16 volume, or a GPT disk whose first partition holds one
 
 Plain Python, standard library only, no mounting.
 """
+import calendar
+import datetime
 import os
 import shutil
 import struct
@@ -139,8 +141,10 @@ class Volume:
             yield e
 
     def entries(self, first, problems, where):
-        """(name, attr, first cluster, size) for each entry, long names joined
-        and checked against their short entries."""
+        """(name, attr, first cluster, size, mtime) for each entry, long names
+        joined and checked against their short entries. `mtime` is the
+        entry's modification time as Unix seconds, reading the DOS fields as
+        UTC (as gopher-metal does); None for a date the fields cannot be."""
         parts, expect, checksum = {}, None, None
         for e in self.raw_entries(first):
             if e[0] == 0xE5:
@@ -178,14 +182,16 @@ class Volume:
             if hi:
                 problems.append(f"{where}/{name}: a FAT32 high cluster half on FAT16 ({hi})")
             size = struct.unpack_from("<I", e, 28)[0]
-            yield name, attr, first_cluster, size
+            yield name, attr, first_cluster, size, dos_time(struct.unpack_from("<HH", e, 22))
 
     # ── the walk ────────────────────────────────────────────────────────────
 
     def walk(self, problems):
         """Every file and directory: (path, is_dir, first cluster, size), with
-        every chain checked and recorded in self.owner."""
+        every chain checked and recorded in self.owner, and each one's
+        modification time in self.mtime (see `entries`)."""
         self.owner = {}
+        self.mtime = {}
         out = []
 
         def own(path, first):
@@ -207,7 +213,7 @@ class Volume:
                 return
             names = set()
             dot = dotdot = False
-            for name, attr, fc, size in self.entries(first, problems, path or "/"):
+            for name, attr, fc, size, mtime in self.entries(first, problems, path or "/"):
                 if name == ".":
                     dot = True
                     if fc != first:
@@ -219,6 +225,7 @@ class Volume:
                         problems.append(f"{path}/..: points at cluster {fc}, not its parent's {parent}")
                     continue
                 full = f"{path}/{name}"
+                self.mtime[full] = mtime
                 if name.casefold() in names:
                     problems.append(f"{full}: a second entry of the same name")
                 names.add(name.casefold())
@@ -277,6 +284,23 @@ class Volume:
                     return b""
                 return b"".join(self.cluster(c) for c in self.chain(fc))[:size]
         raise Problem(f"{path}: not found")
+
+
+def dos_time(fields):
+    """A DOS (time, date) pair as Unix seconds, read as UTC: the date's bits
+    are years since 1980, month, day; the time's are hours, minutes, and
+    seconds in two-second steps. None for fields that are not a date (a zero
+    date, as an entry nothing ever dated has)."""
+    t, d = fields
+    year, month, day = 1980 + (d >> 9), (d >> 5) & 0xF, d & 0x1F
+    hour, minute, second = t >> 11, (t >> 5) & 0x3F, (t & 0x1F) * 2
+    if not (1 <= month <= 12 and 1 <= day <= 31 and hour < 24 and minute < 60 and second < 60):
+        return None
+    try:
+        datetime.date(year, month, day)  # 30 February, and the like
+    except ValueError:
+        return None
+    return calendar.timegm((year, month, day, hour, minute, second, 0, 0, 0))
 
 
 def short_name(short, case):

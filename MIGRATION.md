@@ -22,9 +22,9 @@ tree before anything is copied.
 2. Build the volume as `chat.py` does, but **mount it with `tz=UTC`**.
 3. Copy with `shutil.copytree` (it keeps modification times), unmount, and
    run `fsck.vfat -n`.
-4. Mount read-only and compare every name, size, hash and modification time
-   with the source. Then boot this machine on it and let the chat judge's
-   read gates look.
+4. Compare every name, size, hash and modification time with the source:
+   `droplet/compare_volume.py <copy> <volume.img>`, which needs no mount.
+   Then boot this machine on it and let the chat judge's read gates look.
 
 The application can produce exactly one of the hazards below: **names that
 differ only in case**. It could also produce **names too long for
@@ -222,13 +222,23 @@ The checker adds it up for the real tree. On prod, 2026-10-02: 835 files and
    and unmount.
 4. **Check the volume** with `fsck.vfat -n volume.img`, at the partition's
    offset or on a loop device of the partition.
-5. **Compare.** Mount read-only with `tz=UTC`, and for every file in the
-   copy, check that:
+5. **Compare**, without mounting:
+
+       droplet/compare_volume.py /path/to/copy volume.img        # exit 0: identical
+       droplet/compare_volume.py /path/to/copy volume.img --json
+
+   It reads the volume through `tools/fat16_read.py`, an independent reader
+   written from the FAT spec, so it needs no root. For every file and
+   directory in the copy it checks:
    - the name exists, compared exactly, not by case;
    - the size and SHA-256 match;
-   - the modification time is within 2 seconds.
+   - the modification time is within 2 seconds, read as UTC.
 
-   Also check that nothing on the volume is missing from the copy.
+   It also reports anything on the volume that is not in the copy, and any
+   inconsistency in the volume itself. A volume copied without `tz=UTC`
+   shows here as every file's time off by the host's offset.
+   `droplet/compare_volume.py --self-test` makes volumes with mkfs.vfat and
+   mtools and checks that each kind of mismatch is found.
 6. **Let this machine read it.** Boot with the volume attached and request:
    - a conversation;
    - a session with uploads;

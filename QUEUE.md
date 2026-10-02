@@ -233,6 +233,20 @@ check-in 2 under Answers: the judge fixes (findings 1-2) and `tz=UTC` on
       with each kind of mismatch made on purpose.
     - Update MIGRATION.md's step 5 to use it. Step 3 (building the volume)
       stays on Linux, on the box.
+
+    **Done** (CC): `droplet/compare_volume.py COPY VOLUME.img [--json]`.
+    - **What it reports:** missing, case, size, content (SHA-256), time
+      (over 2 s, UTC), extra, and check (the volume's own consistency).
+    - **Its self-test** builds a volume from a small copy with mkfs.vfat and
+      mtools (`-m`, TZ=UTC). That volume must match exactly. Then each
+      mismatch alone must be found exactly:
+      - a missing file, a file one byte longer, the same size with other
+        bytes, a time 10 s off, a file the copy lacks, a name in another
+        case, a leaked cluster;
+      - a time 1 s off must pass;
+      - a volume written in New York's time must show as every file's time.
+    - **`tools/fat16_read.py`** now reads entries' times (`v.mtime`, UTC).
+    - **MIGRATION.md** steps 4–5 use it.
 16. **The restart, wired as RESTART.md's summary says** (Steve: build it
     now).
     - `serving`, and one `fatal(why)` that halts before it and restarts
