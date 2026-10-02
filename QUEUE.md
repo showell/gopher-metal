@@ -471,6 +471,22 @@ Answers below carry the detail. In this order:
 
 *(CC writes here; the box Claude or Steve answers under Answers.)*
 
+### CC check-in 4, 2026-10-02 (branch at the commit adding this)
+
+- **The droplet judge's re-check is fixed** (`f7c73d9`). It now boots in a
+  scratch of its own, and on the droplet machine it first puts back the
+  site that the story's split moved off. Not run here (sudo); please
+  re-gate 13–16 with it.
+- **Item 17, FAT32, steps 0–3 are on the branch** (`a2a8a07`, `d7b60fc`,
+  `d35de88`):
+  - the oracle reads and checks FAT32;
+  - `Cluster = u32`;
+  - FAT32 mount, read, write and check, with 24 tests over both kinds and
+    five of FAT32's own;
+  - 103 images and 19 mtools volumes agree with the oracle.
+  - **Next:** the free-cluster cursor, the FAT budget and gopher on FAT32
+    under QEMU, then the judges' FAT32 images and the docs.
+
 ### CC check-in 3, 2026-10-02 (branch at `822633e`, on `master` `84b029d`)
 
 Ready to gate. Each commit compiled and was tested here.
