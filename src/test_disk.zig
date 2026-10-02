@@ -61,6 +61,8 @@ pub const Layout = struct {
     fat_start: usize,
     fat_bytes: usize,
     clusters: usize,
+    /// The sector cluster 2 starts at.
+    data_sector: usize,
 
     pub fn of(disk: []const u8) Layout {
         const reserved = std.mem.readInt(u16, disk[14..16], .little);
@@ -73,6 +75,7 @@ pub const Layout = struct {
             .fat_start = @as(usize, reserved) * sector,
             .fat_bytes = @as(usize, fat_sectors) * sector,
             .clusters = (total - data_start) / disk[13],
+            .data_sector = data_start,
         };
     }
 };
@@ -115,6 +118,15 @@ pub const Disk = struct {
     }
 
     pub fn deinit(d: *Disk) void {
+        // **EVERY DISK A TEST LEFT HEALTHY MUST CHECK CLEAN**, so each test
+        // here is also a test of `Volume.check`, and of the volume. Not one a
+        // test damaged ("damaged-"), nor one built to reach a limit of the
+        // check ("limit-"), nor one that stops answering (fail_after).
+        const tested = std.mem.startsWith(u8, d.label, "damaged-") or std.mem.startsWith(u8, d.label, "limit-");
+        if (!tested and d.blk.fail_after == null) {
+            const r = d.check() catch |e| std.debug.panic("{s}: the check failed: {s}", .{ d.label, @errorName(e) });
+            if (!r.health.clean()) std.debug.panic("{s}: left healthy, and the check found {d} problems, the first {s} at {s}", .{ d.label, r.health.problems, @tagName(r.found[0].problem), r.found[0].text() });
+        }
         if (d.images_dir.len > 0) d.keep() catch |e| std.debug.panic("writing {s}: {s}", .{ d.label, @errorName(e) });
         if (d.fat_cache) |c| testing.allocator.free(c);
         testing.allocator.free(d.bytes);
@@ -147,6 +159,20 @@ pub const Disk = struct {
     pub fn fatsAgree(d: *const Disk) bool {
         const l = Layout.of(d.bytes);
         return std.mem.eql(u8, d.bytes[l.fat_start..][0..l.fat_bytes], d.bytes[l.fat_start + l.fat_bytes ..][0..l.fat_bytes]);
+    }
+
+    /// `Volume.check`, with what it found kept, and **THE DISK UNCHANGED BY
+    /// IT**, byte for byte: the check reports and never repairs.
+    pub fn check(d: *Disk) !Report {
+        const before = try testing.allocator.dupe(u8, d.bytes);
+        defer testing.allocator.free(before);
+        const seen = try testing.allocator.alloc(u8, d.vol.checkBytes());
+        defer testing.allocator.free(seen);
+        var r = Report{};
+        r.health = try d.vol.check(seen, &r, Report.each);
+        try testing.expectEqual(r.health.problems, r.len);
+        try testing.expect(std.mem.eql(u8, before, d.bytes));
+        return r;
     }
 
     /// The whole file at `path`, read through the volume.
@@ -184,6 +210,49 @@ pub const Disk = struct {
         var c = Collect{ .buf = buf };
         try d.vol.list(dir_cluster, &c, Collect.each);
         return buf[0..c.len];
+    }
+};
+
+/// What `Volume.check` found, each finding with its path copied.
+pub const Report = struct {
+    pub const Found = struct {
+        problem: fat16.Problem,
+        path: [256]u8 = undefined,
+        path_len: usize = 0,
+        cluster: u16,
+        count: u32,
+
+        pub fn text(f: *const Found) []const u8 {
+            return f.path[0..f.path_len];
+        }
+    };
+
+    found: [16]Found = undefined,
+    len: usize = 0,
+    health: fat16.Health = .{},
+
+    pub fn each(r: *Report, f: fat16.Finding) void {
+        if (r.len == r.found.len) return;
+        var k = Found{ .problem = f.problem, .cluster = f.cluster, .count = f.count };
+        k.path_len = @min(f.path.len, k.path.len);
+        @memcpy(k.path[0..k.path_len], f.path[0..k.path_len]);
+        r.found[r.len] = k;
+        r.len += 1;
+    }
+
+    /// One finding, as a test expects it.
+    pub const Want = struct { problem: fat16.Problem, path: []const u8 = "", cluster: u16, count: u32 = 0 };
+
+    /// Exactly these findings, in this order.
+    pub fn expect(r: *const Report, want: []const Want) !void {
+        errdefer for (r.found[0..r.len]) |f| std.debug.print("  found {s} at '{s}', cluster {d}, count {d}\n", .{ @tagName(f.problem), f.text(), f.cluster, f.count });
+        try testing.expectEqual(want.len, r.len);
+        for (want, r.found[0..r.len]) |w, f| {
+            try testing.expectEqual(w.problem, f.problem);
+            try testing.expectEqualStrings(w.path, f.text());
+            try testing.expectEqual(w.cluster, f.cluster);
+            try testing.expectEqual(w.count, f.count);
+        }
     }
 };
 

@@ -51,6 +51,9 @@ const attr_long_name: u8 = 0x0F;
 
 /// The first cluster number that means "no more". FAT16 reserves 0xFFF8 and up.
 const chain_end: u16 = 0xFFF8;
+/// The FAT's mark for a cluster the disk cannot hold data in. It is in use,
+/// by nothing, and is not a leak.
+const bad_cluster: u16 = 0xFFF7;
 
 fn le16(b: []const u8) u16 {
     return @as(u16, b[0]) | (@as(u16, b[1]) << 8);
@@ -160,6 +163,60 @@ pub const Entry = struct {
 
     pub fn isDirectory(self: *const Entry) bool {
         return self.attr & attr_directory != 0;
+    }
+};
+
+/// What `Volume.check` found wrong with a volume.
+pub const Problem = enum {
+    /// A chain runs into a free cluster, past the last cluster, or into the
+    /// bad-cluster mark (or a directory has no chain at all). `cluster` is
+    /// the last one it holds.
+    broken,
+    /// A chain reaches a cluster another chain holds already, or one earlier
+    /// in itself: a cross-link, or a loop. `cluster` is that cluster; the
+    /// path is the second chain to reach it.
+    crossed,
+    /// A file's chain holds fewer clusters than its size needs (`count`).
+    short,
+    /// A file's chain holds more clusters than its size needs (`count`): the
+    /// tail is in use and nothing can reach it.
+    long,
+    /// `count` clusters from `cluster` are marked in use and nothing holds
+    /// them: what a write that stopped part-way leaves behind.
+    leaked,
+    /// The FAT's copies differ, in `count` sectors; `cluster` is the first
+    /// entry that does.
+    fats_differ,
+    /// "." is not its own directory, or ".." not its parent, or the root
+    /// holds either.
+    bad_dot,
+    /// A directory deeper than the check walks. That is a limit of the
+    /// check, not damage: nothing under it was checked, and since what it
+    /// holds would look leaked, leaks were not looked for at all.
+    too_deep,
+};
+
+pub const Finding = struct {
+    problem: Problem,
+    /// Where it was found, from the root ("/data/chat/plan.md"); empty for
+    /// the volume as a whole. It points into the checker, so a caller that
+    /// keeps it copies it.
+    path: []const u8,
+    cluster: u16 = 0,
+    count: u32 = 0,
+};
+
+/// What `Volume.check` walked, and how many findings it made.
+pub const Health = struct {
+    files: u32 = 0,
+    directories: u32 = 0,
+    /// Clusters held by the files and directories walked.
+    used: u32 = 0,
+    leaked: u32 = 0,
+    problems: u32 = 0,
+
+    pub fn clean(self: Health) bool {
+        return self.problems == 0;
     }
 };
 
@@ -1288,6 +1345,274 @@ pub const Volume = struct {
             try self.removeEntry(dir_cluster, first.name[0..first.len]);
         }
         return Error.DirectoryFull; // more entries than this is a broken volume
+    }
+
+    // ---- the boot-time check -------------------------------------------
+
+    /// How many bytes `check` needs to borrow: a bit for every cluster.
+    pub fn checkBytes(self: *const Volume) usize {
+        return @as(usize, self.max_cluster) / 8 + 1;
+    }
+
+    /// **THE BOOT-TIME CHECK: WHAT IS WRONG WITH THIS VOLUME, SAID AND NEVER
+    /// MENDED.** It walks the tree from the root and follows every chain,
+    /// marking each cluster it holds in `seen` (`checkBytes` long, borrowed
+    /// for the call). Then it reads the FAT on the disk for clusters in use
+    /// that nothing holds, and compares the FAT's copies. Each thing wrong
+    /// goes to `each` as a `Finding`, with the path it was found at; the
+    /// answer counts what was walked and how many findings there were.
+    ///
+    /// **IT WRITES NOTHING.** A repair is a decision about whose data wins
+    /// (which of two files sharing a cluster keeps it, whether a leaked run
+    /// was a file the crash had not yet named), and fsck.vfat on a copy is
+    /// where that decision belongs, made by a person, not by a machine
+    /// halfway through booting.
+    ///
+    /// **THE MARKING IS WHAT ENDS THE WALK.** A chain that reaches a cluster
+    /// already marked has crossed another chain, or looped back on itself,
+    /// and it is followed no further; so every step marks a new cluster and
+    /// the walk is at most as long as the volume. A directory whose chain
+    /// crosses is not listed past the crossing, so a directory that points at
+    /// its own ancestor is reported, not descended into for ever.
+    ///
+    /// The tree is walked `max_tree_depth` deep, as removeTree is: the
+    /// recursion runs on a kernel stack with no guard page under it, and each
+    /// level holds a sector.
+    ///
+    /// Errors are the disk's (ReadFailed), or `seen` too short (TooBig). A
+    /// damaged volume is not an error: it is the answer.
+    pub fn check(
+        self: *Volume,
+        seen: []u8,
+        context: anytype,
+        comptime each: fn (@TypeOf(context), Finding) void,
+    ) Error!Health {
+        if (seen.len < self.checkBytes()) return Error.TooBig;
+        const len = self.checkBytes();
+        @memset(seen[0..len], 0);
+        var c = Checker(@TypeOf(context), each){ .vol = self, .seen = seen[0..len], .context = context };
+        try c.directory(0, 0, 0, 0);
+        try c.fatOnDisk();
+        return c.health;
+    }
+
+    fn Checker(comptime Context: type, comptime each: fn (Context, Finding) void) type {
+        return struct {
+            vol: *Volume,
+            seen: []u8,
+            context: Context,
+            health: Health = .{},
+            /// Some directory was not walked, so a leak cannot be told from
+            /// what it holds.
+            stopped_short: bool = false,
+            /// The path being walked, for the findings: a name for each level.
+            path: [max_tree_depth * (max_name + 1)]u8 = undefined,
+            path_len: usize = 0,
+
+            const Self = @This();
+
+            fn report(self: *Self, problem: Problem, cluster: u16, count: u32) void {
+                self.health.problems += 1;
+                each(self.context, .{ .problem = problem, .path = self.path[0..self.path_len], .cluster = cluster, .count = count });
+            }
+
+            /// Marks `cluster` held, and answers whether it already was.
+            fn mark(self: *Self, cluster: u16) bool {
+                const bit = @as(u8, 1) << @intCast(cluster % 8);
+                const was = self.seen[cluster / 8] & bit != 0;
+                self.seen[cluster / 8] |= bit;
+                return was;
+            }
+
+            fn held(self: *const Self, cluster: u16) bool {
+                return self.seen[cluster / 8] & (@as(u8, 1) << @intCast(cluster % 8)) != 0;
+            }
+
+            /// Follows the chain from `first`, marking it, and answers how
+            /// many clusters it holds before anything went wrong. `size` is a
+            /// file's length, which its chain must match; null for a directory.
+            fn chain(self: *Self, first: u16, size: ?u32) Error!u32 {
+                const v = self.vol;
+                const cluster_bytes = v.sectors_per_cluster * sector_size;
+                const need: u32 = if (size) |n| (n + cluster_bytes - 1) / cluster_bytes else 0;
+                if (first == 0) {
+                    // An empty file has no chain. A directory always has one.
+                    if (size == null or need > 0) self.report(if (size == null) .broken else .short, 0, 0);
+                    return 0;
+                }
+                if (!v.inData(first)) {
+                    self.report(.broken, first, 0);
+                    return 0;
+                }
+                var n: u32 = 0;
+                var cluster = first;
+                while (true) {
+                    if (self.mark(cluster)) {
+                        self.report(.crossed, cluster, 0);
+                        self.health.used += n;
+                        return n;
+                    }
+                    n += 1;
+                    const next = try v.fatGet(cluster);
+                    if (next >= chain_end) break;
+                    if (!v.inData(next)) {
+                        // Into a free cluster, past the last one, or into the
+                        // bad-cluster mark. `cluster` is the last one held.
+                        self.report(.broken, cluster, 0);
+                        self.health.used += n;
+                        return n;
+                    }
+                    cluster = next;
+                }
+                self.health.used += n;
+                if (size != null) {
+                    if (n < need) self.report(.short, first, n);
+                    if (n > need) self.report(.long, first, n);
+                }
+                return n;
+            }
+
+            fn push(self: *Self, name: []const u8) usize {
+                const was = self.path_len;
+                if (self.path_len + 1 + name.len <= self.path.len) {
+                    self.path[self.path_len] = '/';
+                    @memcpy(self.path[self.path_len + 1 ..][0..name.len], name);
+                    self.path_len += 1 + name.len;
+                }
+                return was;
+            }
+
+            /// Lists the directory at `cluster` (0: the root), over the first
+            /// `clusters` clusters of its chain, which `chain` has already
+            /// followed and found sound, and checks everything in it.
+            fn directory(self: *Self, cluster: u16, parent: u16, clusters: u32, depth: u32) Error!void {
+                const v = self.vol;
+                // **A SECTOR OF ITS OWN**, not the volume's scratch: the walk
+                // of each entry's chain reads the FAT through the scratch.
+                var sector: [sector_size]u8 align(16) = undefined;
+                var long: [max_name]u8 = undefined;
+                var long_len: usize = 0;
+                var long_sum: u8 = 0;
+                var long_ok = false;
+
+                const sectors: u32 = if (cluster == 0) v.root_sectors else clusters * v.sectors_per_cluster;
+                var at_cluster = cluster;
+                var k: u32 = 0;
+                while (k < sectors) : (k += 1) {
+                    const lba = if (cluster == 0) v.root_start + k else blk: {
+                        if (k > 0 and k % v.sectors_per_cluster == 0) at_cluster = try v.fatGet(at_cluster);
+                        break :blk v.clusterSector(at_cluster) + k % v.sectors_per_cluster;
+                    };
+                    try v.readSector(lba, &sector);
+                    var at: usize = 0;
+                    while (at + dirent_size <= sector_size) : (at += dirent_size) {
+                        const e = sector[at..][0..dirent_size];
+                        if (e[0] == 0x00) return; // nothing further in this directory
+                        if (e[0] == 0xE5) {
+                            long_ok = false;
+                            continue;
+                        }
+                        if (e[11] == attr_long_name) {
+                            takeLongPart(e, &long, &long_len, &long_sum, &long_ok);
+                            continue;
+                        }
+                        if (e[11] & attr_volume_label != 0) {
+                            long_ok = false;
+                            continue;
+                        }
+                        var entry = decode(e);
+                        if (long_ok and long_len > 0 and long_sum == shortChecksum(e[0..11].*)) {
+                            entry.long_len = @intCast(@min(long_len, entry.long.len));
+                            @memcpy(entry.long[0..entry.long_len], long[0..entry.long_len]);
+                        }
+                        long_ok = false;
+                        long_len = 0;
+                        try self.entryIn(entry, cluster, parent, depth);
+                    }
+                }
+            }
+
+            fn entryIn(self: *Self, entry: Entry, dir: u16, parent: u16, depth: u32) Error!void {
+                const name = entry.text();
+                // "." is this directory and ".." its parent, 0 for the root.
+                if (eqlBytes(name, ".") or eqlBytes(name, "..")) {
+                    const want = if (eqlBytes(name, ".")) dir else parent;
+                    if (dir == 0 or entry.first_cluster != want) {
+                        const was = self.push(name);
+                        self.report(.bad_dot, entry.first_cluster, 0);
+                        self.path_len = was;
+                    }
+                    return;
+                }
+                const was = self.push(name);
+                defer self.path_len = was;
+                if (entry.isDirectory()) {
+                    self.health.directories += 1;
+                    const n = try self.chain(entry.first_cluster, null);
+                    if (n == 0) return;
+                    if (depth + 1 >= max_tree_depth) {
+                        self.stopped_short = true;
+                        self.report(.too_deep, entry.first_cluster, 0);
+                        return;
+                    }
+                    try self.directory(entry.first_cluster, dir, n, depth + 1);
+                } else {
+                    self.health.files += 1;
+                    _ = try self.chain(entry.first_cluster, entry.size);
+                }
+            }
+
+            /// The FAT as it sits on the disk: every copy against the first,
+            /// and every cluster in use against what the walk held.
+            fn fatOnDisk(self: *Self) Error!void {
+                const v = self.vol;
+                var first: [sector_size]u8 align(16) = undefined;
+                var other: [sector_size]u8 align(16) = undefined;
+                var differ: u32 = 0;
+                var differ_at: u16 = 0;
+                var run_start: u16 = 0;
+                var run: u32 = 0;
+                var s: u32 = 0;
+                while (s < v.sectors_per_fat) : (s += 1) {
+                    try v.readSector(v.fat_start + s, &first);
+                    var copy: u32 = 1;
+                    while (copy < v.num_fats) : (copy += 1) {
+                        try v.readSector(v.fat_start + copy * v.sectors_per_fat + s, &other);
+                        if (!std.mem.eql(u8, &first, &other)) {
+                            if (differ == 0) {
+                                var i: usize = 0;
+                                while (first[i] == other[i]) i += 1;
+                                differ_at = @intCast(s * (sector_size / 2) + i / 2);
+                            }
+                            differ += 1;
+                        }
+                    }
+                    var i: u32 = 0;
+                    while (i < sector_size / 2) : (i += 1) {
+                        const c = s * (sector_size / 2) + i;
+                        if (c < 2) continue;
+                        if (c > v.max_cluster) break;
+                        const value = le16(first[i * 2 ..][0..2]);
+                        const leaked = !self.stopped_short and value != 0 and value != bad_cluster and !self.held(@intCast(c));
+                        if (leaked) {
+                            if (run == 0) run_start = @intCast(c);
+                            run += 1;
+                        } else if (run > 0) {
+                            self.leak(run_start, run);
+                            run = 0;
+                        }
+                    }
+                }
+                if (run > 0) self.leak(run_start, run);
+                if (differ > 0) self.report(.fats_differ, differ_at, differ);
+            }
+
+            fn leak(self: *Self, start: u16, count: u32) void {
+                self.health.leaked += count;
+                self.path_len = 0;
+                self.report(.leaked, start, count);
+            }
+        };
     }
 
     /// A whole file into `out`, which must be large enough to hold it.

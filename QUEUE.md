@@ -68,6 +68,27 @@ in order. The box Claude reorders on `master`, and CC proposes at the bottom.
      chains. Report only: never repair.
    - Host-tested on item 3's disk, with damage made on purpose.
    - The box Claude wires it into the boot log.
+
+   **Done** (CC): `Volume.check(seen, context, each)` in `fat16.zig`.
+   - **What it reports:** broken chains, crossed or looped chains, files
+     whose size and chain disagree, leaked runs, FAT copies that differ, a
+     bad `.` or `..`, and a tree deeper than it walks.
+   - **How a report looks:** each finding is a `Finding` with its path, and
+     the answer is a `Health` (files, directories, clusters used, leaked,
+     `clean()`).
+   - **It writes nothing.** The tests check this byte for byte.
+   - **Memory and time:** it borrows `checkBytes()` bytes (at most 8 KiB) and
+     uses a sector of stack per directory level, 16 levels at most. It reads
+     every directory sector and every FAT sector once, plus one FAT read per
+     cluster when the FAT is not held. With the FAT held, check after
+     `cacheFat`.
+   - **Tests:**
+     - every disk a test leaves healthy must check clean;
+     - each kind of damage is tested for its exact findings;
+     - `tools/check_fat16_images.sh` has it judge volumes that mkfs.vfat and
+       mtools made, healthy and damaged, and requires the oracle's verdict.
+   - **Box Claude, for the boot log:** print `problems`, `leaked` and each
+     finding; never halt on one.
 6. **The log ring.**
    - A fixed-size ring buffer holding the last N KB of everything
      `serial.put` writes, so a status page can serve it later.
@@ -161,6 +182,11 @@ in order. The box Claude reorders on `master`, and CC proposes at the bottom.
   `plan` replaces `Plan`, where Linux keeps both (MIGRATION.md).
 - **Stop `fat16.zig`'s `grow` at 65,536 directory entries.** It grows past
   FAT's limit today, and `fsck.fat` would then reject the volume.
+- **Read the NT case bits (byte 12 of a short entry) in `fat16.zig`'s
+  `decode`.** mtools and Windows store `topic.md` as `TOPIC.MD` with "lower
+  case" flags and no long name, and this machine lists it upper case
+  (`tools/check_fat16_images.sh` shows it). Linux's vfat writes a long name
+  instead, so the migration is not affected.
 - **`zig fmt` the three files on `master` it flags** (`src/tcp_sim.zig`,
   `src/rtc.zig`, `src/civil.zig`). `zig fmt --check src` fails today, so a
   gate on it would fail before it checked anything new.

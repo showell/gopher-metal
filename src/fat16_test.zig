@@ -15,6 +15,7 @@
 const std = @import("std");
 const fat16 = @import("fat16.zig");
 const options = @import("fat16_test_options");
+const virtio = @import("virtio.zig");
 const test_disk = @import("test_disk.zig");
 const testing = std.testing;
 const Shape = test_disk.Shape;
@@ -338,4 +339,294 @@ test "a FAT too short for the clusters it describes is refused at mount" {
     var blk = @import("virtio.zig").Block.inMemory(bytes);
     var scratch: [test_disk.sector]u8 align(16) = undefined;
     try testing.expectError(fat16.Error.BadBootSector, fat16.Volume.mount(&blk, &scratch, 0));
+}
+
+// ---- the boot-time check (QUEUE item 5) ------------------------------------
+//
+// Every disk a test above left healthy is checked when it is torn down, and
+// must check clean (test_disk.Disk.deinit). These break a disk on purpose, one
+// way each, and expect exactly what the check should say. `Disk.check` also
+// requires that the check changed nothing on the disk.
+
+/// Writes a file's entry fields on the disk directly: its size, or its first
+/// cluster.
+fn setEntry(d: *test_disk.Disk, e: fat16.Entry, comptime field: enum { size, first_cluster }, value: u32) void {
+    const at = e.lba * test_disk.sector + e.slot;
+    switch (field) {
+        .size => std.mem.writeInt(u32, d.bytes[at + 28 ..][0..4], value, .little),
+        .first_cluster => std.mem.writeInt(u16, d.bytes[at + 26 ..][0..2], @intCast(value), .little),
+    }
+}
+
+test "the check counts what a healthy volume holds" {
+    for (both) |cached| {
+        const d = try Disk.make("check-healthy", small, cached);
+        defer d.deinit();
+        const empty = d.free();
+        var data: [3000]u8 = undefined;
+        try d.vol.writeFile("data/chat/a.md", pattern(&data, 1)); // 6 clusters
+        try d.vol.writeFile("data/chat/b.md", ""); // none
+        try d.vol.writeFile("auth/7/password", "hash"); // 1
+        try d.vol.writeFile("data/gone", "x");
+        try d.vol.remove("data/gone");
+        const r = try d.check();
+        try r.expect(&.{});
+        try testing.expectEqual(@as(u32, 3), r.health.files);
+        try testing.expectEqual(@as(u32, 4), r.health.directories); // data, data/chat, auth, auth/7
+        try testing.expectEqual(@as(u32, @intCast(empty - d.free())), r.health.used);
+        try testing.expectEqual(@as(u32, 0), r.health.leaked);
+    }
+}
+
+test "the check finds clusters in use that nothing holds" {
+    for (both) |cached| {
+        const d = try Disk.make("damaged-check-leaked", small, cached);
+        defer d.deinit();
+        try d.vol.writeFile("data/x", "kept");
+        const last: u16 = @intCast(Layout.of(d.bytes).clusters + 1);
+        // One cluster alone, and a run of three linked ones, as a write that
+        // stopped before its entry was written leaves them.
+        try damageFat(d, cached, last - 10, 0xFFFF);
+        try damageFat(d, cached, last - 5, last - 4);
+        try damageFat(d, cached, last - 4, last - 3);
+        try damageFat(d, cached, last - 3, 0xFFFF);
+        // A cluster marked bad is in use by nothing, and is not a leak.
+        try damageFat(d, cached, last - 1, 0xFFF7);
+        // And the volume's very last cluster, where the FAT's scan ends.
+        try damageFat(d, cached, last, 0xFFFF);
+        const r = try d.check();
+        try r.expect(&.{
+            .{ .problem = .leaked, .cluster = last - 10, .count = 1 },
+            .{ .problem = .leaked, .cluster = last - 5, .count = 3 },
+            .{ .problem = .leaked, .cluster = last, .count = 1 },
+        });
+        try testing.expectEqual(@as(u32, 5), r.health.leaked);
+    }
+}
+
+test "the check finds a chain that runs into a free cluster, past the volume, or into a bad one" {
+    for (both) |cached| {
+        const d = try Disk.make("damaged-check-broken", small, cached);
+        defer d.deinit();
+        var data: [1500]u8 = undefined; // three clusters
+        try d.vol.writeFile("data/f", pattern(&data, 2));
+        const e = try d.vol.open("data/f");
+        const past: u16 = @intCast(Layout.of(d.bytes).clusters + 2);
+        for ([_]u16{ 0, past, 0xFFF7 }) |link| {
+            try damageFat(d, cached, e.first_cluster, link);
+            const r = try d.check();
+            // The rest of the chain is then held by nothing.
+            try r.expect(&.{
+                .{ .problem = .broken, .path = "/data/f", .cluster = e.first_cluster },
+                .{ .problem = .leaked, .cluster = e.first_cluster + 1, .count = 2 },
+            });
+        }
+    }
+}
+
+test "the check finds a first cluster past the volume, and a directory with no chain" {
+    for (both) |cached| {
+        const d = try Disk.make("damaged-check-first", small, cached);
+        defer d.deinit();
+        try d.vol.writeFile("data/f", "x");
+        try d.vol.writeFile("auth/7/password", "x");
+        const f = try d.vol.open("data/f");
+        const dir = try d.vol.open("auth/7");
+        const past: u16 = @intCast(Layout.of(d.bytes).clusters + 2);
+        setEntry(d, f, .first_cluster, past);
+        setEntry(d, dir, .first_cluster, 0);
+        try d.mount(cached);
+        const r = try d.check();
+        try r.expect(&.{
+            .{ .problem = .broken, .path = "/data/f", .cluster = past },
+            .{ .problem = .broken, .path = "/auth/7", .cluster = 0 },
+            .{ .problem = .leaked, .cluster = f.first_cluster, .count = 1 },
+            .{ .problem = .leaked, .cluster = dir.first_cluster, .count = 2 }, // auth/7 and its password
+        });
+    }
+}
+
+test "the check finds two files sharing clusters, and a file that loops" {
+    for (both) |cached| {
+        const d = try Disk.make("damaged-check-crossed", small, cached);
+        defer d.deinit();
+        var data: [1500]u8 = undefined;
+        try d.vol.writeFile("a", pattern(&data, 3));
+        try d.vol.writeFile("b", pattern(&data, 4));
+        try d.vol.writeFile("c", pattern(&data, 5));
+        var chain: [8]u16 = undefined;
+        const a = chainOf(d, (try d.vol.open("a")).first_cluster, &chain)[0..3].*;
+        const b = chainOf(d, (try d.vol.open("b")).first_cluster, &chain)[0..3].*;
+        const c = chainOf(d, (try d.vol.open("c")).first_cluster, &chain)[0..3].*;
+        try damageFat(d, cached, a[2], b[1]); // a runs on into b's tail
+        try damageFat(d, cached, c[2], c[0]); // c comes back to its start
+        const r = try d.check();
+        try r.expect(&.{
+            .{ .problem = .long, .path = "/a", .cluster = a[0], .count = 5 },
+            .{ .problem = .crossed, .path = "/b", .cluster = b[1] },
+            .{ .problem = .crossed, .path = "/c", .cluster = c[0] },
+        });
+    }
+}
+
+test "the check finds a directory that loops, and one that points at its own parent" {
+    for (both) |cached| {
+        const d = try Disk.make("damaged-check-dirs", small, cached);
+        defer d.deinit();
+        // Two full clusters, as in the loop test above.
+        var path: [64]u8 = undefined;
+        for (0..10) |k| {
+            const p = try std.fmt.bufPrint(&path, "data/sessions/session-{d:0>4}.md", .{k});
+            try d.vol.writeFile(p, "x");
+        }
+        try d.vol.writeFile("data/up/x", "x");
+        const data_dir = try d.vol.open("data");
+        const sessions = try d.vol.open("data/sessions");
+        const up = try d.vol.open("data/up");
+        var chain: [8]u16 = undefined;
+        const s = chainOf(d, sessions.first_cluster, &chain)[0..2].*;
+        try damageFat(d, cached, s[1], s[0]);
+        setEntry(d, up, .first_cluster, data_dir.first_cluster);
+        try d.mount(cached);
+        const r = try d.check();
+        try r.expect(&.{
+            // The loop is found, and the sessions are all still checked.
+            .{ .problem = .crossed, .path = "/data/sessions", .cluster = s[0] },
+            // A directory that is its own parent is reported, not walked
+            // for ever, and what it used to hold is held by nothing.
+            .{ .problem = .crossed, .path = "/data/up", .cluster = data_dir.first_cluster },
+            .{ .problem = .leaked, .cluster = up.first_cluster, .count = 2 },
+        });
+        try testing.expectEqual(@as(u32, 10), r.health.files);
+    }
+}
+
+test "the check finds a file whose size and chain disagree" {
+    for (both) |cached| {
+        const d = try Disk.make("damaged-check-size", small, cached);
+        defer d.deinit();
+        try d.vol.writeFile("short", "x" ** 1000); // two clusters
+        try d.vol.writeFile("long", "x" ** 1000);
+        try d.vol.writeFile("empty", "x" ** 1000);
+        const short = try d.vol.open("short");
+        const long = try d.vol.open("long");
+        const empty = try d.vol.open("empty");
+        setEntry(d, short, .size, 5000);
+        setEntry(d, long, .size, 10);
+        setEntry(d, empty, .size, 0);
+        try d.mount(cached);
+        const r = try d.check();
+        try r.expect(&.{
+            .{ .problem = .short, .path = "/short", .cluster = short.first_cluster, .count = 2 },
+            .{ .problem = .long, .path = "/long", .cluster = long.first_cluster, .count = 2 },
+            .{ .problem = .long, .path = "/empty", .cluster = empty.first_cluster, .count = 2 },
+        });
+    }
+}
+
+test "the check finds FAT copies that differ" {
+    for (both) |cached| {
+        const d = try Disk.make("damaged-check-fats", small, cached);
+        defer d.deinit();
+        try d.vol.writeFile("f", "x");
+        // The second copy only, and not mounted again: a held FAT would refuse
+        // the volume, which is cacheFat's business, not the check's.
+        const l = Layout.of(d.bytes);
+        std.mem.writeInt(u16, d.bytes[l.fat_start + l.fat_bytes + 300 * 2 ..][0..2], 0xFFFF, .little);
+        std.mem.writeInt(u16, d.bytes[l.fat_start + l.fat_bytes + 1000 * 2 ..][0..2], 0xFFFF, .little);
+        const r = try d.check();
+        try r.expect(&.{.{ .problem = .fats_differ, .cluster = 300, .count = 2 }});
+    }
+}
+
+test "the check finds a . or .. that points elsewhere" {
+    for (both) |cached| {
+        const d = try Disk.make("damaged-check-dots", small, cached);
+        defer d.deinit();
+        try d.vol.writeFile("data/chat/x", "x");
+        const chat = try d.vol.open("data/chat");
+        const at = @as(usize, chat.first_cluster - 2 + Layout.of(d.bytes).data_sector) * test_disk.sector;
+        // "." is the first entry of a directory, ".." the second.
+        std.mem.writeInt(u16, d.bytes[at + 26 ..][0..2], 77, .little);
+        std.mem.writeInt(u16, d.bytes[at + 32 + 26 ..][0..2], 78, .little);
+        try d.mount(cached);
+        const r = try d.check();
+        try r.expect(&.{
+            .{ .problem = .bad_dot, .path = "/data/chat/.", .cluster = 77 },
+            .{ .problem = .bad_dot, .path = "/data/chat/..", .cluster = 78 },
+        });
+    }
+}
+
+test "the check says where it stopped going deeper, and does not call what is below leaked" {
+    for (both) |cached| {
+        // A healthy volume (tools/fat16_read.py checks it clean), deeper than
+        // the check walks.
+        const d = try Disk.make("limit-check-deep", small, cached);
+        defer d.deinit();
+        const deep = "d/" ** 16 ++ "f";
+        try d.vol.writeFile(deep, "x");
+        const r = try d.check();
+        try r.expect(&.{
+            .{ .problem = .too_deep, .path = "/d" ** 16, .cluster = (try d.vol.open("d/" ** 15 ++ "d")).first_cluster },
+        });
+        try testing.expectEqual(@as(u32, 0), r.health.leaked);
+    }
+}
+
+test "the check refuses a bitmap too short, and a disk that stops answering is an error" {
+    const d = try Disk.make("io-failure-check", small, false);
+    defer d.deinit();
+    try d.vol.writeFile("data/x", "x");
+    var short: [8]u8 = undefined;
+    const Ignore = struct {
+        fn each(_: void, _: fat16.Finding) void {}
+    };
+    try testing.expectError(fat16.Error.TooBig, d.vol.check(&short, {}, Ignore.each));
+    d.blk.fail_after = d.blk.requests;
+    try testing.expectError(fat16.Error.ReadFailed, d.check());
+}
+
+// **VOLUMES ANOTHER PROGRAM MADE.** Every volume above was formatted by
+// test_disk.zig and written by fat16.zig itself; the volumes this machine
+// meets in service were made by mkfs.vfat and written by Linux. So
+// tools/check_fat16_images.sh has tools/fat16_read.py make some with
+// mkfs.vfat and mtools (`make-foreign`), healthy and damaged each way its own
+// self-test damages them, and passes the directory as -Dfat16-foreign. The
+// verdict here must be the oracle's: healthy-* clean, damaged-* not. What was
+// judged is written to judged.txt there, and the script requires every image
+// in it: an option left unset makes this test do nothing, and the script is
+// what says so.
+test "a volume mkfs.vfat and mtools made: the check's verdict is the oracle's" {
+    if (options.foreign_dir.len == 0) return;
+    const io = testing.io;
+    var dir = try std.Io.Dir.cwd().openDir(io, options.foreign_dir, .{ .iterate = true });
+    defer dir.close(io);
+    var judged: std.ArrayList(u8) = .empty;
+    defer judged.deinit(testing.allocator);
+
+    var it = dir.iterate();
+    while (try it.next(io)) |file| {
+        if (!std.mem.endsWith(u8, file.name, ".img")) continue;
+        const bytes = try dir.readFileAlloc(io, file.name, testing.allocator, .limited(64 << 20));
+        defer testing.allocator.free(bytes);
+        var blk = virtio.Block.inMemory(bytes);
+        var scratch: [test_disk.sector]u8 align(16) = undefined;
+        var vol = try fat16.Volume.mount(&blk, &scratch, 0);
+        const seen = try testing.allocator.alloc(u8, vol.checkBytes());
+        defer testing.allocator.free(seen);
+        var r = test_disk.Report{};
+        r.health = try vol.check(seen, &r, test_disk.Report.each);
+
+        const healthy = std.mem.startsWith(u8, file.name, "healthy-");
+        try judged.print(testing.allocator, "{s}: {s}", .{ file.name, if (r.health.clean()) "clean" else "damaged" });
+        for (r.found[0..r.len]) |f| try judged.print(testing.allocator, "; {s} at '{s}' cluster {d}", .{ @tagName(f.problem), f.text(), f.cluster });
+        try judged.append(testing.allocator, '\n');
+        if (healthy != r.health.clean()) {
+            std.debug.print("{s}", .{judged.items});
+            return error.TestUnexpectedResult;
+        }
+        if (healthy) try testing.expect(r.health.files > 0);
+    }
+    try dir.writeFile(io, .{ .sub_path = "judged.txt", .data = judged.items });
 }

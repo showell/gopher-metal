@@ -6,6 +6,7 @@ item 4).
     tools/fat16_read.py list  IMAGE            every file and directory, with sizes
     tools/fat16_read.py cat   IMAGE PATH       a file's bytes, to stdout
     tools/fat16_read.py check IMAGE...         the volume's consistency; exit 1 if not
+    tools/fat16_read.py make-foreign DIR       writes the self-test's volumes, for fat16.zig's check
     tools/fat16_read.py --self-test            checks this reader against mkfs.vfat
                                                and mtools, then against damage
 
@@ -310,6 +311,8 @@ def load(path):
 def main(argv):
     if argv[1:2] == ["--self-test"]:
         return self_test()
+    if len(argv) == 3 and argv[1] == "make-foreign":
+        return make_foreign(argv[2])
     if len(argv) >= 3 and argv[1] == "list":
         v = load(argv[2])
         problems = []
@@ -339,43 +342,97 @@ def main(argv):
 
 # ── the self-test ───────────────────────────────────────────────────────────
 
+MTOOLS = ("mkfs.vfat", "mcopy", "mmd")
+
+
+def foreign_volumes(d):
+    """A volume another program made (mkfs.vfat formats it, mtools writes
+    it), the files written to it, and the same volume damaged each way
+    `check` must catch: (healthy image bytes, files, [(name, what, image
+    bytes, the words a problem must hold)]). `d` is a scratch directory."""
+    img = os.path.join(d, "v.img")
+    with open(img, "wb") as f:
+        f.truncate(8 << 20)
+    subprocess.run(["mkfs.vfat", "-F", "16", "-S", "512", "-s", "1", "-n", "TEST", img],
+                   check=True, capture_output=True)
+    files = {
+        "data/chat/1_2/sessions/topic.md": b"hello\n" * 300,
+        "data/chat/1_2/sessions/a-much-longer-session-name.reactions.jsonl": b"{}\n",
+        "auth/1/api-key": b"0123456789abcdef",
+        "EMPTY": b"",
+        "data/big.bin": bytes(range(256)) * 400,
+    }
+    for path in files:
+        parent = os.path.dirname(path)
+        parts = parent.split("/") if parent else []
+        for k in range(1, len(parts) + 1):
+            subprocess.run(["mmd", "-i", img, "-D", "s", "::/" + "/".join(parts[:k])],
+                           capture_output=True)
+    for path, data in files.items():
+        src = os.path.join(d, "src")
+        with open(src, "wb") as f:
+            f.write(data)
+        subprocess.run(["mcopy", "-i", img, src, "::/" + path], check=True, capture_output=True)
+
+    with open(img, "rb") as f:
+        good = bytes(f.read())
+    v = Volume(good)
+
+    def fat_set(img2, cluster, value, copies=None):
+        for k in (copies if copies is not None else range(v.nfats)):
+            at = v.base + (v.fat_start + k * v.fat_sectors) * SECTOR + cluster * 2
+            struct.pack_into("<H", img2, at, value)
+
+    def damage(change):
+        img2 = bytearray(good)
+        change(img2)
+        return bytes(img2)
+
+    big = v.chain(next(fc for p, isd, fc, s in v.walk([]) if p == "/data/big.bin"))
+    topic = next(fc for p, isd, fc, s in v.walk([]) if p.endswith("topic.md"))
+    free = next(c for c in range(2, v.max_cluster + 1) if v.fat(c) == 0)
+    damages = [
+        ("loop", "a loop", damage(lambda i: fat_set(i, big[3], big[1])), "loops"),
+        ("free", "a free cluster in a chain", damage(lambda i: fat_set(i, big[2], 0)), "free cluster"),
+        ("crossed", "a cross-link", damage(lambda i: fat_set(i, v.chain(topic)[-1], big[5])), "cross-linked"),
+        ("leak", "a leak", damage(lambda i: fat_set(i, free, 0xFFFF)), "leaked"),
+        ("short", "a short chain", damage(lambda i: fat_set(i, big[-2], 0xFFFF)), "needs"),
+        ("fats", "FAT copies differing", damage(lambda i: fat_set(i, free, 0xFFFF, copies=[1])), "differs"),
+    ]
+    return good, files, damages
+
+
+def make_foreign(out):
+    """Writes foreign_volumes' images into `out`, for fat16.zig's own check
+    to judge: healthy-mtools.img, and damaged-mtools-<kind>.img."""
+    missing = [t for t in MTOOLS if shutil.which(t) is None]
+    if missing:
+        print(f"cannot make them: {', '.join(missing)} not installed "
+              "(apt-get install dosfstools mtools)", file=sys.stderr)
+        return 2
+    os.makedirs(out, exist_ok=True)
+    with tempfile.TemporaryDirectory() as d:
+        good, _, damages = foreign_volumes(d)
+        with open(os.path.join(out, "healthy-mtools.img"), "wb") as f:
+            f.write(good)
+        for name, _, img, _ in damages:
+            with open(os.path.join(out, f"damaged-mtools-{name}.img"), "wb") as f:
+                f.write(img)
+    return 0
+
+
 def self_test():
     """Against volumes another program made: mkfs.vfat formats, mtools
     writes. Then the same volume damaged each way `check` must catch."""
-    missing = [t for t in ("mkfs.vfat", "mcopy", "mmd") if shutil.which(t) is None]
+    missing = [t for t in MTOOLS if shutil.which(t) is None]
     if missing:
         print(f"self-test cannot run: {', '.join(missing)} not installed "
               "(apt-get install dosfstools mtools)")
         return 2
     failures = []
     with tempfile.TemporaryDirectory() as d:
-        img = os.path.join(d, "v.img")
-        with open(img, "wb") as f:
-            f.truncate(8 << 20)
-        subprocess.run(["mkfs.vfat", "-F", "16", "-S", "512", "-s", "1", "-n", "TEST", img],
-                       check=True, capture_output=True)
-        files = {
-            "data/chat/1_2/sessions/topic.md": b"hello\n" * 300,
-            "data/chat/1_2/sessions/a-much-longer-session-name.reactions.jsonl": b"{}\n",
-            "auth/1/api-key": b"0123456789abcdef",
-            "EMPTY": b"",
-            "data/big.bin": bytes(range(256)) * 400,
-        }
-        for path in files:
-            parent = os.path.dirname(path)
-            parts = parent.split("/") if parent else []
-            for k in range(1, len(parts) + 1):
-                subprocess.run(["mmd", "-i", img, "-D", "s", "::/" + "/".join(parts[:k])],
-                               capture_output=True)
-        for path, data in files.items():
-            src = os.path.join(d, "src")
-            with open(src, "wb") as f:
-                f.write(data)
-            subprocess.run(["mcopy", "-i", img, src, "::/" + path], check=True, capture_output=True)
-
-        with open(img, "rb") as f:
-            good = bytearray(f.read())
-        v = Volume(bytes(good))
+        good, files, damages = foreign_volumes(d)
+        v = Volume(good)
         problems = v.check()
         if problems:
             failures.append(f"a clean mtools volume reads as inconsistent: {problems}")
@@ -385,31 +442,13 @@ def self_test():
                     failures.append(f"{path}: the bytes read back differ")
             except Problem as p:
                 failures.append(f"{path}: {p}")
-
-        def damaged(what, change, want):
-            img2 = bytearray(good)
-            change(Volume(bytes(img2)), img2)
+        for _, what, img, want in damages:
             try:
-                got = Volume(bytes(img2)).check()
+                got = Volume(img).check()
             except Problem as p:
                 got = [str(p)]
             if not any(want in p for p in got):
                 failures.append(f"{what}: wanted a problem with {want!r}, got {got}")
-
-        def fat_set(vol, img2, cluster, value, copies=None):
-            for k in (copies if copies is not None else range(vol.nfats)):
-                at = vol.base + (vol.fat_start + k * vol.fat_sectors) * SECTOR + cluster * 2
-                struct.pack_into("<H", img2, at, value)
-
-        big = v.chain(next(fc for p, isd, fc, s in v.walk([]) if p == "/data/big.bin"))
-        topic = next(fc for p, isd, fc, s in v.walk([]) if p.endswith("topic.md"))
-        free = next(c for c in range(2, v.max_cluster + 1) if v.fat(c) == 0)
-        damaged("a loop", lambda vol, i: fat_set(vol, i, big[3], big[1]), "loops")
-        damaged("a free cluster in a chain", lambda vol, i: fat_set(vol, i, big[2], 0), "free cluster")
-        damaged("a cross-link", lambda vol, i: fat_set(vol, i, v.chain(topic)[-1], big[5]), "cross-linked")
-        damaged("a leak", lambda vol, i: fat_set(vol, i, free, 0xFFFF), "leaked")
-        damaged("a short chain", lambda vol, i: fat_set(vol, i, big[-2], 0xFFFF), "needs")
-        damaged("FAT copies differing", lambda vol, i: fat_set(vol, i, free, 0xFFFF, copies=[1]), "differs")
 
     if failures:
         print("self-test FAILED:\n  " + "\n  ".join(failures))

@@ -238,6 +238,7 @@ pub fn build(b: *std.Build) void {
     // tools/check_fat16_images.sh does both.
     const fat16_opts = b.addOptions();
     fat16_opts.addOption([]const u8, "images_dir", b.option([]const u8, "fat16-images", "where fat16_test writes its disk images") orelse "");
+    fat16_opts.addOption([]const u8, "foreign_dir", b.option([]const u8, "fat16-foreign", "volumes other tools made, for fat16_test's check to judge") orelse "");
     const fat16_unit = b.addTest(.{
         .name = "fat16_test",
         .root_module = b.createModule(.{
