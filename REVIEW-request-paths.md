@@ -1,9 +1,10 @@
 # Review: every path angry-gopher builds from a request, as an adversary
 
 QUEUE.md item 20. This review covers `angry-gopher/zig-server/src` at
-`be16d28`. That is GitHub's `master` on 2026-10-02, which does **not** yet
-have the box's `e2610edd` (the body-read fix) or `496bdca3` (`touchUser` and
-`reserveUploadBytes` refuse a non-digit id). Nothing is fixed here.
+`be16d28`, which already has `e2610edd` (the body-read fix, from June).
+The box's `496bdca3` (`touchUser` and `reserveUploadBytes` refuse a
+non-digit id) came after it. Its diff touches only those two functions, so
+no finding below changes. Nothing is fixed here.
 
 **The scope:** every filesystem call whose path is built, even in part, from
 a value a request carries. That means:

@@ -367,7 +367,7 @@ queue full). After 17 and 18.*
       clean.
     - MIGRATION.md steps 2–4 use it.
 20. **Review, as an adversary: every path angry-gopher builds from a value a
-    request carries** *(CC, started 2026-10-02, on angry-gopher `be16d28`: GitHub's master does not have `e2610edd` or `496bdca3` yet.)* (`REVIEW-interrupts.md`'s shape, nothing fixed).
+    request carries** *(CC, started 2026-10-02, on angry-gopher `be16d28`.)* (`REVIEW-interrupts.md`'s shape, nothing fixed).
     - The class: on 2026-10-02 prod held `data/users/r` and `data/users/y`,
       made by `touchUser` from a user id read out of request memory the body
       read had overwritten (the bug `e2610edd` fixed). `touchUser` made a
@@ -389,8 +389,9 @@ queue full). After 17 and 18.*
     - **Also:** API-key and admin ids reach paths unchecked; the game
       store grows the disk without limit (a policy question for Steve); and
       small edges (`isSafeName` dot-files, a `urlDecode` off-by-one, case on FAT).
-    - **Not checked here:** whether `e2610edd`/`496bdca3` change any of it;
-      they were not on GitHub.
+    - **`496bdca3`, on `master` since,** changes none of it: its diff is
+      `touchUser` and `reserveUploadBytes` only. `e2610edd` was already in
+      `be16d28`, from June.
 
 *Item 21 queued 2026-10-02 (Steve: do the essay's "subtraction"; box Claude
 draws the seam, CC takes the tail). Background:
@@ -524,12 +525,11 @@ Answers below carry the detail. In this order:
 
 ### CC check-in 5, 2026-10-02 (branch at item 20's commit, on `master` `500e111`)
 
-- **Item 21's question: no, CC cannot push to angry-gopher from this
-  session.** Asking for push access to `showell/angry-gopher` was refused
-  by this session's permissions, and CC's GitHub scope is `gopher-metal`
-  only. Steve can grant it (a permission rule, or the repo added to the
-  environment). Until then the box does item 21's tail. If Steve grants
-  it, CC takes the file moves.
+- **Item 21's question: yes, CC can push to angry-gopher now.** The
+  first request for access was refused, but Steve then granted it in this
+  session. CC will push to a branch named `claude/elegant-keller-an3ccr`
+  there too, never to `master`, one file per commit. CC takes the tail once
+  `store.zig` is on angry-gopher's `master`; at `496bdca` it is not yet.
 - **Item 20 done:** `REVIEW-request-paths.md`, on `be16d28`. Findings 1–3
   (the `/logout` deletion, the guest takeover via `.upgrade`, the unchecked
   DM half) are worth fixing before the Store lands. The Store moves path
