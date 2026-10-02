@@ -232,8 +232,26 @@ Look at these every hour or two, then every day for a week:
   - requests and connections.
 - **The site:** chat, a game, an upload. `droplet/race.py` compares
   response times with what the README measured.
-- **A backup:** download `/admin/backup` once, as the admin. It is a tar
-  of everything; keep it off the droplet.
+- **A backup:** take one, as below, and keep it off the droplet.
+
+**Taking a backup of metal.** Do it on `<prod>`, over the private network,
+never through Caddy from a home connection: metal answers nothing else
+while it streams, and over a home connection that is minutes
+(REVIEW-admin-backup.md, finding 3). It needs the admin's password
+twice, to log in and again for the archive. `read -rs` takes it once,
+unechoed and out of the shell's history, and `printf %s` hands it over
+without a newline:
+
+    read -rs PW
+    printf %s "$PW" | curl -s -c jar -d 'name=Steve&action=login' --data-urlencode password@- http://<metal>/login/full
+    printf %s "$PW" | curl -s -b jar --data-urlencode password@- -o gopher-backup.tar http://<metal>/admin/backup
+    unset PW; rm jar
+    droplet/check_backup.py gopher-backup.tar
+
+- GO: `check_backup: whole: N files, ...`. A tar cut short lists cleanly
+  in `tar`, so this line is the only proof it is whole.
+- It holds the session secret and every password hash: keep it
+  encrypted, or delete it once it has been used.
 
 Prod's Linux server stays stopped, with its data as it was at step 1. **Do
 not start it** while metal serves: two hosts writing two copies of the
@@ -249,8 +267,9 @@ same data cannot be merged.
 1. **Freeze metal.** Point Caddy at a maintenance page, or at nothing, so
    no more writes land.
 2. **Take the data off it**, either way:
-   - `/admin/backup` as the admin (no console needed). Then `tar xf
-     gopher-backup.tar -C back/`; tar keeps the modification times.
+   - A backup, taken as above (no console needed). Then, only after
+     `droplet/check_backup.py` says it is whole, `tar xf
+     gopher-backup.tar -C back/`. tar keeps the modification times.
    - Or the whole volume: from the recovery console, `dd if=/dev/sdX1`
      to a file, fetched to `<box>`. Then:
 
