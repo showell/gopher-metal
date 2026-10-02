@@ -248,7 +248,7 @@ check-in 2 under Answers: the judge fixes (findings 1-2) and `tz=UTC` on
     - **`tools/fat16_read.py`** now reads entries' times (`v.mtime`, UTC).
     - **MIGRATION.md** steps 4–5 use it.
 16. **The restart, wired as RESTART.md's summary says** (Steve: build it
-    now).
+    now). *(CC, started 2026-10-02.)*
     - `serving`, and one `fatal(why)` that halts before it and restarts
       after; the restart record in CMOS; the back-off as pure code with host
       tests (the schedule, the hour reset, a record that is garbage or
