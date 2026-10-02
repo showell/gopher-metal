@@ -42,6 +42,18 @@ IMAGE="${IMAGE:-$CHECKOUT/codex/test/fat16-write.disk}"
 WORK="$HOME/build/gopher-metal/probe"
 mkdir -p "$WORK"
 
+# **FAT=32 FORMATS THE PROBES' OWN VOLUMES AS FAT32** (QUEUE.md item 17):
+# vfat, append, replace and ladder, which mkfs.vfat their volumes here. FAT32
+# needs 65,525 clusters or more, so it is 40 MB at 512-byte clusters where
+# FAT16 is 16 MB. The fixture probes (block, fat16, fat16write, stdio) read
+# FAT16 fixtures either way. Default 16, as always.
+FAT="${FAT:-16}"
+case "$FAT" in
+    16) mkfat=(-F 16 -S 512); fat_blocks=32768 ;;
+    32) mkfat=(-F 32 -S 512 -s 1); fat_blocks=40960 ;;
+    *) echo "FAT must be 16 or 32, not $FAT"; exit 2 ;;
+esac
+
 want="${1:-all}"
 # `run.sh gopher <gate>` asks for one gate of the judge; `isolated` asks for a
 # boot per single request instead of one boot for all of them. The judge prints
@@ -189,7 +201,7 @@ if [ "$want" = all ] || [ "$want" = vfat ]; then
     else
         # 32 MB, FAT16, 512-byte sectors, no partition table: fsck reads the
         # volume directly rather than having to find it.
-        mkfs.vfat -F 16 -S 512 -n GOPHER -C "$img" 32768 > /dev/null 2>&1
+        mkfs.vfat "${mkfat[@]}" -n GOPHER -C "$img" "$fat_blocks" > /dev/null 2>&1
         boot vfat \
             -drive id=d,file="$img",format=raw,if=none \
             -device virtio-blk-device,drive=d
@@ -265,7 +277,7 @@ if [ "$want" = all ] || [ "$want" = append ]; then
         # geometry, and a FAT of 130 KB — bigger than one 64 KB device request,
         # so holding it in memory takes the path that splits a read. No other
         # volume in these probes reaches that path.
-        mkfs.vfat -F 16 -S 512 -s 1 -n GOPHER -C "$img" 32768 > /dev/null 2>&1
+        mkfs.vfat "${mkfat[@]}" -s 1 -n GOPHER -C "$img" "$fat_blocks" > /dev/null 2>&1
         boot append \
             -drive id=d,file="$img",format=raw,if=none \
             -device virtio-blk-device,drive=d
@@ -395,7 +407,7 @@ if [ "$want" = all ] || [ "$want" = replace ]; then
         # seconds apart that differed in exactly those two bytes.
         blank="$WORK/replace.blank.img"
         rm -f "$blank"
-        mkfs.vfat -F 16 -S 512 -n GOPHER -C "$blank" 32768 > /dev/null 2>&1
+        mkfs.vfat "${mkfat[@]}" -n GOPHER -C "$blank" "$fat_blocks" > /dev/null 2>&1
         for k in replace replace_cached; do
             img="$WORK/$k.img"
             cp "$blank" "$img"
@@ -709,7 +721,7 @@ if [ "$want" = ladder ]; then
     scale="${LADDER_SCALE:-1}"
     img="$WORK/ladder.img"
     rm -f "$img"
-    mkfs.vfat -F 16 -S 512 -n LADDER -C "$img" 32768 > /dev/null 2>&1
+    mkfs.vfat "${mkfat[@]}" -n LADDER -C "$img" "$fat_blocks" > /dev/null 2>&1
     truncate -s 64M "$img"
     if [ ! -f "$HERE/ladder.elf" ]; then
         echo "FAIL ladder | no ladder.elf; run: zig build ladder"

@@ -299,14 +299,21 @@ def partition_last(image: str) -> int:
     return int(next(l for l in info.splitlines() if l.startswith("Last sector")).split()[2])
 
 
+# **FAT=32 SERVES THE WHOLE JUDGE FROM A FAT32 VOLUME** (QUEUE.md item 17,
+# FAT32.md "Then the chat judge"): build_disk formats it FAT32 at 512-byte
+# clusters, about 126,000 of them in 64 MiB. The site's own disk on the
+# droplet machine stays FAT16. Default 16.
+FAT_KIND = os.environ.get("FAT", "16")
+
+
 def build_disk(image: str, content: str, mnt: str, size: int = 64 << 20) -> None:
-    """A GPT disk of `size` bytes whose first partition is FAT16, holding
-    `content`. FAT16 holds at most 2 GiB, which is as large as this goes."""
+    """A GPT disk of `size` bytes whose first partition is FAT16 (or FAT32
+    with FAT=32), holding `content`."""
     with open(image, "wb") as f:
         f.truncate(size)
     run(["sgdisk", "-o", "-n", f"1:{PART_FIRST}:0", "-t", "1:0700", "-c", "1:gopher", image])
     blocks = (partition_last(image) - PART_FIRST + 1) // 2
-    run(["mkfs.vfat", "-F", "16", "-S", "512", "-n", "GOPHER",
+    run(["mkfs.vfat", "-F", FAT_KIND, "-S", "512", *(["-s", "1"] if FAT_KIND == "32" else []), "-n", "GOPHER",
          "--offset", str(PART_FIRST), image, str(blocks)])
     mount(image, mnt, writable=True)
     try:
@@ -2320,6 +2327,9 @@ def main() -> int:
         print(__doc__.strip())
         return 2
     elf, linux_bin, gopher_root, work = sys.argv[1:]
+    if FAT_KIND not in ("16", "32"):
+        print(f"FAT must be 16 or 32, not {FAT_KIND}")
+        return 2
     global EXPECTED_COMMIT
     EXPECTED_COMMIT = checkout_commit(gopher_root)
     if subprocess.run(["sudo", "-n", "true"], capture_output=True).returncode != 0:

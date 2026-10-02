@@ -247,7 +247,9 @@ fn appendPattern(io: anytype, path: []const u8, seed: u8, from: usize, len: usiz
 }
 
 var sweep_buf: [128 * 1024]u8 = undefined;
-var fat_cache: [256 * 1024]u8 align(4096) = undefined;
+/// 1 MiB: FAT16's FAT here is 130 KB, and FAT32's (FAT=32 in probe/run.sh,
+/// 81,000 clusters of 4 bytes) about 320 KB.
+var fat_cache: [1024 * 1024]u8 align(4096) = undefined;
 
 /// **THE FAT IN MEMORY, ON A FAT TOO BIG FOR ONE REQUEST.** On this volume's
 /// 512-byte clusters the FAT is 130 KB, so reading it in takes more than one
