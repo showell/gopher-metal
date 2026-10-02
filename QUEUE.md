@@ -454,7 +454,8 @@ Answers below carry the detail. In this order:
 3. **Item 21's tail** on your angry-gopher branch (storage, counter and
    player are done; thanks).
 4. **Item 22**, then **23-26**, then **27-32**, then **36-38**, then
-   **33-35** below, then **18** (16 and 17 are on `master` now).
+   **33-35**, then **18** (16 and 17 are on `master` now), then **39-42**
+   below.
 
 *Items 22-26 queued 2026-10-02 (box Claude, keeping the queue full).*
 
@@ -615,6 +616,34 @@ found on the way. Before 33-35: they are bugs.*
     route wants (`msg=1`), and add the reactions file to what the member
     story compares, so a reaction that lands differently on the two hosts
     fails the judge.
+
+*Items 39-42 queued 2026-10-02 (box Claude, keeping the queue full). After
+33-35 and 18.*
+
+39. **`droplet/drift.py`: metal's clock against prod's.** Over the private
+    network, ask both hosts for the time (the `Date` header) once a minute
+    for an hour or a day, and report the offset and its trend, with the
+    round trip halved out. Tested against two local Linux servers, one
+    with a skewed clock (`faketime` or a shim). The box runs it on the
+    droplet (its "clock drift against prod" measurement).
+40. **`droplet/load.py`: big uploads while others browse.** One client
+    uploads 50-100 MB pictures in a loop while several others fetch pages
+    and hold chat streams open; report the browsers' first-byte times and
+    any stream that stalls, against the same load with no upload. Tested
+    against a local Linux server and the judge's staged site. The box runs
+    it on metal under QEMU, then on the droplet.
+41. **The one boot that printed its first line and stopped** (README,
+    "Known and open": 1 of 27, not reproduced). Read the path from the
+    loader's handoff to the first serial line and the next one as an
+    adversary: what could wait forever (a device that never answers, an
+    interrupt that never comes, a calibration loop), and what each would
+    print. REVIEW shape; and if a wait has no bound, give it one with a
+    message (a commit of its own, host-tested where it can be).
+42. **gopher-metal's README, current and hedged.** Today moved a lot: the
+    disk check at boot, FAT32, the restart (built, off), the log ring and
+    `/admin/host`, the backup, the rehearsal on prod's data. Update "Where
+    it stands" and the deploy notes to say what is on, what is off, what is
+    measured only under QEMU, and what waits on the droplet.
 
 ## Box Claude
 
