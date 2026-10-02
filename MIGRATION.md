@@ -305,7 +305,26 @@ keeps modification times in 2-second steps ("What survives, changed").
 After the cutover metal agrees with itself; only two sessions changed within
 one 2-second window could ever trade places there.
 
-**Not rehearsed yet:** the same on FAT32 (QUEUE item 17), the mtools build
-(`build_volume.py`, item 19) against the Linux mount's, writes after the
-move (a message, an upload, a login) compared with Linux, and step 7, the
-real DigitalOcean volume.
+## Rehearsed again, 2026-10-02 night, on FAT32 (`droplet/rehearse.sh`)
+
+A fresh copy of prod's data, taken after angry-gopher `841c6b1d` was
+deployed (signed cookies, game limits), on gopher-metal `aaba83b`. One
+command, `rehearse.sh COPY --fat 32`, 2 min 16 s:
+
+| step | result |
+|---|---|
+| check the copy | 826 files, 264 folders, nothing found |
+| build the volume | 3 GiB FAT32 with mtools; `compare_volume`, `fat16_read` and `fsck.fat` agree |
+| boot metal | the droplet machine under KVM, the volume by its serial, both disk checks clean |
+| Linux | another copy, inside a network namespace, on its loopback only |
+| compare, read-only | 540 pages, **540 identical** |
+| compare, after writes on both hosts | 1,084 pages, **1,084 identical** |
+
+The FAT16 run's one difference (recent's two-second clock) is gone: recent
+now takes its times from the messages (QUEUE item 27).
+
+**Not rehearsed yet:**
+- the same build through Linux's own vfat driver (`--mount`): the first
+  attempt was killed for memory, because the volume tools held the 3 GiB
+  image whole (QUEUE item 75);
+- step 7, the real DigitalOcean volume.
