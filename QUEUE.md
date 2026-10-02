@@ -604,15 +604,15 @@ cutover itself. After 32, before 18.*
 found on the way. Before 33-35: they are bugs.*
 
 36. **On metal, a file written over a directory's name deletes the
-    directory** (REVIEW-store.md finding 3): `fat16.writeFileIn` refuses
+    directory** *(CC, done: `IsDirectory`, as `IsDir` through io.zig)* (REVIEW-store.md finding 3): `fat16.writeFileIn` refuses
     to replace a directory (`BadName`, or the error std gives on Linux:
     match what Linux does, and say which), with your host test turned
     around to require it; the oracle checks the volume after.
-37. **Concurrent appends to one game session lose lines** (1,814 of 2,000,
+37. **Concurrent appends to one game session lose lines** *(CC, done: angry-gopher `ab67e590`)* (1,814 of 2,000,
     GROWTH-game-store.md): serialize `storage.zig`'s append per session (a
     mutex, as `chat_mu` does for chat), and a test of concurrent appends
     that fails without it.
-38. **The judge's "a reaction" step reacts to nothing**: post what the
+38. **The judge's "a reaction" step reacts to nothing** *(CC, done)*: post what the
     route wants (`msg=1`), and add the reactions file to what the member
     story compares, so a reaction that lands differently on the two hosts
     fails the judge.
