@@ -1037,6 +1037,11 @@ rehearsal on prod's copy. **Before 70-74.***
     scratch folder (a volume built from prod's data, under `/tmp`) stays
     behind; put the scratch somewhere a killed run's next run can find
     and remove, or say how the box should clean it.
+    **And run as the user, not root:** `rehearse.py` calls `ip netns`
+    directly, so the box ran it under `sudo`, and then `image.sh`'s `zig
+    build droplet` failed (root's PATH has no zig; built as root, it would
+    leave root-owned files in `.zig-cache`). Call `sudo -n ip ...` for the
+    namespace only, as the `--mount` path already does with `sudo -n`.
 
 ## Box Claude
 
