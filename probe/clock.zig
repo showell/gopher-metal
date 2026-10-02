@@ -196,9 +196,10 @@ pub fn kmain() noreturn {
     const told_ns: i96 = @as(i96, told) * ns;
     if (t0 < told_ns or t0 > told_ns + ns) serial.fail(".real is not the time it was told");
 
+    // A tenth of a second of .awake, measured: a fixed count of spins was
+    // four seconds under TCG and a fraction of one under KVM (QUEUE item 74).
     const a0 = Io.Clock.now(.awake, io).nanoseconds;
-    var spin: u64 = 0;
-    while (spin < 20_000_000) : (spin += 1) asm volatile ("pause");
+    while (Io.Clock.now(.awake, io).nanoseconds - a0 < ns / 10) asm volatile ("pause");
     const t1 = Io.Clock.now(.real, io).nanoseconds;
     const a1 = Io.Clock.now(.awake, io).nanoseconds;
     if (t1 <= t0) serial.fail(".real did not advance");

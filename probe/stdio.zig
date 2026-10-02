@@ -92,9 +92,11 @@ pub fn kmain() noreturn {
     serial.put("\n");
 
     // The clock moves forward, which is all a timeout needs of it.
+    // Until it has moved, bounded so a clock that never moves fails below
+    // rather than hanging.
     const t0 = Io.Clock.now(.awake, io);
     var spin: u64 = 0;
-    while (spin < 2_000_000) : (spin += 1) asm volatile ("pause");
+    while (spin < 2_000_000 and Io.Clock.now(.awake, io).nanoseconds - t0.nanoseconds < std.time.ns_per_ms) : (spin += 1) asm volatile ("pause");
     const t1 = Io.Clock.now(.awake, io);
     serial.put("  clock advanced ");
     serial.putDec(@intCast(t1.nanoseconds - t0.nanoseconds));
