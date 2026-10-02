@@ -825,6 +825,27 @@ test "a file rewritten under a name in another case keeps the name and alias it 
     }
 }
 
+// ---- a file near 4 GiB (REVIEW-restart-fat32.md F1) --------------------------
+
+test "an append to a file within a cluster of 4 GiB answers TooBig past it, not a panic" {
+    for (configs) |cfg| {
+        const shape, const cached = .{ cfg.shape, cfg.cached };
+        const d = try Disk.make("damaged-near-4g", shape, cached);
+        defer d.deinit();
+        try d.vol.writeFile("data/x", "abc");
+        const e = try d.vol.open("data/x");
+        // Its entry says 4 GiB less 100 bytes; the chain is still one cluster,
+        // so the disk is damaged on purpose, but the arithmetic is what is
+        // under test: it used to overflow before reading the chain.
+        const at = e.lba * test_disk.sector + e.slot + 28;
+        std.mem.writeInt(u32, d.bytes[at..][0..4], 0xFFFF_FF9C, .little);
+        try d.mount(cached);
+        try testing.expectError(fat16.Error.TooBig, d.vol.writeInto("data/x", 0xFFFF_FF9C, "x" ** 101));
+        // Within the limit it gets past the sizes and meets the short chain.
+        try testing.expect(std.meta.isError(d.vol.writeInto("data/x", 0xFFFF_FF9C, "more")));
+    }
+}
+
 // ---- a file never replaces a directory (QUEUE item 36) -----------------------
 
 test "a file written over a directory's name is refused, and the directory and its contents stay" {
