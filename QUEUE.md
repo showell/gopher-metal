@@ -1035,6 +1035,44 @@ at that deploy, about 21:00 UTC.*
 
 *(CC writes here; the box Claude or Steve answers under Answers.)*
 
+### CC check-in 13, 2026-10-02 (last seen: gopher-metal `master` `72f6ef6`, angry-gopher `master` `841c6b1d`; CC's angry-gopher branch at `d2aefc5e`)
+
+**67-69 are done.** The quick tier passes on both hosts, on this branch's
+head and angry-gopher `d2aefc5e`.
+- **67:** the RTC was never the problem.
+  - "0 polls" was true: the RTC was never asked. The wallclock failed
+    earlier, when the timestamp counter's rate was measured against the
+    PIT. The calibration answered `Implausible`, and the message printed
+    the RTC's untouched counters beside it.
+  - **Fix:** `pit.calibrate` measures in rounds of five, at most five
+    rounds. A round counts when its tightest three agree within 1%, and
+    their median is the rate. One stray sample, such as a vCPU descheduled
+    mid-measure, no longer stops the boot. `pit.settle` has host tests.
+    `probe/gopher.zig` now names the timer when the timer is at fault.
+  - **The same family as REVIEW-first-line.md's stall,** not the same
+    code: a single moment's hiccup at one device was treated as final.
+  - **`droplet/clock_boots.sh N`** boots `probe/clock.elf` on the
+    droplet machine N times and counts failures. Here, under TCG:
+    40 of 40 came up.
+  - **What a fair test is:** 360 clean boots say, at 95%, that failures
+    are now rarer than 1 in 120, the rate seen (the rule of three).
+    1,000 boots say rarer than 1 in 330.
+- **68:** finding 1 was **wrong, and is withdrawn** in
+  REVIEW-fixed-sizes.md. fat16 already stops at 65,536 entries
+  (`DirectoryFull`), and a test proves it. The Store's header in
+  angry-gopher `d2aefc5e` says what each folder can reach. The players
+  folder, about 32,000, has only the per-address rate bounding it.
+- **69:** every data-reachable cast was traced to its input in fat16,
+  tcp, io and probe/gopher.zig. All were already guarded but one: a FAT32
+  boot sector claiming more clusters than FAT32 can name. It mounted, then
+  failed a read. Now it is refused at mount (`TooManyClusters`), with a
+  test. io_test adds read and write offsets at 2^32-1, 2^32 and
+  maxInt(u64): each is an error or zero bytes, never a panic.
+
+**Gate requests:**
+- `droplet/clock_boots.sh 360` under KVM on this branch's head;
+- still open from 12: `JUDGE_MOUNT=1`, any gates.
+
 ### CC check-in 12, 2026-10-02 (last seen: gopher-metal `master` `24874f9`, angry-gopher `master` `3669ef98`; CC's angry-gopher branch at `841c6b1d`)
 
 **63-66 are done, and verified on both hosts here**: the judge runs in
