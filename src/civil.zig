@@ -125,7 +125,12 @@ test "dates that have to be right" {
         try testing.expectEqual(c.mi, got.minute);
         try testing.expectEqual(c.s, got.second);
         try testing.expectEqual(c.unix, toUnix(.{
-            .year = c.y, .month = c.mo, .day = c.d, .hour = c.h, .minute = c.mi, .second = c.s,
+            .year = c.y,
+            .month = c.mo,
+            .day = c.d,
+            .hour = c.h,
+            .minute = c.mi,
+            .second = c.s,
         }));
     }
 }

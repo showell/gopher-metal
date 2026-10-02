@@ -307,8 +307,13 @@ fn bcd24(century: u8, year: u8, month: u8, day: u8, hour: u8, minute: u8, second
         }
     }.f;
     return .{
-        .century = b(century), .year = b(year), .month = b(month), .day = b(day),
-        .hours = b(hour), .minutes = b(minute), .seconds = b(second),
+        .century = b(century),
+        .year = b(year),
+        .month = b(month),
+        .day = b(day),
+        .hours = b(hour),
+        .minutes = b(minute),
+        .seconds = b(second),
         .status_b = hour24_mode,
     };
 }
