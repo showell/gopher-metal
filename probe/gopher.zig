@@ -269,6 +269,14 @@ pub fn kmain() noreturn {
     const clock = metal.wallclock.start() catch |e| {
         serial.put("  wallclock: ");
         serial.put(@errorName(e));
+        // **SAY WHICH CLOCK.** NoTimer and Implausible are the timer's: its
+        // rate never settled, and the RTC was never asked. This printed the
+        // RTC's empty record for them, "0 polls", which read as an RTC that
+        // was never polled (QUEUE.md item 67).
+        if (e == error.NoTimer or e == error.Implausible) {
+            serial.put(" (the timestamp counter's rate, against the PIT, never settled; the RTC was not asked)\n");
+            serial.fail("the clocks would not come up");
+        }
         const m = metal.rtc.last_miss;
         serial.put(" (rtc: ");
         serial.putDec(m.polls);
