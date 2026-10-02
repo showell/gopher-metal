@@ -68,6 +68,16 @@ def build(copy: str, out: str, fat: int = 16, size: int = 2 << 30, cluster_secto
                           capture_output=True, text=True)
     if made.returncode != 0:
         raise Refused(f"mkfs.vfat would not make FAT{fat} of {size >> 20} MiB: {made.stderr.strip()}")
+    # **WHAT mkfs.vfat CALLS FAT32 MAY NOT BE.** It makes a FAT32 layout with
+    # too few clusters without complaint (1 GiB at 32 KiB clusters: 32,768).
+    # Linux calls that FAT32; the spec, and this machine, count clusters and
+    # call it FAT16, and the mount refuses it (REVIEW-restart-fat32.md F2).
+    with open(out, "rb") as f:
+        kind = fat16_read.Volume(f.read()).kind
+    if kind != f"FAT{fat}":
+        raise Refused(f"mkfs.vfat made a FAT{fat} layout of {size >> 20} MiB that the spec's cluster count calls "
+                      f"{kind}, which this machine refuses; FAT32 needs 65,525 clusters (--gib 3 or more at "
+                      f"32 KiB clusters)")
     at = f"{out}@@{PART_FIRST * SECTOR}"
     env = dict(os.environ, TZ="UTC", MTOOLS_SKIP_CHECK="1")
     for top in sorted(os.listdir(copy)):
@@ -206,6 +216,13 @@ def self_test() -> int:
                 failures.append(f"FAT{fat}: {problems}")
             if len(serial) != 9 or serial[4] != "-":
                 failures.append(f"FAT{fat}: a serial of {serial!r}")
+        # A FAT32 layout too small to be FAT32 by its cluster count is refused.
+        try:
+            build(copy, os.path.join(d, "small32.img"), 32, 1 << 30)
+            failures.append("a 1 GiB FAT32 at 32 KiB clusters was built, not refused")
+        except Refused as e:
+            if "cluster count" not in str(e):
+                failures.append(f"a 1 GiB FAT32 was refused for another reason: {e}")
         # A tree the checker finds something in is refused.
         bad = os.path.join(d, "bad")
         make_tree(bad)
