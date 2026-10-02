@@ -586,13 +586,13 @@ cutover itself. After 32, before 18.*
     booting; `compare_hosts.py` (28-29) against prod still on Linux; the
     Caddy switch; what is watched for the first day; and **the go/no-go
     line** at each step. Short sentences; Steve runs it.
-34. **The way back: a volume to a Linux tree** (`droplet/extract_volume.py
+34. **The way back: a volume to a Linux tree** *(CC, done)* (`droplet/extract_volume.py
     VOLUME.img OUT/`, through `tools/fat16_read.py`, no root): every file
     with its stored name and case and its modification time, so a failed
     cutover after writes on metal can return to Linux with them. Judged by
     `compare_volume.py` in reverse and by the judge's Linux server reading
     the result. Test on mtools and judge volumes, FAT16 and FAT32.
-35. **A backup the admin can download: `GET /admin/backup`**, on both
+35. **A backup the admin can download: `GET /admin/backup`** *(CC, done: angry-gopher `b01c460b`, and the judge case)*, on both
     hosts: the Store's roots as one archive (tar is enough; streamed, not
     built in memory: metal has no room for 250 MB), admin only, with a
     judge case that downloads it on both hosts and compares the member
