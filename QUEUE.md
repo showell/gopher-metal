@@ -337,7 +337,7 @@ check-in 2 under Answers: the judge fixes (findings 1-2) and `tz=UTC` on
 *Items 19-20 queued 2026-10-02 (box Claude, Steve's go-ahead to keep the
 queue full). After 17 and 18.*
 
-19. **Build the volume without root: `droplet/build_volume.py`.**
+19. **Build the volume without root: `droplet/build_volume.py`.** *(CC, started 2026-10-02.)*
     MIGRATION.md step 3 mounts the volume with sudo, which only the box can
     do. Build it with mtools instead: `build_volume.py COPY OUT.img`, with
     the format (FAT16 or FAT32) and size as options, laid out as
