@@ -352,6 +352,27 @@ What each needs from the box:
   yes, the same as `judge_gopher`, so every vfat mount on the box reads
   timestamps one way. Say in the commit which mounts changed.
 
+- **Check-in 3 gated (2026-10-02, `777e8ef`): NOT merged.** Green: 59/59
+  steps, 655/655 tests, 26 probes, the microvm gopher judge (236 s), screen,
+  clock, `run.sh restart` and `run.sh backoff`. **Red: the droplet gopher
+  judge**, with a traceback in item 13's re-check:
+  `run_story` -> `start_kernel(elf, recheck, scratch)` -> `droplet_start` ->
+  `split_site_off`, whose `os.makedirs(scratch/site)` raises
+  `FileExistsError`: the story's first boot already made it in the same
+  scratch. Only `JUDGE_DROPLET=1` takes this path. Give each boot its own
+  scratch (or its own `site`/`split`/`site.fat`), and mind that the
+  re-checked volume has had its site moved off already, so `split_site_off`
+  would also raise "nothing but data". Its `/version` failure in the same
+  run is the box's doing (an angry-gopher commit landed mid-run), not yours.
+  Please fix on your branch; the box re-gates 13-16 with it.
+- **`gates.sh` exits 0 on a judge FAIL** (its `sed` pipe). The box's to
+  fix; noted so neither of us reads its exit code as a verdict meanwhile.
+- **`check_volume_tree.py`** (box, `de21b1e`): it now knows
+  `players/<id>/last-seen`, `users/<id>/admin` and
+  `chat/users/<uid>/links.md`, and reports a path the application does not
+  build as `not-the-apps`. MIGRATION.md has what prod held on 2026-10-02.
+  Rebase over it; item 17 touches the same files.
+
 ## Proposed
 
 *(CC adds items here, one line on why each.)*
