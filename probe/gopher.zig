@@ -300,6 +300,14 @@ pub fn kmain() noreturn {
     router.host_status.provideLog(metalLog);
     router.roots.point(base, .{ .data_dir = data_dir, .auth_dir = auth_dir }) catch
         serial.fail("roots.point could not allocate the store paths");
+    // The game store's floor reads the data's volume (QUEUE.md item 52).
+    router.game_limits.free_space = dataSpace;
+    if (conf.trusted_proxy) |p| {
+        router.game_limits.trusted_proxy = ipText(&trusted_proxy_text, p);
+        serial.put("  X-Forwarded-For is believed from ");
+        serial.put(router.game_limits.trusted_proxy.?);
+        serial.put(" only\n");
+    } else serial.put("  no trusted_proxy: every request is the address it came from\n");
     var hub = Hub.init(io, base);
 
     const limit = conf.requests;
@@ -577,6 +585,8 @@ fn serveOne(
 
     var outcome: []const u8 = "ok";
     var bus = Bus.of(hub);
+    var peer_text: [15]u8 = undefined;
+    bus.peer = ipText(&peer_text, table.conns[i].peer_ip);
     router.route(&req, io, request_alloc, &bus) catch |e| {
         outcome = @errorName(e);
     };
@@ -1072,6 +1082,12 @@ const Config = struct {
     /// spells it: `volume = 92DE-8831`. When it is set, a volume with exactly
     /// that serial must be attached, or the machine stops.
     volume: ?u32 = null,
+    /// The reverse proxy whose X-Forwarded-For names the client
+    /// (`trusted_proxy = 10.0.0.2`): prod's Caddy, over the private network.
+    /// Without it every request counts as the address it came from, and
+    /// through Caddy that is one address for everyone, so the game store's
+    /// bounds on what one address may do become bounds on the whole site.
+    trusted_proxy: ?[4]u8 = null,
 };
 
 /// A droplet's two network cards, in PCI slot order: what `virtio.findNth` is
@@ -1130,8 +1146,12 @@ fn readConfig(io: Io, alloc: std.mem.Allocator) Config {
         } else if (std.mem.eql(u8, key, "volume")) {
             conf.volume = parseSerial(value) orelse
                 serial.fail(config_path ++ ": `volume` is a FAT serial, as blkid shows it: 92DE-8831");
+        } else if (std.mem.eql(u8, key, "trusted_proxy")) {
+            const a = std.Io.net.Ip4Address.parse(value, 0) catch
+                serial.fail(config_path ++ ": `trusted_proxy` is an IPv4 address: 10.0.0.2");
+            conf.trusted_proxy = a.bytes;
         } else {
-            serial.fail(config_path ++ ": the keys are `requests`, `idle_timeout_ms`, `streams`, `keepalive_ms`, `lose_one_sent_in`, `card` and `volume`");
+            serial.fail(config_path ++ ": the keys are `requests`, `idle_timeout_ms`, `streams`, `keepalive_ms`, `lose_one_sent_in`, `card`, `volume` and `trusted_proxy`");
         }
     }
     if (!said_anything) serial.fail(config_path ++ " is present but says nothing");
@@ -1193,6 +1213,21 @@ fn addVolume(facts: *std.ArrayList(router.host_status.Fact), alloc: std.mem.Allo
     else |e|
         try std.fmt.allocPrint(alloc, "FAT16, serial {s}: free space unreadable ({s})", .{ named, @errorName(e) });
     try facts.append(alloc, .{ .label = label, .value = value });
+}
+
+/// The data's volume, free and total, for the game store's floor: the volume
+/// when one is attached, else the boot disk, which then holds the data.
+fn dataSpace() ?router.game_limits.Space {
+    const v = Io.dataVolume() orelse Io.siteVolume() orelse return null;
+    const sp = v.space() catch return null;
+    return .{ .free = sp.free, .total = sp.total };
+}
+
+var trusted_proxy_text: [15]u8 = undefined;
+
+/// `203.0.113.7`, into `buf`.
+fn ipText(buf: *[15]u8, ip: [4]u8) []const u8 {
+    return std.fmt.bufPrint(buf, "{d}.{d}.{d}.{d}", .{ ip[0], ip[1], ip[2], ip[3] }) catch unreachable;
 }
 
 /// `92DE-8831`: two halves of four hex digits, high half first.
