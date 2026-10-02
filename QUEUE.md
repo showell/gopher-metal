@@ -1156,6 +1156,60 @@ layer, last. 76-78 stand; take 79-83 before them.*
 
 *(CC writes here; the box Claude or Steve answers under Answers.)*
 
+### CC check-in 15, 2026-10-02 night (last seen: gopher-metal `master` `206a6f4`, angry-gopher `master` `d2aefc5e`; CC's angry-gopher branch at `d1c68b05`)
+
+**75 is done**, then general polish, as Steve asked while you were off:
+docs accurate, tests thorough and quick.
+
+**This changes `probe/run.sh`** (usage comments only) **and `build.zig`**
+(fat16_test's build mode), as CLOUD.md asks me to say.
+
+- **75, the volume tools' memory:**
+  - `fat16_read.open_image` maps an image read-only; every caller that
+    only reads uses it. `compare_volume` hashes both sides block by block.
+  - fsck's copy of the partition is sparse (`SEEK_DATA`).
+  - **The test:** a 16 GiB FAT32 volume built and judged in a process of
+    its own peaks at 40 MB, with 5 MB on disk, in 5 s. With the old
+    whole-file read put back, a 3 GiB one peaked at 6.2 GB and failed.
+  - **rehearse.py runs as the user**: `sudo -n` for `ip` only, and
+    setpriv back to the user inside the namespace. Its scratch is in
+    `~/build/gopher-metal/rehearse/`. A killed run's scratch and namespace
+    are removed by the next run, which says so; the self-test checks this.
+  - **Please run, under KVM:** `rehearse.sh` as yourself, not root.
+    Here I could only check the command shapes and the sudo/setpriv chain
+    as root, because creating a second user was refused. Also please run
+    the `--mount` rehearsal that was killed.
+- **Doc audits of both repos**, every claim checked against the code.
+  The ones a reader would act on:
+  - angry-gopher said a hand-set `gopher_uid` reaches a player's games.
+    It is signed now.
+  - the port is `GOPHER_PORT`, not hardcoded;
+  - routing lives in router.zig;
+  - prod ships a Debug build;
+  - here: the TCP retransmission clock is measured with a 200 ms floor,
+    and fast retransmit exists;
+  - the chat judge runs without root;
+  - MIGRATION's FAT budget is about 256 GiB, not 64.
+- **A real break, fixed:** `games/driving/build` called
+  `ops/build_driving`, which was retired in `ea516760`.
+- **Faster, with the same checks:**
+  - **the quick tier:** 152 s → 86 s here. The uploads gate set 30
+    requests and made 4, so it waited out a 60 s timeout. It now sets the
+    exact count, and fails if the kernel exits any other way. No other
+    gate waits more than 1 s for its kernel.
+  - **`zig build test`:** 39 s → 12.6 s warm. fat16_test is built
+    ReleaseSafe, the mode the kernel ships in, with every safety check
+    on.
+  - **test_judges:** 9.8 s → 6.7 s.
+  - Each speed-up was checked to still fail when it should.
+
+**A question:** angry-gopher's `zig build test` takes 12 s warm, and much
+of that is bcrypt at cost 10 in Debug: 200-300 ms a hash, and the router,
+users and store tests set passwords many times. Should tests other than
+auth.zig's own hash at a lower cost? auth.zig's known-answer and `$2b$10$`
+tests would stay at 10. It needs a test-only switch in auth.zig, so I
+have left it for you or Steve to decide.
+
 ### CC check-in 14, 2026-10-02 (last seen: gopher-metal `master` `206a6f4`, angry-gopher `master` `d2aefc5e`; CC's angry-gopher branch at `5fd6654e`)
 
 **70-74 are done.** The quick tier passes on both hosts, with this
