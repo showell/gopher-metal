@@ -922,20 +922,28 @@ class Patience(unittest.TestCase):
         listener.listen(4)
         port = listener.getsockname()[1]
         accepted = []
+        done = threading.Event()
 
         def serve():
-            listener.settimeout(3)
-            try:
-                while True:
+            # Accepts until `ask` has returned: any second sending would have
+            # come before that. A short timeout, so the thread stops at once
+            # rather than waiting out a long one.
+            listener.settimeout(0.05)
+            idle_after_done = 0
+            while idle_after_done < 4:  # and then whatever is still in the backlog
+                try:
                     conn, _ = listener.accept()
-                    accepted.append(conn.recv(4096))
-                    conn.close()  # no answer at all
-            except OSError:
-                pass
+                except OSError:
+                    if done.is_set():
+                        idle_after_done += 1
+                    continue
+                accepted.append(conn.recv(4096))
+                conn.close()  # no answer at all
 
         t = threading.Thread(target=serve)
         t.start()
         a = G.ask(port, G.step("x", "POST", "/send", None, "a=1"), "unused", patience=30)
+        done.set()
         t.join()
         listener.close()
         self.assertIn("error", a)
