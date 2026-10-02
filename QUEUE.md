@@ -766,6 +766,50 @@ and GROWTH-game-store.md. After 43-46, before 47-50: they close holes.*
     prod's, from item 39) to what it checks, and say how a failure shows.
     Tested locally against two servers, one stopped.
 
+*Items 57-61 queued 2026-10-02 evening (box Claude, keeping the queue
+full). After 53 and 55.*
+
+57. **Fix REVIEW-admin-backup.md findings 1, 2 and 7** (angry-gopher, a
+    commit each, a test that fails without each):
+    - **1:** the download asks for the password again (a POST with it), so
+      a copied session cookie is not the whole site;
+    - **2:** a cut-off archive must be detectable: a last member (a
+      manifest with every member's size and SHA-256, or a count) written
+      only when the walk completes, and `compare`/`extract` tools refuse
+      an archive without it;
+    - **7:** `HEAD /admin/backup` reads nothing;
+    - **finding 3** is documentation: where the route is described (and in
+      CUTOVER.md), metal's backups are taken from prod over the private
+      network, never through Caddy from a home connection.
+58. **Options for Steve: session lifetime and revoking a secret**
+    (findings 1 and 5's other half). Today a session is good for 365 days
+    and cannot be revoked, and the secret is never rotated. A short note:
+    how to rotate the secret (with the old one accepted for a while, as
+    uid_cookie.zig's `issued` allows), what each member and player sees,
+    and two or three shapes of shorter or revocable sessions with their
+    costs. No code; Steve decides.
+59. **`droplet/rehearse.sh COPY`: the whole rehearsal as one command** for
+    the box: check the copy, build the volume both ways (mtools here; the
+    Linux mount behind a flag for the box), fsck and the oracle, compare,
+    boot metal on it (QEMU, the droplet machine, the volume by its serial,
+    loopback only), start Linux on another copy inside a network namespace
+    (`ip netns`, so real data is never on a public port), then
+    `compare_hosts.py` read-only and `--writes`, printing counts and
+    anonymised labels only, and stopping every process it started. FAT16
+    and FAT32. Test it end to end on the judge's staged site; the box runs
+    it on prod's copy.
+60. **`probe/run.sh`: a fixture that fails to copy fails the probe.** The
+    block probe's `cp "$IMAGE" "$WORK/disk.img"` (and the like) are not
+    checked, so a missing fixture boots the previous run's copy and can
+    pass. Fail the probe when the copy fails, and say what changed.
+61. **Metal reads its site files from disk every time** (README: pages
+    read from files are about 1 ms slower than Linux, "most likely" for
+    this reason, not measured apart). Measure it first: time the read
+    alone under QEMU. Then, if it is the cause, a small cache of the
+    boot disk's site files (read-only, so never stale), bounded in
+    memory, host-tested; the box measures with `droplet/race.py` before
+    and after.
+
 ## Box Claude
 
 - v6: gates, images, deploy with Steve, and the survival test (the marker
