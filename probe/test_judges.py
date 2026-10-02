@@ -353,6 +353,55 @@ class Timings(unittest.TestCase):
         self.assertEqual(G.request_timings(old), [])
 
 
+class DiskCheckLines(unittest.TestCase):
+    """The disk check's lines in a boot log (QUEUE.md item 13), as gopher.zig's
+    diskCheck prints them."""
+    CLEAN = ("  the boot disk: FAT16 at LBA 2048, FAT held in memory (128512 bytes)\n"
+             "  disk check, the boot disk: 18 files, 17 directories, 52 clusters used, 0 leaked, 0 problems\n"
+             "  listening on port 80\n")
+
+    def test_a_clean_line_is_read_and_passes(self):
+        self.assertEqual(G.disk_check_lines(self.CLEAN)["the boot disk"],
+                         {"files": 18, "directories": 17, "used": 52, "leaked": 0, "problems": 0})
+        self.assertEqual(G.disk_check_differences(self.CLEAN), [])
+
+    def test_a_problem_fails_unless_the_disk_was_damaged_on_purpose(self):
+        log = self.CLEAN.replace("0 leaked, 0 problems", "1 leaked, 1 problems") \
+            + "    leaked at (the volume), cluster 32168, count 1\n"
+        got = G.disk_check_differences(log)
+        self.assertTrue(got and "cluster 32168" in got[0], got)
+        self.assertEqual(G.disk_check_differences(log, damaged=True), [])
+
+    def test_a_mounted_disk_with_no_line_fails(self):
+        log = self.CLEAN.replace("  disk check, the boot disk: 18 files, 17 directories, 52 clusters used, "
+                                 "0 leaked, 0 problems\n", "")
+        self.assertTrue(G.disk_check_differences(log))
+        not_run = log + "  disk check, the boot disk: not run: ReadFailed\n"
+        self.assertEqual(G.disk_check_differences(not_run),
+                         ["the disk check of the boot disk: not run: ReadFailed"])
+        # A boot that never mounted the disk has nothing to say about it.
+        self.assertEqual(G.disk_check_differences("FAIL: no disk\n"), [])
+
+    def test_the_volume_needs_its_own_line_when_it_serves_chat(self):
+        log = self.CLEAN + ("  the volume: FAT16 at LBA 2048, FAT held in memory (1 bytes)\n"
+                            "  chat's data: the volume\n")
+        self.assertTrue(G.disk_check_differences(log))
+        log += "  disk check, the volume: 3 files, 2 directories, 5 clusters used, 0 leaked, 0 problems\n"
+        self.assertEqual(G.disk_check_differences(log), [])
+
+    @unittest.skipUnless(shutil.which("mkfs.vfat"), "needs mkfs.vfat (dosfstools) to make a volume")
+    def test_leaking_a_cluster_is_what_the_oracle_calls_a_leak(self):
+        with tempfile.TemporaryDirectory() as d:
+            img = os.path.join(d, "v.img")
+            subprocess.run(["mkfs.vfat", "-F", "16", "-S", "512", "-C", img, str(32 * 1024)],
+                           check=True, capture_output=True)
+            leaked = G.leak_a_cluster(img)
+            out = subprocess.run([sys.executable, os.path.join(G.TOOLS_DIR, "fat16_read.py"), "check", img],
+                                 capture_output=True, text=True).stdout
+            self.assertIn("leaked", out)
+            self.assertIn(str(leaked), out)
+
+
 class ClockJudge(unittest.TestCase):
     # **THE HOST'S RATE IS GIVEN, NOT READ.** These fixtures were recorded on
     # a host whose TSC runs at 2,494.134 MHz. Read from the machine running

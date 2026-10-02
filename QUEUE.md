@@ -163,6 +163,41 @@ check-in 2 under Answers: the judge fixes (findings 1-2) and `tz=UTC` on
       after the writes each run makes. A damaged volume must still boot and
       serve.
     - Say in `QUEUE.md` what changed in the judges; the box runs them.
+
+    **Done** (CC). **Kernel:** `gopher.zig`'s `mountFat` runs `diskCheck`
+    after `cacheFat`.
+    - **What it prints:** `  disk check, <disk>: N files, N directories, N
+      clusters used, N leaked, N problems`, then up to 20 findings
+      (`    leaked at (the volume), cluster 32168, count 1`), then `and N
+      more`.
+    - **It never halts:** on no memory or a read error it prints
+      `not run: <why>` and boots on.
+
+    **What changed in the judges** (`probe/judge_gopher.py`):
+    - **`finish_kernel`, so every gopher boot of every gate:** each disk the
+      boot mounted (the boot disk; the volume when chat's data is on it) must
+      have its summary line with 0 problems. A gate that damaged the disk
+      passes `damaged=True`. Failures are counted at the end as
+      `FAIL  disk check: ...`.
+    - **`run_story`, after each story,** two checks on the disk the kernel
+      wrote:
+      - `tools/fat16_read.py check` must be clean;
+      - one more boot of a copy of it (`requests = 1`, `GET /version`) must
+        check clean too.
+    - **A new gate, `damaged`:** `leak_a_cluster` marks the last free
+      cluster in use in both FATs; the kernel must report exactly that
+      leak, and still serve `/` with a 200.
+
+    Not run here: the judge needs sudo for its mounts. Run here instead,
+    under TCG, on the judge's own `stage()` with mtools in place of the
+    mount:
+    - a clean disk printed `18 files, 17 directories, 52 clusters used, 0
+      leaked, 0 problems` and served two requests;
+    - with one cluster leaked, it printed the leak by cluster number and
+      still served both requests.
+
+    `test_judges.py` has five new tests of the line handling, against those
+    logs' shapes.
 14. **A cheap free-space figure** (REVIEW-admin-host.md finding 4).
     - Count the free clusters once at mount (or from the walk in
       `cacheFat`/`check`) and keep the count current through every allocation

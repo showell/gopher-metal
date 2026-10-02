@@ -320,6 +320,24 @@ def build_disk(image: str, content: str, mnt: str, size: int = 64 << 20) -> None
         umount(mnt)
 
 
+def leak_a_cluster(image: str) -> int:
+    """Marks the last free cluster of `image`'s volume in use in both FATs,
+    with nothing holding it: what a write that stopped before its directory
+    entry leaves behind. Answers the cluster."""
+    sys.path.insert(0, TOOLS_DIR)
+    import fat16_read
+    with open(image, "rb") as f:
+        data = bytearray(f.read())
+    v = fat16_read.Volume(bytes(data))
+    leaked = max(c for c in range(2, v.max_cluster + 1) if v.fat(c) == 0)
+    for k in range(v.nfats):
+        at = v.base + (v.fat_start + k * v.fat_sectors) * SECTOR + leaked * 2
+        data[at:at + 2] = (0xFFFF).to_bytes(2, "little")
+    with open(image, "wb") as f:
+        f.write(data)
+    return leaked
+
+
 def fat_serial(image: str) -> str:
     """The FAT serial of `image`'s first partition, as `blkid` spells it
     (`92DE-8831`): the boot sector's volume ID, offset 39."""
@@ -496,7 +514,7 @@ QUICK = bool(os.environ.get("JUDGE_QUICK"))
 # silently complete run.
 GATES = ["cases", "members", "streams-linux", "streams-metal", "budget", "churn",
          "bulk", "uploads", "slow", "lagging", "concurrent", "timeouts",
-         "endurance", "stamina"]
+         "damaged", "endurance", "stamina"]
 # The boots that exist to be long. The quick tier leaves them out; asking for
 # one by name still runs it.
 LONG = {"endurance", "stamina"}
@@ -636,7 +654,52 @@ def start_kernel(elf: str, image: str, scratch: str, kvm: bool = False):
     return qemu, port, serial
 
 
-def finish_kernel(qemu, serial: str):
+# ── the disk check (QUEUE.md item 13) ─────────────────────────────────────────
+#
+# **EVERY BOOT CHECKS ITS DISKS, AND EVERY BOOT SAYS SO.** gopher.zig runs
+# fat16's Volume.check on each volume it mounts and prints one summary line
+# each. finish_kernel requires that line for every disk the boot mounted, and
+# 0 problems on it, unless the gate damaged the disk on purpose
+# (`damaged=True`). What it finds goes into DISK_CHECK_FAILURES, which main
+# counts and prints with the gates' failures, because finish_kernel is called
+# from every gate and answers each of them the same way.
+
+DISK_CHECK = re.compile(r"^  disk check, (.+?): (\d+) files, (\d+) directories, (\d+) clusters used, "
+                        r"(\d+) leaked, (\d+) problems$", re.M)
+DISK_CHECK_FAILURES = []
+
+
+def disk_check_lines(log: str) -> dict:
+    """Each `disk check` summary line in a boot's log, by the disk it names:
+    {"the boot disk": {"files": .., "directories": .., "used": .., "leaked": ..,
+    "problems": ..}}."""
+    keys = ("files", "directories", "used", "leaked", "problems")
+    return {m.group(1): dict(zip(keys, (int(g) for g in m.groups()[1:])))
+            for m in DISK_CHECK.finditer(log)}
+
+
+def disk_check_differences(log: str, damaged: bool = False) -> list:
+    """What is wrong with a boot's disk-check lines: a mounted disk with none,
+    a check that did not run, or (unless `damaged`) a problem found."""
+    out = []
+    lines = disk_check_lines(log)
+    disks = ["the boot disk"] + (["the volume"] if "chat's data: the volume" in log else [])
+    for disk in disks:
+        if f"  {disk}: FAT16 at LBA" not in log:
+            continue  # this boot never got as far as mounting it
+        got = lines.get(disk)
+        if got is None:
+            not_run = re.search(rf"^  disk check, {re.escape(disk)}: (.*)$", log, re.M)
+            out.append(f"the disk check of {disk}: " + (not_run.group(1) if not_run
+                                                         else "no summary line"))
+        elif got["problems"] and not damaged:
+            found = re.findall(r"^    ([a-z_]+ at .*)$", log, re.M)
+            out.append(f"the disk check of {disk} found {got['problems']} problem(s): "
+                       + "; ".join(found[:3]))
+    return out
+
+
+def finish_kernel(qemu, serial: str, damaged: bool = False):
     try:
         code = qemu.wait(timeout=60)
     except subprocess.TimeoutExpired:
@@ -655,16 +718,19 @@ def finish_kernel(qemu, serial: str):
     text = open(serial, "rb").read().decode("latin-1", "replace")
     lines = "\n".join(l for l in text.splitlines()
                       if l.strip() and "SeaBIOS" not in l and "\x1b" not in l)
+    for d in disk_check_differences(lines, damaged):
+        DISK_CHECK_FAILURES.append(f"{d} ({serial})")
     return code, lines
 
 
-def ask_kernel(elf: str, image: str, c: dict, scratch: str) -> dict:
+def ask_kernel(elf: str, image: str, c: dict, scratch: str, damaged: bool = False) -> dict:
     """One request to a fresh boot. The pristine disk says `requests = 1`, so
-    the kernel stops once it has answered."""
+    the kernel stops once it has answered. `damaged`: the gate broke the disk
+    on purpose, so its disk check is expected to find something."""
     before = time.time()
     qemu, port, serial = start_kernel(elf, image, scratch)
     answer = ask(port, c, os.path.join(scratch, "kernel"))
-    answer["guest_exit"], answer["serial"] = finish_kernel(qemu, serial)
+    answer["guest_exit"], answer["serial"] = finish_kernel(qemu, serial, damaged)
     answer["window"] = (int(before) - 1, int(time.time()) + 1)
     return answer
 
@@ -1052,6 +1118,25 @@ def run_story(elf, linux_bin, content, pristine, work, mnt, steps, label, report
             report(f"FAIL  {label}: {s['name']}  ({s['method']} {s['path']})")
             for d in diffs:
                 report(f"        {d}")
+
+    # **AFTER THE WRITES, THE DISK MUST STILL CHECK CLEAN**: by the oracle,
+    # and by the kernel's own check on one more boot of the disk it wrote.
+    oracle = subprocess.run([sys.executable, os.path.join(TOOLS_DIR, "fat16_read.py"), "check", image],
+                            capture_output=True, text=True)
+    if oracle.returncode != 0:
+        failures += 1
+        report(f"FAIL  {label}: after the story, tools/fat16_read.py finds the disk inconsistent: "
+               + " | ".join(oracle.stdout.splitlines()[1:4]))
+    recheck = os.path.join(scratch, "recheck.img")
+    shutil.copy(image, recheck)
+    set_request_limit(recheck, 1, mnt)
+    rq, rport, rserial = start_kernel(elf, recheck, scratch)
+    ask(rport, case("the version, on a boot of the written disk", "GET", "/version"),
+        os.path.join(scratch, "recheck"))
+    _, rlog = finish_kernel(rq, rserial)
+    if "the boot disk" not in disk_check_lines(rlog):
+        failures += 1
+        report(f"FAIL  {label}: the boot after the story printed no disk check")
 
     # The whole data tree, both sides, at the end of the story.
     mount(image, mnt, writable=False)
@@ -2407,6 +2492,30 @@ def main() -> int:
         lap("endurance")
 
     # ── stamina ──────────────────────────────────────────────────────────────
+    # ── a damaged disk still boots and serves (QUEUE.md item 13) ─────────────
+    if running("damaged"):
+        scratch = tempfile.mkdtemp(dir=work)
+        image = os.path.join(scratch, "damaged.img")
+        shutil.copy(pristine, image)
+        leaked = leak_a_cluster(image)
+        answer = ask_kernel(elf, image, case("index, on a damaged disk", "GET", "/"), scratch,
+                            damaged=True)
+        log = answer.get("serial", "")
+        got = disk_check_lines(log).get("the boot disk")
+        if answer.get("status") != 200:
+            failures += 1
+            print(f"FAIL  damaged: a disk with a leaked cluster was not served from ({answer.get('status')})")
+        elif got is None or got["leaked"] != 1 or got["problems"] != 1:
+            failures += 1
+            print(f"FAIL  damaged: the disk check did not report the one leaked cluster: {got}")
+        elif f"    leaked at (the volume), cluster {leaked}, count 1" not in log:
+            failures += 1
+            print(f"FAIL  damaged: the disk check did not name cluster {leaked}")
+        else:
+            print(f"ok    damaged: a disk with cluster {leaked} leaked boots, says so, and serves")
+        shutil.rmtree(scratch, ignore_errors=True)
+        lap("damaged")
+
     if running("stamina"):
         rounds = STAMINA * STAMINA_ROUNDS
         f, log, answers, _ = run_story(elf, linux_bin, content, pristine, work, mnt,
@@ -2460,6 +2569,9 @@ def main() -> int:
                          if peaks[-1] == at else f"{peaks[-1] - at} bytes of growth"))
 
         lap("stamina")
+    for d in DISK_CHECK_FAILURES:
+        failures += 1
+        print(f"FAIL  disk check: {d}")
     names = " ".join(g for g in GATES if g in chosen)
     took = f"{lap.total():.0f} s"
     if DROPLET:

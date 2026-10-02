@@ -906,7 +906,79 @@ fn mountFat(blk: *virtio.Block, scratch: *[fat16.sector_size]u8, what: []const u
     serial.put(", FAT held in memory (");
     serial.putDec(vol.fatBytes());
     serial.put(" bytes)\n");
+    diskCheck(&vol, what);
     return vol;
+}
+
+/// **THE DISK CHECK, AT EVERY MOUNT** (`fat16.Volume.check`, QUEUE.md item
+/// 13): one summary line per volume, then each finding. It reports and never
+/// halts, and it writes nothing: a damaged volume still boots and serves, and
+/// the log says what to look at with fsck.vfat on a copy. The judges read the
+/// summary line on every boot (probe/judge_gopher.py, `disk_check_lines`).
+///
+/// It runs after `cacheFat`, so following a chain is a memory read; the walk
+/// reads each directory sector once.
+fn diskCheck(vol: *fat16.Volume, what: []const u8) void {
+    serial.put("  disk check, ");
+    serial.put(what);
+    serial.put(": ");
+    const seen = pages.allocator.alloc(u8, vol.checkBytes()) catch {
+        serial.put("not run: no memory for its map of the clusters\n");
+        return;
+    };
+    defer pages.allocator.free(seen);
+    const Shown = struct {
+        /// More findings than this are counted, not printed: a volume with
+        /// thousands of leaked runs must not bury the rest of the boot.
+        const most = 20;
+        held: [most]fat16.Finding = undefined,
+        paths: [most][256]u8 = undefined,
+        n: u32 = 0,
+        fn each(self: *@This(), f: fat16.Finding) void {
+            if (self.n < most) {
+                const len = @min(f.path.len, self.paths[self.n].len);
+                @memcpy(self.paths[self.n][0..len], f.path[0..len]);
+                self.held[self.n] = f;
+                self.held[self.n].path = self.paths[self.n][0..len];
+            }
+            self.n += 1;
+        }
+    };
+    var shown: Shown = .{};
+    const h = vol.check(seen, &shown, Shown.each) catch |e| {
+        serial.put("not run: ");
+        serial.put(@errorName(e));
+        serial.put("\n");
+        return;
+    };
+    serial.putDec(h.files);
+    serial.put(" files, ");
+    serial.putDec(h.directories);
+    serial.put(" directories, ");
+    serial.putDec(h.used);
+    serial.put(" clusters used, ");
+    serial.putDec(h.leaked);
+    serial.put(" leaked, ");
+    serial.putDec(h.problems);
+    serial.put(" problems\n");
+    for (shown.held[0..@min(shown.n, Shown.most)]) |f| {
+        serial.put("    ");
+        serial.put(@tagName(f.problem));
+        serial.put(" at ");
+        serial.put(if (f.path.len > 0) f.path else "(the volume)");
+        serial.put(", cluster ");
+        serial.putDec(f.cluster);
+        if (f.count != 0) {
+            serial.put(", count ");
+            serial.putDec(f.count);
+        }
+        serial.put("\n");
+    }
+    if (shown.n > Shown.most) {
+        serial.put("    and ");
+        serial.putDec(shown.n - Shown.most);
+        serial.put(" more\n");
+    }
 }
 
 fn logRequest(number: u64, what: []const u8, outcome: []const u8) void {
