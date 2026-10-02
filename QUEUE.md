@@ -198,7 +198,7 @@ check-in 2 under Answers: the judge fixes (findings 1-2) and `tz=UTC` on
 
     `test_judges.py` has five new tests of the line handling, against those
     logs' shapes.
-14. **A cheap free-space figure** (REVIEW-admin-host.md finding 4).
+14. **A cheap free-space figure** (REVIEW-admin-host.md finding 4). *(CC, started 2026-10-02.)*
     - Count the free clusters once at mount (or from the walk in
       `cacheFat`/`check`) and keep the count current through every allocation
       and every free, including the failure paths that give clusters back.
