@@ -380,6 +380,18 @@ queue full). After 17 and 18.*
       like. For each: is it validated before the join, by what, and what
       would a bad value make or remove on disk? `deleteTree` first.
 
+    **Done** (CC): `REVIEW-request-paths.md`, read on `be16d28`; nothing fixed.
+    - **The worst three:** `/logout` deletes any player's game data and
+      record (members' too) by the unsigned `gopher_uid` cookie; a guest
+      account is taken over by naming its id in the cookie on `.upgrade`;
+      and a DM's other half is never checked, so anyone can fake
+      conversations, and on Linux `..` appends to `chat_root/images.md`.
+    - **Also:** API-key and admin ids reach paths unchecked; the game
+      store grows the disk without limit (a policy question for Steve); and
+      small edges (`isSafeName` dot-files, a `urlDecode` off-by-one, case on FAT).
+    - **Not checked here:** whether `e2610edd`/`496bdca3` change any of it;
+      they were not on GitHub.
+
 *Item 21 queued 2026-10-02 (Steve: do the essay's "subtraction"; box Claude
 draws the seam, CC takes the tail). Background:
 http://143.244.172.148:9100/notes/a-web-server-in-a-box.md*
