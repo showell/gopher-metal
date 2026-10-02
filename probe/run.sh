@@ -229,7 +229,7 @@ if [ "$want" = all ] || [ "$want" = vfat ]; then
                 fi
 
                 # Now the other direction: Linux writes, we read.
-                sudo mount -o loop,noexec,nosuid,nodev "$img" "$mnt"
+                sudo mount -o loop,noexec,nosuid,nodev,tz=UTC "$img" "$mnt"
                 sudo mkdir -p "$mnt/restored"
                 printf 'linux wrote this, with a name 8.3 cannot hold\n' \
                     | sudo tee "$mnt/restored/written-by-linux.txt" > /dev/null
@@ -278,7 +278,7 @@ if [ "$want" = all ] || [ "$want" = append ]; then
             else
                 mnt="$WORK/amnt"
                 mkdir -p "$mnt"
-                sudo mount -o loop,ro,noexec,nosuid,nodev "$img" "$mnt"
+                sudo mount -o loop,ro,noexec,nosuid,nodev,tz=UTC "$img" "$mnt"
                 # The expectation, generated HERE -- not read back through ours.
                 { seq -f 'line %04g aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa' 1 600
                   echo 'one more'; } > "$WORK/append.want"   # the late append, through an open handle
@@ -412,7 +412,7 @@ if [ "$want" = all ] || [ "$want" = replace ]; then
                 else
                     mnt="$WORK/rmnt"
                     mkdir -p "$mnt"
-                    sudo mount -o loop,ro,noexec,nosuid,nodev,uid="$(id -u)" "$img" "$mnt"
+                    sudo mount -o loop,ro,noexec,nosuid,nodev,tz=UTC,uid="$(id -u)" "$img" "$mnt"
                     if verdict="$(python3 "$HERE/judge_replace.py" "$img" "$mnt")"; then
                         echo "     $k | $verdict"
                     else
