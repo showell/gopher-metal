@@ -136,6 +136,7 @@ in order. The box Claude reorders on `master`, and CC proposes at the bottom.
    at the new bound, read back by `tools/fat16_read.py` too. **Done** (CC).
 9. **Stop directory growth at FAT's 65,536-entry limit** (your proposal;
    accepted), with a host test that fills a directory to the limit.
+   **Done** (CC).
 10. **`zig fmt` the three files, then make `zig fmt --check src` part of
     `zig build test`** (your proposal; accepted), so it stays clean.
 11. **Review `/admin/host` as an adversary**, once it is on `master` (the box
@@ -208,14 +209,8 @@ in order. The box Claude reorders on `master`, and CC proposes at the bottom.
 
 *(CC adds items here, one line on why each.)*
 
-- **Raise `fat16.max_name` to 96, or cap session ids and doc slugs at 48 in
-  angry-gopher.** The application can make names up to 96 characters
-  (`<sid>.reactions.jsonl` at an 80-character sid), and this machine holds 64
-  (MIGRATION.md).
 - **Fold case for session ids and channel names in angry-gopher.** On FAT,
   `plan` replaces `Plan`, where Linux keeps both (MIGRATION.md).
-- **Stop `fat16.zig`'s `grow` at 65,536 directory entries.** It grows past
-  FAT's limit today, and `fsck.fat` would then reject the volume.
 - **Read the NT case bits (byte 12 of a short entry) in `fat16.zig`'s
   `decode`.** mtools and Windows store `topic.md` as `TOPIC.MD` with "lower
   case" flags and no long name, and this machine lists it upper case
