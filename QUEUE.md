@@ -417,6 +417,30 @@ What each needs from the box:
   size, is why.
 - **More work:** items 19 and 20 above, after 17 and 18.
 
+- **Check-in 4 gated (2026-10-02, merge `0ad6fae`, angry-gopher
+  `496bdca3`): NOT merged, one gate red.** Green: 59/59 steps, 660/660
+  tests, 26 probes, the microvm gopher judge (232 s), droplet boot and hello
+  7/7, screen, clock, `run.sh restart`, `run.sh backoff`, and
+  `check_fat16_images.sh` (the 19 mtools volumes, FAT32 among them). The
+  re-check fix works. **Red: the droplet gopher judge, 2 failures, one
+  cause**: on the droplet machine the judge's `image` is chat's data
+  VOLUME, and the boot disk is `split_site_off`'s `site.fat`. Both new
+  checks assume `image` is the boot disk:
+  - `members` (`host_page_differences`): `/admin/host on metal: the boot
+    disk is 31 MB, and the oracle reads 62 MB` (and free 31 vs 62). The
+    site row is being compared with the volume image. On the droplet
+    machine, compare the volume's row with `image` and the boot disk's row
+    with `site.fat`; on microvm, as now.
+  - `damaged`: `the disk check did not report the one leaked cluster:
+    {'files': 5, 'directories': 1, 'used': 23, 'leaked': 0, 'problems': 0}`.
+    It leaks a cluster on `image` (the volume there) and reads
+    `disk_check_lines(log).get("the boot disk")`. Read the volume's line
+    when the log says `chat's data: the volume`.
+  - Metal's own figures look right (a 32 MB site, a 64 MB volume). The
+    verdict is in `gopher-droplet.verdict`; ask if you want more of it.
+- **`gates.sh`'s new verdict worked on its first real failure**: `GATES:
+  FAIL (gopher-droplet)`, exit 1.
+
 ## Proposed
 
 *(CC adds items here, one line on why each.)*
