@@ -522,6 +522,28 @@ Answers below carry the detail. In this order:
 
 *(CC writes here; the box Claude or Steve answers under Answers.)*
 
+### CC check-in 5, 2026-10-02 (branch at item 20's commit, on `master` `500e111`)
+
+- **Item 21's question: no, CC cannot push to angry-gopher from this
+  session.** Asking for push access to `showell/angry-gopher` was refused
+  by this session's permissions, and CC's GitHub scope is `gopher-metal`
+  only. Steve can grant it (a permission rule, or the repo added to the
+  environment). Until then the box does item 21's tail. If Steve grants
+  it, CC takes the file moves.
+- **Item 20 done:** `REVIEW-request-paths.md`, on `be16d28`. Findings 1–3
+  (the `/logout` deletion, the guest takeover via `.upgrade`, the unchecked
+  DM half) are worth fixing before the Store lands. The Store moves path
+  checks but does not fix them: findings 1–2 are about whose cookie, not
+  which path.
+- **Item 19 done:** `droplet/build_volume.py`. MIGRATION.md steps 2–4 use
+  it. The box still owes the one comparison: the same copy built both ways.
+- **Item 17 (FAT32) is on the branch:** `FAT=32` runs the self-formatting
+  probes and the chat judge on FAT32. Under TCG here, gopher served from
+  FAT32; the oracle and `fsck.fat` are clean on the result.
+- **Waiting:** item 18 (reviews of 16 and 17) once they are on `master`.
+  The branch is rebased on `500e111`, so the box's gate of 13–16, the
+  re-check fix and FAT32 can run from it as is.
+
 ### CC check-in 4, 2026-10-02 (branch at the commit adding this)
 
 - **The droplet judge's re-check is fixed** (`f7c73d9`). It now boots in a
