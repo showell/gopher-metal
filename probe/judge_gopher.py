@@ -202,7 +202,11 @@ MEMBER_STORY = [
     step("the admin roster (Steve is uid 1)", "GET", "/admin", JAR),
     # Everything the Store keeps, as one tar (QUEUE.md item 35): compared by
     # its members, not its bytes, whose file times differ by host.
-    step("the backup", "GET", "/admin/backup", JAR),
+    # It asks for the password again (QUEUE.md item 57): the session alone is
+    # a form, compared as a page; the archive is the answer to the password,
+    # and must end with a manifest that holds (droplet/check_backup.py).
+    step("the backup's form", "GET", "/admin/backup", JAR),
+    step("the backup", "POST", "/admin/backup", JAR, "password=correct+horse+battery+staple"),
     step("the game roster", "GET", "/admin/lynrummy", JAR),
     step("someone else's DM is not his", "GET", "/chat/c/2_9/general", JAR),
     step("a session minted outside both servers", "GET", "/chat/conversations", FRESH),
@@ -1004,7 +1008,8 @@ def differences(c: dict, metal: dict, linux: dict) -> list:
             out.append(f"{h}: metal {m!r}, Linux {l!r}")
     if c["path"] == "/version":
         out += version_differences(metal["body"], linux["body"])
-    elif c["path"] == "/admin/backup" and metal["status"] == 200 and linux["status"] == 200:
+    elif (c["path"] == "/admin/backup" and metal["status"] == 200 and linux["status"] == 200
+          and "x-tar" in metal["headers"].get("content-type", "") + linux["headers"].get("content-type", "")):
         out += backup_differences(metal["body"], linux["body"], metal["window"], linux["window"])
     elif c["path"] == "/admin/host" and metal["status"] == 200:
         # A refusal (no session, not the admin) is an ordinary page, compared
@@ -1099,6 +1104,8 @@ def backup_differences(metal: bytes, linux: bytes, metal_window=None, linux_wind
             t = tarfile.open(fileobj=io.BytesIO(body))
             got = {}
             for m in t.getmembers():
+                if m.name == "backup-manifest.txt":
+                    continue  # each host's own hashes of its own times; checked below, alone
                 data = t.extractfile(m).read() if m.isfile() else b""
                 got[m.name] = ("folder" if m.isdir() else "file", m.size,
                                normalize(data, window) if window else data)
@@ -1111,6 +1118,13 @@ def backup_differences(metal: bytes, linux: bytes, metal_window=None, linux_wind
     out = [e for e in (merr, lerr) if e]
     if out:
         return out
+    # Each whole by its own manifest (QUEUE.md item 57): a cut archive lists
+    # cleanly, so the members alone could agree on two short ones.
+    sys.path.insert(0, DROPLET_DIR)
+    import check_backup
+    for name, body in (("metal", metal), ("Linux", linux)):
+        problems = check_backup.check(body)[0]
+        out += [f"/admin/backup on {name} is not whole: {p}" for p in problems]
     if not m:
         out.append("/admin/backup on metal is empty")
     for name in sorted(set(m) - set(l)):
