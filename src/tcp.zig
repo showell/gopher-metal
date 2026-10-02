@@ -447,8 +447,10 @@ pub const Table = struct {
     fn emit(self: *Table, wire: anytype, i: usize, flags: u8, seq: u32, payload: []const u8) void {
         const c = &self.conns[i];
         const w = c.window();
-        if (c.tight(w)) {
-            c.heard(); // nothing open to announce any more
+        if (c.tight(w) or c.peer_done) {
+            // Nothing open to announce any more, or nobody left to send into
+            // it: a peer that has sent its FIN is owed no window.
+            c.heard();
         } else if (c.tight(c.told_wnd)) {
             c.window_news = .said_once;
             c.update_at = null;
