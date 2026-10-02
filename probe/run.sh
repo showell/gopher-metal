@@ -99,8 +99,13 @@ boot() {
     # keeps -no-reboot: a restart it did not plan is a failure to see.
     local reboot=-no-reboot
     [ "${RESTARTS:-}" = 1 ] && reboot=
-    timeout 60 qemu-system-x86_64 \
-        -M microvm,rtc=on,pit=on \
+    # MACHINE=pc boots QEMU's pc machine (the droplet's chipset: PIIX3, so the
+    # reset control register and the keyboard controller restart it), still
+    # through PVH. Every other boot is microvm, as always.
+    local machine="microvm,rtc=on,pit=on"
+    [ -n "${MACHINE:-}" ] && machine="$MACHINE"
+    timeout "${TIMEOUT:-60}" qemu-system-x86_64 \
+        -M "$machine" \
         -kernel "$HERE/$name.elf" \
         -nographic $reboot -m "${MEM:-512}" \
         -global virtio-mmio.force-legacy=false \
@@ -540,6 +545,32 @@ if [ "$want" = all ] || [ "$want" = restart ]; then
         echo "FAIL restart | it did not come back from the triple fault with CMOS and RAM kept; see $WORK/restart.out"
         failed=1
     fi
+fi
+
+# **THE RESTART, END TO END** (RESTART.md, QUEUE.md item 16). backoff.elf
+# marks itself serving and fails on purpose, four times: each must restart the
+# machine, each next boot must find the record counting them and the boot
+# before's kept log ending with its reason, and the fifth must wait out the
+# back-off (a second a minute) and then serve. On the pc machine, the
+# droplet's, where the first reset method already restarts it; and on microvm,
+# where only the triple fault does.
+if [ "$want" = all ] || [ "$want" = backoff ]; then
+    for m in pc microvm; do
+        if [ "$m" = pc ]; then
+            MACHINE=pc RESTARTS=1 TIMEOUT=120 boot backoff
+        else
+            RESTARTS=1 TIMEOUT=120 boot backoff
+        fi
+        for n in 1 2 3 4; do
+            if ! grep -aq "restarted after a failure (restart $n in a row)" "$WORK/backoff.out"; then
+                echo "FAIL backoff | on $m, no boot reported restart $n; see $WORK/backoff.out"
+                failed=1
+                break
+            fi
+        done
+        grep -aq "serving again after 4 restarts in a row" "$WORK/backoff.out" \
+            && echo "     backoff | on $m: four restarts, each reported with its reason, then the back-off and serving again"
+    done
 fi
 
 if [ "$want" = all ] || [ "$want" = rng ]; then

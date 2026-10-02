@@ -211,7 +211,9 @@ pub fn kmain() noreturn {
         serial.fail("the loader described no memory, so there is nothing to serve from");
     };
     const image = metal.boot.image();
-    const carved = pages.bring(pvh.largestFree(entries, image));
+    // With the restart built in, the kept log's region past the image is
+    // reserved too, so the page allocator never hands it out.
+    const carved = pages.bring(pvh.largestFree(entries, if (gm_build.restart) metal.restarting.reserved() else image));
     if (carved.pages_total == 0) serial.fail("no usable region of RAM to serve from");
     serial.put("  ram: ");
     serial.putDec(pvh.totalRam(entries));
@@ -286,6 +288,12 @@ pub fn kmain() noreturn {
     serial.put("\n");
     booted_unix = @intCast(clock.unix);
     tsc_hz_seen = clock.tsc_hz;
+
+    // ── the restart (RESTART.md), only with -Drestart ───────────────────────
+    if (gm_build.restart) {
+        const restarted = metal.restarting.begin(wallNow);
+        if (restarted.wait_seconds > 0) waitSeconds(restarted.wait_seconds);
+    }
 
     // ── the host contract ───────────────────────────────────────────────────
     router.host_status.provide(metalFacts);
@@ -362,6 +370,10 @@ pub fn kmain() noreturn {
     stream_scratch = std.heap.FixedBufferAllocator.init(scratch_heap);
     turning = .{ .wire = &wire, .table = &table, .hub = &hub, .conf = conf };
     stream.after_arrivals = streamTurn;
+
+    // From here a fatal error is a failure while serving: with the restart
+    // built in, it restarts the machine (RESTART.md).
+    if (gm_build.restart) metal.restarting.serving();
 
     // ── the loop: talk to the network, serve whatever is ready ──────────────
     //
@@ -1178,10 +1190,27 @@ fn serialText(text: *[9]u8, n: u32) []const u8 {
     return text;
 }
 
+/// The wall clock in Unix seconds, or null before it is set: for the restart
+/// record, which must not panic asking.
+fn wallNow() ?i64 {
+    if (!Io.realTimeIsSet()) return null;
+    return @intCast(@divFloor(Io.Clock.now(.real, Io.io()).nanoseconds, std.time.ns_per_s));
+}
+
+/// The restart's back-off: a busy wait on the TSC, before anything serves.
+fn waitSeconds(s: u32) void {
+    const until = Io.awakeNs().? + @as(i96, s) * std.time.ns_per_s;
+    while (Io.awakeNs().? < until) asm volatile ("pause");
+    serial.put("  waited ");
+    serial.putDec(s);
+    serial.put(" s; serving\n");
+}
+
 pub const panic = std.debug.FullPanic(panicImpl);
 fn panicImpl(msg: []const u8, _: ?usize) noreturn {
     serial.put("PANIC: ");
     serial.put(msg);
     serial.put("\n");
+    if (serial.on_fatal) |f| f(.panic, msg);
     serial.exitQemu(1);
 }

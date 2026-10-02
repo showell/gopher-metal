@@ -62,6 +62,7 @@ pub fn build(b: *std.Build) void {
         .{ .name = "http.elf", .root = "probe/http.zig", .step = "http", .help = "the one-request web server probe kernel" },
         .{ .name = "ladder.elf", .root = "probe/ladder.zig", .step = "ladder", .help = "one operation many times, at a flat cost" },
         .{ .name = "stdhttp.elf", .root = "probe/stdhttp.zig", .step = "stdhttp", .help = "the same, but with zig's own std.http.Server" },
+        .{ .name = "backoff.elf", .root = "probe/backoff.zig", .step = "backoff", .help = "the restart end to end: four restarts, then the back-off (RESTART.md)" },
         .{ .name = "restart.elf", .root = "probe/restart.zig", .step = "restart", .help = "what each way of restarting keeps (RESTART.md)" },
         .{ .name = "hello.elf", .root = "droplet/hello.zig", .step = "hello", .help = "for a real droplet: both cards, every request, forever" },
     };
@@ -135,6 +136,10 @@ pub fn build(b: *std.Build) void {
     build_opts.addOption([]const u8, "commit", commitOf(b, gopher_root));
     const gm_opts = b.addOptions();
     gm_opts.addOption([]const u8, "commit", commitOf(b, b.pathFromRoot(".")));
+    // **OFF UNTIL A DROPLET HAS BEEN MEASURED** (QUEUE.md item 16's hard
+    // rule): a guest's reset must restart a real droplet, not power it off,
+    // before any deployed image restarts itself. -Drestart=true builds it in.
+    gm_opts.addOption(bool, "restart", b.option(bool, "restart", "gopher.elf restarts on a failure while serving (RESTART.md); off by default") orelse false);
     build_opts.addOption(bool, "fake_leak", false);
 
     const app = b.createModule(.{
@@ -222,7 +227,7 @@ pub fn build(b: *std.Build) void {
     // the formatter writes it. It was let slip once (three files, QUEUE.md
     // item 10), and a separate step nobody runs would let it slip again.
     test_step.dependOn(&b.addFmt(.{ .paths = &.{"src"}, .check = true }).step);
-    for ([_][]const u8{ "src/rtc.zig", "src/stack.zig", "src/civil.zig", "src/fat16.zig", "src/pvh.zig", "src/pages.zig", "src/tcp.zig", "src/tcp_check.zig", "src/tcp_sim.zig", "src/io_test.zig", "src/log_ring.zig", "src/ready.zig", "src/request_heap.zig", "droplet/image.zig", "src/dhcp.zig", "src/screen.zig" }) |path| {
+    for ([_][]const u8{ "src/rtc.zig", "src/stack.zig", "src/civil.zig", "src/fat16.zig", "src/pvh.zig", "src/pages.zig", "src/tcp.zig", "src/tcp_check.zig", "src/tcp_sim.zig", "src/io_test.zig", "src/log_ring.zig", "src/restart.zig", "src/kept_log.zig", "src/ready.zig", "src/request_heap.zig", "droplet/image.zig", "src/dhcp.zig", "src/screen.zig" }) |path| {
         const unit = b.addTest(.{ .root_module = b.createModule(.{
             .root_source_file = b.path(path),
             .target = b.graph.host,

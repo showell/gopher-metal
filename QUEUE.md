@@ -262,6 +262,39 @@ check-in 2 under Answers: the judge fixes (findings 1-2) and `tz=UTC` on
     - **Hard rule: it goes into no deployed image** until the box has
       measured, on a real droplet, that a guest's reset restarts it rather
       than powering it off. The box Claude and Steve do that.
+
+    **Done** (CC); see RESTART.md's status note.
+
+    **The modules:**
+    - **`src/restart.zig`:** the CMOS record (magic, count, minutes since
+      2020, reason, checksum, at `0x70`) and the back-off, with host tests
+      (the schedule, the hour reset, garbage and absent records).
+    - **`src/kept_log.zig`:** two log slots past `_kernel_end`, alternating
+      by boot. Each header has a magic and a checksum, and is sealed on the
+      way to a restart. Host tests cover cold garbage, an unsealed boot and
+      corrupt headers.
+    - **`src/reset.zig`:** the three methods, now shared with
+      `restart.elf`.
+    - **`src/restarting.zig`:** the glue.
+      - `reserved()`: the kernel image plus the kept region, which the page
+        allocator is told to leave alone.
+      - `begin()`: reports the kept log and the record, and answers how long
+        to wait.
+      - `serving()`: sets `serial.on_fatal`, so `serial.fail`, panics and
+        CPU exceptions restart the machine.
+      - The restart path itself: `cli`, then the `RESTART:` line, seal the
+        log, the record, `wbinvd`, reset.
+
+    **gopher.elf only with `-Drestart=true`** (off by default: the hard
+    rule). Built with it, here, it reported the kept log and served; a
+    bad config line still halted, with exit 3 and one boot.
+
+    **What changed in `probe/run.sh`, exactly:**
+    - `boot()` takes `MACHINE` (default `microvm,rtc=on,pit=on`, as before)
+      and `TIMEOUT` (default 60, as before).
+    - A new step, `backoff`, runs `backoff.elf` with `RESTARTS=1`, on
+      `MACHINE=pc` and then on microvm. Each must report restarts 1 to 4
+      and then "serving again".
 17. **FAT32, per `FAT32.md`** (Steve: before the cutover, so the data moves
     once).
     - Extend `tools/fat16_read.py` to read and check FAT32 first, from the

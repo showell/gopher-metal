@@ -1,5 +1,31 @@
 # Restarting on failure while serving
 
+> **Status (QUEUE.md item 16): built, and off in every deployed image.**
+>
+> - **What is built:**
+>   - `src/restart.zig` (the record and the back-off, host-tested);
+>   - `src/kept_log.zig` (two slots past the kernel, host-tested);
+>   - `src/reset.zig` (the three methods);
+>   - `src/restarting.zig`, the glue: `serial.on_fatal`, set by
+>     `serving()`, routes `serial.fail` and the panic handler to the restart.
+> - **gopher.elf** builds it in only with `-Drestart=true`. The default stays
+>   off until the box Claude and Steve have measured, on a real droplet, that
+>   a guest's reset restarts it rather than powering it off.
+> - **`probe/backoff.elf`** (`probe/run.sh backoff`) runs it end to end,
+>   measured here under TCG on three machines (QEMU's `pc`; the
+>   droplet-shaped boot through SeaBIOS and our loader, on dirty RAM; and
+>   `microvm`):
+>   - four restarts in a row, each next boot finding the record counting
+>     them and the boot before's kept log ending with its reason;
+>   - then the back-off, and serving again.
+>
+> The design below is what was built, with two refinements:
+> - **The 10-minute clause is gone.** A boot after a restart always follows
+>   it within seconds, so the back-off depends only on the count of
+>   restarts in a row.
+> - **The record lives at CMOS `0x70`–`0x77`.** That is past the last byte
+>   SeaBIOS (`0x5F`) or QEMU's `pc_cmos_init` (`0x5D`) uses.
+
 QUEUE.md item 7. A design note: nothing here is wired yet. The measurements
 come from `probe/restart.elf` (below), run on QEMU 8.2 under TCG in the
 cloud container. The box Claude has KVM and a droplet, and can run the same

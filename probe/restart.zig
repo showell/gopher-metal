@@ -79,48 +79,9 @@ fn cmosWrite(index: u8, value: u8) void {
     port.outb(0x71, value);
 }
 
-const Method = struct { name: []const u8, run: *const fn () void };
-
-const methods = [_]Method{
-    .{ .name = "the reset control register (0xCF9)", .run = resetControlRegister },
-    .{ .name = "the keyboard controller (0xFE to 0x64)", .run = keyboardController },
-    .{ .name = "a triple fault", .run = tripleFault },
-};
-
-/// PIIX3's Reset Control Register: bit 1 asks for a hard reset, bit 2 makes
-/// it happen. Writing 0x02 then 0x06 is the documented sequence.
-fn resetControlRegister() void {
-    port.outb(0xCF9, 0x02);
-    port.outb(0xCF9, 0x06);
-}
-
-/// The 8042's "pulse output line 0", which is wired to the CPU's reset.
-fn keyboardController() void {
-    var waited: u32 = 0;
-    while (port.inb(0x64) & 0x02 != 0 and waited < 100_000) : (waited += 1) {}
-    port.outb(0x64, 0xFE);
-}
-
-/// An interrupt table with nothing in it, then an exception: the exception
-/// cannot be delivered, nor the double fault that follows, and the third
-/// fault resets the processor.
-fn tripleFault() void {
-    const Pointer = packed struct { limit: u16, base: u64 };
-    const empty = Pointer{ .limit = 0, .base = 0 };
-    asm volatile (
-        \\lidt (%[p])
-        \\int3
-        :
-        : [p] "r" (&empty),
-        : .{ .memory = true });
-}
-
-/// Gives a reset a moment to land: on hardware the reset is not
-/// instantaneous after the write.
-fn pause() void {
-    var i: u32 = 0;
-    while (i < 50_000_000) : (i += 1) asm volatile ("pause");
-}
+const reset = metal.reset;
+const methods = reset.methods;
+const pause = reset.pause;
 
 extern var _kernel_end: u8;
 

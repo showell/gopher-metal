@@ -7,6 +7,7 @@ const std = @import("std");
 const port = @import("port.zig");
 const screen = @import("screen.zig");
 const log_ring = @import("log_ring.zig");
+const restart = @import("restart.zig");
 pub const outb = port.outb;
 pub const inb = port.inb;
 
@@ -112,11 +113,27 @@ pub fn exitQemu(code: u8) noreturn {
     while (true) asm volatile ("hlt");
 }
 
+/// **WHAT A FATAL ERROR DOES ONCE THE MACHINE IS SERVING** (restarting.zig).
+/// Null, the default and the whole of boot, means halt: a refusal at boot is a
+/// fact a restart would meet again. Set, `fail` and a host's panic handler end
+/// there instead, and the machine restarts.
+pub var on_fatal: ?*const fn (restart.Reason, []const u8) noreturn linksection(".data") = null;
+
 pub fn fail(why: []const u8) noreturn {
     put("FAIL: ");
     put(why);
     put("\n");
+    if (on_fatal) |f| f(.failure, why);
     exitQemu(1);
+}
+
+/// Moves the ring into `buf`, a region that outlives a restart
+/// (restarting.zig), with what it held so far.
+pub fn keepIn(buf: []u8) void {
+    var held: [64 * 1024]u8 = undefined;
+    const text = ring.read(&held);
+    ring = log_ring.Ring.init(buf);
+    ring.write(text);
 }
 
 pub fn pass() noreturn {
