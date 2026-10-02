@@ -224,7 +224,7 @@ check-in 2 under Answers: the judge fixes (findings 1-2) and `tz=UTC` on
     - **A rule this made explicit:** a `Volume` is a value, and its copies
       share the held FAT but not the count. Only io.zig's copy writes, once
       it has one; that is already so in `gopher.zig`.
-15. **MIGRATION.md step 5 without a mount.** A script (`droplet/compare_volume.py
+15. **MIGRATION.md step 5 without a mount.** *(CC, started 2026-10-02.)* A script (`droplet/compare_volume.py
     COPY VOLUME.img`) that reads the volume through `tools/fat16_read.py` and
     checks, for every file in the copy: the name exists, compared exactly;
     size and SHA-256 match; the modification time is within 2 seconds. Also:
