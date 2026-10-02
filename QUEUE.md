@@ -63,7 +63,7 @@ in order. The box Claude reorders on `master`, and CC proposes at the bottom.
    images, and judges each one. Box Claude: `fat16_read.py check IMAGE`
    reads a bare volume or a GPT disk.
 
-5. **The boot-time disk check, in `fat16.zig`.**
+5. **The boot-time disk check, in `fat16.zig`.** *(CC, started 2026-10-02.)*
    - At mount, walk the directory tree and report leaked clusters and broken
      chains. Report only: never repair.
    - Host-tested on item 3's disk, with damage made on purpose.
