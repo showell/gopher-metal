@@ -41,9 +41,12 @@ no fixed limit of 512 entries.
 
 1. Run `droplet/check_volume_tree.py <copy of prod's data>` (the directory
    holding `data/` and `auth/`). Fix or decide on everything it lists.
-2. Build the volume as `chat.py` does, but **mount it with `tz=UTC`**.
-3. Copy with `shutil.copytree` (it keeps modification times), unmount, and
-   run `fsck.vfat -n`.
+2. Build the volume without root: `droplet/build_volume.py <copy> <out.img>`
+   (add `--fat 32 --gib N` for FAT32). It copies with mtools in UTC,
+   keeping modification times, and refuses a tree step 1 still finds
+   anything in.
+3. It then checks what it built with `fsck.fat -n`, `tools/fat16_read.py`
+   and step 4's comparison, and prints the serial.
 4. Compare every name, size, hash and modification time with the source:
    `droplet/compare_volume.py <copy> <volume.img>`, which needs no mount.
    Then boot this machine on it and let the chat judge's read gates look.
@@ -238,12 +241,23 @@ The checker adds it up for the real tree. On prod, 2026-10-02: 835 files and
    For each finding, rename or remove it in the copy (and in prod, if prod
    is to keep running on Linux meanwhile), or decide to lose it. Then run
    the checker again until it finds nothing.
-3. **Build the volume** as `chat.py` builds one (`judge.build_disk(...,
-   size=2 << 30)`), but mount with `tz=UTC` added to the options. Then copy
-   with `shutil.copytree`, which keeps modification times through `copy2`,
-   and unmount.
-4. **Check the volume** with `fsck.vfat -n volume.img`, at the partition's
-   offset or on a loop device of the partition.
+3. **Build the volume**, without root:
+
+       droplet/build_volume.py /path/to/copy volume.img                    # FAT16, 2 GiB
+       droplet/build_volume.py /path/to/copy volume.img --fat 32 --gib 16  # FAT32
+
+   It lays the disk out as `new_volume.py` does: GPT, one partition,
+   mkfs.vfat, with 32 KiB clusters on FAT32. It copies the tree in with
+   mtools (`mcopy -s -m`, `TZ=UTC`), keeping modification times in UTC,
+   and refuses a tree `check_volume_tree.py` still finds anything in. It
+   prints the FAT serial.
+
+   The old way still works where there is root, and the box builds the
+   same copy both ways once to compare them: `judge.build_disk`, mounted
+   with `tz=UTC`, then `shutil.copytree`.
+4. **Check the volume.** `build_volume.py` already ran `fsck.fat -n` on the
+   partition, `tools/fat16_read.py check`, and step 5's comparison. Any
+   problem is printed, and it exits 1.
 5. **Compare**, without mounting:
 
        droplet/compare_volume.py /path/to/copy volume.img        # exit 0: identical
