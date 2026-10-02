@@ -6,6 +6,7 @@ const com1: u16 = 0x3F8;
 const std = @import("std");
 const port = @import("port.zig");
 const screen = @import("screen.zig");
+const log_ring = @import("log_ring.zig");
 pub const outb = port.outb;
 pub const inb = port.inb;
 
@@ -27,7 +28,23 @@ pub fn init() void {
 var serial_dead = false;
 const patience: u32 = 100_000;
 
+/// **THE LAST 64 KiB OF THE LOG, FOR A STATUS PAGE TO SERVE** (log_ring.zig),
+/// with secrets taken out on the way in. The port and the screen still get
+/// every byte as written. `putPort` alone, the NMI handler's, does not reach
+/// it.
+///
+/// **THE RING IS IN `.data`, ITS BYTES IN `.bss`.** The loader does not
+/// write `.bss` (probe/link.ld), so a ring there would start with whatever
+/// RAM held: on a fresh VM that is zero, and after a reset that kept the
+/// RAM it is the last boot's head and count, which `store` would index with.
+/// In `.data` the loader writes the ring empty on every boot. The bytes may
+/// be anything until written, and nothing reads past what the ring says it
+/// holds.
+var ring_bytes: [64 * 1024]u8 = undefined;
+pub var ring: log_ring.Ring linksection(".data") = .{ .buf = &ring_bytes };
+
 pub fn put(bytes: []const u8) void {
+    ring.write(bytes);
     screen.put(bytes);
     putPort(bytes);
 }

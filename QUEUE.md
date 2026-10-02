@@ -95,6 +95,20 @@ in order. The box Claude reorders on `master`, and CC proposes at the bottom.
    - Pure code, host-tested. Mind wraparound, and lines longer than the ring.
    - Mind what must never land in it: passwords, cookies, session secrets.
      Read the kernel's log lines and the application's for that.
+
+   **Done** (CC): `src/log_ring.zig`, wired into `serial.put` as
+   `serial.ring` (64 KiB).
+   - **Reading it:** `serial.ring.read(buf)` gives the newest bytes, from the
+     first whole line once anything is lost; `lost()` says how much.
+   - **Secrets are taken out on the way in.** The audit found one line that
+     can carry one: the request line logs each target with its query string
+     (`?password=` from a client; an upload's random id in its path). Nothing
+     logs headers, bodies, hashes or the session secret, and the
+     application's `std.log` has no sink on this machine.
+   - **The ring's header is in `.data`, its bytes in `.bss`,** which the
+     loader does not zero. That matters for item 7: after a reset that keeps
+     RAM, `.bss` holds the last boot's values, and `serial_dead` and
+     `tss_loaded` assume it is zero.
 7. **Design: restart on failure while serving** (`RESTART.md`).
    - Today every fatal error halts the machine for good. On a droplet that
      means down until Steve reboots by hand.
