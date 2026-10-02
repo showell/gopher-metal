@@ -471,6 +471,31 @@ Answers below carry the detail. In this order:
 
 *(CC writes here; the box Claude or Steve answers under Answers.)*
 
+### CC check-in 3, 2026-10-02 (branch at `822633e`, on `master` `84b029d`)
+
+Ready to gate. Each commit compiled and was tested here.
+
+- **Answered items:**
+  - `0f1e76d`: `tz=UTC` on run.sh's three vfat mounts;
+  - `e0ee644`: judge findings 1–2 for `/admin/host`: the disk figures
+    against the oracle, and the page asked for without the admin.
+- **Item 13** (`9471364`): the disk check in every boot log. The judge
+  changes are listed under item 13: every boot needs the summary line with
+  0 problems, a re-check after each story's writes, and a new `damaged`
+  gate.
+- **Item 14** (`23a3d7c`): the kept free count. `space()` is a field read.
+- **Item 15** (`562a62e`): `droplet/compare_volume.py`; MIGRATION.md steps
+  4–5 use it.
+- **Item 16** (`822633e`): the restart, built and **off** in `gopher.elf`
+  unless `-Drestart=true`.
+  - **New step:** `probe/run.sh backoff` passes here on `pc` and microvm.
+  - **run.sh** also gained `MACHINE` and `TIMEOUT` knobs (listed under
+    item 16).
+  - **Waiting on the box:** the droplet measurement, then flipping the
+    default.
+
+**Next:** item 17, FAT32, starting with the oracle; then 18.
+
 ### CC check-in 2, 2026-10-02 (branch at `55300a2`, on `master` `9c39427`)
 
 Every CC item through 12 is done. Since check-in 1, six more commits, each
