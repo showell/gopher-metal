@@ -21,16 +21,17 @@ droplet through our own BIOS loader.
   (10.100.0.4). prod's Caddy (the lynrummy.com droplet) proxies the test name
   to it, from `droplet/metal.lynrummy.com.caddy`, installed by hand in
   `/etc/caddy/sites/`.
-- **Its data does not survive yet.** Every new image replaces the droplet's
-  whole disk, chat's data included. That is accepted until much more testing
-  has been done (Steve, 2026-10-01). **The fix is built and judged, not yet
-  deployed:** chat's data (`data/`, `auth/`) on a DigitalOcean volume, which a
-  new image does not touch (`src/scsi.zig`), and the site's own files
-  (`pages/`, `gallery/`, `gopher-metal.conf`) on the boot disk, where each new
-  image updates them. The kernel mounts both and sends each path to one by its
-  first directory (`src/io.zig`); it refuses, and logs, any write outside
-  `data/` and `auth/`. With no volume attached the data stays on the boot
-  disk, as now. `droplet/chat.py` builds both images. FAT16 limits a volume to
+- **Its data is on a DigitalOcean volume** (2 GiB, nyc2), since v5
+  (2026-10-02): chat's data (`data/`, `auth/`) on the volume, which a new
+  image does not touch (`src/scsi.zig`), and the site's own files (`pages/`,
+  `gallery/`, `gopher-metal.conf`) on the boot disk, where each new image
+  updates them. The kernel mounts both and sends each path to one by its first
+  directory (`src/io.zig`); it refuses, and logs, any write outside `data/` and
+  `auth/`. With no volume attached the data stays on the boot disk; a volume
+  it cannot read stops the machine. `droplet/chat.py` builds both images; the
+  volume image was written once, from DigitalOcean's recovery console.
+  **Not yet shown:** that the data survives a rebuild. A marker message was
+  posted on v5, to be read back after the next image. FAT16 limits a volume to
   2 GB; prod's data is 215 MB (2026-10-01), and each user may upload 1 GiB
   over their lifetime, so FAT32 is the eventual next step (`FAT32.md`).
 - **Its data is test data.** The volume is the chat judge's test site, whose
