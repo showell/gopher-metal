@@ -169,6 +169,9 @@ should have slept.
 
 ### 5. An NMI stops the machine
 
+**Fixed:** an NMI is logged on the serial port and the machine carries on,
+on a stack of its own (IST 2). See `gm_nmi` in `src/interrupts.zig`.
+
 **Where:** `install` routes vector 2 to the same exception stub as faults,
 and `gm_exception` always calls `serial.fail`.
 
@@ -186,6 +189,11 @@ by default rather than on purpose.
 an NMI should stop the machine and say so in the comment.
 
 ### 6. Exceptions run on the faulting stack, with no IST
+
+**Fixed:** a TSS in `boot.zig`'s GDT (selector 0x18), loaded by
+`interrupts.install`. The double fault runs on IST 1 and the NMI on IST 2,
+16 KB each. Other exceptions still use the faulting stack; it is the double
+fault that catches the case where that stack is the problem.
 
 **Where:** every gate has `ist = 0`.
 

@@ -62,16 +62,22 @@ export var pml4 align(4096) linksection(".data") = [_]u64{0} ** 512;
 export var pdpt align(4096) linksection(".data") = [_]u64{0} ** 512;
 
 /// A flat GDT: a 64-bit code segment and a data segment, which is all long
-/// mode looks at.
-export var gdt align(8) linksection(".data") = [_]u64{
+/// mode looks at — and two slots for the task state segment's descriptor
+/// (16 bytes in long mode), which `interrupts.install` fills and loads. The
+/// TSS is there for one reason: the stacks it names, which the double fault
+/// and the NMI switch to whatever state the stack they interrupted is in.
+pub export var gdt align(8) linksection(".data") = [_]u64{
     0,
     0x00AF9A000000FFFF, // code: present, ring 0, executable, long
     0x00CF92000000FFFF, // data: present, ring 0, writable
+    0, // the TSS, low half (selector 0x18)
+    0, // the TSS, high half
 };
+pub const tss_selector: u16 = 0x18;
 
 const GdtPointer = extern struct { limit: u16, base: u32 };
 /// Filled by the stub, because the base is an address only the linker knows.
-/// Three entries of eight bytes, so the limit is 23.
+/// Five entries of eight bytes, so the limit is 39.
 export var gdt_pointer linksection(".data") = GdtPointer{ .limit = 0, .base = 0 };
 
 /// **WHAT THE LOADER PUT IN %ebx**, saved before anything can clobber it: a
@@ -158,7 +164,7 @@ export fn _start() callconv(.naked) noreturn {
             \\  movl %cr0, %eax
             \\  orl $0x80000001, %eax    // paging + protection: long mode arms here
             \\  movl %eax, %cr0
-            \\  movw $23, gdt_pointer
+            \\  movw $39, gdt_pointer
             \\  movl $gdt, %eax
             \\  movl %eax, gdt_pointer + 2
             \\  lgdt gdt_pointer

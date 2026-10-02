@@ -28,6 +28,12 @@ const patience: u32 = 100_000;
 
 pub fn put(bytes: []const u8) void {
     screen.put(bytes);
+    putPort(bytes);
+}
+
+/// The serial port alone, without the screen. For a handler that may have
+/// interrupted `screen.put` part-way, whose state it must not touch.
+pub fn putPort(bytes: []const u8) void {
     if (serial_dead) return;
     for (bytes) |b| {
         var waited: u32 = 0;
