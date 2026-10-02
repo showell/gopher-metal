@@ -126,7 +126,11 @@ Then compare the two:
 
 ### 7. Build the boot image
 
-Put the serial from step 4 in `droplet/volume-serial`. Then:
+Put the serial from step 4 in `droplet/volume-serial`, and prod's private
+address (where its Caddy reaches `<metal>` from) in `droplet/trusted-proxy`.
+Without the second, every request through Caddy counts as one address, and
+the game store's bound of 5 new players an hour (QUEUE.md item 52) is the
+whole site's. Then:
 
     droplet/chat.py boot.img
     gzip -k boot.img
@@ -134,8 +138,9 @@ Put the serial from step 4 in `droplet/volume-serial`. Then:
 Serve `boot.img.gz` and `prod-volume.img.gz` (`gzip -k prod-volume.img`)
 where `<metal>`'s recovery console can fetch them.
 
-- GO: both files are there, and `boot.img`'s `gopher-metal.conf` names the
-  serial from step 4.
+- GO: both files are there, `boot.img`'s `gopher-metal.conf` names the
+  serial from step 4, and chat.py's last line says which address's
+  X-Forwarded-For it believes, not "believing no X-Forwarded-For".
 
 ### 8. Write the volume, from the recovery console
 
