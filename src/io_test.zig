@@ -237,3 +237,11 @@ test "rename replaces a file on the volume, as std.Io spells it, and refuses wha
     try testing.expectError(io_mod.Error.WriteFailed, cwd.rename("data/chat/1_2/sessions/topic.count", cwd, "index.html", io));
     try t.volume.expectFile("data/chat/1_2/sessions/topic.count", "5\n");
 }
+
+test "a file written over a directory is IsDir, as on Linux, and the directory stays" {
+    const t = try Two.make(true);
+    defer t.deinit();
+    try cwd.writeFile(io, .{ .sub_path = "data/chat/1_2/sessions/topic.md", .data = "x" });
+    try testing.expectError(io_mod.Error.IsDir, cwd.writeFile(io, .{ .sub_path = "data/chat/1_2/Sessions", .data = "a file" }));
+    try t.volume.expectFile("data/chat/1_2/sessions/topic.md", "x");
+}
