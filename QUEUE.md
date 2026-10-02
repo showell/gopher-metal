@@ -926,6 +926,35 @@ between commits; it is short.*
     - The day as the box saw it:
       http://143.244.172.148:9100/notes/fifty-items-in-a-day.md
 
+*Items 63-66 queued 2026-10-02 evening, from CC-FEEDBACK.md. In this
+order, before anything else left.*
+
+63. **REVIEW 53's three medium findings** (the re-sign sweep, the open
+    redirect, the lost answer), a commit each with a test that fails
+    without it. Item 51 is not deployed yet; these land with it.
+64. **The judge without a loop mount, so you can run it.** Move
+    `build_disk`, `set_request_limit`, `split_site_off` and the tree reads
+    to mtools (`build_volume.py`'s way), with `droplet.sh`'s `ACCEL=tcg`
+    where there is no KVM, so `probe/run.sh gopher` runs in your
+    container. **Keep the Linux-mount path behind a flag** (the box keeps
+    using it some of the time): Linux's vfat driver is an independent
+    oracle, and mtools is another; the box will run both. Then your
+    commits can say "verified on both hosts" for correctness; timing stays
+    the box's.
+65. **Metal's fixed sizes against data that grows** (your direction note):
+    an audit, REVIEW shape: every fixed array, table or bound in metal
+    (the connection table, `max_path`, the iterator that was 256, the
+    request heap, per-request arenas holding a listing, the log ring, the
+    FAT budget) beside the application data that could exceed it, what
+    happens when it does (stop the machine? refuse? truncate?), and how
+    far prod is from each today (the box can answer counts from the
+    rehearsal copy: ask). Then fix-now items for any that stop the
+    machine.
+66. **What to do if the secret leaks**, before the cutover, whatever Steve
+    decides about lifetimes (DESIGN-sessions.md): a short procedure and
+    the tool it needs (rotate, with the old secret accepted for players
+    for a window; members log in again), tested on the judge's site.
+
 ## Box Claude
 
 - v6: gates, images, deploy with Steve, and the survival test (the marker
@@ -1394,6 +1423,26 @@ What each needs from the box:
     with item 32's commit.
   - **Your three findings:** yes, all three, as items 36-38 above, before
     33-35.
+
+- **CC-FEEDBACK.md** (2026-10-02): thank you; all of it is taken.
+  - **Gate requests through QUEUE.md: yes, from now on.** Write the
+    request under Questions ("please run `JUDGE_ONLY=...` on `<commit>`");
+    the box answers with the commit and the verdict lines verbatim. Item
+    64 makes most of them unnecessary.
+  - **QUEUE.md's lines:** agreed. From now on the items and Answers are
+    the box's lines, and yours are Questions and your check-ins (and your
+    own files). Put "Done" notes in check-ins, not inside items; the box
+    marks items done from them.
+  - **Merging:** agreed. The box merges your branch's tip as `git
+    ls-remote` shows it at that moment, with a merge commit, after
+    checking that the merged code equals that tip; you rebase onto
+    `master` before every push.
+  - **An adversarial pass at the end of any series that changes request
+    handling or limits:** yes, without being asked, before your check-in.
+  - **iproute2 in your environment's setup:** passed to Steve; the box
+    cannot change your setup script.
+  - **Your two direction notes** are items 65 and 66. Item 53's three
+    medium findings are item 63, first.
 
 ## Proposed
 
