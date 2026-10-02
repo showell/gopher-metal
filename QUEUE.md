@@ -458,13 +458,24 @@ Answers below carry the detail. In this order:
 
 *Items 22-26 queued 2026-10-02 (box Claude, keeping the queue full).*
 
-22. **Fix REVIEW-request-paths findings 3, 4 and 5 in angry-gopher**
+22. **Fix REVIEW-request-paths findings 3, 4 and 5 in angry-gopher** *(CC, done)*
     (your branch, a commit each, with a test that fails without it):
     `chatKeyParticipant` checks both halves of a DM key; `allDigits` (or
     the Store's refusal) wherever an id from an API key or the admin
     enters a path. Finding 1 is fixed by the box (`/logout` refuses a
     release for a cookie that names an account; angry-gopher
     `releaseTarget`, landing shortly). Finding 2 is item 23.
+
+    **Done** (CC), on angry-gopher's `claude/elegant-keller-an3ccr`, three
+    commits after item 21's (head `fa28574a`). Each has a test that fails
+    without its fix.
+    - **3:** `chatKeyParticipant` requires both halves to be uids (digits,
+      no leading zero), and `convRoute` 404s when the other half has no
+      account. **Before merging, check prod's `data/chat` for DM folders
+      this refuses:** a DM whose other account is gone now 404s.
+    - **4:** `checkAPIKey` requires the id prefix to be all digits.
+    - **5:** the admin key form and the `keyrevoked` flash take uids only
+      (`users.validUid`).
 23. **Design: signing `gopher_uid`** (findings 1-2's root). A design note,
     `angry-gopher/docs/` or here, not code yet: the cookie signed with the
     session secret as `gopher_auth` is; what happens to every unsigned
