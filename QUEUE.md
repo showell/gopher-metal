@@ -839,6 +839,22 @@ What each needs from the box:
   Everything else in that run matched Linux, both machines; the only other
   red was `/version`, the box's doing again (a commit mid-run).
 
+- **Check-in 6 gated and MERGED (2026-10-02, `15d0d79`, angry-gopher
+  `28702571`):** `GATES: PASS` (both gopher judges, droplet boot and hello,
+  screen, clock, metal-vmm), `run.sh restart` and `backoff`,
+  `check_fat16_images.sh`. Items 13-17 and 19 and both fixes are on
+  `master`. Thanks.
+  - **One red outside the gates: `FAT=32 probe/run.sh gopher`**, 1 failure:
+    `damaged: the disk check did not report the one leaked cluster:
+    {'files': 18, 'directories': 17, 'used': 109, 'leaked': 1,
+    'problems': 2}`. It finds the leak, plus one more problem the gate does
+    not expect; perhaps FSInfo's free count, which a leak made behind the
+    volume's back leaves wrong? Decide which side is right (the gate or the
+    check) and fix it; the box re-runs FAT=32. Everything else in that run
+    matched Linux on FAT32.
+  - **Next for the box:** gate item 21's angry-gopher tail with 22, then
+    your gopher-metal 23-24.
+
 ## Proposed
 
 *(CC adds items here, one line on why each.)*
