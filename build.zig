@@ -217,7 +217,7 @@ pub fn build(b: *std.Build) void {
     // device can report in is a way to be silently wrong, and those modes are
     // cheaper to enumerate on the host than to provoke in QEMU.
     const test_step = b.step("test", "host unit tests for the pure parts of src/");
-    for ([_][]const u8{ "src/rtc.zig", "src/stack.zig", "src/civil.zig", "src/fat16.zig", "src/fat16_test.zig", "src/pvh.zig", "src/pages.zig", "src/tcp.zig", "src/tcp_check.zig", "src/tcp_sim.zig", "src/ready.zig", "src/request_heap.zig", "droplet/image.zig", "src/dhcp.zig", "src/screen.zig" }) |path| {
+    for ([_][]const u8{ "src/rtc.zig", "src/stack.zig", "src/civil.zig", "src/fat16.zig", "src/pvh.zig", "src/pages.zig", "src/tcp.zig", "src/tcp_check.zig", "src/tcp_sim.zig", "src/ready.zig", "src/request_heap.zig", "droplet/image.zig", "src/dhcp.zig", "src/screen.zig" }) |path| {
         const unit = b.addTest(.{ .root_module = b.createModule(.{
             .root_source_file = b.path(path),
             .target = b.graph.host,
@@ -233,6 +233,21 @@ pub fn build(b: *std.Build) void {
     // initial sequence number is, and where the peer's first byte is. Every
     // scenario then crosses zero, or the half-way point that decides which
     // of two numbers comes first, within its first few segments.
+    // **FAT16 ON AN IN-MEMORY DISK.** With -Dfat16-images=<dir>, every image
+    // the tests made is also written there, for tools/fat16_read.py to check:
+    // tools/check_fat16_images.sh does both.
+    const fat16_opts = b.addOptions();
+    fat16_opts.addOption([]const u8, "images_dir", b.option([]const u8, "fat16-images", "where fat16_test writes its disk images") orelse "");
+    const fat16_unit = b.addTest(.{
+        .name = "fat16_test",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/fat16_test.zig"),
+            .target = b.graph.host,
+            .imports = &.{.{ .name = "fat16_test_options", .module = fat16_opts.createModule() }},
+        }),
+    });
+    test_step.dependOn(&b.addRunArtifact(fat16_unit).step);
+
     const starts = [_]struct { isn: u32, peer: u32 }{
         .{ .isn = 2000, .peer = 5000 }, // where the tests were written
         .{ .isn = 0, .peer = 0 },

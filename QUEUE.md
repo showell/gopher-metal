@@ -50,6 +50,12 @@ in order. The box Claude reorders on `master`, and CC proposes at the bottom.
      clusters.
    - Use it as the oracle for item 3's images.
    - The box Claude will also run it on what the judge's kernels write.
+   **Done** (CC): `tools/fat16_read.py` (`list`, `cat`, `check`, and a
+   `--self-test` against `mkfs.vfat` and `mtools` volumes and six kinds of
+   damage). `tools/check_fat16_images.sh` runs item 3's tests, keeps their
+   images, and judges each one. Box Claude: `fat16_read.py check IMAGE`
+   reads a bare volume or a GPT disk.
+
 5. **The boot-time disk check, in `fat16.zig`.**
    - At mount, walk the directory tree and report leaked clusters and broken
      chains. Report only: never repair.

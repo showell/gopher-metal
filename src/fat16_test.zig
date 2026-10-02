@@ -15,6 +15,7 @@
 const std = @import("std");
 const virtio = @import("virtio.zig");
 const fat16 = @import("fat16.zig");
+const options = @import("fat16_test_options");
 
 const testing = std.testing;
 const sector = 512;
@@ -53,7 +54,7 @@ fn format(disk: []u8, shape: Shape) void {
     b[21] = 0xF8;
     std.mem.writeInt(u16, b[22..24], @intCast(fat_sectors), .little);
     b[38] = 0x29;
-    @memcpy(b[43..54], "GOPHER     ");
+    @memcpy(b[43..54], "NO NAME    "); // the spec's label for none: the root holds no label entry
     @memcpy(b[54..62], "FAT16   ");
     b[510] = 0x55;
     b[511] = 0xAA;
@@ -88,6 +89,10 @@ const Layout = struct {
 
 /// A disk in memory with a mounted volume on it.
 const Disk = struct {
+    /// What the image is called when the tests are asked to keep their
+    /// images (-Dfat16-images): "damaged-" first for the ones a test broke on
+    /// purpose, which a checker must find fault with.
+    label: []const u8,
     bytes: []u8,
     blk: virtio.Block,
     scratch: [sector]u8 align(16) = undefined,
@@ -97,12 +102,12 @@ const Disk = struct {
     /// Formats `shape` into a fresh disk and mounts it, holding its FAT in
     /// memory if `cached`. Heap-allocated: the volume points at the block and
     /// the scratch, which must not move.
-    fn make(shape: Shape, cached: bool) !*Disk {
+    fn make(label: []const u8, shape: Shape, cached: bool) !*Disk {
         const d = try testing.allocator.create(Disk);
         errdefer testing.allocator.destroy(d);
         const bytes = try testing.allocator.alloc(u8, @as(usize, shape.sectors) * sector);
         format(bytes, shape);
-        d.* = .{ .bytes = bytes, .blk = virtio.Block.inMemory(bytes) };
+        d.* = .{ .label = label, .bytes = bytes, .blk = virtio.Block.inMemory(bytes) };
         try d.mount(cached);
         return d;
     }
@@ -118,9 +123,22 @@ const Disk = struct {
     }
 
     fn deinit(d: *Disk) void {
+        if (options.images_dir.len > 0) d.keep() catch |e| std.debug.panic("writing {s}: {s}", .{ d.label, @errorName(e) });
         if (d.fat_cache) |c| testing.allocator.free(c);
         testing.allocator.free(d.bytes);
         testing.allocator.destroy(d);
+    }
+
+    /// Writes the image to `images_dir`, named by its label and whether its
+    /// FAT was held in memory.
+    fn keep(d: *Disk) !void {
+        const io = testing.io;
+        var dir = try std.Io.Dir.cwd().createDirPathOpen(io, options.images_dir, .{});
+        defer dir.close(io);
+        var name: [128]u8 = undefined;
+        const held = if (d.fat_cache != null) "held" else "disk";
+        const file = try std.fmt.bufPrint(&name, "{s}-{s}.img", .{ d.label, held });
+        try dir.writeFile(io, .{ .sub_path = file, .data = d.bytes });
     }
 
     /// Free clusters, counted in the first FAT as it sits on the disk.
@@ -191,7 +209,7 @@ const both = [_]bool{ false, true };
 
 test "a volume formatted from the spec mounts, and its root is empty" {
     for (both) |cached| {
-        const d = try Disk.make(small, cached);
+        const d = try Disk.make("fresh", small, cached);
         defer d.deinit();
         var buf: [256]u8 = undefined;
         try testing.expectEqualStrings("", try d.names(0, &buf));
@@ -201,7 +219,7 @@ test "a volume formatted from the spec mounts, and its root is empty" {
 
 test "a file is read back exactly, at every size around a sector and a cluster" {
     for (both) |cached| {
-        const d = try Disk.make(small, cached);
+        const d = try Disk.make("sizes", small, cached);
         defer d.deinit();
         const sizes = [_]usize{ 0, 1, 511, 512, 513, 1023, 1024, 1025, 4096, 70_000 };
         var data: [70_000]u8 = undefined;
@@ -217,7 +235,7 @@ test "a file is read back exactly, at every size around a sector and a cluster" 
 
 test "a path makes its directories, and names of every length up to max_name read back by name" {
     for (both) |cached| {
-        const d = try Disk.make(small, cached);
+        const d = try Disk.make("names", small, cached);
         defer d.deinit();
         var name: [fat16.max_name]u8 = undefined;
         var path: [128]u8 = undefined;
@@ -232,7 +250,7 @@ test "a path makes its directories, and names of every length up to max_name rea
 }
 
 test "a name longer than max_name is refused, not truncated" {
-    const d = try Disk.make(small, true);
+    const d = try Disk.make("toolong", small, true);
     defer d.deinit();
     const long = "a" ** (fat16.max_name + 1);
     try testing.expectError(fat16.Error.BadName, d.vol.writeFile(long, "x"));
@@ -240,7 +258,7 @@ test "a name longer than max_name is refused, not truncated" {
 
 test "a replaced file gives back what it held" {
     for (both) |cached| {
-        const d = try Disk.make(small, cached);
+        const d = try Disk.make("replaced", small, cached);
         defer d.deinit();
         var data: [20_000]u8 = undefined;
         try d.vol.writeFile("data/x", pattern(&data, 1));
@@ -255,7 +273,7 @@ test "a replaced file gives back what it held" {
 
 test "appends cross cluster boundaries and read back whole" {
     for (both) |cached| {
-        const d = try Disk.make(small, cached);
+        const d = try Disk.make("appends", small, cached);
         defer d.deinit();
         try d.vol.writeFile("data/log", "");
         var whole: [3000]u8 = undefined;
@@ -281,7 +299,7 @@ test "appends cross cluster boundaries and read back whole" {
 
 test "removing a tree gives back every cluster, directories included" {
     for (both) |cached| {
-        const d = try Disk.make(small, cached);
+        const d = try Disk.make("removetree", small, cached);
         defer d.deinit();
         const empty = d.free();
         var data: [4000]u8 = undefined;
@@ -301,7 +319,7 @@ test "removing a tree gives back every cluster, directories included" {
 
 test "a directory grows past its first cluster, and every name in it is found" {
     for (both) |cached| {
-        const d = try Disk.make(small, cached);
+        const d = try Disk.make("growth", small, cached);
         defer d.deinit();
         // Each name takes three entries; a 512-byte cluster holds sixteen.
         var path: [64]u8 = undefined;
@@ -320,7 +338,7 @@ test "a directory grows past its first cluster, and every name in it is found" {
 test "a full disk refuses the write, and the refused write leaves nothing behind" {
     for (both) |cached| {
         // The smallest FAT16 there is: 4,085 clusters of 512 bytes.
-        const d = try Disk.make(.{ .sectors = 4085 + 1 + 2 * 17 + 32 }, cached);
+        const d = try Disk.make("full", .{ .sectors = 4085 + 1 + 2 * 17 + 32 }, cached);
         defer d.deinit();
         const big = try testing.allocator.alloc(u8, 1 << 20);
         defer testing.allocator.free(big);
@@ -340,7 +358,7 @@ test "a full disk refuses the write, and the refused write leaves nothing behind
 
 test "a chain that runs into a free cluster is a broken chain, not a short file" {
     for (both) |cached| {
-        const d = try Disk.make(small, cached);
+        const d = try Disk.make("damaged-chain", small, cached);
         defer d.deinit();
         var data: [2000]u8 = undefined;
         try d.vol.writeFile("broken", pattern(&data, 9));
@@ -357,7 +375,7 @@ test "a chain that runs into a free cluster is a broken chain, not a short file"
 }
 
 test "a disk that stops answering is an error, not a hang or a wrong answer" {
-    const d = try Disk.make(small, false);
+    const d = try Disk.make("io-failure", small, false);
     defer d.deinit();
     try d.vol.writeFile("data/x", "before");
     d.blk.fail_after = d.blk.requests;
