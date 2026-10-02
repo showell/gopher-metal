@@ -57,6 +57,8 @@ pub const Error = error{
     /// A volume that runs past sector 2^32: this machine's sector numbers are
     /// 32 bits (FAT32.md §10).
     VolumeTooLarge,
+    /// More clusters than FAT32's 28-bit cluster numbers can name.
+    TooManyClusters,
     /// A file asked to replace a directory, which Linux refuses too (EISDIR).
     IsDirectory,
 };
@@ -419,6 +421,12 @@ pub const Volume = struct {
         const clusters = (total - data_start) / sectors_per_cluster;
         if (clusters < 4085) return Error.NotFat16;
         const kind: Kind = if (clusters < 65525) .fat16 else .fat32;
+        // **FAT32'S CLUSTER NUMBERS ARE 28 BITS**, and from 0x0FFFFFF7 up they
+        // are marks (a bad cluster, the end of a chain). A volume with more
+        // clusters than numbers below the marks would have chains that end
+        // where they should go on. Refused, rather than read as far as the
+        // disk lets it (QUEUE.md item 69).
+        if (kind == .fat32 and clusters > 0x0FFF_FFF5) return Error.TooManyClusters;
         var root_cluster: Cluster = 0;
         switch (kind) {
             .fat16 => if (root_entries == 0) return Error.BadBootSector,

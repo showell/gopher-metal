@@ -1171,6 +1171,13 @@ test "FAT32: a volume this machine cannot write safely is refused at mount, each
     @memcpy(bytes[32 * test_disk.sector ..][0..test_disk.sector], bytes[0..test_disk.sector]);
     std.mem.writeInt(u32, bytes[32 * test_disk.sector + 32 ..][0..4], 0xFFFF_FFF0, .little);
     try testing.expectError(fat16.Error.VolumeTooLarge, fat16.Volume.mount(&blk, &scratch, 32));
+    // More clusters than FAT32's 28-bit numbers can name: their top numbers
+    // are the bad-cluster and end-of-chain marks (QUEUE.md item 69). The
+    // FAT is said to be big enough for them, so only the count refuses it.
+    test_disk.format(bytes, test_disk.small32);
+    std.mem.writeInt(u32, bytes[32..][0..4], 0xFFFF_FFF0, .little); // sectors in all
+    std.mem.writeInt(u32, bytes[36..][0..4], 0x0200_0000, .little); // sectors per FAT
+    try testing.expectError(fat16.Error.TooManyClusters, fat16.Volume.mount(&blk, &scratch, 0));
     // And the same volume, untouched, mounts.
     test_disk.format(bytes, test_disk.small32);
     const v = try fat16.Volume.mount(&blk, &scratch, 0);

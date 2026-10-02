@@ -189,6 +189,28 @@ test "an append through a File goes to the disk its path names" {
     try testing.expectEqualStrings("two\nt", &buf);
 }
 
+test "an offset past what FAT holds reads nothing and writes nothing, rather than a panic" {
+    // io.zig hands fat16 a u32 offset. Each cast is guarded (QUEUE.md item
+    // 69): a read at or past the file's end is its end, and a write past
+    // 4 GiB is a full disk. These are the edges of both.
+    const t = try Two.make(true);
+    defer t.deinit();
+    const path = "data/x";
+    try cwd.writeFile(io, .{ .sub_path = path, .data = "abc" });
+    var file = try cwd.openFile(io, path, .{});
+    defer file.close(io);
+    var buf: [4]u8 = undefined;
+    try testing.expectEqual(@as(usize, 1), try file.readPositionalAll(io, &buf, 2));
+    for ([_]u64{ 3, 0xFFFF_FFFF, 0x1_0000_0000, std.math.maxInt(u64) }) |at|
+        try testing.expectEqual(@as(usize, 0), try file.readPositionalAll(io, &buf, at));
+    for ([_]u64{ 0x1_0000_0000, std.math.maxInt(u64) }) |at|
+        try testing.expectError(io_mod.Error.NoSpaceLeft, file.writePositionalAll(io, "x", at));
+    // Just under the bound it is fat16's own answer: past the end is a hole,
+    // which FAT cannot leave, and is refused as a failed write.
+    try testing.expectError(io_mod.Error.WriteFailed, file.writePositionalAll(io, "x", 0xFFFF_FFFF));
+    try t.volume.expectFile(path, "abc");
+}
+
 test "a directory opened under data/ lists the volume's entries, and deleting a tree there frees the volume" {
     const t = try Two.make(true);
     defer t.deinit();
