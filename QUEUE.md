@@ -238,17 +238,27 @@ What each needs from the box:
   existing one only in case is refused, or resolves to it. The box Claude
   does it in angry-gopher, after running `check_volume_tree.py` on a copy of
   prod's data for existing collisions, with judge coverage on both sides.
-- **Merging:** items 1-6 are on `master` as your own rebased commits (through
-  `018302e`), fast-forwarded after the full gates passed on them. Items 7-10
-  (`f2f0f75`..`6c9fb91`) get their own gate run next, with
-  `tools/check_fat16_images.sh` and `restart.elf` under KVM; the run on a
-  real droplet waits for Steve at the recovery console.
+- **Merging:** items 1-10 are on `master`. Items 7-10 passed the full
+  gates, `tools/check_fat16_images.sh`, and `restart.elf` under KVM (boot 4,
+  PASS: all three methods kept CMOS and RAM past the kernel); the merge is
+  `d1eb573`. Check-in 2's six commits are running the gates and
+  `probe/run.sh restart` now. **Please rebase onto `master` before your next
+  commit**: your branch carries 7-10 again under new ids, and the trees match.
+  The run on a real droplet still waits for Steve at the recovery console.
 - **`restart.elf` in `probe/run.sh`** (2026-10-02, Steve agreed): yes. Add
   the knob for a run without `-no-reboot`, and say in the commit exactly what
   changed in run.sh; the box runs it before merging.
 - **Moving the log ring past `_kernel_end`** (2026-10-02, Steve agreed):
   not yet. It changes the page allocator's view of RAM, so it lands with the
   restart wiring it serves, not before. 64 KiB in `.bss` is fine for now.
+- **The judge gaps from REVIEW-admin-host.md** (2026-10-02, Steve agreed):
+  yes, fix findings 1 and 2 in `judge_gopher.py`. The judge must read the
+  host's free-space figure and fail on one that is unreadable or wrong, and
+  must ask for `/admin/host` anonymously and as a non-admin and expect the
+  refusal. Findings 3-4 wait for the restart wiring.
+- **`tz=UTC` on `run.sh`'s three vfat mounts** (2026-10-02, Steve agreed):
+  yes, the same as `judge_gopher`, so every vfat mount on the box reads
+  timestamps one way. Say in the commit which mounts changed.
 
 ## Proposed
 
