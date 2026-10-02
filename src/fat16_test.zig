@@ -630,3 +630,77 @@ test "a volume mkfs.vfat and mtools made: the check's verdict is the oracle's" {
     }
     try dir.writeFile(io, .{ .sub_path = "judged.txt", .data = judged.items });
 }
+
+// ---- a directory at FAT's limit (QUEUE item 9) -----------------------------
+
+/// Makes `path` a directory of `clusters` clusters with every entry in use:
+/// "." and "..", then empty files F0000000, F0000001, ..., one 8.3 entry
+/// each. Laid straight onto the disk, in both FATs: writing 65,536 names
+/// through fat16.zig would scan the directory from its start for each one.
+fn fullDirectory(d: *test_disk.Disk, cached: bool, path: []const u8, clusters: usize) !void {
+    const first = try d.vol.makePath(path);
+    const l = Layout.of(d.bytes);
+    try testing.expectEqual(@as(u8, 1), d.bytes[13]); // one sector a cluster, below
+    const fat = struct {
+        fn get(bytes: []const u8, at: Layout, c: usize) u16 {
+            return std.mem.readInt(u16, bytes[at.fat_start + c * 2 ..][0..2], .little);
+        }
+        fn set(bytes: []u8, at: Layout, c: usize, v: u16) void {
+            for (0..2) |copy| std.mem.writeInt(u16, bytes[at.fat_start + copy * at.fat_bytes + c * 2 ..][0..2], v, .little);
+        }
+    };
+    var last: usize = first;
+    var candidate: usize = 2;
+    for (1..clusters) |_| {
+        while (fat.get(d.bytes, l, candidate) != 0) candidate += 1;
+        fat.set(d.bytes, l, last, @intCast(candidate));
+        fat.set(d.bytes, l, candidate, 0xFFFF);
+        last = candidate;
+    }
+    var name: u32 = 0;
+    var c: usize = first;
+    for (0..clusters) |k| {
+        const sector = d.bytes[(l.data_sector + c - 2) * test_disk.sector ..][0..test_disk.sector];
+        for (0..test_disk.sector / 32) |slot| {
+            if (k == 0 and slot < 2) continue; // "." and ".."
+            const e = sector[slot * 32 ..][0..32];
+            @memset(e, 0);
+            _ = std.fmt.bufPrint(e[0..8], "F{X:0>7}", .{name}) catch unreachable;
+            @memset(e[8..11], ' ');
+            e[11] = 0x20; // an archive bit: a plain file
+            name += 1;
+        }
+        c = fat.get(d.bytes, l, c);
+    }
+    try d.mount(cached);
+}
+
+test "a directory grows to FAT's limit of 65,536 entries, and no further" {
+    for (both) |cached| {
+        const d = try Disk.make("dirlimit", small, cached);
+        defer d.deinit();
+        const per_cluster = test_disk.sector / 32;
+        const limit = fat16.Volume.max_dir_entries / per_cluster; // 4,096 clusters
+        // One cluster short of the limit, and full: the next name grows it
+        // to exactly the limit.
+        try fullDirectory(d, cached, "data/big", limit - 1);
+        try d.vol.writeFile("data/big/one-more.md", "fits");
+        try d.expectFile("data/big/one-more.md", "fits");
+        var chain: [4200]u16 = undefined;
+        try testing.expectEqual(limit, chainOf(d, (try d.vol.open("data/big")).first_cluster, &chain).len);
+        // "one-more.md" took two of the new cluster's sixteen entries (a long
+        // part and the short entry); seven more such names take the other
+        // fourteen, and then the directory is full.
+        var path: [64]u8 = undefined;
+        for (0..7) |k| try d.vol.writeFile(try std.fmt.bufPrint(&path, "data/big/more-{d}.md", .{k}), "x");
+        const before = d.free();
+        try testing.expectError(fat16.Error.DirectoryFull, d.vol.writeFile("data/big/past-the-limit.md", "x"));
+        try testing.expectEqual(before, d.free());
+        try testing.expectEqual(limit, chainOf(d, (try d.vol.open("data/big")).first_cluster, &chain).len);
+        // Every name in it is still found, the first laid down and the last.
+        _ = try d.vol.open("data/big/F0000000");
+        _ = try d.vol.open("data/big/more-6.md");
+        // Other directories still grow.
+        try d.vol.writeFile("data/small/x", "x");
+    }
+}
