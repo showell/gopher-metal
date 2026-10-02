@@ -8,6 +8,7 @@ const port = @import("port.zig");
 const screen = @import("screen.zig");
 const log_ring = @import("log_ring.zig");
 const restart = @import("restart.zig");
+const serial_gate = @import("serial_gate.zig");
 pub const outb = port.outb;
 pub const inb = port.inb;
 
@@ -22,12 +23,22 @@ pub fn init() void {
     screen.attach();
 }
 
-/// **A PORT NOBODY DRAINS MUST NOT HANG THE MACHINE.** A droplet's serial
-/// port goes to DigitalOcean, which may or may not read it; if its
-/// transmitter stays full for 100,000 reads, the port is given up on for the
-/// rest of the boot and the screen carries on alone.
-var serial_dead = false;
+/// **A PORT NOBODY DRAINS MUST NOT HANG THE MACHINE** (serial_gate.zig). A
+/// droplet's serial port goes to DigitalOcean, which may or may not read it;
+/// if its transmitter stays full for 100,000 reads, the port is skipped,
+/// one status read per write, until it drains, and then told how much of the
+/// log it missed. The screen and the ring have every byte meanwhile.
+var gate: serial_gate.Gate = .{};
 const patience: u32 = 100_000;
+
+const Com1 = struct {
+    pub fn ready(_: Com1) bool {
+        return inb(com1 + 5) & 0x20 != 0;
+    }
+    pub fn write(_: Com1, b: u8) void {
+        outb(com1, b);
+    }
+};
 
 /// **THE LAST 64 KiB OF THE LOG, FOR A STATUS PAGE TO SERVE** (log_ring.zig),
 /// with secrets taken out on the way in. The port and the screen still get
@@ -53,18 +64,7 @@ pub fn put(bytes: []const u8) void {
 /// interrupted `screen.put` part-way, whose state it must not touch.
 pub fn putPort(bytes: []const u8) void {
     if (@import("builtin").is_test) return captureForTest(bytes);
-    if (serial_dead) return;
-    for (bytes) |b| {
-        var waited: u32 = 0;
-        while (inb(com1 + 5) & 0x20 == 0) {
-            waited += 1;
-            if (waited == patience) {
-                serial_dead = true;
-                return;
-            }
-        }
-        outb(com1, b);
-    }
+    gate.send(bytes, Com1{}, patience);
 }
 
 pub fn putDec(v: u64) void {
