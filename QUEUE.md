@@ -1064,6 +1064,78 @@ rehearsal on prod's copy. **Before 70-74.***
 
 *(CC writes here; the box Claude or Steve answers under Answers.)*
 
+### CC check-in 14, 2026-10-02 (last seen: gopher-metal `master` `206a6f4`, angry-gopher `master` `d2aefc5e`; CC's angry-gopher branch at `5fd6654e`)
+
+**70-74 are done.** The quick tier passes on both hosts, with this
+branch's head and angry-gopher `5fd6654e`. **75 is next**: I have read
+it, and Steve's note on running as root.
+
+**This changes `gates.sh` and `probe/run.sh` (item 72), as CLOUD.md asks
+me to say.** The defaults behave as before. The one difference: each chat
+judge's scratch is now `~/build/gopher-metal/probe-MACHINE`. Verdicts are
+still copied to `$VERDICTS/gopher-MACHINE.verdict`.
+
+- **70:** CUTOVER.md is the entry point. It opens with a table of the
+  other pages: what each is for, and when it is needed.
+  - "Before the day" step 3 is now `droplet/rehearse.sh COPY --fat 32
+    --gib N`.
+  - MIGRATION.md is the background to steps 2-5. Its own copy of the
+    procedure, which still said FAT16, is gone.
+  - Corrected where pages said things that are no longer true:
+    - fat16 does stop at 65,536 entries;
+    - RESTART.md's body said "nothing is wired";
+    - FAT32.md said "not yet code".
+  - Your "Rehearsed again" section is kept as you wrote it, over my
+    shorter one. Its "step 7" now points at CUTOVER.md's step 8, since
+    MIGRATION no longer numbers steps.
+- **71: the back-off was never the slow part.** backoff.elf already waits
+  a second for each minute, 1 s in all. The time was `reset.pause`, a
+  fixed spin of 50 million `pause` instructions after each method that
+  does not restart. On microvm that is two per restart, eight per run.
+  - **Fix:** the pause is a measured 100 ms on the calibrated clock, and
+    the old spin only when the clock is not running. Linux waits 50 µs.
+  - **No test schedule was added:** with the pause fixed it saves no
+    time, and it would be one more setting that must never reach a
+    deployed image.
+  - **Under TCG:** `run.sh backoff` 100.9 s → 22.4 s; `run.sh restart`
+    30.6 s → 11.1 s. Both still report every method correctly.
+- **72:** `GATES_PARALLEL=1`, off by default. Both judges each ran the
+  whole quick tier side by side here and passed: 242 s for the two, where
+  one alone takes about 155 s. **Please measure it under KVM** before
+  making it the default, as the item says.
+- **73:** six commits on angry-gopher, one per module. Nothing deleted was
+  reachable: the compiler confirms each.
+  - **What went:**
+    - unused imports in chat_conv, chat_links and users;
+    - `edge.get`;
+    - player.zig's `cookie_name` and `cookie_max_age`, replaced by
+      uid_cookie;
+    - `session_meta.createdAt`;
+    - `users.isNameReserved`, called only by its own test. That test now
+      asks `findMemberByName` the same three things.
+  - There is no `files.zig` any more.
+  - **What stayed:** the remaining declarations only tests reach are
+    deliberate test helpers.
+  - **Not run here:** `ops/check` stops at the Elm suite in this
+    container, before and after these commits, because the Elm tools are
+    not installed. `zig build test` (703/703), `ops/check_zig` and
+    `ops/check_chat` were green at each commit.
+- **74:** each probe timed under TCG. Every `run.sh` run first pays
+  about 10 s for the judges' own tests. Above that:
+  - **clock** was 32 s: four boots, each with a fixed 4 s spin. It is now
+    a measured 0.1 s, and `run.sh clock` went from 42 s to 28 s. What is
+    left is waiting for RTC second edges, about 4 s a boot. Those are
+    events, so they stay.
+  - **backoff and restart:** as in 71.
+  - **The rest** are a few seconds or less.
+  - The fixture probes cannot run here, so their times are not known.
+
+**Gate requests:**
+- `GATES_PARALLEL=1` under KVM: the clock gate and the timing stories;
+- the probes' new times under KVM;
+- still open: `droplet/clock_boots.sh 360` under KVM, and
+  `JUDGE_MOUNT=1`.
+
 ### CC check-in 13, 2026-10-02 (last seen: gopher-metal `master` `72f6ef6`, angry-gopher `master` `841c6b1d`; CC's angry-gopher branch at `d2aefc5e`)
 
 **67-69 are done.** The quick tier passes on both hosts, on this branch's
