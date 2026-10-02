@@ -267,6 +267,12 @@ const Client = struct {
     time_wait_until: ?i96 = null,
     done_at: ?i96 = null,
 
+    /// Bytes ahead of a hole, by their offset from RCV.NXT, waiting for it
+    /// to fill; and where the table's FIN is, once one has been seen.
+    held: [client_buffer]u8 = undefined,
+    held_mask: [client_buffer]bool = @splat(false),
+    fin_at: ?u32 = null,
+
     const base_rto_ns: i96 = 300 * ns_per_ms;
     const max_rto_ns: i96 = 8 * ns_per_s;
     const max_persist_ns: i96 = 60 * ns_per_s;
@@ -275,6 +281,11 @@ const Client = struct {
 
     fn init(iss: u32) Client {
         return .{ .iss = iss, .snd_una = iss, .snd_nxt = iss, .snd_max = iss };
+    }
+
+    /// Whether anything is held past a hole.
+    fn holding(self: *const Client) bool {
+        return std.mem.indexOfScalar(bool, &self.held_mask, true) != null;
     }
 
     fn window(self: *const Client) u32 {
@@ -550,8 +561,11 @@ const Client = struct {
             }
         }
 
-        // Seventh, the text: in order only (holding later segments is a MAY).
-        var all_taken = true;
+        // Seventh, the text. Segments ahead of a hole are held, as Linux
+        // holds them (RFC 9293 makes it a MAY), and a hole is reported, and
+        // its filling acknowledged, at once (RFC 5681 §4.2).
+        if (flags & tcp.flag_fin != 0) self.fin_at = seq +% @as(u32, @intCast(data.len));
+        var at_once = false;
         if (data.len > 0) {
             const takes = self.state == .established or self.state == .fin_wait_1 or self.state == .fin_wait_2;
             if (!takes) {
@@ -559,46 +573,69 @@ const Client = struct {
                 sim.fault("the table sent text after its FIN");
                 return;
             }
-            if (seq != self.rcv_nxt) return self.sendAck(sim);
-            const n = @min(data.len, client_buffer - self.unread);
-            for (data[0..n], self.received..) |b, k| {
-                if (k >= sim.sc.answer_len or b != answerByte(k)) {
-                    sim.fault("the client took a byte that is not the next byte of the answer");
-                    return;
-                }
+            // Where the segment's bytes go, relative to RCV.NXT: a segment
+            // that straddles it has its old part skipped.
+            var skip: usize = 0;
+            var at: usize = 0;
+            if (seqLt(seq, self.rcv_nxt)) {
+                skip = self.rcv_nxt -% seq;
+            } else at = seq -% self.rcv_nxt;
+            const room = self.window();
+            const had_hole = self.holding();
+            if (at > 0) at_once = true; // out of order: a duplicate ACK now
+            for (data[@min(skip, data.len)..], at..) |b, pos| {
+                if (pos >= room) break;
+                self.held[pos] = b;
+                self.held_mask[pos] = true;
             }
-            self.received += n;
-            self.unread += n;
-            self.rcv_nxt +%= @intCast(n);
-            all_taken = n == data.len;
+            var n: usize = 0;
+            while (n < room and self.held_mask[n]) n += 1;
+            if (n > 0) {
+                for (self.held[0..n], self.received..) |b, k| {
+                    if (k >= sim.sc.answer_len or b != answerByte(k)) {
+                        sim.fault("the client took a byte that is not the next byte of the answer");
+                        return;
+                    }
+                }
+                self.received += n;
+                self.unread += n;
+                self.rcv_nxt +%= @intCast(n);
+                std.mem.copyForwards(u8, self.held[0 .. client_buffer - n], self.held[n..]);
+                std.mem.copyForwards(bool, self.held_mask[0 .. client_buffer - n], self.held_mask[n..]);
+                @memset(self.held_mask[client_buffer - n ..], false);
+                if (had_hole or self.holding()) at_once = true; // a hole filled, or one left
+            }
+            if (data.len > skip and skip + (room -| at) < data.len) at_once = true; // some did not fit
             self.ack_owed += 1;
-            if (!all_taken or self.ack_owed >= 2) {
+            if (at_once or self.ack_owed >= 2) {
                 self.sendAck(sim);
             } else if (self.delack_at == null) {
                 self.delack_at = sim.now + sim.sc.delayed_ack_ns;
             }
         }
 
-        // Eighth, the FIN.
-        if (flags & tcp.flag_fin != 0 and all_taken and seq +% @as(u32, @intCast(data.len)) == self.rcv_nxt) {
-            self.rcv_nxt +%= 1;
-            self.peer_fin = true;
-            switch (self.state) {
-                .established => {
-                    self.state = .close_wait;
-                    self.fin_wanted = true;
-                },
-                .fin_wait_1 => self.state = .closing,
-                .fin_wait_2 => {
-                    self.state = .time_wait;
-                    self.time_wait_until = sim.now + time_wait_ns;
-                },
-                else => {},
+        // Eighth, the FIN, once everything before it has been taken.
+        if (self.fin_at) |fin_seq| {
+            if (!self.peer_fin and fin_seq == self.rcv_nxt) {
+                self.rcv_nxt +%= 1;
+                self.peer_fin = true;
+                switch (self.state) {
+                    .established => {
+                        self.state = .close_wait;
+                        self.fin_wanted = true;
+                    },
+                    .fin_wait_1 => self.state = .closing,
+                    .fin_wait_2 => {
+                        self.state = .time_wait;
+                        self.time_wait_until = sim.now + time_wait_ns;
+                    },
+                    else => {},
+                }
+                self.sendAck(sim);
+            } else if (!self.peer_fin and flags & tcp.flag_fin != 0) {
+                // A FIN ahead of a hole: say what is missing.
+                self.sendAck(sim);
             }
-            self.sendAck(sim);
-        } else if (flags & tcp.flag_fin != 0 and data.len == 0) {
-            // A FIN ahead of a hole: say what is missing.
-            self.sendAck(sim);
         }
         self.output(sim);
     }
@@ -872,7 +909,16 @@ pub fn runSeed(seed: u64) !void {
 
 /// The seeds `zig build test` runs. A seed that once failed and was fixed
 /// stays here, named, as a regression test.
-const seeds = [_]u64{ 1, 2, 3, 4, 5, 6, 7, 8 };
+const seeds = [_]u64{
+    1, 2, 3, 4, 5, 6, 7, 8,
+    // A half-closed client: the table re-marked a window as owed after the
+    // peer's FIN, every turn it sent data (fixed in tcp.zig's emit).
+    125,
+    // Heavy reordering, when this client took segments in order only: every
+    // round ended on the 5 s backed-off timer, and Karn's rule threw away the
+    // round's only sample. The client now holds segments past a hole.
+    1332,
+};
 
 test "the table against a simulated network and an RFC 9293 client, a handful of seeds" {
     for (seeds) |seed| try runSeed(seed);
