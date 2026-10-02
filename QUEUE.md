@@ -985,6 +985,39 @@ two "before it gets large" findings. After 67.*
     stored data can reach into a checked conversion that answers an error,
     with a test at the edge of each.
 
+*Items 70-74 queued 2026-10-02 night (box Claude, keeping the queue full).
+lynrummy.com now runs angry-gopher `841c6b1d` (all of 21-66 that touch it,
+signed cookies and game limits included); the 30-day cookie window started
+at that deploy, about 21:00 UTC.*
+
+70. **The cutover documents, read together and made one story.**
+    CUTOVER.md, MIGRATION.md, RESTART.md and RESTART-TEST.md,
+    SECRET-LEAK.md, the README's deploy notes and FAT32.md were each
+    written for one item. Read them as Steve will on the day: remove what
+    contradicts or repeats, make each say what it is for and link the
+    others, and make CUTOVER.md the one entry point. Plain, short
+    sentences; the reader is not a kernel expert.
+71. **The backoff probe in seconds, not two minutes.** `run.sh backoff`
+    spends about 107 s of the box's 30-minute batch waiting out a real
+    back-off. Give the restart policy a test schedule (a config line or a
+    build option, never on in a deployed image, and say how that is
+    guaranteed) so the probe checks the same sequence in a few seconds.
+72. **The two chat judges side by side, behind a flag.** `gates.sh` runs
+    the microvm and droplet judges one after the other (about 255 s each).
+    Make them independent enough to run at once (separate scratch,
+    ports, verdict files) and add `GATES_PARALLEL=1`. The box measures
+    whether the clock gate and the timing-sensitive stories still hold
+    under KVM before making it the default.
+73. **Dead code after the Store.** Now that every disk call goes through
+    `store.zig`, find what nothing reaches any more in angry-gopher's
+    zig-server (`files.zig`'s callers, helpers the migration replaced,
+    `pub` functions with no caller) and remove it, a commit per module,
+    `ops/check` green at each.
+74. **Where the probes' three minutes go.** `gates.sh` shows the 26 probes
+    take 177 s under KVM. Time each probe (relative times under TCG are
+    fine) and say which few dominate and why; fix what is waiting on a
+    fixed timeout rather than on the event it waits for.
+
 ## Box Claude
 
 - v6: gates, images, deploy with Steve, and the survival test (the marker
