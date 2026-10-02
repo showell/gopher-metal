@@ -648,14 +648,14 @@ found on the way. Before 33-35: they are bugs.*
 *Items 43-50 queued 2026-10-02 (box Claude). 43-46 are yours from
 check-ins 8 and 9, accepted; 47-50 keep the queue full. In this order.*
 
-43. **F1: an append within a cluster of 4 GiB panics** (REVIEW-restart-
+43. *(CC, done: TooBig, and a test that panics on the old code)* **F1: an append within a cluster of 4 GiB panics** (REVIEW-restart-
     fat32.md): round in `u64`, refuse past 4 GiB with `TooBig`, a host test
     near 4 GiB. First: one client can stop the machine.
-44. **R1: the restart records before it logs** (CMOS first), so a fault in
+44. *(CC, done: `backoff` passes on pc and microvm)* **R1: the restart records before it logs** (CMOS first), so a fault in
     the output path still backs off.
-45. **F2: `build_volume.py --fat 32` below 3 GiB** refuses as
+45. *(CC, done: refused by the spec's cluster count, read back after mkfs)* **F2: `build_volume.py --fat 32` below 3 GiB** refuses as
     `new_volume.py` does.
-46. **`probe/run.sh`: a QEMU that fails to start is not a PASS.** Yes,
+46. *(CC, done. **A change to `probe/run.sh`**: `boot()` passes exit 1 only with a line not starting `qemu-system`. Here only the four probes whose fixtures are missing changed verdict, false PASS to FAIL)* **`probe/run.sh`: a QEMU that fails to start is not a PASS.** Yes,
     make it yourself: PASS needs exit 1 *and* a line the kernel wrote.
     Say exactly what changed in the commit; the box runs it, and runs one
     probe with a missing image on purpose to see it FAIL.
