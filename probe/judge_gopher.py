@@ -266,6 +266,32 @@ CAP_STORY = [step(f"new game {n + 1}", "POST", "/game/new-session", P1_SIGNED, C
 ]
 
 
+# **LYN RUMMY, ON BOTH** (QUEUE.md item 49). Metal serves the games too. A
+# player arrives by name, starts a game and makes moves, starts a puzzle and
+# moves in it, reloads both, and the admin's roster shows them. The files
+# they write are compared at the end, as chat's are.
+GAME_STATE = "hand:\n  AS KD 7H\nboard:\n  (empty)\n"
+LYNRUMMY_STORY = [
+    step("a player names themselves", "POST", "/play", None, "name=Lyn&next=%2Fgame"),
+    step("the game page", "GET", "/game", JAR),
+    step("a new game", "POST", "/game/new-session", JAR, GAME_STATE),
+    step("a move", "POST", "/game/sessions/1/actions", JAR, "1) draw"),
+    step("another move", "POST", "/game/sessions/1/actions", JAR, "2) meld AS KD"),
+    step("an annotation", "POST", "/game/sessions/1/annotations", JAR, '{"note":"a good meld"}'),
+    step("the game, reloaded", "GET", "/game/1", JAR),
+    step("its state and moves, for the reload", "GET", "/game/sessions/1/actions", JAR),
+    step("the player's games", "GET", "/game/sessions", JAR),
+    step("the same, as JSON", "GET", "/game/api/sessions", JAR),
+    step("the game's detail", "GET", "/game/sessions/1", JAR),
+    step("a game never made", "POST", "/game/sessions/9/actions", JAR, "1) draw"),
+    step("the puzzles page", "GET", "/puzzles", JAR),
+    step("a puzzle's first move", "POST", "/puzzles/sessions/1/puzzles/0/actions", JAR, "1) move"),
+    step("its second", "POST", "/puzzles/sessions/1/puzzles/0/actions", JAR, "2) move"),
+    step("the puzzles page, reloaded", "GET", "/puzzles", JAR),
+    step("the game roster", "GET", "/admin/lynrummy", FRESH),
+]
+
+
 # ENDURANCE: the writes, over and over, READ BACK EVERY ROUND.
 #
 # **STAMINA BELOW ONLY READS, AND A READ CANNOT LOSE ANYTHING.** Three GETs
@@ -609,7 +635,7 @@ QUICK = bool(os.environ.get("JUDGE_QUICK"))
 # answerable in one of those minutes. `JUDGE_ONLY=uploads` (probe/run.sh gopher
 # uploads) runs that gate and nothing else. An unknown name is an error, not a
 # silently complete run.
-GATES = ["cases", "members", "uids", "caps", "streams-linux", "streams-metal", "budget", "churn",
+GATES = ["cases", "members", "uids", "caps", "lynrummy", "streams-linux", "streams-metal", "budget", "churn",
          "bulk", "uploads", "slow", "lagging", "concurrent", "timeouts",
          "damaged", "endurance", "stamina"]
 # The boots that exist to be long. The quick tier leaves them out; asking for
@@ -2730,6 +2756,42 @@ def main() -> int:
             print(f"ok    the cap story: {saved} games of 250,000 bytes saved and the next "
                   f"{CAP_TRIES - saved} refused (507, saying why) on both hosts alike, all {files} files agree")
         lap("cap story")
+
+    # ── Lyn Rummy ────────────────────────────────────────────────────────────
+    if running("lynrummy"):
+        minted = {FRESH: mint_session("1", int(time.time()))}
+        f, _, answers, files = run_story(elf, linux_bin, content, pristine, work, mnt,
+                                         LYNRUMMY_STORY, "lynrummy", print, minted)
+        failures += f
+        # As each step's name says, not merely alike on both.
+        by_name = {s["name"]: a for s, a in zip(LYNRUMMY_STORY, answers)}
+        body = lambda name: by_name[name].get("body") or b""
+        want = {"a player names themselves": 303, "the game page": 200, "a new game": 200,
+                "a move": 204, "another move": 204, "an annotation": 204, "the game, reloaded": 200,
+                "its state and moves, for the reload": 200, "the player's games": 200,
+                "the same, as JSON": 200, "the game's detail": 200, "a game never made": 404,
+                "the puzzles page": 200, "a puzzle's first move": 204, "its second": 204,
+                "the puzzles page, reloaded": 200, "the game roster": 200}
+        wrong = [f"{name} answered {by_name[name].get('status')}, want {st}"
+                 for name, st in want.items() if by_name[name].get("status") != st]
+        if not wrong:
+            if body("a new game") != b'{"session_id":1}\n':
+                wrong.append(f"the new game answered {body('a new game')!r}")
+            reload = body("its state and moves, for the reload")
+            if b"hand:" not in reload or not reload.endswith(b"---\n1) draw\n2) meld AS KD\n"):
+                wrong.append(f"the reload is not the state and both moves: {reload[-80:]!r}")
+            if b"session_id: 1\\n" not in body("the puzzles page") or b"session_id: 2\\n" not in body("the puzzles page, reloaded"):
+                wrong.append("the puzzles page did not offer session 1, then 2 after a move")
+            if b"Lyn" not in body("the game roster"):
+                wrong.append("the roster does not show the player")
+        for w in wrong:
+            failures += 1
+            print(f"FAIL  lynrummy: {w}")
+        if not f and not wrong:
+            print(f"ok    the Lyn Rummy story: {len(LYNRUMMY_STORY)} requests to ONE boot — a name, a game "
+                  f"and its moves, a puzzle and its moves, both reloaded, the roster — each answered as "
+                  f"Linux answered, all {files} files agree")
+        lap("Lyn Rummy story")
 
     # ── a live stream, on both ───────────────────────────────────────────────
     if running("streams-linux"):
