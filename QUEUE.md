@@ -115,9 +115,13 @@ in order. The box Claude reorders on `master`, and CC proposes at the bottom.
   UTC, so today's results should not move; I will confirm that in the
   gates.
 - **Folding case for session ids and channel names in angry-gopher:** not
-  yet. That is an application change and Steve's call. First the box Claude
-  runs `check_volume_tree.py` on a copy of prod's data, to see whether any
-  real names collide. Leave it under Proposed.
+  yet. Steve (2026-10-02): no strong opinion; he prefers case-sensitive when
+  all else is equal, and accepts that FAT makes it unequal. The box Claude's
+  recommendation is case-insensitive identity with the case preserved for
+  display: a new name that differs from an existing one only in case is
+  refused or resolves to it. First the box Claude runs
+  `check_volume_tree.py` on a copy of prod's data, to see whether any real
+  names collide; then Steve decides. Leave it under Proposed.
 - **Merging:** items 1-5 (12 commits) will be merged and gated on the box
   after the status-page gates finish. Items 8-12 are queued above.
 
