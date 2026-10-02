@@ -148,6 +148,14 @@ FRESH = "$FRESH"      # minted when the story starts: must be honored
 STALE = "$STALE"      # minted 400 days back: must be refused
 FORGED = "$FORGED"    # a fresh one with the MAC of another id: must be refused
 MEMBER2 = "$MEMBER2"  # a fresh, honest session for uid 2, a member who is not the admin
+FORGED_UID = "$FORGED_UID"  # gopher_uid for p1, signed with another secret: must be no one
+
+
+def mint_uid(uid: str, issued: int, secret: bytes = SESSION_SECRET) -> str:
+    """A signed gopher_uid made HERE, in uid_cookie.zig's format: a label of
+    its own, so no session's MAC passes as one."""
+    mac = hmac.new(secret, f"gopher_uid\n{uid}\n{issued}".encode(), hashlib.sha256).digest()
+    return f"gopher_uid={uid}.{issued}.{base64.urlsafe_b64encode(mac).rstrip(b'=').decode()}"
 
 MEMBER_STORY = [
     step("chat, anonymous", "GET", "/chat"),
@@ -217,6 +225,29 @@ MEMBER_STORY = [
     step("still serving after garbage", "GET", "/nope"),
     step("a connection that says nothing", "RAW", "-", raw=b""),
     step("still serving after silence", "GET", "/chat"),
+]
+
+
+# **GOPHER_UID, SIGNED** (QUEUE.md item 51, DESIGN-signed-uid.md). The cookie
+# that names a player was set in the clear, so whoever set it by hand was that
+# player, or that guest. Now it is signed, and an unsigned one from before is
+# re-signed once, on its owner's first GET, inside a window. The forged
+# requests come FIRST, while the window is open and p1 not yet signed: the
+# hole at its widest. A POST is never the re-signing, so they are no one.
+UPGRADE_HEADING = b"Set a password to use chat"
+
+UID_STORY = [
+    step("a release with an unsigned cookie, before its owner's visit", "POST", "/logout",
+         "gopher_uid=p1", "release=yes"),
+    step("a guest upgrade with an unsigned cookie", "POST", "/login/full", "gopher_uid=7",
+         "name=Gus&password=forged&action=login&next=%2F"),
+    step("a member's id, hand-set", "GET", "/play", "gopher_uid=1"),
+    step("a signature from another secret", "GET", "/play", FORGED_UID),
+    step("a player names themselves", "POST", "/play", None, "name=Debbie&next=%2Fplay"),
+    step("and is that player, signed", "GET", "/play", JAR),
+    step("a legacy cookie's first visit is re-signed", "GET", "/play?next=/play", "gopher_uid=p1"),
+    step("and the re-signed cookie is that player", "GET", "/play", JAR),
+    step("the same unsigned cookie again is no one", "GET", "/play", "gopher_uid=p1"),
 ]
 
 
@@ -295,7 +326,14 @@ def stage(root: str, gopher_root: str) -> None:
     write(root, "auth/next-id.txt", "3\n")
     with open(os.path.join(root, "data/chat/_session_secret"), "wb") as f:
         f.write(SESSION_SECRET)
-    write(root, "data/players/next-id.txt", "1\n")
+    write(root, "data/players/next-id.txt", "2\n")
+    # **COOKIES FROM BEFORE THEY WERE SIGNED** (QUEUE.md item 51): a player
+    # and a guest from then, and the window for re-signing their unsigned
+    # cookies open (until 2100). This is a site before its cutover; CUTOVER.md
+    # closes the window on the copy metal serves.
+    write(root, "data/players/p1/name", "Nikhil")
+    write(root, "auth/7/name", "Gus")
+    write(root, "data/players/unsigned-window", "4102444800\n")
     # One finished game and one puzzle session for player 1, at a fixed time.
     write(root, f"{GAME1}/lynrummy-elm/sessions/1/meta",
           f"created_at: {STAGED_TIME}\nlabel: staged\n\nboard: the judge's fixture\n")
@@ -556,7 +594,7 @@ QUICK = bool(os.environ.get("JUDGE_QUICK"))
 # answerable in one of those minutes. `JUDGE_ONLY=uploads` (probe/run.sh gopher
 # uploads) runs that gate and nothing else. An unknown name is an error, not a
 # silently complete run.
-GATES = ["cases", "members", "streams-linux", "streams-metal", "budget", "churn",
+GATES = ["cases", "members", "uids", "streams-linux", "streams-metal", "budget", "churn",
          "bulk", "uploads", "slow", "lagging", "concurrent", "timeouts",
          "damaged", "endurance", "stamina"]
 # The boots that exist to be long. The quick tier leaves them out; asking for
@@ -1184,7 +1222,7 @@ def read_or_none(path: str):
 def cookie_from(answer: dict, jar):
     """The gopher_uid a response set, or the jar unchanged."""
     sc = answer.get("headers", {}).get("set-cookie", "")
-    m = re.search(r"(gopher_uid=[A-Za-z0-9]+)", sc)
+    m = re.search(r"(gopher_uid=[A-Za-z0-9._-]+)", sc)
     return m.group(1) if m else jar
 
 
@@ -2605,6 +2643,48 @@ def main() -> int:
                   f"and the kernel's own session honored by Linux")
 
         lap("member story")
+
+    # ── gopher_uid, signed ───────────────────────────────────────────────────
+    if running("uids"):
+        minted = {FORGED_UID: mint_uid("p1", int(time.time()), b"another secret, as long as the judge's own")}
+        f, _, answers, files = run_story(elf, linux_bin, content, pristine, work, mnt,
+                                         UID_STORY, "uids", print, minted)
+        failures += f
+        # As each step's name says, not merely alike: two hosts that both
+        # honoured a forged cookie would agree.
+        by_name = {s["name"]: a for s, a in zip(UID_STORY, answers)}
+        playing = lambda a, who: f"Currently playing as <strong>{who}</strong>".encode() in (a.get("body") or b"")
+        set_uid = lambda a: re.search(r"gopher_uid=([^;]*)", a.get("headers", {}).get("set-cookie", ""))
+        wrong = []
+        upgrade = by_name["a guest upgrade with an unsigned cookie"]
+        if upgrade.get("status") != 200 or UPGRADE_HEADING in (upgrade.get("body") or b""):
+            wrong.append(f"the guest upgrade answered {upgrade.get('status')}, not the stranger's form")
+        for name, who in (("a member's id, hand-set", "Steve"), ("a signature from another secret", "Nikhil"),
+                          ("the same unsigned cookie again is no one", "Nikhil")):
+            if playing(by_name[name], who) or set_uid(by_name[name]):
+                wrong.append(f"{name}: answered as {who}, or set a cookie")
+        named = set_uid(by_name["a player names themselves"])
+        if not named or named.group(1).count(".") != 2:
+            wrong.append(f"naming oneself set {named.group(0) if named else 'no cookie'}, not a signed one")
+        if not playing(by_name["and is that player, signed"], "Debbie"):
+            wrong.append("the signed cookie /play set did not name its player")
+        first = by_name["a legacy cookie's first visit is re-signed"]
+        resigned = set_uid(first)
+        if first.get("status") != 303 or not resigned or not resigned.group(1).startswith("p1."):
+            wrong.append(f"the legacy cookie's first visit answered {first.get('status')}, "
+                         f"setting {resigned.group(0) if resigned else 'nothing'}: not re-signed "
+                         "(and so p1 did not survive the forged release)")
+        if not playing(by_name["and the re-signed cookie is that player"], "Nikhil"):
+            wrong.append("the re-signed cookie did not name p1")
+        for w in wrong:
+            failures += 1
+            print(f"FAIL  uids: {w}")
+        if not f and not wrong:
+            print(f"ok    the uid story: {len(UID_STORY)} requests to ONE boot, each answered as Linux "
+                  f"answered, all {files} files agree; a forged release and a forged guest upgrade did "
+                  f"nothing, a hand-set and a wrongly signed cookie named no one, and a legacy cookie "
+                  f"was re-signed once and refused after")
+        lap("uid story")
 
     # ── a live stream, on both ───────────────────────────────────────────────
     if running("streams-linux"):
