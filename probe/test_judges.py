@@ -155,6 +155,23 @@ class Cookies(unittest.TestCase):
         self.assertEqual(G.cookie_from(a, None), "gopher_uid=p1")
         self.assertEqual(G.cookie_from(a, "gopher_uid=9"), "gopher_uid=p1")
 
+    def test_a_signed_uid_is_kept_whole(self):
+        a = {"headers": {"set-cookie": "gopher_uid=p1.1790000000.ab-c_d; Path=/; HttpOnly"}}
+        self.assertEqual(G.cookie_from(a, None), "gopher_uid=p1.1790000000.ab-c_d")
+
+    def test_mint_uid_is_uid_cookie_zigs_format(self):
+        # uid_cookie.zig's frozen vector: the judge's mint and the server's
+        # sign must agree, or every minted cookie would be refused alike.
+        self.assertEqual(G.mint_uid("p3", 1790000000, b"a secret of thirty-two bytes or more, for tests"),
+                         "gopher_uid=p3.1790000000.BTTIGQI3slTgQ_iFwX0DSWx8EhfbUkaIsSuUFfQayP4")
+
+    def test_a_signed_uid_normalizes_like_a_session(self):
+        w = (1790000000, 1790000001)
+        one = G.normalize(G.mint_uid("p1", 1790000000).encode(), w)
+        two = G.normalize(G.mint_uid("p1", 1790000001).encode(), w)
+        self.assertEqual(one, two)
+        self.assertEqual(one, b"gopher_uid=p1.<NOW>.<MAC>")
+
     def test_no_set_cookie_keeps_the_jar(self):
         self.assertEqual(G.cookie_from({"headers": {}}, "gopher_uid=p2"), "gopher_uid=p2")
         self.assertIsNone(G.cookie_from({"error": "refused"}, None))
