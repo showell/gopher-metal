@@ -809,6 +809,25 @@ and GROWTH-game-store.md. After 43-46, before 47-50: they close holes.*
     prod's, from item 39) to what it checks, and say how a failure shows.
     Tested locally against two servers, one stopped.
 
+    **Done (CC), 53-56:**
+    - 53: REVIEW-signed-uid-and-limits.md. The worst three:
+      - inside the window, one GET per id signs every legacy player, and
+        now locks the owner out;
+      - the re-sign's redirect echoes the request target (measured:
+        `//evil.example/x`);
+      - the marker is written before the cookie arrives, so one lost
+        answer loses a player.
+      Nothing fixed, per the shape.
+    - 54: angry-gopher `9f3124f4`. lint_portable refuses `Io.Dir.cwd()`
+      outside store.zig in the route table's reach. A test's own private
+      helpers are exempt (Zig compiles them only for tests), and 9 new
+      tests cover it.
+    - 55: `droplet/RESTART-TEST.md`.
+    - 56: angry-gopher `7313d43d`. The watchdog's `metal` and
+      `metal-clock` checks, with `deploy/test_watchdog.py`. **It needs
+      `~/metal-url` on prod**, one line with metal's private address,
+      which CC did not write.
+
 *Items 57-61 queued 2026-10-02 evening (box Claude, keeping the queue
 full). After 53 and 55.*
 
@@ -869,6 +888,29 @@ full). After 53 and 55.*
 ## Questions
 
 *(CC writes here; the box Claude or Steve answers under Answers.)*
+
+### CC check-in 10, 2026-10-02 (last seen: gopher-metal `master` `ccce8df`, angry-gopher `master` `4e776903`; CC's angry-gopher branch at `7313d43d`)
+
+**51, 52, 47-50 and 53-56 are done**, each noted at its item. CC's queue
+is empty. What is yours:
+1. **Run the judge**: `uids`, `caps` and `lynrummy` are new gates, and the
+   staging changed (p1, guest 7, players' next-id 2). CC rehearsed each
+   story against Linux alone; it has no loop mount. The judge's Linux side
+   now runs with `GOPHER_GAME_FLOOR=off` (item 52's note says why).
+2. **Before metal serves anyone through Caddy:** write
+   `droplet/trusted-proxy` (prod's private address), or 5 new players an
+   hour is the whole site's. Also `~/metal-url` on prod, for the
+   watchdog.
+3. **Item 50 found and fixed a machine stop:** metal's directory
+   iterator halted the machine at a folder's 257th entry. That is
+   reachable: item 52 allows 500 sessions in one folder, and the players
+   folder is unbounded. Worth a boot and the full judge on that commit
+   (`io: a directory is listed by a cursor`).
+4. **Prod's Caddyfile has no `log` directive**, so there is nothing for
+   `replay.py` (item 48) to read until one is added.
+5. Item 53's findings 1-3 are small fixes, if you want them queued: a
+   per-address count on re-signs, a sanitized redirect, and marking the
+   id on its first signed use.
 
 ### CC check-in 9, 2026-10-02 (last seen: gopher-metal `master` `ea8b567`, angry-gopher `master` `44575ee1`; CC's angry-gopher branch at `30350218`)
 
