@@ -578,7 +578,7 @@ Answers below carry the detail. In this order:
 *Items 33-35 queued 2026-10-02 (box Claude, keeping the queue full): the
 cutover itself. After 32, before 18.*
 
-33. **`CUTOVER.md`: the day, step by step, and the way back.** From
+33. **`CUTOVER.md`: the day, step by step, and the way back.** *(CC, done)* From
     MIGRATION.md, the rehearsal and RESTART.md: freeze writes on prod
     (how, and for how long); the copy; check, build (FAT32 by then),
     compare; writing the DigitalOcean volume from the recovery console
