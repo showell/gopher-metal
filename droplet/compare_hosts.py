@@ -116,7 +116,11 @@ def ask(base: str, path: str, cookie: str, netns: str = None, extra: list = ()) 
     cmd = ["curl", "-sS", "-o", "-", "-w", "\n%{http_code}", "-H", f"Cookie: {cookie}", *extra,
            base.rstrip("/") + path]
     if netns:
+        # Root for the namespace alone (QUEUE.md item 75): through `sudo -n`
+        # when this is not root. curl writes nothing but its output.
         cmd = ["ip", "netns", "exec", netns] + cmd
+        if os.geteuid() != 0:
+            cmd = ["sudo", "-n"] + cmd
     r = subprocess.run(cmd, capture_output=True)
     if r.returncode != 0:
         return ("no answer", b"")

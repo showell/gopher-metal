@@ -28,10 +28,19 @@ only read. For each FAT kind (both, unless `--fat` names one):
 
 It prints counts and anonymised labels only, as the tools it runs do:
 nothing from the copy is named. It stops every process it started and
-removes the namespace and every file it made, whatever happens.
+removes the namespace and every file it made, whatever happens. A run that
+is killed outright (the OOM killer, SIGKILL) cannot; its scratch is under
+`~/build/gopher-metal/rehearse/` (or `$REHEARSE_SCRATCH`), and the next run
+removes it, and its namespace, and says so.
 
-Needs: sgdisk, mkfs.vfat, mtools, fsck.fat, qemu-system-x86_64, ip (and
-sudo -n for `--mount`, root for `ip netns`). Uses KVM when /dev/kvm is
+**Run it as yourself.** It uses root only through `sudo -n`: for `ip
+netns`, and for the loop mount of `--mount`. What runs inside the namespace
+runs as you again, so every file it leaves is yours. Run as root, it works
+the same, but a `zig build` it causes (image.sh) would then leave
+root-owned files in `.zig-cache`.
+
+Needs: sgdisk, mkfs.vfat, mtools, fsck.fat, qemu-system-x86_64, ip,
+setpriv. Uses KVM when /dev/kvm is
 usable and says when it is not (`ACCEL=tcg`: slow, but the same machine).
 
 Exit 0 when every step is GO for every kind, 1 at the first NO-GO, 2 for a
@@ -55,8 +64,61 @@ import judge_gopher as G  # noqa: E402
 
 GOPHER_ROOT = os.environ.get("GOPHER_ROOT", os.path.expanduser("~/showell_repos/angry-gopher"))
 ELF = os.path.join(ROOT, "probe", "gopher.elf")
-NETNS = f"gm-rehearse-{os.getpid()}"
+NETNS_PREFIX = "gm-rehearse-"
+NETNS = f"{NETNS_PREFIX}{os.getpid()}"
 LINUX_PORT = 9101
+# **ONE FOLDER FOR EVERY RUN'S SCRATCH** (QUEUE.md item 75), so a run killed
+# before its `finally` (the OOM killer, a SIGKILL) leaves its volume, built
+# from prod's data, where the next run finds it and removes it.
+SCRATCH = os.environ.get("REHEARSE_SCRATCH", os.path.expanduser("~/build/gopher-metal/rehearse"))
+
+
+# **AS THE USER, WITH ROOT ONLY FOR THE NAMESPACE** (QUEUE.md item 75). Run as
+# root, a zig build here would leave root-owned files in .zig-cache; run as
+# the user, `ip netns` needs root. So `ip` alone goes through `sudo -n`, and
+# what runs inside the namespace is dropped back to this user (setpriv), so
+# the files the Linux server writes are this user's. Run as root, both are
+# plain calls, as before.
+def as_root(cmd: list) -> list:
+    return cmd if os.geteuid() == 0 else ["sudo", "-n", *cmd]
+
+
+def in_netns(cmd: list, env: dict = None) -> list:
+    """`cmd` inside this run's namespace, as this user, with `env` set: sudo
+    starts it with a clean environment, so what it needs is named."""
+    drop = [] if os.geteuid() == 0 else ["setpriv", f"--reuid={os.getuid()}", f"--regid={os.getgid()}",
+                                          "--clear-groups", "--"]
+    pre = ["env", *(f"{k}={v}" for k, v in env.items())] if env else []
+    return as_root(["ip", "netns", "exec", NETNS, *drop, *pre, *cmd])
+
+
+def pid_alive(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
+def clear_leftovers() -> list:
+    """Removes the scratch folders and namespaces of runs that are no longer
+    running (named by their pid), and says what it removed."""
+    said = []
+    os.makedirs(SCRATCH, exist_ok=True)
+    for name in sorted(os.listdir(SCRATCH)):
+        pid = name.rsplit("-", 1)[-1]
+        if name.startswith("rehearse-") and pid.isdigit() and not pid_alive(int(pid)):
+            shutil.rmtree(os.path.join(SCRATCH, name), ignore_errors=True)
+            said.append(f"scratch {name}")
+    listed = subprocess.run(["ip", "netns", "list"], capture_output=True, text=True).stdout.split()
+    for ns in listed:
+        pid = ns[len(NETNS_PREFIX):]
+        if ns.startswith(NETNS_PREFIX) and pid.isdigit() and not pid_alive(int(pid)):
+            subprocess.run(as_root(["ip", "netns", "del", ns]), capture_output=True)
+            said.append(f"namespace {ns}")
+    return said
 DEFAULT_GIB = {16: 1, 32: 3}  # FAT32 needs 65,525 clusters: 3 GiB at 32 KiB
 
 
@@ -124,7 +186,7 @@ class Started:
                     p.wait()
         self.procs = []
         if self.netns:
-            subprocess.run(["ip", "netns", "del", self.netns], capture_output=True)
+            subprocess.run(as_root(["ip", "netns", "del", self.netns]), capture_output=True)
             self.netns = None
 
 
@@ -176,20 +238,22 @@ def start_linux(started: Started, scratch: str, copy: str) -> None:
     binary = os.path.join(GOPHER_ROOT, "zig-server", "zig-out", "bin", "zig-server")
     if not os.path.isfile(binary):
         raise NoGo(f"no Linux build at {binary}: run `zig build` in zig-server/")
-    for cmd in (["ip", "netns", "add", NETNS], ["ip", "netns", "exec", NETNS, "ip", "link", "set", "lo", "up"]):
+    for cmd in (as_root(["ip", "netns", "add", NETNS]), as_root(["ip", "netns", "exec", NETNS, "ip", "link", "set", "lo", "up"])):
         r = subprocess.run(cmd, capture_output=True, text=True)
         if r.returncode != 0:
             raise NoGo(f"`{' '.join(cmd[:4])}` failed: {r.stderr.strip()}")
         started.netns = NETNS
-    env = dict(os.environ, GOPHER_CONFIG=os.path.join(root, "gopher.conf"), GOPHER_PORT=str(LINUX_PORT),
-               GOPHER_BIND="127.0.0.1", GOPHER_GAME_FLOOR="off")
+    env = {"GOPHER_CONFIG": os.path.join(root, "gopher.conf"), "GOPHER_PORT": str(LINUX_PORT),
+           "GOPHER_BIND": "127.0.0.1", "GOPHER_GAME_FLOOR": "off", "HOME": os.path.expanduser("~"),
+           "PATH": os.environ.get("PATH", "/usr/bin:/bin")}
     log = open(os.path.join(scratch, "linux.log"), "wb")
-    p = subprocess.Popen(["ip", "netns", "exec", NETNS, binary], cwd=root, env=env, stdout=log, stderr=log)
+    p = subprocess.Popen(in_netns(["sh", "-c", 'cd "$0" && exec "$1"', root, binary], env), cwd=root,
+                         stdout=log, stderr=log)
     started.procs.append(p)
     deadline = time.time() + 30
     while time.time() < deadline:
-        r = subprocess.run(["ip", "netns", "exec", NETNS, "curl", "-s", "-o", "/dev/null", "-w", "%{http_code}",
-                            f"http://127.0.0.1:{LINUX_PORT}/version"], capture_output=True, text=True)
+        r = subprocess.run(in_netns(["curl", "-s", "-o", "/dev/null", "-w", "%{http_code}",
+                                     f"http://127.0.0.1:{LINUX_PORT}/version"]), capture_output=True, text=True)
         if r.stdout == "200":
             say("Linux", "GO", f"serving another copy inside namespace {NETNS}, on its loopback only")
             return
@@ -224,7 +288,8 @@ def rehearse(copy: str, fat: int, gib: int, mount: bool, writes: bool) -> None:
         raise NoGo("the copy")
     say("check the copy", "GO", f"{summary['files']} files, {summary['directories']} folders, nothing found")
     started = Started()
-    scratch = tempfile.mkdtemp(prefix="rehearse-")
+    scratch = os.path.join(SCRATCH, f"rehearse-{os.getpid()}")
+    os.makedirs(scratch)
     try:
         volume = os.path.join(scratch, "volume.img")
         try:
@@ -281,6 +346,12 @@ def main(argv) -> int:
     if not os.path.isfile(ELF):
         print(f"rehearse: no {ELF}: ./port.sh && zig build gopher")
         return 2
+    if os.geteuid() != 0 and subprocess.run(["sudo", "-n", "true"], capture_output=True).returncode != 0:
+        print("rehearse: the Linux server runs in a network namespace, which needs root: run as root, or "
+              "where `sudo -n` works")
+        return 2
+    for what in clear_leftovers():
+        print(f"rehearse: removed {what}, left by a run that was killed")
     signal.signal(signal.SIGTERM, lambda *_: sys.exit(1))  # so `finally` runs
     try:
         for fat in fats:
@@ -314,6 +385,11 @@ def self_test() -> int:
         os.makedirs(copy)
         for top in G.DATA_DIRS:
             shutil.copytree(os.path.join(site, top), os.path.join(copy, top))
+        # What a killed run leaves (QUEUE.md item 75): its scratch, and its
+        # namespace. A pid that cannot be running names them.
+        dead = os.path.join(SCRATCH, "rehearse-4194999")
+        os.makedirs(dead, exist_ok=True)
+        subprocess.run(as_root(["ip", "netns", "add", f"{NETNS_PREFIX}4194999"]), capture_output=True)
         whole = subprocess.run([sys.executable, __file__, copy], capture_output=True, text=True)
         print(whole.stdout, end="")
         bad = os.path.join(d, "bad")
@@ -331,6 +407,9 @@ def self_test() -> int:
         failures.append("the output names something from the copy")
     if "gm-rehearse-" in leftovers:
         failures.append("a namespace was left behind")
+    if os.path.exists(dead) or "removed scratch rehearse-4194999" not in whole.stdout \
+            or "removed namespace gm-rehearse-4194999" not in whole.stdout:
+        failures.append("a killed run's scratch and namespace were not removed, and said so")
     if failures:
         print("self-test FAILED:\n  " + "\n  ".join(failures))
         return 1
