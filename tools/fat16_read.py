@@ -529,7 +529,9 @@ def foreign_volumes(d, kind="FAT16"):
 
 def make_foreign(out):
     """Writes foreign_volumes' images into `out`, for fat16.zig's own check
-    to judge: healthy-mtools.img, and damaged-mtools-<kind>.img."""
+    to judge: for FAT16 and for FAT32, healthy-mtools<kind>.img and
+    damaged-mtools<kind>-<damage>.img. A change that must still check clean
+    (FAT32's reserved bits) is named healthy- too."""
     missing = [t for t in MTOOLS if shutil.which(t) is None]
     if missing:
         print(f"cannot make them: {', '.join(missing)} not installed "
@@ -537,12 +539,14 @@ def make_foreign(out):
         return 2
     os.makedirs(out, exist_ok=True)
     with tempfile.TemporaryDirectory() as d:
-        good, _, damages = foreign_volumes(d)
-        with open(os.path.join(out, "healthy-mtools.img"), "wb") as f:
-            f.write(good)
-        for name, _, img, _ in damages:
-            with open(os.path.join(out, f"damaged-mtools-{name}.img"), "wb") as f:
-                f.write(img)
+        for kind, tag in (("FAT16", ""), ("FAT32", "32")):
+            good, _, damages = foreign_volumes(d, kind)
+            with open(os.path.join(out, f"healthy-mtools{tag}.img"), "wb") as f:
+                f.write(good)
+            for name, _, img, want in damages:
+                state = "healthy" if want is None else "damaged"
+                with open(os.path.join(out, f"{state}-mtools{tag}-{name}.img"), "wb") as f:
+                    f.write(img)
     return 0
 
 

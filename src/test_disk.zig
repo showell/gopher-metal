@@ -1,4 +1,4 @@
-//! A FAT16 disk in memory, for host tests: formatted here from Microsoft's
+//! A FAT16 or FAT32 disk in memory, for host tests: formatted here from Microsoft's
 //! FAT specification (not by `fat16.zig`), served by `virtio.Block.inMemory`,
 //! and checked by reading its bytes directly where a check can be. Shared by
 //! `fat16_test.zig` and `io_test.zig`.
@@ -10,16 +10,80 @@ const fat16 = @import("fat16.zig");
 const testing = std.testing;
 pub const sector = 512;
 
-/// A FAT16 volume's shape, as `format` writes it.
+/// A volume's shape, as `format` writes it. The kind must be what the
+/// cluster count makes it (the spec decides by count): FAT32 needs 65,525
+/// clusters or more.
 pub const Shape = struct {
     sectors: u32,
     sectors_per_cluster: u8 = 1,
     root_entries: u16 = 512,
+    kind: fat16.Kind = .fat16,
+    /// Added to a kept image's name, so the two kinds' images of one test
+    /// do not overwrite each other.
+    suffix: []const u8 = "",
 };
 
-/// Lays a fresh FAT16 filesystem over all of `disk`: a BPB, two FATs whose
-/// first two entries are the media byte and an end mark, and an empty root.
+/// Lays a fresh filesystem of `shape.kind` over all of `disk`.
 pub fn format(disk: []u8, shape: Shape) void {
+    switch (shape.kind) {
+        .fat16 => format16(disk, shape),
+        .fat32 => format32(disk, shape),
+    }
+}
+
+/// FAT32, from the spec: 32 reserved sectors with FSInfo at 1 and the backup
+/// boot sector at 6 (its FSInfo copy at 7); no fixed root, so the root is
+/// cluster 2, a chain of one; two FATs of 4-byte entries, whose first three
+/// are the media mark, an end mark, and the root's end. FSInfo's free count
+/// and hint are "unknown", which the spec allows and Linux recomputes.
+fn format32(disk: []u8, shape: Shape) void {
+    @memset(disk, 0);
+    const reserved: u32 = 32;
+    const fat_sectors: u32 = ((shape.sectors / shape.sectors_per_cluster + 2) * 4 + sector - 1) / sector;
+    const b = disk[0..sector];
+    b[0] = 0xEB;
+    b[1] = 0x58;
+    b[2] = 0x90;
+    @memcpy(b[3..11], "MSWIN4.1");
+    std.mem.writeInt(u16, b[11..13], sector, .little);
+    b[13] = shape.sectors_per_cluster;
+    std.mem.writeInt(u16, b[14..16], @intCast(reserved), .little);
+    b[16] = 2;
+    // Root entries, the 16-bit total and the 16-bit FAT size are all 0.
+    b[21] = 0xF8;
+    std.mem.writeInt(u32, b[32..36], shape.sectors, .little);
+    std.mem.writeInt(u32, b[36..40], fat_sectors, .little);
+    std.mem.writeInt(u32, b[44..48], 2, .little); // the root's first cluster
+    std.mem.writeInt(u16, b[48..50], 1, .little); // FSInfo
+    std.mem.writeInt(u16, b[50..52], 6, .little); // the backup boot sector
+    b[64] = 0x80;
+    b[66] = 0x29;
+    std.mem.writeInt(u32, b[67..71], 0x3232_3232, .little);
+    @memcpy(b[71..82], "NO NAME    ");
+    @memcpy(b[82..90], "FAT32   ");
+    b[510] = 0x55;
+    b[511] = 0xAA;
+
+    const fsinfo = disk[sector..][0..sector];
+    std.mem.writeInt(u32, fsinfo[0..4], 0x4161_5252, .little);
+    std.mem.writeInt(u32, fsinfo[484..488], 0x6141_7272, .little);
+    std.mem.writeInt(u32, fsinfo[488..492], 0xFFFF_FFFF, .little);
+    std.mem.writeInt(u32, fsinfo[492..496], 0xFFFF_FFFF, .little);
+    std.mem.writeInt(u32, fsinfo[508..512], 0xAA55_0000, .little);
+    @memcpy(disk[6 * sector ..][0..sector], b);
+    @memcpy(disk[7 * sector ..][0..sector], fsinfo);
+
+    for (0..2) |copy| {
+        const fat = disk[(reserved + copy * fat_sectors) * sector ..];
+        std.mem.writeInt(u32, fat[0..4], 0x0FFF_FFF8, .little);
+        std.mem.writeInt(u32, fat[4..8], 0x0FFF_FFFF, .little);
+        std.mem.writeInt(u32, fat[8..12], 0x0FFF_FFFF, .little); // the root, one cluster
+    }
+}
+
+/// FAT16: a BPB, two FATs whose first two entries are the media byte and an
+/// end mark, and an empty root.
+fn format16(disk: []u8, shape: Shape) void {
     @memset(disk, 0);
     const reserved: u32 = 1;
     // A FAT large enough for every cluster the data region could hold, and a
@@ -56,27 +120,70 @@ pub fn format(disk: []u8, shape: Shape) void {
     }
 }
 
-/// What the BPB on a disk says, read from its bytes.
+/// What the BPB on a disk says, read from its bytes, and the FAT read and
+/// written the same way: from the spec, not through fat16.zig.
 pub const Layout = struct {
     fat_start: usize,
     fat_bytes: usize,
     clusters: usize,
     /// The sector cluster 2 starts at.
     data_sector: usize,
+    kind: fat16.Kind,
+    /// FAT32's root cluster; 0 on FAT16.
+    root_cluster: u32,
 
     pub fn of(disk: []const u8) Layout {
         const reserved = std.mem.readInt(u16, disk[14..16], .little);
-        const fat_sectors = std.mem.readInt(u16, disk[22..24], .little);
+        var fat_sectors: u32 = std.mem.readInt(u16, disk[22..24], .little);
+        if (fat_sectors == 0) fat_sectors = std.mem.readInt(u32, disk[36..40], .little);
         const root_entries = std.mem.readInt(u16, disk[17..19], .little);
         var total: u32 = std.mem.readInt(u16, disk[19..21], .little);
         if (total == 0) total = std.mem.readInt(u32, disk[32..36], .little);
-        const data_start = reserved + 2 * fat_sectors + (root_entries * 32 + sector - 1) / sector;
+        const data_start = reserved + 2 * fat_sectors + (@as(u32, root_entries) * 32 + sector - 1) / sector;
+        const clusters = (total - data_start) / disk[13];
+        const kind: fat16.Kind = if (clusters >= 65525) .fat32 else .fat16;
         return .{
             .fat_start = @as(usize, reserved) * sector,
             .fat_bytes = @as(usize, fat_sectors) * sector,
-            .clusters = (total - data_start) / disk[13],
+            .clusters = clusters,
             .data_sector = data_start,
+            .kind = kind,
+            .root_cluster = if (kind == .fat32) std.mem.readInt(u32, disk[44..48], .little) else 0,
         };
+    }
+
+    fn width(l: Layout) usize {
+        return if (l.kind == .fat32) 4 else 2;
+    }
+
+    /// FAT entry `c` in copy `copy`: on FAT32 its low 28 bits.
+    pub fn get(l: Layout, disk: []const u8, copy: usize, c: usize) u32 {
+        const at = l.fat_start + copy * l.fat_bytes + c * l.width();
+        return if (l.kind == .fat32)
+            std.mem.readInt(u32, disk[at..][0..4], .little) & 0x0FFF_FFFF
+        else
+            std.mem.readInt(u16, disk[at..][0..2], .little);
+    }
+
+    /// Sets FAT entry `c` in copy `copy` to exactly `v`, all 32 bits on FAT32.
+    pub fn set(l: Layout, disk: []u8, copy: usize, c: usize, v: u32) void {
+        const at = l.fat_start + copy * l.fat_bytes + c * l.width();
+        if (l.kind == .fat32)
+            std.mem.writeInt(u32, disk[at..][0..4], v, .little)
+        else
+            std.mem.writeInt(u16, disk[at..][0..2], @intCast(v), .little);
+    }
+
+    /// What a chain's last entry is written as, and the bad-cluster mark.
+    pub fn end(l: Layout) u32 {
+        return if (l.kind == .fat32) 0x0FFF_FFFF else 0xFFFF;
+    }
+    pub fn bad(l: Layout) u32 {
+        return if (l.kind == .fat32) 0x0FFF_FFF7 else 0xFFF7;
+    }
+    /// Whether `v` ends a chain.
+    pub fn ends(l: Layout, v: u32) bool {
+        return v >= (if (l.kind == .fat32) @as(u32, 0x0FFF_FFF8) else 0xFFF8);
     }
 };
 
@@ -86,6 +193,8 @@ pub const Disk = struct {
     /// images (-Dfat16-images): "damaged-" first for the ones a test broke on
     /// purpose, which a checker must find fault with.
     label: []const u8,
+    /// The shape's suffix, after the label in a kept image's name.
+    suffix: []const u8 = "",
     /// Where `deinit` writes the image; empty: nowhere.
     images_dir: []const u8 = "",
     bytes: []u8,
@@ -102,7 +211,7 @@ pub const Disk = struct {
         errdefer testing.allocator.destroy(d);
         const bytes = try testing.allocator.alloc(u8, @as(usize, shape.sectors) * sector);
         format(bytes, shape);
-        d.* = .{ .label = label, .bytes = bytes, .blk = virtio.Block.inMemory(bytes) };
+        d.* = .{ .label = label, .suffix = shape.suffix, .bytes = bytes, .blk = virtio.Block.inMemory(bytes) };
         try d.mount(cached);
         return d;
     }
@@ -143,12 +252,12 @@ pub const Disk = struct {
         defer dir.close(io);
         var name: [128]u8 = undefined;
         const held = if (d.fat_cache != null) "held" else "disk";
-        const file = try std.fmt.bufPrint(&name, "{s}-{s}.img", .{ d.label, held });
+        const file = try std.fmt.bufPrint(&name, "{s}{s}-{s}.img", .{ d.label, d.suffix, held });
         try dir.writeFile(io, .{ .sub_path = file, .data = d.bytes });
         // Beside it, the volume's kept free count, for tools/fat16_read.py to
         // count against (tools/check_fat16_images.sh).
         var count: [16]u8 = undefined;
-        const free_name = try std.fmt.bufPrint(&name, "{s}-{s}.free", .{ d.label, held });
+        const free_name = try std.fmt.bufPrint(&name, "{s}{s}-{s}.free", .{ d.label, d.suffix, held });
         try dir.writeFile(io, .{ .sub_path = free_name, .data = try std.fmt.bufPrint(&count, "{d}\n", .{d.vol.free_clusters}) });
     }
 
@@ -164,7 +273,7 @@ pub const Disk = struct {
         const l = Layout.of(d.bytes);
         var n: usize = 0;
         for (2..l.clusters + 2) |c| {
-            if (std.mem.readInt(u16, d.bytes[l.fat_start + c * 2 ..][0..2], .little) == 0) n += 1;
+            if (l.get(d.bytes, 0, c) == 0) n += 1;
         }
         return n;
     }
@@ -269,6 +378,10 @@ pub const Report = struct {
         }
     }
 };
+
+/// The smallest FAT32 there is, near enough: 68,874 clusters of 512 bytes
+/// (FAT32 needs 65,525), about 34 MiB.
+pub const small32 = Shape{ .sectors = 70_000, .kind = .fat32, .suffix = "-fat32" };
 
 /// 4 MiB of 512-byte clusters: about 8,000 clusters, well inside FAT16.
 pub const small = Shape{ .sectors = 8192 };

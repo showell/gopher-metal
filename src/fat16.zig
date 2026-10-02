@@ -35,7 +35,35 @@ const virtio = @import("virtio.zig");
 const civil = @import("civil.zig");
 
 pub const sector_size: u32 = 512;
-pub const Error = error{ NotFat16, BadBootSector, ReadFailed, WriteFailed, NotFound, TooBig, BadChain, BadName, Full, DirectoryFull, FatsDisagree };
+pub const Error = error{
+    NotFat16,
+    BadBootSector,
+    ReadFailed,
+    WriteFailed,
+    NotFound,
+    TooBig,
+    BadChain,
+    BadName,
+    Full,
+    DirectoryFull,
+    FatsDisagree,
+    /// FAT32 with mirroring off (BPB_ExtFlags bit 7): one FAT is live and the
+    /// rest stale, and this machine writes every copy (FAT32.md §3).
+    NotMirrored,
+    /// A FAT32 version this machine does not know (BPB_FSVer is not 0).
+    FatVersion,
+    /// A FAT32 root cluster outside the data region.
+    BadRoot,
+    /// A volume that runs past sector 2^32: this machine's sector numbers are
+    /// 32 bits (FAT32.md §10).
+    VolumeTooLarge,
+};
+
+/// **WHICH FAT A VOLUME IS**, decided as Microsoft's specification decides
+/// it: by its count of clusters, never by what the boot sector calls itself.
+/// Fewer than 4,085 is FAT12, which this machine does not take; fewer than
+/// 65,525 is FAT16; more is FAT32.
+pub const Kind = enum { fat16, fat32 };
 
 /// A directory entry as it sits on disk.
 const dirent_size: u32 = 32;
@@ -58,6 +86,10 @@ const chain_end: Cluster = 0xFFF8;
 /// The FAT's mark for a cluster the disk cannot hold data in. It is in use,
 /// by nothing, and is not a leak.
 const bad_cluster: Cluster = 0xFFF7;
+/// FAT32's: its entries are 28 bits, so its marks are too.
+const fat32_mask: Cluster = 0x0FFF_FFFF;
+const fat32_chain_end: Cluster = 0x0FFF_FFF8;
+const fat32_bad_cluster: Cluster = 0x0FFF_FFF7;
 
 fn le16(b: []const u8) u16 {
     return @as(u16, b[0]) | (@as(u16, b[1]) << 8);
@@ -197,6 +229,10 @@ pub const Problem = enum {
     /// "." is not its own directory, or ".." not its parent, or the root
     /// holds either.
     bad_dot,
+    /// FAT32's FSInfo says a free count (`count`) that is set and wrong, or
+    /// a next-free hint outside the data region (`cluster`): what fsck.fat
+    /// reports. Unknown (0xFFFFFFFF) is always right.
+    fsinfo,
     /// A directory deeper than the check walks. That is a limit of the
     /// check, not damage: nothing under it was checked, and since what it
     /// holds would look leaked, leaks were not looked for at all.
@@ -252,6 +288,18 @@ pub const Volume = struct {
     root_sectors: u32,
     root_entries: u32,
     data_start: u32,
+    kind: Kind = .fat16,
+    /// FAT32's root is a chain, from here. Cluster 0 still means "the root"
+    /// everywhere in this file's API, as a `..` entry spells it on both kinds;
+    /// `dirStart` turns it into this.
+    root_cluster: Cluster = 0,
+    /// FAT32's FSInfo sector, and the backup boot sector (its FSInfo copy is
+    /// the sector after it), relative to the volume.
+    fsinfo_sector: u32 = 0,
+    backup_boot: u32 = 0,
+    /// Whether this mount has marked FSInfo's free count and next-free hint
+    /// unknown yet: done on the first change to the FAT (FAT32.md §7).
+    fsinfo_unknown: bool = false,
     /// The highest cluster number the data region holds.
     max_cluster: Cluster,
     /// **HOW MANY CLUSTERS ARE FREE, KEPT** (QUEUE.md item 14): counted once
@@ -333,27 +381,45 @@ pub const Volume = struct {
         const reserved: u32 = le16(b[14..16]);
         const num_fats: u32 = b[16];
         const root_entries: u32 = le16(b[17..19]);
-        const sectors_per_fat: u32 = le16(b[22..24]);
+        const fat16_sectors: u32 = le16(b[22..24]);
+        const sectors_per_fat: u32 = if (fat16_sectors != 0) fat16_sectors else le32(b[36..40]);
         var total: u32 = le16(b[19..21]);
         if (total == 0) total = le32(b[32..36]);
 
         if (bytes_per_sector != sector_size) return Error.NotFat16;
         if (sectors_per_cluster == 0 or sectors_per_cluster > 128) return Error.BadBootSector;
         if (reserved == 0 or num_fats == 0 or num_fats > 2) return Error.BadBootSector;
-        if (root_entries == 0 or sectors_per_fat == 0) return Error.BadBootSector;
+        if (sectors_per_fat == 0) return Error.BadBootSector;
+        // Sector numbers here are 32 bits, the volume's own and the disk's.
+        if (@as(u64, start_lba) + total > 0xFFFF_FFFF) return Error.VolumeTooLarge;
 
-        const root_start = reserved + num_fats * sectors_per_fat;
+        const root_start = std.math.add(u32, reserved, std.math.mul(u32, num_fats, sectors_per_fat) catch
+            return Error.BadBootSector) catch return Error.BadBootSector;
         const root_sectors = (root_entries * dirent_size + sector_size - 1) / sector_size;
         const data_start = root_start + root_sectors;
         if (total == 0 or data_start >= total) return Error.BadBootSector;
 
-        // FAT16 is defined by how many clusters the data region holds, not by
-        // anything the boot sector says about itself.
+        // The kind is how many clusters the data region holds, not anything
+        // the boot sector says about itself.
         const clusters = (total - data_start) / sectors_per_cluster;
-        if (clusters < 4085 or clusters >= 65525) return Error.NotFat16;
+        if (clusters < 4085) return Error.NotFat16;
+        const kind: Kind = if (clusters < 65525) .fat16 else .fat32;
+        var root_cluster: Cluster = 0;
+        switch (kind) {
+            .fat16 => if (root_entries == 0) return Error.BadBootSector,
+            .fat32 => {
+                // FAT32's own fields, checked like every other (FAT32.md §3).
+                if (root_entries != 0 or fat16_sectors != 0) return Error.BadBootSector;
+                if (le16(b[40..42]) & 0x80 != 0) return Error.NotMirrored;
+                if (le16(b[42..44]) != 0) return Error.FatVersion;
+                root_cluster = le32(b[44..48]);
+                if (root_cluster < 2 or root_cluster > clusters + 1) return Error.BadRoot;
+            },
+        }
         // A FAT too short for the clusters it describes would have `fatGet`
         // read past its end, into the next copy or the root.
-        if (sectors_per_fat * (sector_size / 2) < clusters + 2) return Error.BadBootSector;
+        const entry_bytes: u32 = if (kind == .fat32) 4 else 2;
+        if (@as(u64, sectors_per_fat) * (sector_size / entry_bytes) < @as(u64, clusters) + 2) return Error.BadBootSector;
 
         var vol: Volume = .{
             .blk = blk,
@@ -368,8 +434,16 @@ pub const Volume = struct {
             .root_sectors = root_sectors,
             .root_entries = root_entries,
             .data_start = data_start,
-            // 0x29 says the extended boot record, and with it the serial, is there.
-            .serial = if (b[38] == 0x29) le32(b[39..43]) else null,
+            .kind = kind,
+            .root_cluster = root_cluster,
+            .fsinfo_sector = if (kind == .fat32) le16(b[48..50]) else 0,
+            .backup_boot = if (kind == .fat32) le16(b[50..52]) else 0,
+            // 0x29 says the extended boot record, and with it the serial, is
+            // there: at 38 on FAT16, at 66 on FAT32.
+            .serial = switch (kind) {
+                .fat16 => if (b[38] == 0x29) le32(b[39..43]) else null,
+                .fat32 => if (b[66] == 0x29) le32(b[67..71]) else null,
+            },
         };
         vol.free_clusters = try vol.countFree();
         return vol;
@@ -380,17 +454,65 @@ pub const Volume = struct {
     fn countFree(self: *Volume) Error!u32 {
         var free: u32 = 0;
         var s: u32 = 0;
+        const per = self.entriesPerSector();
         while (s < self.sectors_per_fat) : (s += 1) {
             try self.readSector(self.fat_start + s, self.scratch);
             var i: u32 = 0;
-            while (i < sector_size / 2) : (i += 1) {
-                const c = s * (sector_size / 2) + i;
+            while (i < per) : (i += 1) {
+                const c = s * per + i;
                 if (c < 2) continue;
                 if (c > self.max_cluster) return free;
-                if (le16(self.scratch[i * 2 ..][0..2]) == 0) free += 1;
+                if (self.entryIn(self.scratch, i) == 0) free += 1;
             }
         }
         return free;
+    }
+
+    /// Bytes a FAT entry takes: 2 on FAT16, 4 on FAT32.
+    fn entryBytes(self: *const Volume) u32 {
+        return if (self.kind == .fat32) 4 else 2;
+    }
+
+    fn entriesPerSector(self: *const Volume) u32 {
+        return sector_size / self.entryBytes();
+    }
+
+    /// The `i`th FAT entry in a sector of the FAT: its value, which on FAT32
+    /// is the low 28 bits (the top four are reserved).
+    fn entryIn(self: *const Volume, sector: []const u8, i: u32) Cluster {
+        return switch (self.kind) {
+            .fat16 => le16(sector[i * 2 ..][0..2]),
+            .fat32 => le32(sector[i * 4 ..][0..4]) & fat32_mask,
+        };
+    }
+
+    /// The first value that ends a chain, on this kind.
+    fn chainEndValue(self: *const Volume) Cluster {
+        return if (self.kind == .fat32) fat32_chain_end else chain_end;
+    }
+
+    /// What a chain's last entry is written as.
+    fn endMark(self: *const Volume) Cluster {
+        return if (self.kind == .fat32) 0x0FFF_FFFF else 0xFFFF;
+    }
+
+    fn badMark(self: *const Volume) Cluster {
+        return if (self.kind == .fat32) fat32_bad_cluster else bad_cluster;
+    }
+
+    /// The cluster a directory starts at: on FAT32, cluster 0 (the root, as
+    /// this file's API and a `..` entry spell it) is `root_cluster`.
+    fn dirStart(self: *const Volume, dir_cluster: Cluster) Cluster {
+        return if (dir_cluster == 0 and self.kind == .fat32) self.root_cluster else dir_cluster;
+    }
+
+    /// An entry decoded, with FAT32's high cluster half (bytes 20..22). On
+    /// FAT16 those bytes belonged to OS/2's extended attributes, and are not a
+    /// cluster.
+    fn entryFrom(self: *const Volume, e: []const u8) Entry {
+        var entry = decode(e);
+        if (self.kind == .fat32) entry.first_cluster |= @as(Cluster, le16(e[20..22])) << 16;
+        return entry;
     }
 
     fn readSector(self: *Volume, lba: u32, into: *[sector_size]u8) Error!void {
@@ -425,7 +547,7 @@ pub const Volume = struct {
     /// mark, which nothing should be chained through.
     fn nextCluster(self: *Volume, cluster: Cluster) Error!?Cluster {
         const v = try self.fatGet(cluster);
-        if (v >= chain_end) return null;
+        if (v >= self.chainEndValue()) return null;
         if (!self.inData(v)) return Error.BadChain;
         return v;
     }
@@ -477,15 +599,17 @@ pub const Volume = struct {
         loop: Loop = .{},
 
         fn start(vol: *Volume, dir_cluster: Cluster) Error!Walk {
-            if (dir_cluster != 0 and !vol.inData(dir_cluster)) return Error.BadChain;
+            // FAT32's root is a chain like any other directory's.
+            const first = vol.dirStart(dir_cluster);
+            if (first != 0 and !vol.inData(first)) return Error.BadChain;
             return .{
                 .vol = vol,
-                .root = dir_cluster == 0,
-                .cluster = dir_cluster,
-                .lba = if (dir_cluster == 0) vol.root_start else vol.clusterSector(dir_cluster),
+                .root = first == 0,
+                .cluster = first,
+                .lba = if (first == 0) vol.root_start else vol.clusterSector(first),
                 .left_in_root = vol.root_sectors,
-                // As `pass(dir_cluster)` leaves it.
-                .loop = .{ .seen = dir_cluster, .power = 2 },
+                // As `pass(first)` leaves it.
+                .loop = .{ .seen = first, .power = 2 },
             };
         }
 
@@ -545,7 +669,7 @@ pub const Volume = struct {
                     long_ok = false;
                     continue;
                 }
-                var entry = decode(e);
+                var entry = self.entryFrom(e);
                 entry.lba = walk.lba;
                 entry.slot = @intCast(at);
                 // **THE CHECKSUM IS WHAT TIES A LONG NAME TO ITS ENTRY.** A run
@@ -630,26 +754,44 @@ pub const Volume = struct {
 
     /// The FAT entry for a cluster.
     fn fatGet(self: *Volume, cluster: Cluster) Error!Cluster {
-        const at = @as(u32, cluster) * 2;
-        if (self.fat) |fat| return le16(fat[at..][0..2]);
+        const width = self.entryBytes();
+        const at = @as(u32, cluster) * width;
+        if (self.fat) |fat| return self.entryIn(fat[at - at % sector_size ..][0..sector_size], at % sector_size / width);
         try self.readSector(self.fat_start + at / sector_size, self.scratch);
-        return le16(self.scratch[at % sector_size ..][0..2]);
+        return self.entryIn(self.scratch, at % sector_size / width);
+    }
+
+    /// Puts `value` into the entry at byte `at` of a FAT sector. **On FAT32
+    /// the top four bits of the entry are kept**: the spec reserves them, and
+    /// another tool may have set them (FAT32.md §4).
+    fn putEntry(self: *const Volume, sector: []u8, at: u32, value: Cluster) void {
+        switch (self.kind) {
+            .fat16 => {
+                sector[at] = @truncate(value);
+                sector[at + 1] = @truncate(value >> 8);
+            },
+            .fat32 => {
+                const kept = le32(sector[at..][0..4]) & ~fat32_mask;
+                std.mem.writeInt(u32, sector[at..][0..4], kept | (value & fat32_mask), .little);
+            },
+        }
     }
 
     /// Sets the FAT entry for a cluster, **in every copy of the FAT**. A
     /// volume whose second FAT disagrees with its first is one that other
     /// tools will quietly repair, or quietly believe.
     fn fatSet(self: *Volume, cluster: Cluster, value: Cluster) Error!void {
-        const at = @as(u32, cluster) * 2;
+        try self.forgetFsInfo();
+        const width = self.entryBytes();
+        const at = @as(u32, cluster) * width;
         const in_sector = at / sector_size;
         if (self.fat) |fat| {
             // The cached sector is the truth — cacheFat checked every copy
             // agreed with it — so it is written to each copy whole, and no
             // copy is read back first.
-            self.keepCount(le16(fat[at..][0..2]), value);
-            fat[at] = @truncate(value);
-            fat[at + 1] = @truncate(value >> 8);
             const sector = fat[in_sector * sector_size ..][0..sector_size];
+            self.keepCount(self.entryIn(sector, at % sector_size / width), value);
+            self.putEntry(sector, at % sector_size, value);
             var c: u32 = 0;
             while (c < self.num_fats) : (c += 1) {
                 try self.writeSector(self.fat_start + c * self.sectors_per_fat + in_sector, sector);
@@ -661,9 +803,26 @@ pub const Volume = struct {
             const lba = self.fat_start + copy * self.sectors_per_fat + in_sector;
             try self.readSector(lba, self.scratch);
             // The first copy is the one every read here follows.
-            if (copy == 0) self.keepCount(le16(self.scratch[at % sector_size ..][0..2]), value);
-            self.scratch[at % sector_size] = @truncate(value);
-            self.scratch[at % sector_size + 1] = @truncate(value >> 8);
+            if (copy == 0) self.keepCount(self.entryIn(self.scratch, at % sector_size / width), value);
+            self.putEntry(self.scratch, at % sector_size, value);
+            try self.writeSector(lba, self.scratch);
+        }
+    }
+
+    /// **FSINFO'S FREE COUNT AND NEXT-FREE HINT, MARKED UNKNOWN** on the first
+    /// change to a FAT32 volume's FAT after mount, in FSInfo and in the backup
+    /// boot sector's copy of it (FAT32.md §7). Both are hints, which Linux
+    /// recomputes when they say 0xFFFFFFFF; one left set and wrong is what
+    /// fsck.fat reports. One sector write a copy, once a mount.
+    fn forgetFsInfo(self: *Volume) Error!void {
+        if (self.kind != .fat32 or self.fsinfo_unknown) return;
+        self.fsinfo_unknown = true;
+        for ([_]u32{ self.fsinfo_sector, self.backup_boot + 1 }) |lba| {
+            if (lba == 0 or lba >= self.fat_start) continue; // no such sector in the reserved area
+            try self.readSector(lba, self.scratch);
+            if (le32(self.scratch[0..4]) != 0x4161_5252 or le32(self.scratch[484..488]) != 0x6141_7272) continue;
+            std.mem.writeInt(u32, self.scratch[488..492], 0xFFFF_FFFF, .little);
+            std.mem.writeInt(u32, self.scratch[492..496], 0xFFFF_FFFF, .little);
             try self.writeSector(lba, self.scratch);
         }
     }
@@ -699,7 +858,7 @@ pub const Volume = struct {
                 candidate += 1;
                 continue;
             }
-            try self.fatSet(candidate, 0xFFFF); // the end, until something follows
+            try self.fatSet(candidate, self.endMark()); // the end, until something follows
             if (previous != 0) try self.fatSet(previous, candidate);
             if (first == 0) first = candidate;
             previous = candidate;
@@ -773,14 +932,14 @@ pub const Volume = struct {
         // **THE ROOT DIRECTORY CANNOT GROW.** On FAT16 it is a fixed run of
         // sectors sized when the volume was made, which is the one hard limit
         // this filesystem has that a caller can hit in normal use.
-        if (dir_cluster == 0) return Error.DirectoryFull;
+        if (dir_cluster == 0 and self.kind == .fat16) return Error.DirectoryFull;
         try self.grow(dir_cluster);
         return self.findRun(dir_cluster, needed);
     }
 
     /// Adds one zeroed cluster to the end of a directory's chain.
     fn grow(self: *Volume, dir_cluster: Cluster) Error!void {
-        const end = try self.chainEnd(dir_cluster);
+        const end = try self.chainEnd(self.dirStart(dir_cluster));
         // **FAT'S LIMIT ON A DIRECTORY: 65,536 ENTRIES**, 2 MiB. Past it
         // fsck.fat calls the directory broken, and Linux, which would have to
         // read the volume after this machine wrote it, may refuse it. So a
@@ -876,7 +1035,7 @@ pub const Volume = struct {
                     continue;
                 }
 
-                var entry = decode(e);
+                var entry = self.entryFrom(e);
                 const has_long = long_ok and long_len > 0 and long_sum == shortChecksum(e[0..11].*);
                 if (has_long) {
                     entry.long_len = @intCast(@min(long_len, entry.long.len));
@@ -974,8 +1133,7 @@ pub const Volume = struct {
         putDos(e[14..18], when); // creation time, creation date
         putLe16(e[18..20], when.date); // last access date
         putDos(e[22..26], when); // write time, write date
-        e[26] = @truncate(first);
-        e[27] = @truncate(first >> 8);
+        putCluster(e, first);
         e[28] = @truncate(size);
         e[29] = @truncate(size >> 8);
         e[30] = @truncate(size >> 16);
@@ -1096,13 +1254,11 @@ pub const Volume = struct {
         const dot = self.scratch[0..dirent_size];
         @memcpy(dot[0..11], ".          ");
         dot[11] = attr_directory;
-        dot[26] = @truncate(cluster);
-        dot[27] = @truncate(cluster >> 8);
+        putCluster(dot, cluster);
         const dotdot = self.scratch[dirent_size..][0..dirent_size];
         @memcpy(dotdot[0..11], "..         ");
         dotdot[11] = attr_directory;
-        dotdot[26] = @truncate(dir_cluster);
-        dotdot[27] = @truncate(dir_cluster >> 8);
+        putCluster(dotdot, dir_cluster);
         try self.writeSector(self.clusterSector(cluster), self.scratch);
 
         const short = try self.aliasFor(dir_cluster, name);
@@ -1314,8 +1470,7 @@ pub const Volume = struct {
         const when = self.stamp();
         putDos(e[22..26], when);
         putLe16(e[18..20], when.date);
-        e[26] = @truncate(first_cluster);
-        e[27] = @truncate(first_cluster >> 8);
+        putCluster(e, first_cluster);
         e[28] = @truncate(size);
         e[29] = @truncate(size >> 8);
         e[30] = @truncate(size >> 16);
@@ -1459,7 +1614,9 @@ pub const Volume = struct {
         const len = self.checkBytes();
         @memset(seen[0..len], 0);
         var c = Checker(@TypeOf(context), each){ .vol = self, .seen = seen[0..len], .context = context };
-        try c.directory(0, 0, 0, 0);
+        // FAT32's root is a chain, held like any directory's.
+        const root_clusters: u32 = if (self.kind == .fat32) try c.chain(self.root_cluster, null) else 0;
+        if (self.kind == .fat16 or root_clusters > 0) try c.directory(0, 0, root_clusters, 0);
         try c.fatOnDisk();
         return c.health;
     }
@@ -1522,7 +1679,7 @@ pub const Volume = struct {
                     }
                     n += 1;
                     const next = try v.fatGet(cluster);
-                    if (next >= chain_end) break;
+                    if (next >= v.chainEndValue()) break;
                     if (!v.inData(next)) {
                         // Into a free cluster, past the last one, or into the
                         // bad-cluster mark. `cluster` is the last one held.
@@ -1563,11 +1720,13 @@ pub const Volume = struct {
                 var long_sum: u8 = 0;
                 var long_ok = false;
 
-                const sectors: u32 = if (cluster == 0) v.root_sectors else clusters * v.sectors_per_cluster;
-                var at_cluster = cluster;
+                // Only FAT16's root is a fixed run; FAT32's is a chain.
+                const fixed_root = cluster == 0 and v.kind == .fat16;
+                const sectors: u32 = if (fixed_root) v.root_sectors else clusters * v.sectors_per_cluster;
+                var at_cluster = v.dirStart(cluster);
                 var k: u32 = 0;
                 while (k < sectors) : (k += 1) {
-                    const lba = if (cluster == 0) v.root_start + k else blk: {
+                    const lba = if (fixed_root) v.root_start + k else blk: {
                         if (k > 0 and k % v.sectors_per_cluster == 0) at_cluster = try v.fatGet(at_cluster);
                         break :blk v.clusterSector(at_cluster) + k % v.sectors_per_cluster;
                     };
@@ -1588,7 +1747,7 @@ pub const Volume = struct {
                             long_ok = false;
                             continue;
                         }
-                        var entry = decode(e);
+                        var entry = v.entryFrom(e);
                         if (long_ok and long_len > 0 and long_sum == shortChecksum(e[0..11].*)) {
                             entry.long_len = @intCast(@min(long_len, entry.long.len));
                             @memcpy(entry.long[0..entry.long_len], long[0..entry.long_len]);
@@ -1640,6 +1799,7 @@ pub const Volume = struct {
                 var differ_at: Cluster = 0;
                 var run_start: Cluster = 0;
                 var run: u32 = 0;
+                var free: u32 = 0;
                 var s: u32 = 0;
                 while (s < v.sectors_per_fat) : (s += 1) {
                     try v.readSector(v.fat_start + s, &first);
@@ -1650,18 +1810,20 @@ pub const Volume = struct {
                             if (differ == 0) {
                                 var i: usize = 0;
                                 while (first[i] == other[i]) i += 1;
-                                differ_at = @intCast(s * (sector_size / 2) + i / 2);
+                                differ_at = @intCast(s * v.entriesPerSector() + i / v.entryBytes());
                             }
                             differ += 1;
                         }
                     }
                     var i: u32 = 0;
-                    while (i < sector_size / 2) : (i += 1) {
-                        const c = s * (sector_size / 2) + i;
+                    const per = v.entriesPerSector();
+                    while (i < per) : (i += 1) {
+                        const c = s * per + i;
                         if (c < 2) continue;
                         if (c > v.max_cluster) break;
-                        const value = le16(first[i * 2 ..][0..2]);
-                        const leaked = !self.stopped_short and value != 0 and value != bad_cluster and !self.held(@intCast(c));
+                        const value = v.entryIn(&first, i);
+                        if (value == 0) free += 1;
+                        const leaked = !self.stopped_short and value != 0 and value != v.badMark() and !self.held(@intCast(c));
                         if (leaked) {
                             if (run == 0) run_start = @intCast(c);
                             run += 1;
@@ -1673,6 +1835,16 @@ pub const Volume = struct {
                 }
                 if (run > 0) self.leak(run_start, run);
                 if (differ > 0) self.report(.fats_differ, differ_at, differ);
+                if (v.kind == .fat32 and v.fsinfo_sector != 0 and v.fsinfo_sector < v.fat_start) {
+                    try v.readSector(v.fsinfo_sector, &first);
+                    if (le32(first[0..4]) == 0x4161_5252 and le32(first[484..488]) == 0x6141_7272) {
+                        self.path_len = 0;
+                        const count = le32(first[488..492]);
+                        const hint = le32(first[492..496]);
+                        if (count != 0xFFFF_FFFF and count != free) self.report(.fsinfo, 0, count);
+                        if (hint != 0xFFFF_FFFF and !v.inData(hint)) self.report(.fsinfo, hint, 0);
+                    }
+                }
             }
 
             fn leak(self: *Self, start: Cluster, count: u32) void {
@@ -1874,6 +2046,18 @@ fn takeLongPart(e: []const u8, out: *[max_name]u8, len: *usize, sum: *u8, ok: *b
 }
 
 /// An on-disk 8.3 name, trimmed and dotted.
+/// A directory entry's first cluster, both halves: the low at 26..28 and the
+/// high at 20..22 (FAT32.md §6). On FAT16 the high half of every cluster is 0,
+/// which is also what the spec wants those bytes to hold there; so one
+/// writer serves both kinds, and a FAT32 file past cluster 65,535 is not the
+/// case that gets forgotten.
+fn putCluster(e: []u8, cluster: Cluster) void {
+    e[26] = @truncate(cluster);
+    e[27] = @truncate(cluster >> 8);
+    e[20] = @truncate(cluster >> 16);
+    e[21] = @truncate(cluster >> 24);
+}
+
 fn putLe16(out: *[2]u8, v: u16) void {
     out[0] = @truncate(v);
     out[1] = @truncate(v >> 8);

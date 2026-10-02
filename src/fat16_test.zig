@@ -21,6 +21,18 @@ const testing = std.testing;
 const Shape = test_disk.Shape;
 const Layout = test_disk.Layout;
 const small = test_disk.small;
+/// The tests that apply to both kinds run over both: the same operations,
+/// the same expectations, on FAT16 and on FAT32.
+const formats = [_]Shape{ small, test_disk.small32 };
+/// Each format with the FAT on the disk and held in memory.
+const configs = blk: {
+    var out: [formats.len * 2]struct { shape: Shape, cached: bool } = undefined;
+    for (formats, 0..) |f, i| {
+        out[2 * i] = .{ .shape = f, .cached = false };
+        out[2 * i + 1] = .{ .shape = f, .cached = true };
+    }
+    break :blk out;
+};
 
 /// `test_disk.Disk`, kept as an image when the tests are asked to keep them
 /// (-Dfat16-images).
@@ -42,8 +54,9 @@ fn pattern(buf: []u8, seed: u8) []u8 {
 const both = [_]bool{ false, true };
 
 test "a volume formatted from the spec mounts, and its root is empty" {
-    for (both) |cached| {
-        const d = try Disk.make("fresh", small, cached);
+    for (configs) |cfg| {
+        const shape, const cached = .{ cfg.shape, cfg.cached };
+        const d = try Disk.make("fresh", shape, cached);
         defer d.deinit();
         var buf: [256]u8 = undefined;
         try testing.expectEqualStrings("", try d.names(0, &buf));
@@ -52,8 +65,9 @@ test "a volume formatted from the spec mounts, and its root is empty" {
 }
 
 test "a file is read back exactly, at every size around a sector and a cluster" {
-    for (both) |cached| {
-        const d = try Disk.make("sizes", small, cached);
+    for (configs) |cfg| {
+        const shape, const cached = .{ cfg.shape, cfg.cached };
+        const d = try Disk.make("sizes", shape, cached);
         defer d.deinit();
         const sizes = [_]usize{ 0, 1, 511, 512, 513, 1023, 1024, 1025, 4096, 70_000 };
         var data: [70_000]u8 = undefined;
@@ -68,8 +82,9 @@ test "a file is read back exactly, at every size around a sector and a cluster" 
 }
 
 test "a path makes its directories, and names of every length up to max_name read back by name" {
-    for (both) |cached| {
-        const d = try Disk.make("names", small, cached);
+    for (configs) |cfg| {
+        const shape, const cached = .{ cfg.shape, cfg.cached };
+        const d = try Disk.make("names", shape, cached);
         defer d.deinit();
         var name: [fat16.max_name]u8 = undefined;
         var path: [128]u8 = undefined;
@@ -91,8 +106,9 @@ test "a name longer than max_name is refused, not truncated" {
 }
 
 test "a replaced file gives back what it held" {
-    for (both) |cached| {
-        const d = try Disk.make("replaced", small, cached);
+    for (configs) |cfg| {
+        const shape, const cached = .{ cfg.shape, cfg.cached };
+        const d = try Disk.make("replaced", shape, cached);
         defer d.deinit();
         var data: [20_000]u8 = undefined;
         try d.vol.writeFile("data/x", pattern(&data, 1));
@@ -106,8 +122,9 @@ test "a replaced file gives back what it held" {
 }
 
 test "appends cross cluster boundaries and read back whole" {
-    for (both) |cached| {
-        const d = try Disk.make("appends", small, cached);
+    for (configs) |cfg| {
+        const shape, const cached = .{ cfg.shape, cfg.cached };
+        const d = try Disk.make("appends", shape, cached);
         defer d.deinit();
         try d.vol.writeFile("data/log", "");
         var whole: [3000]u8 = undefined;
@@ -132,8 +149,9 @@ test "appends cross cluster boundaries and read back whole" {
 }
 
 test "removing a tree gives back every cluster, directories included" {
-    for (both) |cached| {
-        const d = try Disk.make("removetree", small, cached);
+    for (configs) |cfg| {
+        const shape, const cached = .{ cfg.shape, cfg.cached };
+        const d = try Disk.make("removetree", shape, cached);
         defer d.deinit();
         const empty = d.free();
         var data: [4000]u8 = undefined;
@@ -152,8 +170,9 @@ test "removing a tree gives back every cluster, directories included" {
 }
 
 test "a directory grows past its first cluster, and every name in it is found" {
-    for (both) |cached| {
-        const d = try Disk.make("growth", small, cached);
+    for (configs) |cfg| {
+        const shape, const cached = .{ cfg.shape, cfg.cached };
+        const d = try Disk.make("growth", shape, cached);
         defer d.deinit();
         // Each name takes three entries; a 512-byte cluster holds sixteen.
         var path: [64]u8 = undefined;
@@ -191,8 +210,9 @@ test "a full disk refuses the write, and the refused write leaves nothing behind
 }
 
 test "a chain that runs into a free cluster is a broken chain, not a short file" {
-    for (both) |cached| {
-        const d = try Disk.make("damaged-chain", small, cached);
+    for (configs) |cfg| {
+        const shape, const cached = .{ cfg.shape, cfg.cached };
+        const d = try Disk.make("damaged-chain", shape, cached);
         defer d.deinit();
         var data: [2000]u8 = undefined;
         try d.vol.writeFile("broken", pattern(&data, 9));
@@ -200,7 +220,7 @@ test "a chain that runs into a free cluster is a broken chain, not a short file"
         // Its second cluster is marked free in both copies of the FAT.
         const l = Layout.of(d.bytes);
         for (0..2) |copy| {
-            std.mem.writeInt(u16, d.bytes[l.fat_start + copy * l.fat_bytes + @as(usize, e.first_cluster) * 2 ..][0..2], 0, .little);
+            l.set(d.bytes, copy, e.first_cluster, 0);
         }
         try d.mount(cached); // so a held FAT sees the damage too
         var out: [2000]u8 = undefined;
@@ -222,7 +242,7 @@ test "a disk that stops answering is an error, not a hang or a wrong answer" {
 fn damageFat(d: *test_disk.Disk, cached: bool, cluster: fat16.Cluster, value: fat16.Cluster) !void {
     const l = Layout.of(d.bytes);
     for (0..2) |copy| {
-        std.mem.writeInt(u16, d.bytes[l.fat_start + copy * l.fat_bytes + @as(usize, cluster) * 2 ..][0..2], @intCast(value), .little);
+        l.set(d.bytes, copy, cluster, value);
     }
     try d.mount(cached);
 }
@@ -232,10 +252,10 @@ fn chainOf(d: *const test_disk.Disk, first: fat16.Cluster, out: []fat16.Cluster)
     const l = Layout.of(d.bytes);
     var n: usize = 0;
     var c = first;
-    while (c >= 2 and c < 0xFFF8 and n < out.len) {
+    while (c >= 2 and !l.ends(c) and n < out.len) {
         out[n] = c;
         n += 1;
-        c = std.mem.readInt(u16, d.bytes[l.fat_start + @as(usize, c) * 2 ..][0..2], .little);
+        c = l.get(d.bytes, 0, c);
     }
     return out[0..n];
 }
@@ -244,8 +264,9 @@ fn chainOf(d: *const test_disk.Disk, first: fat16.Cluster, out: []fat16.Cluster)
 // bounded, each of these hung: the test did not fail, it never finished.
 
 test "a file whose chain loops back is a broken chain to append to, not a hang" {
-    for (both) |cached| {
-        const d = try Disk.make("damaged-loop-file", small, cached);
+    for (configs) |cfg| {
+        const shape, const cached = .{ cfg.shape, cfg.cached };
+        const d = try Disk.make("damaged-loop-file", shape, cached);
         defer d.deinit();
         var data: [1536]u8 = undefined; // three clusters, full, so an append needs a fourth
         try d.vol.writeFile("data/log", pattern(&data, 4));
@@ -263,8 +284,9 @@ test "a file whose chain loops back is a broken chain to append to, not a hang" 
 }
 
 test "a directory whose chain loops back is a broken chain to list, search or grow, not a hang" {
-    for (both) |cached| {
-        const d = try Disk.make("damaged-loop-dir", small, cached);
+    for (configs) |cfg| {
+        const shape, const cached = .{ cfg.shape, cfg.cached };
+        const d = try Disk.make("damaged-loop-dir", shape, cached);
         defer d.deinit();
         // Every cluster of it full, so no end-of-directory entry stops a walk:
         // "." and "..", and three entries a name, are 32, two clusters.
@@ -287,14 +309,17 @@ test "a directory whose chain loops back is a broken chain to list, search or gr
 }
 
 test "a link past the last cluster, or to the bad-cluster mark, is a broken chain" {
-    for (both) |cached| {
-        const d = try Disk.make("damaged-past-end", small, cached);
+    for (configs) |cfg| {
+        const shape, const cached = .{ cfg.shape, cfg.cached };
+        const d = try Disk.make("damaged-past-end", shape, cached);
         defer d.deinit();
         var data: [1500]u8 = undefined;
         try d.vol.writeFile("f", pattern(&data, 5));
         const e = try d.vol.open("f");
-        const past: u16 = @intCast(Layout.of(d.bytes).clusters + 2);
-        for ([_]u16{ past, 0xFFF0, 0xFFF7 }) |link| {
+        const past: fat16.Cluster = @intCast(Layout.of(d.bytes).clusters + 2);
+        const l = Layout.of(d.bytes);
+        // Past the volume, in the reserved range, and the bad mark.
+        for ([_]fat16.Cluster{ past, l.end() - 15, l.bad() }) |link| {
             try damageFat(d, cached, e.first_cluster, link);
             var out: [1500]u8 = undefined;
             try testing.expectError(fat16.Error.BadChain, d.vol.readFile(e, &out));
@@ -305,17 +330,18 @@ test "a link past the last cluster, or to the bad-cluster mark, is a broken chai
 }
 
 test "an entry whose first cluster is past the volume is a broken chain, and removing it frees nothing" {
-    for (both) |cached| {
-        const d = try Disk.make("damaged-first-cluster", small, cached);
+    for (configs) |cfg| {
+        const shape, const cached = .{ cfg.shape, cfg.cached };
+        const d = try Disk.make("damaged-first-cluster", shape, cached);
         defer d.deinit();
         try d.vol.writeFile("f", "some bytes");
         try d.vol.writeFile("data/x", "a directory's worth");
         const e = try d.vol.open("f");
         const dir = try d.vol.open("data");
-        const past: u16 = @intCast(Layout.of(d.bytes).clusters + 2);
+        const past: fat16.Cluster = @intCast(Layout.of(d.bytes).clusters + 2);
         // The first cluster is two bytes at offset 26 of the entry.
-        std.mem.writeInt(u16, d.bytes[e.lba * test_disk.sector + e.slot + 26 ..][0..2], past, .little);
-        std.mem.writeInt(u16, d.bytes[dir.lba * test_disk.sector + dir.slot + 26 ..][0..2], 0xFF00, .little);
+        setEntry(d, e, .first_cluster, past);
+        setEntry(d, dir, .first_cluster, past + 1000);
         try d.mount(cached);
         const free = d.free();
 
@@ -324,7 +350,7 @@ test "an entry whose first cluster is past the volume is a broken chain, and rem
         try testing.expectError(fat16.Error.BadChain, d.vol.writeInto("f", 2, "x"));
         try testing.expectError(fat16.Error.BadChain, d.vol.open("data/x"));
         var buf: [64]u8 = undefined;
-        try testing.expectError(fat16.Error.BadChain, d.names(0xFF00, &buf));
+        try testing.expectError(fat16.Error.BadChain, d.names(past + 1000, &buf));
         try d.vol.remove("f");
         try testing.expectEqual(free, d.free());
         try testing.expect(d.fatsAgree());
@@ -354,13 +380,17 @@ fn setEntry(d: *test_disk.Disk, e: fat16.Entry, comptime field: enum { size, fir
     const at = e.lba * test_disk.sector + e.slot;
     switch (field) {
         .size => std.mem.writeInt(u32, d.bytes[at + 28 ..][0..4], value, .little),
-        .first_cluster => std.mem.writeInt(u16, d.bytes[at + 26 ..][0..2], @intCast(value), .little),
+        .first_cluster => {
+            std.mem.writeInt(u16, d.bytes[at + 26 ..][0..2], @truncate(value), .little);
+            std.mem.writeInt(u16, d.bytes[at + 20 ..][0..2], @truncate(value >> 16), .little);
+        },
     }
 }
 
 test "the check counts what a healthy volume holds" {
-    for (both) |cached| {
-        const d = try Disk.make("check-healthy", small, cached);
+    for (configs) |cfg| {
+        const shape, const cached = .{ cfg.shape, cfg.cached };
+        const d = try Disk.make("check-healthy", shape, cached);
         defer d.deinit();
         const empty = d.free();
         var data: [3000]u8 = undefined;
@@ -373,27 +403,33 @@ test "the check counts what a healthy volume holds" {
         try r.expect(&.{});
         try testing.expectEqual(@as(u32, 3), r.health.files);
         try testing.expectEqual(@as(u32, 4), r.health.directories); // data, data/chat, auth, auth/7
-        try testing.expectEqual(@as(u32, @intCast(empty - d.free())), r.health.used);
+        // FAT32's root is a chain in the data region, held like any
+        // directory's: one cluster here, already in use when `empty` was
+        // counted.
+        const root: u32 = if (shape.kind == .fat32) 1 else 0;
+        try testing.expectEqual(@as(u32, @intCast(empty - d.free())) + root, r.health.used);
         try testing.expectEqual(@as(u32, 0), r.health.leaked);
     }
 }
 
 test "the check finds clusters in use that nothing holds" {
-    for (both) |cached| {
-        const d = try Disk.make("damaged-check-leaked", small, cached);
+    for (configs) |cfg| {
+        const shape, const cached = .{ cfg.shape, cfg.cached };
+        const d = try Disk.make("damaged-check-leaked", shape, cached);
         defer d.deinit();
         try d.vol.writeFile("data/x", "kept");
-        const last: u16 = @intCast(Layout.of(d.bytes).clusters + 1);
+        const last: fat16.Cluster = @intCast(Layout.of(d.bytes).clusters + 1);
         // One cluster alone, and a run of three linked ones, as a write that
         // stopped before its entry was written leaves them.
-        try damageFat(d, cached, last - 10, 0xFFFF);
+        const l = Layout.of(d.bytes);
+        try damageFat(d, cached, last - 10, l.end());
         try damageFat(d, cached, last - 5, last - 4);
         try damageFat(d, cached, last - 4, last - 3);
-        try damageFat(d, cached, last - 3, 0xFFFF);
+        try damageFat(d, cached, last - 3, l.end());
         // A cluster marked bad is in use by nothing, and is not a leak.
-        try damageFat(d, cached, last - 1, 0xFFF7);
+        try damageFat(d, cached, last - 1, l.bad());
         // And the volume's very last cluster, where the FAT's scan ends.
-        try damageFat(d, cached, last, 0xFFFF);
+        try damageFat(d, cached, last, l.end());
         const r = try d.check();
         try r.expect(&.{
             .{ .problem = .leaked, .cluster = last - 10, .count = 1 },
@@ -405,14 +441,15 @@ test "the check finds clusters in use that nothing holds" {
 }
 
 test "the check finds a chain that runs into a free cluster, past the volume, or into a bad one" {
-    for (both) |cached| {
-        const d = try Disk.make("damaged-check-broken", small, cached);
+    for (configs) |cfg| {
+        const shape, const cached = .{ cfg.shape, cfg.cached };
+        const d = try Disk.make("damaged-check-broken", shape, cached);
         defer d.deinit();
         var data: [1500]u8 = undefined; // three clusters
         try d.vol.writeFile("data/f", pattern(&data, 2));
         const e = try d.vol.open("data/f");
-        const past: u16 = @intCast(Layout.of(d.bytes).clusters + 2);
-        for ([_]u16{ 0, past, 0xFFF7 }) |link| {
+        const past: fat16.Cluster = @intCast(Layout.of(d.bytes).clusters + 2);
+        for ([_]fat16.Cluster{ 0, past, Layout.of(d.bytes).bad() }) |link| {
             try damageFat(d, cached, e.first_cluster, link);
             const r = try d.check();
             // The rest of the chain is then held by nothing.
@@ -425,14 +462,15 @@ test "the check finds a chain that runs into a free cluster, past the volume, or
 }
 
 test "the check finds a first cluster past the volume, and a directory with no chain" {
-    for (both) |cached| {
-        const d = try Disk.make("damaged-check-first", small, cached);
+    for (configs) |cfg| {
+        const shape, const cached = .{ cfg.shape, cfg.cached };
+        const d = try Disk.make("damaged-check-first", shape, cached);
         defer d.deinit();
         try d.vol.writeFile("data/f", "x");
         try d.vol.writeFile("auth/7/password", "x");
         const f = try d.vol.open("data/f");
         const dir = try d.vol.open("auth/7");
-        const past: u16 = @intCast(Layout.of(d.bytes).clusters + 2);
+        const past: fat16.Cluster = @intCast(Layout.of(d.bytes).clusters + 2);
         setEntry(d, f, .first_cluster, past);
         setEntry(d, dir, .first_cluster, 0);
         try d.mount(cached);
@@ -447,8 +485,9 @@ test "the check finds a first cluster past the volume, and a directory with no c
 }
 
 test "the check finds two files sharing clusters, and a file that loops" {
-    for (both) |cached| {
-        const d = try Disk.make("damaged-check-crossed", small, cached);
+    for (configs) |cfg| {
+        const shape, const cached = .{ cfg.shape, cfg.cached };
+        const d = try Disk.make("damaged-check-crossed", shape, cached);
         defer d.deinit();
         var data: [1500]u8 = undefined;
         try d.vol.writeFile("a", pattern(&data, 3));
@@ -470,8 +509,9 @@ test "the check finds two files sharing clusters, and a file that loops" {
 }
 
 test "the check finds a directory that loops, and one that points at its own parent" {
-    for (both) |cached| {
-        const d = try Disk.make("damaged-check-dirs", small, cached);
+    for (configs) |cfg| {
+        const shape, const cached = .{ cfg.shape, cfg.cached };
+        const d = try Disk.make("damaged-check-dirs", shape, cached);
         defer d.deinit();
         // Two full clusters, as in the loop test above.
         var path: [64]u8 = undefined;
@@ -502,8 +542,9 @@ test "the check finds a directory that loops, and one that points at its own par
 }
 
 test "the check finds a file whose size and chain disagree" {
-    for (both) |cached| {
-        const d = try Disk.make("damaged-check-size", small, cached);
+    for (configs) |cfg| {
+        const shape, const cached = .{ cfg.shape, cfg.cached };
+        const d = try Disk.make("damaged-check-size", shape, cached);
         defer d.deinit();
         try d.vol.writeFile("short", "x" ** 1000); // two clusters
         try d.vol.writeFile("long", "x" ** 1000);
@@ -525,23 +566,25 @@ test "the check finds a file whose size and chain disagree" {
 }
 
 test "the check finds FAT copies that differ" {
-    for (both) |cached| {
-        const d = try Disk.make("damaged-check-fats", small, cached);
+    for (configs) |cfg| {
+        const shape, const cached = .{ cfg.shape, cfg.cached };
+        const d = try Disk.make("damaged-check-fats", shape, cached);
         defer d.deinit();
         try d.vol.writeFile("f", "x");
         // The second copy only, and not mounted again: a held FAT would refuse
         // the volume, which is cacheFat's business, not the check's.
         const l = Layout.of(d.bytes);
-        std.mem.writeInt(u16, d.bytes[l.fat_start + l.fat_bytes + 300 * 2 ..][0..2], 0xFFFF, .little);
-        std.mem.writeInt(u16, d.bytes[l.fat_start + l.fat_bytes + 1000 * 2 ..][0..2], 0xFFFF, .little);
+        l.set(d.bytes, 1, 300, l.end());
+        l.set(d.bytes, 1, 1000, l.end());
         const r = try d.check();
         try r.expect(&.{.{ .problem = .fats_differ, .cluster = 300, .count = 2 }});
     }
 }
 
 test "the check finds a . or .. that points elsewhere" {
-    for (both) |cached| {
-        const d = try Disk.make("damaged-check-dots", small, cached);
+    for (configs) |cfg| {
+        const shape, const cached = .{ cfg.shape, cfg.cached };
+        const d = try Disk.make("damaged-check-dots", shape, cached);
         defer d.deinit();
         try d.vol.writeFile("data/chat/x", "x");
         const chat = try d.vol.open("data/chat");
@@ -559,10 +602,11 @@ test "the check finds a . or .. that points elsewhere" {
 }
 
 test "the check says where it stopped going deeper, and does not call what is below leaked" {
-    for (both) |cached| {
+    for (configs) |cfg| {
+        const shape, const cached = .{ cfg.shape, cfg.cached };
         // A healthy volume (tools/fat16_read.py checks it clean), deeper than
         // the check walks.
-        const d = try Disk.make("limit-check-deep", small, cached);
+        const d = try Disk.make("limit-check-deep", shape, cached);
         defer d.deinit();
         const deep = "d/" ** 16 ++ "f";
         try d.vol.writeFile(deep, "x");
@@ -612,13 +656,23 @@ test "a volume mkfs.vfat and mtools made: the check's verdict is the oracle's" {
         defer testing.allocator.free(bytes);
         var blk = virtio.Block.inMemory(bytes);
         var scratch: [test_disk.sector]u8 align(16) = undefined;
-        var vol = try fat16.Volume.mount(&blk, &scratch, 0);
+        const healthy = std.mem.startsWith(u8, file.name, "healthy-");
+        // A volume this machine refuses at mount (FAT32 mirroring off, a
+        // version it does not know, a root out of range) is one it has found
+        // wanting: the oracle must call it damaged too.
+        var vol = fat16.Volume.mount(&blk, &scratch, 0) catch |e| {
+            try judged.print(testing.allocator, "{s}: refused; {s}\n", .{ file.name, @errorName(e) });
+            if (healthy) {
+                std.debug.print("{s}", .{judged.items});
+                return error.TestUnexpectedResult;
+            }
+            continue;
+        };
         const seen = try testing.allocator.alloc(u8, vol.checkBytes());
         defer testing.allocator.free(seen);
         var r = test_disk.Report{};
         r.health = try vol.check(seen, &r, test_disk.Report.each);
 
-        const healthy = std.mem.startsWith(u8, file.name, "healthy-");
         try judged.print(testing.allocator, "{s}: {s}", .{ file.name, if (r.health.clean()) "clean" else "damaged" });
         for (r.found[0..r.len]) |f| try judged.print(testing.allocator, "; {s} at '{s}' cluster {d}", .{ @tagName(f.problem), f.text(), f.cluster });
         try judged.append(testing.allocator, '\n');
@@ -642,19 +696,16 @@ fn fullDirectory(d: *test_disk.Disk, cached: bool, path: []const u8, clusters: u
     const l = Layout.of(d.bytes);
     try testing.expectEqual(@as(u8, 1), d.bytes[13]); // one sector a cluster, below
     const fat = struct {
-        fn get(bytes: []const u8, at: Layout, c: usize) u16 {
-            return std.mem.readInt(u16, bytes[at.fat_start + c * 2 ..][0..2], .little);
-        }
-        fn set(bytes: []u8, at: Layout, c: usize, v: u16) void {
-            for (0..2) |copy| std.mem.writeInt(u16, bytes[at.fat_start + copy * at.fat_bytes + c * 2 ..][0..2], v, .little);
+        fn set(bytes: []u8, at: Layout, c: usize, v: u32) void {
+            for (0..2) |copy| at.set(bytes, copy, c, v);
         }
     };
     var last: usize = first;
     var candidate: usize = 2;
     for (1..clusters) |_| {
-        while (fat.get(d.bytes, l, candidate) != 0) candidate += 1;
+        while (l.get(d.bytes, 0, candidate) != 0) candidate += 1;
         fat.set(d.bytes, l, last, @intCast(candidate));
-        fat.set(d.bytes, l, candidate, 0xFFFF);
+        fat.set(d.bytes, l, candidate, l.end());
         last = candidate;
     }
     var name: u32 = 0;
@@ -670,14 +721,15 @@ fn fullDirectory(d: *test_disk.Disk, cached: bool, path: []const u8, clusters: u
             e[11] = 0x20; // an archive bit: a plain file
             name += 1;
         }
-        c = fat.get(d.bytes, l, c);
+        c = l.get(d.bytes, 0, c);
     }
     try d.mount(cached);
 }
 
 test "a directory grows to FAT's limit of 65,536 entries, and no further" {
-    for (both) |cached| {
-        const d = try Disk.make("dirlimit", small, cached);
+    for (configs) |cfg| {
+        const shape, const cached = .{ cfg.shape, cfg.cached };
+        const d = try Disk.make("dirlimit", shape, cached);
         defer d.deinit();
         const per_cluster = test_disk.sector / 32;
         const limit = fat16.Volume.max_dir_entries / per_cluster; // 4,096 clusters
@@ -708,8 +760,9 @@ test "a directory grows to FAT's limit of 65,536 entries, and no further" {
 // ---- the NT case bits (QUEUE item 12) ---------------------------------------
 
 test "a short name with the NT lower-case bits lists in lower case, and is found either way" {
-    for (both) |cached| {
-        const d = try Disk.make("ntcase", small, cached);
+    for (configs) |cfg| {
+        const shape, const cached = .{ cfg.shape, cfg.cached };
+        const d = try Disk.make("ntcase", shape, cached);
         defer d.deinit();
         // Upper-case 8.3 names: one short entry each, no long name.
         try d.vol.writeFile("data/TOPIC.MD", "both");
@@ -781,4 +834,156 @@ test "the kept free count follows every operation, the refused and failed ones i
         const sp = try d.vol.space();
         try testing.expectEqual(@as(u64, kept) * 512, sp.free);
     }
+}
+
+// ---- FAT32's own cases (QUEUE item 17, FAT32.md "Judged against Linux") ------
+
+/// A FAT32 volume big enough for files past cluster 65,535: about 44 MiB.
+const big32 = Shape{ .sectors = 90_000, .kind = .fat32, .suffix = "-fat32" };
+
+test "FAT32: files that start past cluster 65,535 are found by both halves of their cluster, and read back" {
+    for (both) |cached| {
+        const d = try Disk.make("fat32-high", big32, cached);
+        defer d.deinit();
+        try testing.expectEqual(fat16.Kind.fat32, d.vol.kind);
+        // 33 MiB first: 67,584 clusters, so what follows starts past 65,535.
+        const huge = try testing.allocator.alloc(u8, 33 << 20);
+        defer testing.allocator.free(huge);
+        _ = pattern(huge, 11);
+        try d.vol.writeFile("data/huge.bin", huge);
+        var data: [3000]u8 = undefined;
+        var path: [64]u8 = undefined;
+        for (0..5) |k| {
+            const p = try std.fmt.bufPrint(&path, "data/after/file-{d}.md", .{k});
+            try d.vol.writeFile(p, pattern(&data, @intCast(k)));
+            const e = try d.vol.open(p);
+            try testing.expect(e.first_cluster > 0xFFFF);
+            // Both halves on the disk, as the spec lays them out.
+            const raw = d.bytes[e.lba * test_disk.sector + e.slot ..][0..32];
+            const hi = std.mem.readInt(u16, raw[20..22], .little);
+            const lo = std.mem.readInt(u16, raw[26..28], .little);
+            try testing.expectEqual(e.first_cluster, (@as(u32, hi) << 16) | lo);
+        }
+        // And after a fresh mount, which reads them back from the disk.
+        try d.mount(cached);
+        for (0..5) |k| {
+            const p = try std.fmt.bufPrint(&path, "data/after/file-{d}.md", .{k});
+            try d.expectFile(p, pattern(&data, @intCast(k)));
+        }
+        try d.expectFile("data/huge.bin", huge);
+        // An append past the end of a high file, and a directory made there.
+        try d.vol.writeInto("data/after/file-0.md", 3000, "and more");
+        _ = try d.vol.makePath("data/after/deeper");
+        try d.vol.writeFile("data/after/deeper/x", "x");
+        try d.expectFile("data/after/deeper/x", "x");
+    }
+}
+
+test "FAT32: the root is a chain, and grows past its first cluster as FAT16's cannot" {
+    for (both) |cached| {
+        const d = try Disk.make("fat32-root", test_disk.small32, cached);
+        defer d.deinit();
+        var path: [64]u8 = undefined;
+        // Three entries a name, sixteen a cluster: 60 names need 12 clusters.
+        for (0..60) |k| {
+            const p = try std.fmt.bufPrint(&path, "root-file-number-{d:0>3}.txt", .{k});
+            try d.vol.writeFile(p, p);
+        }
+        const l = Layout.of(d.bytes);
+        var chain: [64]fat16.Cluster = undefined;
+        try testing.expect(chainOf(d, l.root_cluster, &chain).len >= 12);
+        for (0..60) |k| {
+            const p = try std.fmt.bufPrint(&path, "root-file-number-{d:0>3}.txt", .{k});
+            try d.expectFile(p, p);
+        }
+        // A directory in the root has ".." = 0, as the spec spells the root.
+        _ = try d.vol.makePath("sub");
+        const sub = try d.vol.open("sub");
+        const dotdot = d.bytes[(l.data_sector + sub.first_cluster - 2) * test_disk.sector + 32 ..][0..32];
+        try testing.expectEqual(@as(u16, 0), std.mem.readInt(u16, dotdot[26..28], .little));
+        try testing.expectEqual(@as(u16, 0), std.mem.readInt(u16, dotdot[20..22], .little));
+    }
+}
+
+test "FAT32: an entry's reserved top four bits survive a write through it" {
+    for (both) |cached| {
+        const d = try Disk.make("fat32-reserved", test_disk.small32, cached);
+        defer d.deinit();
+        var data: [1024]u8 = undefined; // two clusters
+        try d.vol.writeFile("f", pattern(&data, 2));
+        const e = try d.vol.open("f");
+        const l = Layout.of(d.bytes);
+        var chain: [8]fat16.Cluster = undefined;
+        const last = chainOf(d, e.first_cluster, &chain)[1];
+        // Another tool set the reserved bits on the last entry, an end mark.
+        for (0..2) |copy| l.set(d.bytes, copy, last, 0xA000_0000 | l.end());
+        try d.mount(cached);
+        // An append links a new cluster from that entry: its value changes,
+        // and its top four bits must not.
+        try d.vol.writeInto("f", 1024, "more");
+        for (0..2) |copy| {
+            const raw = std.mem.readInt(u32, d.bytes[l.fat_start + copy * l.fat_bytes + @as(usize, last) * 4 ..][0..4], .little);
+            try testing.expectEqual(@as(u32, 0xA000_0000), raw & 0xF000_0000);
+            try testing.expect(raw & 0x0FFF_FFFF != l.end());
+        }
+        var all: [1028]u8 = undefined;
+        @memcpy(all[0..1024], &data);
+        @memcpy(all[1024..], "more");
+        try d.expectFile("f", &all);
+    }
+}
+
+test "FAT32: FSInfo's free count and hint are marked unknown on the first write, in both copies" {
+    for (both) |cached| {
+        const d = try Disk.make("fat32-fsinfo", test_disk.small32, cached);
+        defer d.deinit();
+        // As a tool that kept them would leave them: set, and right.
+        for ([_]usize{ 1, 7 }) |s| {
+            std.mem.writeInt(u32, d.bytes[s * test_disk.sector + 488 ..][0..4], @intCast(d.free()), .little);
+            std.mem.writeInt(u32, d.bytes[s * test_disk.sector + 492 ..][0..4], 3, .little);
+        }
+        try d.mount(cached);
+        // Reading changes nothing.
+        _ = d.vol.open("nothing") catch {};
+        try testing.expectEqual(@as(u32, @intCast(d.free())), std.mem.readInt(u32, d.bytes[1 * test_disk.sector + 488 ..][0..4], .little));
+        try d.vol.writeFile("x", "a write");
+        for ([_]usize{ 1, 7 }) |s| {
+            try testing.expectEqual(@as(u32, 0xFFFF_FFFF), std.mem.readInt(u32, d.bytes[s * test_disk.sector + 488 ..][0..4], .little));
+            try testing.expectEqual(@as(u32, 0xFFFF_FFFF), std.mem.readInt(u32, d.bytes[s * test_disk.sector + 492 ..][0..4], .little));
+        }
+    }
+}
+
+test "FAT32: a volume this machine cannot write safely is refused at mount, each with its own error" {
+    const bytes = try testing.allocator.alloc(u8, test_disk.small32.sectors * test_disk.sector);
+    defer testing.allocator.free(bytes);
+    var blk = virtio.Block.inMemory(bytes);
+    var scratch: [test_disk.sector]u8 align(16) = undefined;
+    const Case = struct { what: []const u8, offset: usize, value: u32, size: u8, want: fat16.Error };
+    const cases = [_]Case{
+        .{ .what = "mirroring off", .offset = 40, .value = 0x80, .size = 2, .want = fat16.Error.NotMirrored },
+        .{ .what = "version 1", .offset = 42, .value = 1, .size = 2, .want = fat16.Error.FatVersion },
+        .{ .what = "a root cluster past the volume", .offset = 44, .value = 0x0FFF_0000, .size = 4, .want = fat16.Error.BadRoot },
+        .{ .what = "a root cluster of 1", .offset = 44, .value = 1, .size = 4, .want = fat16.Error.BadRoot },
+        .{ .what = "a FAT16 root count on FAT32", .offset = 17, .value = 512, .size = 2, .want = fat16.Error.BadBootSector },
+    };
+    for (cases) |c| {
+        test_disk.format(bytes, test_disk.small32);
+        if (c.size == 2) std.mem.writeInt(u16, bytes[c.offset..][0..2], @intCast(c.value), .little) else std.mem.writeInt(u32, bytes[c.offset..][0..4], c.value, .little);
+        testing.expectError(c.want, fat16.Volume.mount(&blk, &scratch, 0)) catch |e| {
+            std.debug.print("refusing {s}\n", .{c.what});
+            return e;
+        };
+    }
+    // Past sector 2^32: the volume starts at sector 32 of the disk and says
+    // it is nearly 2^32 sectors long.
+    test_disk.format(bytes, test_disk.small32);
+    @memcpy(bytes[32 * test_disk.sector ..][0..test_disk.sector], bytes[0..test_disk.sector]);
+    std.mem.writeInt(u32, bytes[32 * test_disk.sector + 32 ..][0..4], 0xFFFF_FFF0, .little);
+    try testing.expectError(fat16.Error.VolumeTooLarge, fat16.Volume.mount(&blk, &scratch, 32));
+    // And the same volume, untouched, mounts.
+    test_disk.format(bytes, test_disk.small32);
+    const v = try fat16.Volume.mount(&blk, &scratch, 0);
+    try testing.expectEqual(fat16.Kind.fat32, v.kind);
+    try testing.expectEqual(@as(?u32, 0x3232_3232), v.serial);
 }
