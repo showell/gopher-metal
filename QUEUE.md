@@ -308,6 +308,29 @@ check-in 2 under Answers: the judge fixes (findings 1-2) and `tz=UTC` on
     - `droplet/new_volume.py`, `check_volume_tree.py` and MIGRATION.md say
       which format they make or assume. Say what the judges need changed;
       the box runs them.
+    **Done** (CC), on the branch:
+    - **The steps** (FAT32.md 0–4): the oracle first, `Cluster = u32`,
+      mount/read/write/check, then the cursor, run reads and the FAT
+      budget.
+    - **Tests over both kinds:** 24 tests over both, 7 FAT32-only, and
+      mutants.
+    - **The oracle:** 103 images and 19 mtools volumes agree; fsck clean
+      on every healthy FAT32 image.
+    - **Under TCG here:** gopher served from FAT32, writes included.
+
+    **What the judges need, exactly:**
+    - `FAT=32 probe/run.sh` formats `vfat`, `append`, `replace` and
+      `ladder` as FAT32; the fixture probes stay FAT16.
+    - `FAT=32 probe/run.sh gopher` serves the chat judge from FAT32.
+    - `judge_gopher.fat_serial` now reads FAT32's serial at 67. It read 39,
+      which on the droplet machine would have named a volume the kernel
+      refuses.
+    - The disk-check rule accepts a `FAT32 at LBA` line.
+
+    **What the scripts say:** `new_volume.py --fat 32 --gib N` (32 KiB
+    clusters) and `check_volume_tree.py --fat 32 --gib N`. MIGRATION.md has
+    a "Which FAT" section.
+
 18. **Adversarial reviews of 16 and 17** once each is on `master`, in
     `REVIEW-interrupts.md`'s shape.
 

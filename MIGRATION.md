@@ -1,4 +1,4 @@
-# Moving prod's chat data onto a FAT16 volume
+# Moving prod's chat data onto a FAT volume
 
 Prod's chat data is about 215 MB in 801 files under `data/` and `auth/`. It
 lives on Linux, whose filesystem allows almost anything in a name or a tree.
@@ -14,6 +14,28 @@ This note lists what Linux allows and one of those two cannot hold, says
 which of those the application itself can produce, and gives the copy step
 by step. `droplet/check_volume_tree.py <dir>` finds every case in a real
 tree before anything is copied.
+
+## Which FAT
+
+**FAT32, at Steve's decision** (QUEUE.md, item 17): before the cutover, so
+the data moves once. The reason is each user's lifetime cap of 1 GiB, not
+today's size. FAT16 stops at 2 GiB; FAT32 is limited here by the FAT this
+machine holds in memory, 32 MiB, which is 64 GiB at 32 KiB clusters
+(`gopher.zig`'s `fat_budget_bytes`). This machine mounts both kinds, decided
+by cluster count as the spec says, so a FAT16 volume keeps serving until
+the FAT32 one is attached.
+
+Every tool here says which format it makes or assumes:
+
+| tool | FAT16 (the default) | FAT32 |
+|---|---|---|
+| `droplet/check_volume_tree.py` | a 512-entry root, a 2 GiB volume | `--fat 32 --gib N`: the root grows like any directory; the space estimate uses N |
+| `droplet/new_volume.py` | 2 GiB | `--fat 32 --gib N`, N of 3 or more, 32 KiB clusters |
+| `droplet/compare_volume.py`, `tools/fat16_read.py` | read either kind, decided by cluster count | the same |
+| `probe/run.sh`, `probe/run.sh gopher` | the default | `FAT=32` |
+
+The hazards below are the same on both kinds, except that FAT32's root has
+no fixed limit of 512 entries.
 
 ## The short version
 

@@ -407,6 +407,24 @@ class DiskCheckLines(unittest.TestCase):
             self.assertIn(str(leaked), out)
 
 
+class FatSerial(unittest.TestCase):
+    @unittest.skipUnless(shutil.which("mkfs.vfat") and shutil.which("sgdisk"),
+                         "needs mkfs.vfat and sgdisk to make a partitioned volume")
+    def test_the_serial_is_read_where_each_kind_keeps_it(self):
+        # FAT16 keeps it at 39 and FAT32 at 67; reading 39 on FAT32 named a
+        # volume the kernel would refuse as not its own.
+        for fat, mib in (("16", 64), ("32", 64)):
+            with tempfile.TemporaryDirectory() as d:
+                img = os.path.join(d, "v.img")
+                with open(img, "wb") as f:
+                    f.truncate(mib << 20)
+                subprocess.run(["sgdisk", "-o", "-n", f"1:{G.PART_FIRST}:0", img], check=True, capture_output=True)
+                blocks = (G.partition_last(img) - G.PART_FIRST + 1) // 2
+                subprocess.run(["mkfs.vfat", "-F", fat, "-S", "512", *(["-s", "1"] if fat == "32" else []), "-i", "1234ABCD",
+                                "--offset", str(G.PART_FIRST), img, str(blocks)], check=True, capture_output=True)
+                self.assertEqual(G.fat_serial(img), "1234-ABCD", f"FAT{fat}")
+
+
 class ClockJudge(unittest.TestCase):
     # **THE HOST'S RATE IS GIVEN, NOT READ.** These fixtures were recorded on
     # a host whose TSC runs at 2,494.134 MHz. Read from the machine running

@@ -1,9 +1,12 @@
 #!/usr/bin/env python3
 """Lists everything in a directory tree that would not survive a copy onto
-this machine's FAT16 volume. See MIGRATION.md.
+this machine's FAT volume. See MIGRATION.md.
 
     droplet/check_volume_tree.py <root>            # root holds data/ and auth/
     droplet/check_volume_tree.py <root> --json     # the same, one JSON object
+    droplet/check_volume_tree.py <root> --fat 32 --gib 16
+                                                   # for a FAT32 volume of 16 GiB;
+                                                   # the default is FAT16, 2 GiB
     droplet/check_volume_tree.py --self-test       # builds a tree of every
                                                    # hazard and checks each is found
 
@@ -166,7 +169,9 @@ def app_says(rel, rule):
     return f"no: {what}, whose names the application cannot make this way"
 
 
-def check(root, volume=DEFAULT_VOLUME, cluster=DEFAULT_CLUSTER):
+def check(root, volume=DEFAULT_VOLUME, cluster=DEFAULT_CLUSTER, fat=16):
+    """`fat`: 16, whose root is a fixed 512 entries, or 32, whose root is a
+    chain with any directory's limit, and whose FAT entries are 4 bytes."""
     """Every finding under `root`, and a summary."""
     findings = []
     used = 0
@@ -184,7 +189,7 @@ def check(root, volume=DEFAULT_VOLUME, cluster=DEFAULT_CLUSTER):
 
         # How many directory entries this directory takes on the volume.
         taken = sum(slots(n) for n in entries) + (0 if at_root else 2)
-        limit = ROOT_SLOTS if at_root else DIR_SLOTS
+        limit = ROOT_SLOTS if at_root and fat == 16 else DIR_SLOTS
         if taken > limit:
             add(rel_top, "directory-full",
                 f"{taken} directory entries, more than the {limit} a "
@@ -261,22 +266,23 @@ def check(root, volume=DEFAULT_VOLUME, cluster=DEFAULT_CLUSTER):
 
     # The volume: what every file and directory takes, whole clusters each,
     # against what is left after the FATs and the root (an estimate: two FATs
-    # of 2 bytes a cluster, and the 512-entry root).
+    # of 2 bytes a cluster and the 512-entry root on FAT16; of 4 bytes, and
+    # a root that is a chain like any directory, on FAT32).
     clusters = volume // cluster
-    usable = volume - 2 * clusters * 2 - ROOT_SLOTS * 32
+    usable = volume - 2 * clusters * (4 if fat == 32 else 2) - (ROOT_SLOTS * 32 if fat == 16 else 0)
     if used > usable:
         findings.append(Finding(".", "volume-full",
                                 f"{used} bytes in whole {cluster}-byte clusters; the volume holds about {usable}",
                                 "-"))
     summary = {"files": files, "directories": dirs, "bytes_on_volume": used,
-               "volume_usable": usable, "cluster": cluster}
+               "volume_usable": usable, "cluster": cluster, "fat": fat}
     return findings, summary
 
 
 # ── the report ──────────────────────────────────────────────────────────────
 
 def report(findings, summary, out=sys.stdout):
-    print(f"{summary['files']} files, {summary['directories']} directories; "
+    print(f"FAT{summary['fat']}: {summary['files']} files, {summary['directories']} directories; "
           f"{summary['bytes_on_volume']} bytes on the volume in {summary['cluster']}-byte clusters, "
           f"of about {summary['volume_usable']}", file=out)
     if not findings:
@@ -382,10 +388,26 @@ def main(argv):
     if argv[1:] == ["--self-test"]:
         return self_test()
     args = [a for a in argv[1:] if a != "--json"]
-    if len(args) != 1 or not os.path.isdir(args[0]):
+    fat, gib = 16, None
+    try:
+        while "--fat" in args or "--gib" in args:
+            for flag in ("--fat", "--gib"):
+                if flag in args:
+                    i = args.index(flag)
+                    value = int(args[i + 1])
+                    del args[i:i + 2]
+                    if flag == "--fat":
+                        fat = value
+                    else:
+                        gib = value
+    except (IndexError, ValueError):
+        args = []
+    if len(args) != 1 or not os.path.isdir(args[0]) or fat not in (16, 32) or \
+            (fat == 16 and gib is not None and gib > 2):
         print(__doc__, file=sys.stderr)
         return 2
-    findings, summary = check(args[0])
+    volume = (gib << 30) if gib else DEFAULT_VOLUME
+    findings, summary = check(args[0], volume=volume, fat=fat)
     if "--json" in argv:
         json.dump({"summary": summary, "findings": [f.as_dict() for f in findings]}, sys.stdout, indent=2)
         print()

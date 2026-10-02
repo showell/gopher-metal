@@ -306,14 +306,19 @@ def partition_last(image: str) -> int:
 FAT_KIND = os.environ.get("FAT", "16")
 
 
-def build_disk(image: str, content: str, mnt: str, size: int = 64 << 20) -> None:
+def build_disk(image: str, content: str, mnt: str, size: int = 64 << 20,
+               fat: str = None, cluster_sectors: int = None) -> None:
     """A GPT disk of `size` bytes whose first partition is FAT16 (or FAT32
-    with FAT=32), holding `content`."""
+    with FAT=32, or `fat`), holding `content`. `cluster_sectors` is
+    mkfs.vfat's -s: by default its own choice on FAT16, and 1 on FAT32,
+    which a small judge's disk needs to reach FAT32's 65,525 clusters."""
+    fat = fat or FAT_KIND
+    spc = cluster_sectors or (1 if fat == "32" else None)
     with open(image, "wb") as f:
         f.truncate(size)
     run(["sgdisk", "-o", "-n", f"1:{PART_FIRST}:0", "-t", "1:0700", "-c", "1:gopher", image])
     blocks = (partition_last(image) - PART_FIRST + 1) // 2
-    run(["mkfs.vfat", "-F", FAT_KIND, "-S", "512", *(["-s", "1"] if FAT_KIND == "32" else []), "-n", "GOPHER",
+    run(["mkfs.vfat", "-F", fat, "-S", "512", *(["-s", str(spc)] if spc else []), "-n", "GOPHER",
          "--offset", str(PART_FIRST), image, str(blocks)])
     mount(image, mnt, writable=True)
     try:
@@ -347,10 +352,16 @@ def leak_a_cluster(image: str) -> int:
 
 def fat_serial(image: str) -> str:
     """The FAT serial of `image`'s first partition, as `blkid` spells it
-    (`92DE-8831`): the boot sector's volume ID, offset 39."""
+    (`92DE-8831`): the boot sector's volume ID, at offset 39 on FAT16 and 67
+    on FAT32. A FAT32 boot sector is one with no 16-bit FAT size (offset 22)
+    and its extended boot signature, 0x29, at 66, where the serial follows;
+    FAT16 keeps that signature at 38."""
     with open(image, "rb") as f:
-        f.seek(PART_FIRST * SECTOR + 39)
-        n = int.from_bytes(f.read(4), "little")
+        f.seek(PART_FIRST * SECTOR)
+        boot = f.read(SECTOR)
+    fat32 = len(boot) > 70 and int.from_bytes(boot[22:24], "little") == 0 and boot[66] == 0x29
+    at = 67 if fat32 else 39
+    n = int.from_bytes(boot[at:at + 4], "little")
     return f"{n >> 16:04X}-{n & 0xFFFF:04X}"
 
 
