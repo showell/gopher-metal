@@ -473,6 +473,19 @@ pub const Volume = struct {
             return Error.WriteFailed;
     }
 
+    /// How many bytes the data region holds, and how many of them no file
+    /// has: every cluster whose FAT entry is zero. A walk of the whole FAT,
+    /// which is a memory read per cluster once the FAT is cached.
+    pub fn space(self: *Volume) Error!struct { total: u64, free: u64 } {
+        const cluster_bytes: u64 = @as(u64, self.sectors_per_cluster) * sector_size;
+        var free: u64 = 0;
+        var c: u32 = 2;
+        while (c <= self.max_cluster) : (c += 1) {
+            if (try self.fatGet(@intCast(c)) == 0) free += 1;
+        }
+        return .{ .total = (@as(u64, self.max_cluster) - 1) * cluster_bytes, .free = free * cluster_bytes };
+    }
+
     /// The FAT entry for a cluster.
     fn fatGet(self: *Volume, cluster: u16) Error!u16 {
         const at = @as(u32, cluster) * 2;

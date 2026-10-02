@@ -38,6 +38,18 @@ droplet through our own BIOS loader.
   v6 (2026-10-02), after the droplet was rebuilt from the new image. FAT16 limits a volume to
   2 GB; prod's data is 215 MB (2026-10-01), and each user may upload 1 GiB
   over their lifetime, so FAT32 is the eventual next step (`FAT32.md`).
+- **How to see it:** `/admin/host` (admin login) shows the running server,
+  the same page on Linux and on metal. Its first half is the application's
+  (version, angry-gopher's commit, base heap, refused requests), and its
+  second half is the host's own account of itself. On metal that covers:
+  - this repo's commit, the boot time, uptime and clock;
+  - requests, connections and streams;
+  - memory, both disks' serials and free space;
+  - disk work and NMIs.
+
+  Each host hands its half over through angry-gopher's `host_status.provide`.
+  **Not yet on the droplet**, and not yet on lynrummy.com. The public
+  `/version` now names the real angry-gopher commit on metal too.
 - **Its data is test data.** The volume is the chat judge's test site, whose
   accounts' password is in this repo, so anyone who reads the repo can log in
   to them.

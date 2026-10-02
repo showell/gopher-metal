@@ -94,6 +94,15 @@ pub fn keepData(dirs: []const []const u8, on: ?fat16.Volume) void {
     if (data) |*d| d.clock = realUnixOrNull;
 }
 
+/// The two volumes, for a host's status report: the site's, and the data's
+/// when it has one of its own.
+pub fn siteVolume() ?*fat16.Volume {
+    return if (site) |*v| v else null;
+}
+pub fn dataVolume() ?*fat16.Volume {
+    return if (data) |*v| v else null;
+}
+
 const Place = enum { site, data };
 
 /// **THE DISK IS CHOSEN THE WAY FAT16 WILL RESOLVE THE PATH**, or the path is

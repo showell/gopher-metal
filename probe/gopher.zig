@@ -52,6 +52,7 @@ const Io = metal.io;
 const ready = metal.ready;
 const RequestHeap = metal.request_heap.RequestHeap;
 const interrupts = metal.interrupts;
+const gm_build = @import("gm_build");
 
 /// The application, as it is.
 const router = @import("router.zig");
@@ -166,6 +167,14 @@ var held: [max_connections]?Held = @splat(null);
 var held_now: usize = 0;
 var held_most: usize = 0;
 var streams_ended: u64 = 0;
+/// For /admin/host as well as the closing log: requests served, and the
+/// connections open now and at most.
+var served: u64 = 0;
+var open_now: usize = 0;
+var busiest: usize = 0;
+/// When this boot's wall clock started, and the TSC's measured rate.
+var booted_unix: i64 = 0;
+var tsc_hz_seen: u64 = 0;
 var read_buf: [16 * 1024]u8 align(16) = undefined;
 var write_buf: [64 * 1024]u8 align(16) = undefined;
 
@@ -275,8 +284,11 @@ pub fn kmain() noreturn {
     serial.put(" Hz, wall clock ");
     serial.putDec(@intCast(clock.unix));
     serial.put("\n");
+    booted_unix = @intCast(clock.unix);
+    tsc_hz_seen = clock.tsc_hz;
 
     // ── the host contract ───────────────────────────────────────────────────
+    router.host_status.provide(metalFacts);
     router.roots.point(base, .{ .data_dir = data_dir, .auth_dir = auth_dir }) catch
         serial.fail("roots.point could not allocate the store paths");
     var hub = Hub.init(io, base);
@@ -382,11 +394,10 @@ pub fn kmain() noreturn {
     //   card's interrupt, or `interrupts.slice_ns`.
     // - **The goodbyes, when the boot ends.** Connections still closing are
     //   given two seconds of turns, then the machine stops.
-    var served: u64 = 0;
     var deepest: usize = 0;
-    var busiest: usize = 0;
     while (limit == null or served < limit.?) {
-        busiest = @max(busiest, table.inUse());
+        open_now = table.inUse();
+        busiest = @max(busiest, open_now);
         const arrived = stream.pump(&wire, &table, lease.address);
         const now = Io.awakeNs() orelse 0;
         if (nextReady(&table)) |pick| {
@@ -1022,6 +1033,54 @@ fn readConfig(io: Io, alloc: std.mem.Allocator) Config {
     return conf;
 }
 
+/// **WHAT THIS MACHINE SAYS ABOUT ITSELF**, for /admin/host: what a Linux
+/// host reads from /proc, read here from this machine's own counters, clocks
+/// and volumes.
+fn metalFacts(io: Io, alloc: std.mem.Allocator) anyerror![]const router.host_status.Fact {
+    const hs = router.host_status;
+    var facts: std.ArrayList(hs.Fact) = .empty;
+    const now: i64 = @intCast(@divFloor(Io.Clock.now(.real, io).nanoseconds, std.time.ns_per_s));
+    const add = struct {
+        fn f(list: *std.ArrayList(hs.Fact), a: std.mem.Allocator, label: []const u8, comptime fmt: []const u8, args: anytype) !void {
+            try list.append(a, .{ .label = label, .value = try std.fmt.allocPrint(a, fmt, args) });
+        }
+    }.f;
+    try add(&facts, alloc, "host", "gopher-metal, with no operating system", .{});
+    try add(&facts, alloc, "gopher-metal commit", "{s}", .{gm_build.commit});
+    try add(&facts, alloc, "booted", "{s}", .{try hs.utc(alloc, booted_unix)});
+    try add(&facts, alloc, "up for", "{s}", .{try hs.duration(alloc, now - booted_unix)});
+    try add(&facts, alloc, "its clock now", "{s} (set from the hardware clock at boot, never corrected)", .{try hs.utc(alloc, now)});
+    try add(&facts, alloc, "processor", "TSC at {d} MHz; {s}", .{
+        tsc_hz_seen / 1_000_000,
+        if (interrupts.armed()) "rests between frames" else "never rests (polls)",
+    });
+    try add(&facts, alloc, "requests served", "{d}", .{served});
+    try add(&facts, alloc, "connections", "{d} open now, {d} at most, of {d}", .{ open_now, busiest, max_connections });
+    try add(&facts, alloc, "streams", "{d} held now, {d} at most, {d} ended", .{ held_now, held_most, streams_ended });
+    const p = pages.stats();
+    try add(&facts, alloc, "memory (pages)", "{d} MB taken now, {d} MB at most, of {d} MB", .{
+        p.bytes_taken >> 20, (p.pages_high_water * pages.page_size) >> 20, p.bytes_total >> 20,
+    });
+    if (Io.siteVolume()) |v| try addVolume(&facts, alloc, "the boot disk (the site)", v);
+    if (Io.dataVolume()) |v| {
+        try addVolume(&facts, alloc, "the volume (chat's data)", v);
+    } else try add(&facts, alloc, "the volume (chat's data)", "none attached: the data is on the boot disk", .{});
+    const work = diskWork();
+    try add(&facts, alloc, "disk requests", "{d}, busy {d} ms in all", .{ work.requests, @divTrunc(Io.ticksToNs(work.ticks), std.time.ns_per_ms) });
+    try add(&facts, alloc, "NMIs", "{d}", .{interrupts.nmis});
+    return facts.items;
+}
+
+fn addVolume(facts: *std.ArrayList(router.host_status.Fact), alloc: std.mem.Allocator, label: []const u8, v: *fat16.Volume) !void {
+    var serial_text: [9]u8 = undefined;
+    const named = if (v.serial) |n| serialText(&serial_text, n) else "no serial";
+    const value = if (v.space()) |sp|
+        try std.fmt.allocPrint(alloc, "FAT16, serial {s}: {d} MB free of {d} MB", .{ named, sp.free >> 20, sp.total >> 20 })
+    else |e|
+        try std.fmt.allocPrint(alloc, "FAT16, serial {s}: free space unreadable ({s})", .{ named, @errorName(e) });
+    try facts.append(alloc, .{ .label = label, .value = value });
+}
+
 /// `92DE-8831`: two halves of four hex digits, high half first.
 fn parseSerial(text: []const u8) ?u32 {
     if (text.len != 9 or text[4] != '-') return null;
@@ -1032,14 +1091,19 @@ fn parseSerial(text: []const u8) ?u32 {
 
 fn putSerial(serial_number: ?u32) void {
     const n = serial_number orelse return serial.put("none");
-    const digits = "0123456789ABCDEF";
     var text: [9]u8 = undefined;
+    serial.put(serialText(&text, n));
+}
+
+/// `92DE-8831`, as `blkid` spells a FAT serial.
+fn serialText(text: *[9]u8, n: u32) []const u8 {
+    const digits = "0123456789ABCDEF";
     for (0..8) |k| {
         const at = if (k < 4) k else k + 1;
         text[at] = digits[@as(u4, @truncate(n >> @intCast(28 - 4 * k)))];
     }
     text[4] = '-';
-    serial.put(&text);
+    return text;
 }
 
 pub const panic = std.debug.FullPanic(panicImpl);

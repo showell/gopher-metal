@@ -155,6 +155,7 @@ MEMBER_STORY = [
     step("the right one (a $2a$ hash)", "POST", "/login/full", None,
          "name=Steve&password=correct+horse+battery+staple&action=login&next=%2Fchat"),
     step("chat, with no conversations yet", "GET", "/chat", JAR),
+    step("the running server, as the admin", "GET", "/admin/host", JAR),
     step("the conversations API", "GET", "/chat/conversations", JAR),
     step("a message, as a form post", "POST", "/chat/c/1_2/general/send", JAR,
          "markdown=hello+from+bare+metal&cid=c1"),
@@ -773,6 +774,8 @@ def differences(c: dict, metal: dict, linux: dict) -> list:
             out.append(f"{h}: metal {m!r}, Linux {l!r}")
     if c["path"] == "/version":
         out += version_differences(metal["body"], linux["body"])
+    elif c["path"] == "/admin/host":
+        out += host_page_differences(metal["body"], linux["body"])
     else:
         mb = normalize(metal["body"], metal["window"])
         lb = normalize(linux["body"], linux["window"])
@@ -790,13 +793,53 @@ def version_differences(metal: bytes, linux: bytes) -> list:
     out = []
     if m.keys() != l.keys():
         out.append(f"/version keys differ: {sorted(m)} vs {sorted(l)}")
-    if m.get("commit") != "bare-metal":
-        out.append(f"/version on metal names commit {m.get('commit')!r}, want 'bare-metal'")
+    if m.get("commit") != EXPECTED_COMMIT:
+        out.append(f"/version on metal names commit {m.get('commit')!r}, want {EXPECTED_COMMIT!r}, "
+                   f"the angry-gopher checkout it was built from")
     for k in ("result", "version", "rejects"):
         if m.get(k) != l.get(k):
             out.append(f"/version {k}: metal {m.get(k)!r}, Linux {l.get(k)!r}")
     if set(m.get("mem", {})) != set(l.get("mem", {})):
         out.append("/version mem fields differ")
+    return out
+
+
+# The angry-gopher commit metal must name, set in main from the checkout being
+# judged: what gopher-metal's build.zig bakes in (`commitOf`). The Linux side
+# is built without -Dcommit and says "dev", so its commit is not compared.
+EXPECTED_COMMIT = None
+
+
+def checkout_commit(root: str) -> str:
+    """`git rev-parse --short HEAD`, `+dirty` when tracked files have changed:
+    build.zig's `commitOf`, in Python."""
+    head = subprocess.run(["git", "-C", root, "rev-parse", "--short", "HEAD"],
+                          capture_output=True, text=True)
+    if head.returncode != 0:
+        return "unknown"
+    status = subprocess.run(["git", "-C", root, "status", "--porcelain", "--untracked-files=no"],
+                            capture_output=True, text=True).stdout
+    return head.stdout.strip() + ("+dirty" if status.strip() else "")
+
+
+def host_page_differences(metal: bytes, linux: bytes) -> list:
+    """**/admin/host DIFFERS ON PURPOSE**: its second table is each host's own
+    account of itself. So what is compared is its shape: both have the
+    application's half, with the same rows, and each says which host it is."""
+    rows = lambda body: re.findall(rb"<tr><td>(.*?)</td><td>", body)
+    out = []
+    for name, body in (("metal", metal), ("Linux", linux)):
+        if b"<h2>The application</h2>" not in body or b"<h2>The host</h2>" not in body:
+            out.append(f"/admin/host on {name} lacks a half")
+    app = lambda body: rows(body.split(b"<h2>The host</h2>")[0])
+    if app(metal) != app(linux):
+        out.append(f"/admin/host's application rows differ: {app(metal)} vs {app(linux)}")
+    if b"gopher-metal, with no operating system" not in metal:
+        out.append("/admin/host on metal does not say it is gopher-metal")
+    if b"Linux, zig-server" not in linux:
+        out.append("/admin/host on Linux does not say it is Linux")
+    if b"serial " not in metal:
+        out.append("/admin/host on metal names no volume serial")
     return out
 
 
@@ -2111,6 +2154,8 @@ def main() -> int:
         print(__doc__.strip())
         return 2
     elf, linux_bin, gopher_root, work = sys.argv[1:]
+    global EXPECTED_COMMIT
+    EXPECTED_COMMIT = checkout_commit(gopher_root)
     if subprocess.run(["sudo", "-n", "true"], capture_output=True).returncode != 0:
         print("SKIPPED: populating and reading the disk needs `sudo -n` for a loop mount")
         return 77

@@ -126,8 +126,14 @@ pub fn build(b: *std.Build) void {
     const gopher_root = b.option([]const u8, "gopher-root", "the angry-gopher checkout") orelse
         b.pathFromRoot("../angry-gopher");
 
+    // **THE COMMITS, BAKED IN**, for /version and /admin/host: angry-gopher's
+    // (the application's own option, as its ops/deploy sets it on Linux) and
+    // this repository's, each marked `+dirty` when its tree had uncommitted
+    // changes, so a page never names a commit the machine is not running.
     const build_opts = b.addOptions();
-    build_opts.addOption([]const u8, "commit", "bare-metal");
+    build_opts.addOption([]const u8, "commit", commitOf(b, gopher_root));
+    const gm_opts = b.addOptions();
+    gm_opts.addOption([]const u8, "commit", commitOf(b, b.pathFromRoot(".")));
     build_opts.addOption(bool, "fake_leak", false);
 
     const app = b.createModule(.{
@@ -161,6 +167,7 @@ pub fn build(b: *std.Build) void {
             .imports = &.{
                 .{ .name = "metal", .module = metal },
                 .{ .name = "router.zig", .module = app },
+                .{ .name = "gm_build", .module = gm_opts.createModule() },
             },
         }),
     });
@@ -248,4 +255,14 @@ pub fn build(b: *std.Build) void {
         });
         test_step.dependOn(&b.addRunArtifact(unit).step);
     }
+}
+
+/// `git rev-parse --short HEAD` in `dir`, with `+dirty` when its tree has
+/// uncommitted changes; `unknown` when git cannot say.
+fn commitOf(b: *std.Build, dir: []const u8) []const u8 {
+    var code: u8 = 0;
+    const head = b.runAllowFail(&.{ "git", "-C", dir, "rev-parse", "--short", "HEAD" }, &code, .ignore) catch return "unknown";
+    const short = std.mem.trim(u8, head, " \n");
+    const status = b.runAllowFail(&.{ "git", "-C", dir, "status", "--porcelain", "--untracked-files=no" }, &code, .ignore) catch return short;
+    return if (std.mem.trim(u8, status, " \n").len == 0) short else b.fmt("{s}+dirty", .{short});
 }

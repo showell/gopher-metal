@@ -204,12 +204,34 @@ class Differences(unittest.TestCase):
         self.assertIn("byte 3", G.first_difference(b"abc", b"abcdef"))
 
     def test_version_is_compared_field_by_field(self):
-        m = b'{"result":"success","version":"0.1-zig","commit":"bare-metal","rejects":{},"mem":{"live_bytes":1}}'
-        l = b'{"result":"success","version":"0.1-zig","commit":"dev","rejects":{},"mem":{"live_bytes":9}}'
-        self.assertEqual(G.version_differences(m, l), [])
-        wrong = m.replace(b"bare-metal", b"dev")
-        self.assertTrue(G.version_differences(wrong, l))
-        self.assertTrue(G.version_differences(m, l.replace(b'"rejects":{}', b'"rejects":{"x":1}')))
+        saved = G.EXPECTED_COMMIT
+        G.EXPECTED_COMMIT = "be16d282"
+        try:
+            m = b'{"result":"success","version":"0.1-zig","commit":"be16d282","rejects":{},"mem":{"live_bytes":1}}'
+            l = b'{"result":"success","version":"0.1-zig","commit":"dev","rejects":{},"mem":{"live_bytes":9}}'
+            self.assertEqual(G.version_differences(m, l), [])
+            # Metal must name the checkout it was built from, not whatever it likes.
+            wrong = m.replace(b"be16d282", b"dev")
+            self.assertTrue(G.version_differences(wrong, l))
+            self.assertTrue(G.version_differences(m, l.replace(b'"rejects":{}', b'"rejects":{"x":1}')))
+        finally:
+            G.EXPECTED_COMMIT = saved
+
+    def test_the_host_page_is_compared_by_shape(self):
+        app = b"<h2>The application</h2><table><tr><td>version</td><td>0.1</td></tr></table><h2>The host</h2>"
+        m = app + b"<tr><td>host</td><td>gopher-metal, with no operating system</td></tr><td>FAT16, serial 92DE-8831"
+        l = app + b"<tr><td>host</td><td>Linux, zig-server, pid 7</td></tr>"
+        self.assertEqual(G.host_page_differences(m, l), [])
+        self.assertTrue(G.host_page_differences(l, l))
+        self.assertTrue(G.host_page_differences(m.replace(b"<h2>The host</h2>", b""), l))
+        extra = app.replace(b"</table>", b"<tr><td>commit</td><td>x</td></tr></table>")
+        self.assertTrue(G.host_page_differences(extra + m[len(app):], l))
+
+    def test_the_checkout_commit_reads_as_build_zig_writes_it(self):
+        here = os.path.dirname(os.path.abspath(__file__))
+        got = G.checkout_commit(here)
+        self.assertRegex(got, r"^[0-9a-f]{7,}(\+dirty)?$")
+        self.assertEqual(G.checkout_commit("/nonexistent"), "unknown")
 
 
 class RawSocket(unittest.TestCase):
