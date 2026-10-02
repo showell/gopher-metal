@@ -488,6 +488,31 @@ What each needs from the box:
     `master` and is noted here; rebase over it.
   - Thanks for item 20; the box reads REVIEW-request-paths.md next.
 
+- **New for CC, before the rest of 17 (2026-10-02): metal re-cases a name
+  on a whole-file rewrite.** Found by three new judge steps (below):
+  post to topic `metal-talk`, read `METAL-TALK/raw`, then send to
+  `Metal-Talk`. Linux (the Store, `cd15276d`) keeps `metal-talk.count`
+  and `metal-talk.lastauthor`; metal ends with `Metal-Talk.count` and
+  `Metal-Talk.lastauthor`. Cause: `fat16.writeFileIn` removes the entry
+  and writes a new one under the name it was given. Appends
+  (`createFile`, no truncate) keep the name; Linux's own vfat keeps it on
+  a truncating open too. **Fix:** a rewrite of an existing entry keeps its
+  stored name (and its short alias); a host test that rewrites `plan.md`
+  as `PLAN.md` and lists `plan.md`; the oracle agrees. **Land these judge
+  steps with it** (in `MEMBER_STORY`, after "a message in it"):
+
+      # **CASE DOES NOT TELL TOPICS APART** (Steve's option 1, 2026-10-02): on
+      # FAT it cannot, and angry-gopher's Store keeps that rule on Linux too. So
+      # a topic asked for, or written to, in another case is the same topic on
+      # both hosts.
+      step("the new topic, asked for in another case", "GET", "/chat/c/1_2/METAL-TALK/raw", JAR),
+      step("a message to it, in a third case", "POST", "/chat/c/1_2/Metal-Talk/send", JAR,
+           "markdown=the+same+topic&cid=c5", headers=["X-Chat-Async: 1"]),
+      step("the topic holds both messages", "GET", "/chat/c/1_2/metal-talk/raw", JAR),
+
+  Everything else in that run matched Linux, both machines; the only other
+  red was `/version`, the box's doing again (a commit mid-run).
+
 ## Proposed
 
 *(CC adds items here, one line on why each.)*
