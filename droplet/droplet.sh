@@ -24,7 +24,10 @@
 # NO_SCREEN=1 (no display card in slot 02, so gopher-metal finds no screen and
 # writes only to the serial port: not a droplet, a way to measure the screen),
 # and VOLUME=path (a raw disk image attached as a DigitalOcean volume is, on
-# the SCSI controller; VOLUME_TARGET and VOLUME_LUN place it).
+# the SCSI controller; VOLUME_TARGET and VOLUME_LUN place it), and ACCEL=tcg
+# (software emulation and QEMU's `max` processor, for a machine with no KVM,
+# such as a cloud container: slower, and not a droplet's processor; the
+# default is KVM with this box's own, as on a droplet).
 #
 # **DIRTY=1: THE MACHINE STARTS WITH GARBAGE IN EVERY BYTE OF RAM.** QEMU's
 # memory comes fresh from Linux, so it is all zeroes, and a loader or kernel
@@ -92,8 +95,11 @@ bios=()
 [ -n "${BIOS:-}" ] && bios=(-bios "$BIOS")
 [ "${NO_DOOR:-}" = 1 ] && door=()
 
+accel=(-accel kvm -cpu host)
+[ "${ACCEL:-kvm}" = tcg ] && accel=(-accel tcg -cpu max)
+
 exec qemu-system-x86_64 \
-    "${memory[@]}" "${bios[@]}" -accel kvm -cpu host -smp 1 \
+    "${memory[@]}" "${bios[@]}" "${accel[@]}" -smp 1 \
     -nodefaults -no-reboot -display none "${console[@]}" \
     -device piix3-usb-uhci,addr=01.2 \
     "${screen[@]}" \
