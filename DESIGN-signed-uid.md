@@ -1,5 +1,9 @@
 # Design: signing `gopher_uid`
 
+> **Built** (QUEUE.md item 51, angry-gopher `uid_cookie.zig`), with the
+> re-sign grace and per-address count of item 63. What follows is the design
+> as it was written, before the code: "today" below means then.
+
 QUEUE.md item 23. This note is the root fix for REVIEW-request-paths.md
 findings 1 and 2. It is a design for Steve to decide on; no code is in it.
 It was read on angry-gopher at CC's branch `fa28574a`, which sits on

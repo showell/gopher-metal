@@ -8,7 +8,9 @@ with no operating system changes nothing about what it serves. So every request
 below goes to two servers built from the same source:
 
   - the kernel, booted in QEMU with the site on a GPT disk whose first
-    partition is FAT16 — one boot per request, since it serves one and stops;
+    partition is FAT16 (FAT=32: FAT32) — one boot for all the single requests,
+    or one each with JUDGE_ISOLATED=1; JUDGE_DROPLET=1 boots the droplet's
+    machine instead, with chat's data on a SCSI volume;
   - the ordinary Linux build, run over a copy of the same files.
 
 and the answers must agree: status, Location, Set-Cookie, Content-Type, and the
@@ -21,8 +23,8 @@ Linux — because several requests write, and a write on one side must not leak
 into the next case's comparison.
 
 **A WRITE IS JUDGED TWICE.** After it, the files it touched are read back —
-through the Linux VFAT driver on the kernel's disk, and straight off the Linux
-server's directory — and must match, and the kernel's disk must pass fsck.
+off the kernel's disk (mtools, below), and straight off the Linux server's
+directory — and must match, and the kernel's disk must pass fsck.
 
 **TIME.** Routes that stamp the wall clock write a different second on each
 side. A Unix time is replaced with <NOW> only if it lies inside the window in

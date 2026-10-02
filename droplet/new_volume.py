@@ -18,7 +18,8 @@ console, with the volume found by `lsblk` (2G, no partitions):
     droplet/new_volume.py <out.img>                      # FAT16, 2 GiB
     droplet/new_volume.py <out.img> --fat 32 --gib 16    # FAT32, 16 GiB
 
-Needs `sudo -n` for the loop mount, as the judge does.
+No root: the judge's build_disk, which uses mtools (JUDGE_MOUNT=1: a loop
+mount, and `sudo -n`).
 """
 import os
 import shutil

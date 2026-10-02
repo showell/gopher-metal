@@ -439,8 +439,10 @@ where `git stash` would also sweep up any unrelated work in progress.)
 1. §1 invariants, including the liveness table, wired into the existing
    fixture. **Done:** `src/tcp_check.zig`.
 2. §6 awkward ISNs. **Done:** `build.zig`.
-3. §2 the queue audit, written into the code headers.
-4. §9 the loop-latency numbers and their judge bounds.
+3. §2 the queue audit, written into the code headers. **Done:** `src/tcp.zig`'s
+   header, "What waits in the table, and what bounds the wait".
+4. §9 the loop-latency numbers and their judge bounds. **Not done.**
 5. §3 the simulator and model peer: the biggest investment, and the biggest
-   payoff.
-6. §4, §5, §7, §8 and §10 as the simulator matures.
+   payoff. **Done:** `src/tcp_sim.zig`.
+6. §4, §5, §7, §8 and §10 as the simulator matures. **Done:** §7
+   (`matrix_rows`) and §10 (`tools/mutate_tcp.py`). **Not done:** §4, §5, §8.

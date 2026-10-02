@@ -13,8 +13,9 @@ this machine's FAT volume. See MIGRATION.md.
 Plain Python, standard library only, no mounting: it reads the tree, and
 judges each entry against two sets of limits.
 
-  - **The copy**: Linux's vfat driver, which is what writes the volume
-    (judge_gopher.build_disk: mkfs.vfat -F 16, mount, shutil.copytree).
+  - **The copy**: what writes the volume: mtools, in build_volume.py
+    (FAT16 or FAT32), or Linux's vfat driver behind rehearse.py's --mount.
+    Both refuse or change the same names, and are held to the same limits.
   - **The reader**: this machine's own src/fat16.zig and src/io.zig, which
     are what read it afterwards.
 

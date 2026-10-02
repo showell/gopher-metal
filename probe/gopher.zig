@@ -1,6 +1,6 @@
 //! **THE REAL SERVER.** Not a probe that imitates it — `angry-gopher`'s own
 //! ROUTE TABLE, compiled from its own source, serving real requests on a machine
-//! with no operating system, with its data on a FAT16 volume.
+//! with no operating system, with its data on a FAT16 or FAT32 volume.
 //!
 //! The only thing done to the application is `port.sh`: one line changed in
 //! each file that opens with `const Io = std.Io;`. Not one call site moves, and

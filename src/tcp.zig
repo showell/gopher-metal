@@ -38,8 +38,9 @@
 //!   waits for its own persist timer, which backs off to minutes.
 //!
 //! **STILL THE SMALL TCP**, allowed because this box sits behind Caddy on a
-//! private network: no congestion control, no fast retransmit, no selective
-//! acknowledgement, no window scaling, and received segments are taken in
+//! private network: no congestion control, no selective acknowledgement, no
+//! window scaling (a fast retransmit, on three duplicate acknowledgements, it
+//! does have), and received segments are taken in
 //! order only — anything else is dropped and re-acknowledged, which asks the
 //! peer to send it again.
 //!

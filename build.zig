@@ -2,7 +2,8 @@
 // no libc, no syscalls. A kernel is one root file over src/, linked with
 // probe/link.ld and booted by QEMU through the PVH note it carries.
 //
-//   zig build probe     the virtio probe kernel  ->  probe/probe.elf
+//   zig build kernels   every probe kernel into probe/ (`zig build --help` lists each)
+//   zig build gopher    the real server, after ./port.sh
 const std = @import("std");
 const assets = @import("gen/assets.zig");
 
@@ -119,8 +120,8 @@ pub fn build(b: *std.Build) void {
     // gopher` says plainly what is missing when it is missing.
     // What the application's own build.zig supplies and this one must too: a
     // `build_options` module, and the front-end artifacts each page embeds by
-    // name. That table lives in angry-gopher/zig-server/build.zig; only the
-    // two /driving needs are mirrored here, because only /driving is served.
+    // name. That table lives in angry-gopher/zig-server/build.zig; port.sh
+    // copies it into gen/assets.zig, so the two cannot drift.
     //
     // **THIS IS THE PART OF THE PORT THAT IS NOT ABOUT THE MACHINE.** The 61
     // modules compile freestanding with one line changed each; what is left is

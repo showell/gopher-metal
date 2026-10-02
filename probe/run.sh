@@ -6,10 +6,12 @@
 #   probe/run.sh quick      host tests, Debug kernels, every probe, and the
 #                           judge's quick tier: minutes, for iterating
 #   probe/run.sh gopher     the judge's full run, on whatever gopher.elf is
-#   probe/run.sh gopher uploads       ONE gate of it, in about a minute
+#   probe/run.sh gopher uploads       ONE gate of it, in seconds
 #   probe/run.sh gopher isolated      a boot per single request: what a push
 #                                     is judged on
 #   probe/run.sh native     the TCP table on Linux, against Linux's TCP
+#   probe/run.sh ladder     one operation many times, at a flat cost
+#   probe/run.sh soak       one long boot (SOAK_ROUNDS); not part of `all`
 #
 # Prints a line per probe and exits 1 if any failed.
 #

@@ -1,5 +1,10 @@
 # Sessions and the secret: options for Steve
 
+> **Partly built:** changing the secret is `/admin/secret` (QUEUE.md item 66;
+> SECRET-LEAK.md and `droplet/rotate_secret.py`), keeping players' cookies for
+> 0-90 days. Session lifetimes and revocation are still as described. What
+> follows is the note as written: "today" below means then.
+
 QUEUE.md item 58, from REVIEW-admin-backup.md findings 1 and 5. This is a
 note for a decision: no code here. Read at angry-gopher `3669ef98`.
 

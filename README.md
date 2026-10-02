@@ -158,7 +158,7 @@ droplet, booted from a custom image
 | virtio-blk over MMIO | **works** — reads, writes, and reads back |
 | virtio-net over MMIO | **works** |
 | virtio over PCI | **works** — disk and network found on a PC's bus, as a droplet has them |
-| a DigitalOcean volume (virtio-SCSI) | **works on the droplet-shaped QEMU** — found at any target and LUN; the chat judge keeps chat's data on one, the site on the boot disk, and matches Linux. Not yet tried on a real volume |
+| a DigitalOcean volume (virtio-SCSI) | **works on the droplet-shaped QEMU** — found at any target and LUN; the chat judge keeps chat's data on one, the site on the boot disk, and matches Linux; and on the test droplet's real volume since v5 (FAT16) |
 | DHCP | **works** — from QEMU's server and DigitalOcean's, asking again with RFC 2131's backoff |
 | ARP | **works** — answers, which is what makes the address reachable |
 | TCP | **works** — 256 connections; the peer's window and segment size respected, lost segments sent again, silent peers given up on; received in order only |
@@ -173,8 +173,8 @@ droplet, booted from a custom image
 | `Io.Dir` | **works** — see "the seam we first got wrong" |
 | the TSC's rate | **works** — measured against the PIT, 0.001% from the host kernel's own figure |
 | the wall clock | **works** — the CMOS RTC, anchored at a seconds edge; pinned leap-day, noon and 4 PM boots |
-| **angry-gopher's whole route table** | **works** — 38 requests, each answered the same as the Linux build over the same files |
-| many requests per boot | **works** — a 22-step story and 300 requests to one boot, judged against Linux; heaps steady |
+| **angry-gopher's whole route table** | **works** — 15 single requests and four stories (members 40 steps, uids 10, caps 71, Lyn Rummy 17), each answered the same as the Linux build over the same files |
+| many requests per boot | **works** — stories of up to 71 steps and 300 requests to one boot, judged against Linux; heaps steady |
 | many connections, one loop | **works** — a request is served once the whole of it has arrived |
 | chat's live streams | **works** — held by the loop, pinged, budgeted, and ended when their tab leaves or stops reading |
 | uploads | **works** — a picture stored on the volume and read back byte for byte, judged against Linux; the request heap grows past what it keeps |
@@ -191,18 +191,20 @@ droplet, booted from a custom image
     probe/run.sh           # boot each one under microvm (~45 s)
     probe/run.sh clock     # just one
     ./port.sh && zig build gopher && probe/run.sh gopher   # the real server, judged against Linux (~4 min)
-    probe/run.sh gopher uploads   # ONE gate of that judge, in about a minute
+    probe/run.sh gopher uploads   # ONE gate of that judge, in seconds
     probe/run.sh gopher isolated  # a boot per single request: what a push is judged on
     probe/run.sh quick     # all of the above in Debug, with the judge's quick tier
     probe/run.sh native    # the TCP table on Linux, judged by Linux's own TCP (~1 min)
     probe/run.sh ladder    # one operation many times, at a flat cost (LADDER_SCALE=10 for more)
+    probe/run.sh soak      # one boot serving for a long time (SOAK_ROUNDS)
 
 **One gate at a time.** Every gate of the gopher judge boots QEMU, and the
 whole run is four minutes; a change to one gate should be answerable in one of
 those minutes. `probe/run.sh gopher <gate>` runs one — the names are `cases
-members streams-linux streams-metal budget churn bulk uploads slow lagging
-concurrent timeouts endurance stamina`, and a name it does not know is an
-error, not a silently complete run. The single requests go to one boot by
+members uids caps lynrummy streams-linux streams-metal budget churn bulk
+uploads slow lagging concurrent timeouts damaged endurance stamina` (the
+judge's `GATES`), and a name it does not know is an error that lists them,
+not a silently complete run. The single requests go to one boot by
 default (2 s, against fifteen boots and a minute and a half); `probe/run.sh
 gopher isolated` gives each its own boot, which is what proves an answer owes
 nothing to an earlier one, and is what a push is judged on.
@@ -273,13 +275,15 @@ blocked from it. What does and does not work there, found on 2026-10-02:
   - **`probe/run.sh` runs.** The judges' self-test reads the host's TSC
     rate (`HOST_TSC_HZ` overrides it). Probes that need the Cobblestone
     checkout's fixtures (`block`, for one) cannot find them here.
-  - **`droplet/boot.sh` passes all seven probes** once `droplet.sh`'s
-    `-accel kvm -cpu host` is changed to `-accel tcg -cpu max` locally.
+  - **`ACCEL=tcg droplet/boot.sh` passes all seven probes**; `droplet.sh`
+    takes `ACCEL=tcg` where there is no KVM.
 - **What cannot be judged there:**
   - **Resting with the APIC timer.** TCG offers no TSC-deadline timer, so
     `interrupts.startApic` refuses and the machine never rests.
-  - **The chat judge.** It loop-mounts FAT images, and the container's
-    kernel has no `vfat`.
+  - **The judge's `JUDGE_MOUNT=1`**, which reads the disks through Linux's
+    vfat driver: the container's kernel has no `vfat`. The chat judge
+    itself runs here, through mtools, under TCG (the quick tier in about
+    two minutes; `apt-get install mtools` if it is missing).
 
   Both are judged on a machine with KVM.
 
@@ -307,8 +311,8 @@ gopher-metal std.http probe
   responded
 ```
 
-`src/stream.zig` is what makes that true, and it is about a hundred lines,
-because each interface needs exactly one function: a reader needs `stream`, a
+`src/stream.zig` is what makes that true, and its core is small, because
+each interface needs exactly one function: a reader needs `stream`, a
 writer needs `drain`, and everything else in both vtables has a default.
 
 **A read there runs the event loop.** With one core and no preemption there is
@@ -356,7 +360,7 @@ gopher-metal http probe
 | `src/gpt.zig` | where the partition starts, because sector 0 is not the filesystem |
 | `src/fat16.zig` | mount a volume, walk a directory, read a file, write one |
 | `src/arp.zig` | answering "who has this address?", which is what makes one reachable |
-| `src/tcp.zig` | one connection at a time: accept, read, answer, close |
+| `src/tcp.zig` | a table of connections: handshake, windows, retransmission, close |
 | `src/stream.zig` | that connection as a `std.Io.Reader` and a `std.Io.Writer` |
 | `src/io.zig` | `Io.Dir`, `Io.Clock`, `Io.Mutex`, `Io.Group` — the surface the application calls |
 | `src/port.zig`, `src/tsc.zig` | x86 port I/O, and the timestamp counter |
@@ -366,9 +370,9 @@ gopher-metal http probe
 | `probe/*.zig` | one kernel each; a root file with a `kmain` |
 | `probe/link.ld` | the layout — the note first, and `.bss` treated as unwritten |
 | `probe/run.sh` | boots each under `-M microvm`, maps QEMU's exit code back to the guest's |
-| `probe/judge_*.py` | the outside verdicts: the host's clock, a raw FAT16 parse, and the Linux build of angry-gopher |
+| `probe/judge_*.py` | the outside verdicts: the host's clock, a raw FAT16 parse, the Linux build of angry-gopher, and the ladder's, the replace probe's and the soak's |
 
-## Three things that cost time
+## Six things that cost time
 
 Written down because each one looks like something else.
 
@@ -445,31 +449,33 @@ the contract any host meets before calling the route table:
     a Bus over base
     an arena per request
 
-— with the site on a GPT disk whose first partition is FAT16, and clocks from
-its own hardware. Then it calls `router.route`: the application's real
-dispatch, every page — one connection at a time, in a loop, each request with
-its own heap that is reset afterwards. `gopher-metal.conf` on the boot disk says
+— with the site on a GPT disk whose first partition is FAT16 or FAT32, and
+clocks from its own hardware. Then it calls `router.route`: the application's
+real dispatch, every page — a table of up to 256 connections, one request
+served at a time, each request with its own heap that is reset afterwards. `gopher-metal.conf` on the boot disk says
 how many requests to serve (`requests = N`); without it, forever. A request
 that fails is logged and survived, as it is on Linux.
 
 **It is judged against Linux.** `probe/judge_gopher.py` sends each request to
 this kernel and to the ordinary Linux build of the same source over the same
 files, each case starting from the same state on both sides. Status, Location, Set-Cookie, Content-Type and body
-must match; files a request writes are read back through the Linux VFAT driver
-and must match too; and a Unix time is only forgiven if it falls inside the
+must match; files a request writes are read back through mtools (or Linux's
+vfat driver, with `JUDGE_MOUNT=1`) and must match too; and a Unix time is only forgiven if it falls inside the
 window in which that side handled the request.
 
 ```
-ok    the story: 22 requests to ONE boot, each answered as Linux answered, and all 18 data files agree
-ok    stamina: 300 requests to one boot, every answer the same, base heap steady at 72 live bytes, each request's heap the same every round (58498, 26768, 1807 bytes)
-38 of 38 single requests, and both long-running boots, answered as Linux answered
+ok    15 single requests to one boot, each answered as Linux answered
+ok    the member story: 40 requests to ONE boot — login, chat, topics, reactions, admin, logout — each answered as Linux answered, all 27 files agree; …
+ok    the Lyn Rummy story: 17 requests to ONE boot — a name, a game and its moves, a puzzle and its moves, both reloaded, the roster — each answered as Linux answered, all 26 files agree
+answered as Linux answered: cases members uids caps lynrummy streams-linux streams-metal budget churn bulk uploads slow lagging concurrent timeouts damaged (152 s)
 ```
 
-Then two boots that serve many requests. **The story** is one visitor's
-afternoon, told to one kernel and one Linux server — the name page, a game,
-moves, a second game, a second visitor, the puzzles — with garbage and a silent
-connection in the middle that must not stop it; afterwards the whole data tree
-is compared. **Stamina** is 300 requests to one boot: every answer must equal
+(the quick tier under TCG, 2026-10-02.) Then boots that serve many requests.
+**The stories** are one visitor's afternoon each, told to one kernel and one
+Linux server — a member's chat, a player's cookies, the game store's caps, a
+Lyn Rummy game and its puzzles — the member's with garbage on the wire in
+the middle that must not stop it; afterwards the whole data tree is
+compared. **Stamina** is 300 requests to one boot: every answer must equal
 the first answer to the same request, the base heap must not grow, and each
 request must use the same amount of its own heap every round.
 
@@ -478,8 +484,6 @@ screens refusing a stranger, the name page, the player store, a staged game
 session rendered in Eastern time, new game and puzzle sessions stamped with the
 wall clock, a move appended to an action log, a new player's counter and row.
 
-What it does not do yet is take two connections at once — a browser loading
-`/game` opens three — or hold one open for SSE. Both want a scheduler.
 
 ## The seam we first got wrong
 
@@ -1040,12 +1044,13 @@ like the receive side:
 - **The segment size.** The SYN-ACK says ours (1460); a peer's SYN says its,
   and a peer that says nothing is sent 536-byte segments.
 - **Retransmission.** Bytes leave the queue only when acknowledged. What is
-  not acknowledged within a second is sent again with everything after it,
-  and the wait doubles, up to 5 s. A second is RFC 6298's starting value for a
-  sender that measures no round trips; it began at Linux's 200 ms, which is a
-  floor under a measured estimate, and raced slirp's delayed acknowledgements.
-- **Giving up.** Six timeouts with no progress — about 27 s — and the
-  connection is reset. That is how a peer that vanished without a FIN is
+  not acknowledged in time is sent again with everything after it, and the
+  wait doubles, up to 5 s. The wait is measured (RFC 6298's `srtt + 4 *
+  rttvar`, the handshake the first sample), with Linux's 200 ms as its floor
+  and first value, so a peer's delayed acknowledgement is not taken for a
+  loss. Three duplicate acknowledgements resend at once (RFC 5681).
+- **Giving up.** Six timeouts with no progress — about 16 s from a 200 ms
+  clock, 35 s at most — and the connection is reset. That is how a peer that vanished without a FIN is
   noticed.
 - **Every waiting frame before any timer.** A busy loop finds
   acknowledgements queued in the NIC's ring, and looking at the timers first
@@ -1144,7 +1149,7 @@ ok    loss: 5% lost toward the table and 1 in 13 from it: recovered
 **Why it exists.** The send side was debugged one 40-second QEMU boot at a
 time, and the bugs it found were ones a reading of RFC 9293 would have named
 in minutes. A cold review against the RFC found eight more, each now a pure
-test with a fake clock; the table's 44 host tests run in a second, timers and
+test with a fake clock; the table's 68 host tests (tcp_test.zig and tcp_check.zig) run in a second, timers and
 all. What is left for a real peer is the handful of facts an implementation
 cannot know about itself — and those are what this harness asks.
 
@@ -1164,7 +1169,7 @@ connections.
 
 ## What the TCP does not do
 
-No congestion control, no fast retransmit, no selective acknowledgement, no
+No congestion control, no selective acknowledgement, no
 window scaling, no out-of-order reassembly, no keep-alive. (It does measure
 round trips: the retransmission clock is RFC 6298's, from the path.) `zig-server`'s own
 comment says keep-alive is deliberately off. The rest are allowed because this
