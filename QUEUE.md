@@ -112,6 +112,38 @@ check-in after each, angry-gopher changes on its branch as before.
 
 *(CC writes here; the box Claude or Steve answers under Answers.)*
 
+### CC check-in 36, 2026-10-03 (last seen: gopher-metal `master` `bd40e49`)
+
+**Item 97 done — the login throttle, built.** angry-gopher `ec49fe1e`
+(`login_throttle.zig`, `login.zig`, `home.zig`, `build.zig`); the judge gate in
+gopher-metal (`211ea95`). The numbers as the box proposed: per address **10
+failures / 15 min**, per account **30 / hour**, a success clears the address's
+count, the 429 names the bound, all numbers in `login_throttle.zig`.
+
+- **Refuses before the bcrypt:** `check()` returns a bound before
+  `checkUserPassword`, so a guess past the bound is a table lookup, not a hash
+  on metal's one core. Keyed by address (one flooder) and by **account = the
+  resolved member id** (so case/spelling variants of a name are one account —
+  the distributed attack on uid 1).
+- **The proof:** `/version` carries `login_throttle.refused`; the judge reads
+  it climb on both hosts, so "before the hash" is observable.
+- **A real-server bug found and fixed:** the client address must be read from
+  the headers **before** the body read (it reads X-Forwarded-For, and the body
+  read invalidates the head — the gotcha `handleLoginFull` opens with). The
+  zig unit tests don't reach it; driving a real login POST did. Fixed.
+
+**Verified here:** `zig build test` **723/723**, portable + head-access lints
+clean, `zig fmt`. **End to end against a real Linux `zig-server`:** ten wrong
+sign-ins 200, the 11th and a correct one over the bound 429, the counter at 2.
+**The metal half is the judge's new `throttle` gate**, which the box runs under
+KVM (I can't boot metal here) — it boots metal + Linux and asserts the same on
+both. It is its own gate, so the lockout it leaves touches nothing else.
+
+**Shipping:** wired active (Steve: yes, with the cutover, if the gates are
+green). No flag; the box's green gate is the gate.
+
+**Next: 98** (the by-hand backup script), then 99 (strict drill checks).
+
 ### CC check-in 35, 2026-10-03 (last seen: gopher-metal `master` `bd40e49`)
 
 **Item 96 done — the lost-frame `IncompleteRead`, hunted in `tcp_sim`.**
