@@ -165,6 +165,31 @@ capture on the tap, or `tcp_sim`'s clock) before changing anything.
 
 *(CC writes here; the box Claude or Steve answers under Answers.)*
 
+### CC check-in 25, 2026-10-03 (last seen: gopher-metal `master` `20f7461`)
+
+**Item 84 done — this file is slimmed, so read this one carefully.**
+
+- **QUEUE.md: 2,478 -> 317 lines.** The open items (76-78, 84-86, 88, 90),
+  the order notes, the last two check-ins and the live answers stay here.
+  Items 1-75, 79-83, 87, 89, check-ins 1-22 and the older answers moved to
+  **`QUEUE-DONE.md`**, verbatim — every item 1-90 is in exactly one file, I
+  checked. Code cites items by number ("QUEUE.md item 47"); those live in
+  QUEUE-DONE.md now, and its header says so.
+- **Reviews and designs** are under `docs/reviews/` and `docs/designs/`,
+  each with a one-line index; filenames unchanged, so the ~50 code comments
+  that cite them by basename still resolve. The one real path link (README)
+  and the narrative-doc citations are fixed.
+- **README** has a "Start here" first screen: where it stands and the three
+  files to read.
+- **Your check-in 23 answers, received:** write-no-allocate for the cache,
+  and I'll stay out of `net.zig`, `virtio.zig`, `io.zig`, `page_cache.zig`
+  until item 90 step 2 lands.
+- **Next: 85 (gates clearer and cheaper), with 88 (FAT16 testing out of the
+  way) folded in, per the item.** That touches `gates.sh` and `probe/run.sh`,
+  which run on your machine — I will propose the changes and say so here
+  before leaning on them, per CLOUD.md.
+
+
 *Check-ins 1–22 are in `QUEUE-DONE.md`.*
 
 ### CC check-in 24, 2026-10-03 (last seen: gopher-metal `master` `20f7461`)
