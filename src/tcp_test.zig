@@ -1639,3 +1639,81 @@ fn matrixSegment(kind: MatrixKind, setup: MatrixSetup, p: *Peer, buf: []u8, r: u
         .fin_with_data => p.frame(buf, flag_fin | data_flags, r, ten),
     };
 }
+
+// ── a flood of SYNs (QUEUE.md item 82) ───────────────────────────────────────
+
+test "a SYN flood does not keep a real client out: the oldest half-open connection gives way" {
+    var f: Fixture = .{};
+    f.init();
+    var buf: [1600]u8 = undefined;
+    // Spoofed SYNs from addresses that will never answer: the table fills
+    // with connections waiting on a SYN-ACK nobody receives.
+    var flood: u16 = 0;
+    for (0..f.conns.len) |_| {
+        const p = Peer{ .ip = .{ 203, 0, 113, 7 }, .port = 50000 + flood };
+        flood += 1;
+        _ = handle(&f.table, &f.wire, p.frame(&buf, flag_syn, p.seq, ""), 0);
+    }
+    for (f.table.conns) |c| try testing.expectEqual(State.syn_received, c.state);
+
+    // A real client a moment later finds every slot taken by a half-open too
+    // fresh to evict (younger than a round trip): it is refused, as a burst
+    // of real connections is, and Linux retries.
+    var early = Peer{ .ip = .{ 10, 0, 2, 9 }, .port = 39000 };
+    var buf2: [1600]u8 = undefined;
+    _ = handle(&f.table, &f.wire, early.frame(&buf2, flag_syn, early.seq, ""), ms);
+    try testing.expectEqual(@as(u64, 1), f.table.refused);
+
+    // Once the flood's half-opens are older than a round trip, a real client
+    // gets in: the oldest stuck one gives way.
+    var real = Peer{ .ip = .{ 10, 0, 2, 2 }, .port = 40000 };
+    const i = try real.connect(&f.table, &f.wire, min_rto_ns + ms);
+    try testing.expectEqual(State.established, f.table.conns[i].state);
+    try testing.expectEqual(@as(u64, 1), f.table.half_open_given_way);
+
+    // The flood goes on; a real client between every few spoofed SYNs still
+    // gets in, and keeps its slot. Time advances a round trip each step, so
+    // the half-opens the flood leaves are always stuck enough to evict.
+    var now: i96 = min_rto_ns + 2 * ms;
+    var real_ones: u16 = 0;
+    var kept: [8]usize = undefined;
+    var kept_len: usize = 0;
+    for (0..200) |k| {
+        f.wire.count = 0; // the recording wire holds 128 frames; a flood sends more
+        // A real client first, while the flood's earlier half-opens are stuck
+        // (every slot holds one at least a round trip old), then a fresh
+        // spoofed SYN. The real one gets in by evicting a stuck half-open; the
+        // spoofed one takes a freed or stuck slot, or is refused.
+        if (k % 25 == 0) {
+            var c = Peer{ .ip = .{ 10, 0, 2, 3 }, .port = 41000 + real_ones };
+            real_ones += 1;
+            const slot = try c.connect(&f.table, &f.wire, now);
+            // Established connections are not given way: hold at most two,
+            // so the flood always has half-open ones to push out.
+            if (kept_len < 2) {
+                f.table.claim(slot);
+                kept[kept_len] = slot;
+                kept_len += 1;
+            } else f.table.abandon(&f.wire, slot);
+        }
+        const p = Peer{ .ip = .{ 203, 0, 113, 7 }, .port = 50000 + flood };
+        flood += 1;
+        _ = handle(&f.table, &f.wire, p.frame(&buf, flag_syn, p.seq, ""), now);
+        transmit(&f.table, &f.wire, now);
+        now += min_rto_ns + ms;
+    }
+    for (kept[0..kept_len]) |s| try testing.expectEqual(State.established, f.table.conns[s].state);
+    try testing.expectEqual(State.established, f.table.conns[i].state);
+    try testing.expect(f.table.half_open_given_way > 100);
+
+    // The flood stops: what it left times out, and the table is whole again.
+    for (kept[0..kept_len]) |s| f.table.release(s);
+    while (now < 60 * ns_per_s) : (now += 100 * ms) {
+        f.wire.count = 0;
+        transmit(&f.table, &f.wire, now);
+    }
+    for (f.table.conns, 0..) |c, s| {
+        if (s == i or std.mem.indexOfScalar(usize, kept[0..kept_len], s) != null) continue;
+        try testing.expectEqual(State.closed, c.state);
+    }
+}
