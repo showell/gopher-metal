@@ -9,6 +9,23 @@ note at the front. Tests boot it on QEMU's `microvm` machine, on metal-vmm,
 and on a QEMU laid out like a DigitalOcean droplet; for real, it boots on a
 droplet through our own BIOS loader.
 
+## Start here
+
+**Where it stands:** it runs the whole site at
+https://metal.lynrummy.com, a test name proxied to a droplet with no Linux
+on it, serving a copy of prod's chat data. The cutover — replacing Linux at
+`lynrummy.com` with metal — is rehearsed and waiting on a few of Steve's
+steps and the day itself; see below, and `CUTOVER.md`.
+
+**Three files to read, in order:**
+1. this README — what metal is, how it is built and tested, and how it
+   compares with Linux.
+2. [`CUTOVER.md`](CUTOVER.md) — the plan to go live, its go/no-go steps, and
+   the way back.
+3. [`CLOUD.md`](CLOUD.md) and [`QUEUE.md`](QUEUE.md) — how the two Claudes
+   share the work, and the live queue of what is open (done work is in
+   `QUEUE-DONE.md`).
+
 ## Where it runs: a TEST site, https://metal.lynrummy.com
 
 **It runs, and it runs well, but nothing on it is meant to last yet.**
