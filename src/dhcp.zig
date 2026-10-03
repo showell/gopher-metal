@@ -266,3 +266,77 @@ test "each wait doubles from four seconds and stops at sixty-four" {
     try std.testing.expectEqual(@as(u64, 3_000_000_000), waitAfter(0, -1_000_000_000));
     try std.testing.expectEqual(@as(u64, 65_000_000_000), waitAfter(9, 1_000_000_000));
 }
+
+// **A FRAME OF ANY BYTES** (QUEUE.md item 80): what a stranger on the wire,
+// or a damaged frame, hands the parsers a booting machine runs first. Each
+// is refused or parsed with every slice inside the frame; a bounds check
+// that fired here would stop the machine, in ReleaseSafe as in Debug.
+test "a frame of any bytes is refused or parsed inside itself, by UDP, ARP and DHCP's options" {
+    const std = @import("std");
+    const arp = @import("arp.zig");
+    const mac = [6]u8{ 0x52, 0x54, 0, 0x12, 0x34, 0x56 };
+    var good: [600]u8 = undefined;
+    // A real OFFER for transaction 7, as a server would send it.
+    const p = good[proto.udp_payload_at..];
+    var at = writeBootp(p, 7, mac, true);
+    p[0] = op_reply;
+    at = option(p, at, opt_message_type, &.{msg_offer});
+    at = option(p, at, opt_subnet_mask, &.{ 255, 255, 255, 0 });
+    at = option(p, at, opt_router, &.{ 10, 0, 2, 2 });
+    p[at] = opt_end;
+    at += 1;
+    const len = proto.writeUdp(&good, mac, proto.mac_broadcast, .{ 10, 0, 2, 2 }, proto.ip_broadcast, port_server, port_client, at);
+    try std.testing.expect(replyFor(proto.parseUdp(good[0..len]).?.payload, 7, mac));
+
+    var prng = std.Random.DefaultPrng.init(80);
+    const r = prng.random();
+    var frame: [600]u8 = undefined;
+    var parsed: u32 = 0;
+    for (0..200_000) |k| {
+        var n: usize = len;
+        @memcpy(frame[0..len], good[0..len]);
+        switch (k % 4) {
+            // Noise, of any length.
+            0 => {
+                n = r.uintAtMost(usize, frame.len);
+                r.bytes(frame[0..n]);
+            },
+            // The OFFER cut short anywhere.
+            1 => n = r.uintAtMost(usize, len),
+            // A few bytes of it changed: lengths, options, types.
+            2 => for (0..r.intRangeAtMost(usize, 1, 6)) |_| {
+                frame[r.uintLessThan(usize, len)] = r.int(u8);
+            },
+            // Changed past the IP header, which is then made to check again,
+            // so the damage reaches UDP and DHCP rather than stopping there.
+            else => {
+                for (0..r.intRangeAtMost(usize, 1, 6)) |_| {
+                    frame[r.intRangeLessThan(usize, proto.eth_header_len + 2, len)] = r.int(u8);
+                }
+                const ip = frame[proto.eth_header_len..][0..proto.ip_header_len];
+                if (ip[0] == 0x45) {
+                    ip[10] = 0;
+                    ip[11] = 0;
+                    const sum = proto.checksum(ip);
+                    ip[10] = @truncate(sum >> 8);
+                    ip[11] = @truncate(sum);
+                }
+            },
+        }
+        const f = frame[0..n];
+        const lo = @intFromPtr(f.ptr);
+        if (proto.parseUdp(f)) |dg| {
+            parsed += 1;
+            try std.testing.expect(@intFromPtr(dg.payload.ptr) >= lo and @intFromPtr(dg.payload.ptr) + dg.payload.len <= lo + n);
+            _ = replyFor(dg.payload, 7, mac);
+            _ = messageType(dg.payload);
+            _ = ipOption(dg.payload, opt_router);
+            if (findOption(dg.payload, opt_subnet_mask)) |v| {
+                try std.testing.expect(@intFromPtr(v.ptr) + v.len <= lo + n);
+            }
+        }
+        _ = arp.parseRequest(f);
+    }
+    // The damage reached past the IP header often enough to mean something.
+    try std.testing.expect(parsed > 20_000);
+}
