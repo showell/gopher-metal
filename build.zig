@@ -140,7 +140,7 @@ pub fn build(b: *std.Build) void {
     // **OFF UNTIL A DROPLET HAS BEEN MEASURED** (QUEUE.md item 16's hard
     // rule): a guest's reset must restart a real droplet, not power it off,
     // before any deployed image restarts itself. -Drestart=true builds it in.
-    gm_opts.addOption(bool, "restart", b.option(bool, "restart", "gopher.elf restarts on a failure while serving (RESTART.md); off by default") orelse false);
+    gm_opts.addOption(bool, "restart", b.option(bool, "restart", "gopher.elf restarts on a failure while serving (RESTART.md; measured on a real droplet 2026-10-03); -Drestart=false halts instead") orelse true);
     build_opts.addOption(bool, "fake_leak", false);
 
     const app = b.createModule(.{
