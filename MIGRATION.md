@@ -187,7 +187,7 @@ each is reported as a hard link.
   `fsck.fat` calls it broken, and `fat16.zig` stops there too: a write
   that needs more room fails, and the application answers it as a full
   disk. angry-gopher's Store header says how near each of its folders can
-  come (REVIEW-fixed-sizes.md, finding 1).
+  come (docs/reviews/REVIEW-fixed-sizes.md, finding 1).
 - **The application's busiest directories:**
   - **a conversation's `sessions/`:** five names a session, about 4–8 entries
     each, so roughly 4,000 sessions in one conversation before the limit;

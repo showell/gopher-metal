@@ -2,7 +2,7 @@
 
 QUEUE.md item 66. One page, for the day it is needed. CUTOVER.md is where
 the cutover's papers start, and how a backup is taken safely; the options
-behind this page are in DESIGN-sessions.md. It holds whatever is decided
+behind this page are in docs/designs/DESIGN-sessions.md. It holds whatever is decided
 about session lifetimes.
 
 ## What the secret is, and what a leak gives away
@@ -55,7 +55,7 @@ script cannot be run.
   - take a new one;
   - delete every older one you can reach: they hold the old secret, and
     the old hashes and keys;
-  - keep the new one encrypted (REVIEW-admin-backup.md, finding 6).
+  - keep the new one encrypted (docs/reviews/REVIEW-admin-backup.md, finding 6).
 
 **4. Tell the members** they will have to log in again, and why.
 

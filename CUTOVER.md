@@ -103,7 +103,7 @@ serve, and leaves prod's own data alone:
 
 - GO: `cat copy/data/players/unsigned-window` is a number no later than
   `date +%s`. A player or guest who has not visited since the signed
-  cookie was deployed now gets the name page, as DESIGN-signed-uid.md
+  cookie was deployed now gets the name page, as docs/designs/DESIGN-signed-uid.md
   says; their data stays on the volume.
 
 ### 3. Check it
@@ -256,7 +256,7 @@ Look at these every hour or two, then every day for a week:
 **Taking a backup of metal.** Do it on `<prod>`, over the private network,
 never through Caddy from a home connection: metal answers nothing else
 while it streams, and over a home connection that is minutes
-(REVIEW-admin-backup.md, finding 3). It needs the admin's password
+(docs/reviews/REVIEW-admin-backup.md, finding 3). It needs the admin's password
 twice, to log in and again for the archive. `read -rs` takes it once,
 unechoed and out of the shell's history, and `printf %s` hands it over
 without a newline:

@@ -65,7 +65,7 @@ the gates.
   - Add items you discover under "Proposed", with one line each on why.
 - **The box Claude answers on `master`:**
   - in `QUEUE.md`, under "Answers";
-  - in a `REVIEW-*.md` file;
+  - in a `docs/reviews/REVIEW-*.md` file;
   - or in the merge itself.
 
   Fetch `origin/master` to see them.
@@ -87,7 +87,7 @@ the gates.
 - The kernel must stay testable on both Linux and QEMU, and angry-gopher must
   stay buildable and testable on Linux. Steve's rule: neither side may make
   the other untestable.
-- Reviews follow `REVIEW-interrupts.md`'s shape:
+- Reviews follow `docs/reviews/REVIEW-interrupts.md`'s shape:
   - what holds up;
   - findings by severity, each with the failure it causes and how likely it
     is;

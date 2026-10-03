@@ -115,7 +115,7 @@ deploy as above.
 **Known and open:**
 
 - one boot here printed its first line and then nothing for a minute (1 of
-  27, not reproduced since). [`REVIEW-first-line.md`](REVIEW-first-line.md)
+  27, not reproduced since). [`REVIEW-first-line.md`](docs/reviews/REVIEW-first-line.md)
   finds nothing on that path that can wait. The likeliest cause was the
   serial port being given up on for good, silently, after one slow drain.
   A port given up on is now tried again on each write, and told how much

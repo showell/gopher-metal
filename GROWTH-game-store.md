@@ -1,6 +1,6 @@
 # The game store's disk growth: options for Steve
 
-QUEUE.md item 26, from REVIEW-request-paths.md finding 6. There is no code
+QUEUE.md item 26, from docs/reviews/REVIEW-request-paths.md finding 6. There is no code
 in this note. It was measured on angry-gopher at CC's branch `4233a319`.
 
 ## What grows, and what each request costs
