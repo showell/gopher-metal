@@ -344,6 +344,17 @@ pub const Volume = struct {
     /// leave it that way.
     fat: ?[]u8 = null,
 
+    /// **WHERE `find` READS A DIRECTORY, MANY SECTORS AT A REQUEST**, once the
+    /// host has given it memory: a whole multiple of the sector, and
+    /// identity-mapped, since the device writes it. Without it a lookup reads
+    /// a directory a sector per request, and a picture six directories deep on
+    /// a droplet's volume (32 KB clusters, network storage) took about 290
+    /// requests to find before its 64 of data were read (QUEUE.md item 90).
+    /// Only `find` uses it: nothing writes while a lookup reads, so a burst it
+    /// has read cannot go stale under it. A listing the application holds
+    /// open keeps its sector of its own (`Lister`).
+    dir_burst: ?[]u8 = null,
+
     /// How much memory `cacheFat` needs: one copy of the FAT.
     pub fn fatBytes(self: *const Volume) usize {
         return @as(usize, self.sectors_per_fat) * sector_size;
@@ -674,6 +685,12 @@ pub const Volume = struct {
             self.in_cluster = 0;
             return true;
         }
+
+        /// The sectors from this one to the end of its stretch of disk: the
+        /// rest of the cluster, or the rest of FAT16's fixed root.
+        fn sectorsLeftInRun(self: *const Walk) u32 {
+            return if (self.root) self.left_in_root else self.vol.sectors_per_cluster - self.in_cluster;
+        }
     };
 
     /// **A DIRECTORY, ONE ENTRY AT A TIME**, from a sector of its own: what
@@ -700,19 +717,43 @@ pub const Volume = struct {
         long_len: usize = 0,
         long_sum: u8 = 0,
         long_ok: bool = false,
+        /// Set by `find` alone (the volume's `dir_burst`): sectors are read
+        /// up to a stretch at a time, and `burst_n` of them from `burst_lba`
+        /// are held.
+        burst: ?[]u8 = null,
+        burst_lba: u32 = 0,
+        burst_n: u32 = 0,
+
+        /// Reads the walk's sector, unless the burst already holds it.
+        fn load(self: *Lister) Error!void {
+            const lba = self.walk.lba;
+            const b = self.burst orelse return self.walk.vol.readSector(lba, &self.sector);
+            if (lba >= self.burst_lba and lba < self.burst_lba + self.burst_n) return;
+            const n = @min(@as(u32, @intCast(b.len / sector_size)), self.walk.sectorsLeftInRun());
+            try self.walk.vol.readSectors(lba, n, b.ptr);
+            self.burst_lba = lba;
+            self.burst_n = n;
+        }
+
+        /// The walk's sector, as `load` left it.
+        fn current(self: *Lister) *const [sector_size]u8 {
+            const b = self.burst orelse return &self.sector;
+            return b[(self.walk.lba - self.burst_lba) * sector_size ..][0..sector_size];
+        }
 
         /// The next real entry, or null at the directory's end.
         pub fn next(self: *Lister) Error!?Entry {
             while (!self.done) {
                 if (!self.loaded) {
-                    try self.walk.vol.readSector(self.walk.lba, &self.sector);
+                    try self.load();
                     self.loaded = true;
                     self.at = 0;
                 }
+                const sector = self.current();
                 while (self.at + dirent_size <= sector_size) {
                     const at = self.at;
                     self.at += dirent_size;
-                    const e = self.sector[at..][0..dirent_size];
+                    const e = sector[at..][0..dirent_size];
                     if (e[0] == 0x00) { // nothing further in this directory
                         self.done = true;
                         return null;
@@ -775,19 +816,13 @@ pub const Volume = struct {
     }
 
     /// The entry named `name` in a directory, or null. Case-insensitive, as
-    /// 8.3 names are.
+    /// 8.3 names are. **IT STOPS AT THE NAME**: the rest of the directory is
+    /// not read, and is read in bursts up to that point (`dir_burst`).
     pub fn find(self: *Volume, dir_cluster: Cluster, name: []const u8) Error!?Entry {
-        const Search = struct {
-            want: []const u8,
-            found: ?Entry = null,
-            fn each(s: *@This(), e: Entry) void {
-                if (s.found != null) return;
-                if (eqlFold(e.text(), s.want)) s.found = e;
-            }
-        };
-        var search = Search{ .want = name };
-        try self.list(dir_cluster, &search, Search.each);
-        return search.found;
+        var l = try self.lister(dir_cluster);
+        l.burst = self.dir_burst;
+        while (try l.next()) |e| if (eqlFold(e.text(), name)) return e;
+        return null;
     }
 
     /// Walks a slash-separated path from the root. "EFI/BOOT/BOOTX64.EFI".

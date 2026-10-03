@@ -201,6 +201,10 @@ pub const Disk = struct {
     blk: virtio.Block,
     scratch: [sector]u8 align(16) = undefined,
     fat_cache: ?[]u8 = null,
+    /// A cached disk also reads directories in bursts, as the host's do, of
+    /// three sectors: an odd size, so a burst ends inside a cluster as often
+    /// as at its end.
+    dir_burst: [3 * fat16.sector_size]u8 = undefined,
     vol: fat16.Volume = undefined,
     /// FAT sectors the last mount's `cacheFat` brought into line.
     repaired: u32 = 0,
@@ -225,6 +229,7 @@ pub const Disk = struct {
         if (cached) {
             d.fat_cache = try testing.allocator.alloc(u8, d.vol.fatBytes());
             d.repaired = try d.vol.cacheFat(d.fat_cache.?);
+            d.vol.dir_burst = &d.dir_burst;
         }
     }
 

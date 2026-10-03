@@ -1385,3 +1385,44 @@ test "the cursor: on a FAT32 volume 33 MiB full, a small write reads a few FAT s
     try testing.expect(reads < 200);
     try d.expectFile("data/small.md", "a small file after a big one");
 }
+
+test "a lookup reads a directory in bursts and stops at the name, finding what the sector-at-a-time walk finds" {
+    // 4 KB clusters, so a directory's cluster is many sectors; FAT16, so the
+    // fixed root is a run of its own as well.
+    const shape = Shape{ .sectors = 65536, .sectors_per_cluster = 8, .suffix = "-burst" };
+    const d = try Disk.make("dir-burst", shape, true);
+    defer d.deinit();
+    const dir = try d.vol.makePath("chat/conversation/sessions");
+    // Long names, three slots each: two clusters and part of a third.
+    var name: [40]u8 = undefined;
+    const files = 60;
+    for (0..files) |k| {
+        const n = try std.fmt.bufPrint(&name, "a-session-with-a-long-name-{d:0>4}", .{k});
+        try d.vol.writeFileIn(dir, n, n);
+    }
+    var cluster_burst: [8 * fat16.sector_size]u8 = undefined;
+    const bursts = [_]?[]u8{ null, d.vol.dir_burst, &cluster_burst };
+    var cost: [bursts.len]u64 = undefined;
+    for (bursts, 0..) |b, i| {
+        d.vol.dir_burst = b;
+        const before = d.blk.requests;
+        for (0..files) |k| {
+            const n = try std.fmt.bufPrint(&name, "a-session-with-a-long-name-{d:0>4}", .{k});
+            const e = (try d.vol.find(dir, n)).?;
+            try testing.expectEqualStrings(n, e.text());
+        }
+        try testing.expect((try d.vol.find(dir, "not-there")) == null);
+        cost[i] = d.blk.requests - before;
+    }
+    // A cluster at a request is about an eighth of a sector at a request.
+    try testing.expect(cost[2] * 4 < cost[0]);
+    try testing.expect(cost[1] < cost[0]);
+    // The first name is in the first sector: one request, however long the
+    // directory.
+    d.vol.dir_burst = null;
+    const before = d.blk.requests;
+    _ = (try d.vol.find(dir, "a-session-with-a-long-name-0000")).?;
+    try testing.expectEqual(@as(u64, 1), d.blk.requests - before);
+    // The volume keeps the burst it was given, for deinit's check.
+    d.vol.dir_burst = &d.dir_burst;
+}

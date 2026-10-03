@@ -1129,6 +1129,11 @@ fn mountFat(blk: *virtio.Block, scratch: *[fat16.sector_size]u8, what: []const u
         serial.put("\n");
         serial.fail("the FAT could not be held in memory");
     };
+    // Lookups read a directory up to a cluster per request (fat16's
+    // `dir_burst`), within the most one request carries.
+    const burst_sectors = @min(vol.sectors_per_cluster, virtio.Block.max_sectors);
+    vol.dir_burst = pages.allocator.alloc(u8, burst_sectors * fat16.sector_size) catch
+        serial.fail("no memory to read directories in bursts");
     // A machine stopped between the first FAT copy's write and the second's
     // leaves them apart; the first is the FAT (fat16.cacheFat).
     if (repaired > 0) {
