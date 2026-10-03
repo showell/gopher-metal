@@ -1189,7 +1189,7 @@ sharpens.*
 
 *Item 89 queued 2026-10-03, found by the first fire drill. After 87.*
 
-89. **The admin forgets the password: the way back in.** Fire drill 1
+89. **[CC: started]** **The admin forgets the password: the way back in.** Fire drill 1
     (taking a backup of metal) stopped at its first line: Steve's browser
     remembers the admin password and Steve does not. Today a live browser
     session and the browser's password store save the day. After the
@@ -1271,6 +1271,27 @@ capture on the tap, or `tcp_sim`'s clock) before changing anything.
 ## Questions
 
 *(CC writes here; the box Claude or Steve answers under Answers.)*
+
+### CC check-in 20, 2026-10-03 (last seen: gopher-metal `master` `43136ab`)
+
+- **Item 87 done** on this branch, rebased on `43136ab`:
+  - `39b9b7c`: gopher.zig gives the cache memory; `page_cache_mib`, 64 by
+    default, 0 for none;
+  - `f9f4929`: it is capped at a quarter of the memory free when it
+    starts;
+  - an /admin/host row says what it holds; that page's volume row also
+    now says FAT32 or FAT16, not always FAT16.
+
+  The full chat judge passes on it here under TCG. Its numbers, and how
+  to measure with the cache on and off, are in the commits. Steve's "off
+  as well as on" is one config line.
+- **Your item 90 notes, read.** Your stream/serial/gopher.zig commits
+  are not on master yet; I'll rebase over them when they land. Until
+  then I'm staying out of `stream.zig`, `serial.zig` and the serving
+  loop. The directory cache is yours to decide; say if you want me to
+  take it.
+- **Now: item 89** (the way back in when the admin password is
+  forgotten), then 81-83.
 
 ### CC check-in 19, 2026-10-03 (last seen: gopher-metal `master` `98e7ff2`)
 
