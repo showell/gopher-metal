@@ -271,6 +271,67 @@ def check_keepalive():
            if ok else f"the connection died while idle: {got!r}", started)
 
 
+def check_burst(server, n=200):
+    """A burst of real connections well past the table's 64 slots, all asking
+    at once. The table refuses what it has no slot for (RST); Linux's TCP
+    retries, so every one is answered in the end and the table ends clean.
+    This is the honest load a flash of visitors makes (QUEUE.md item 82)."""
+    started = time.time()
+    before = server.stats()["refused"]
+    results = [None] * n
+    gate = threading.Barrier(n)
+    def one(k):
+        try:
+            gate.wait(timeout=20)
+            # A 16 KB body read with a pause holds the slot long enough that
+            # far more than 64 are in the table at once.
+            results[k] = get("/bytes/16384", timeout=30, pause_after=4096, pause=0.3)
+        except Exception as e:
+            results[k] = e
+    threads = [threading.Thread(target=one, args=(k,)) for k in range(n)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    time.sleep(0.5)
+    st = server.stats()
+    want = pattern(16384)
+    wrong = [r for r in results if r != want]
+    refused = st["refused"] - before
+    report(not wrong and st["in_use"] == 0 and refused > 0, "burst",
+           f"{n} slow connections at once, {n - len(wrong)} answered whole; {refused} refused a slot "
+           f"and retried by Linux; {st['in_use']} left in the table", started)
+
+
+def check_stalled_reader(server):
+    """A client that asks for a large body and then stops reading holds its
+    own connection, its window shut; it must not hold up anyone else. While it
+    stalls, many quick requests must still be answered, and promptly."""
+    started = time.time()
+    stall = socket.socket()
+    stall.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 2048)
+    stall.settimeout(10)
+    stall.connect((ADDR, 80))
+    stall.sendall(b"GET /bytes/4000000 HTTP/1.1\r\nHost: native\r\n\r\n")
+    stall.recv(2048)  # take a little, then read no more: the window shuts
+    try:
+        slowest = 0.0
+        wrong = 0
+        for _ in range(60):
+            t = time.perf_counter()
+            if get("/tiny", timeout=10) != b"ok":
+                wrong += 1
+            slowest = max(slowest, time.perf_counter() - t)
+        st = server.stats()
+    finally:
+        stall.close()
+    # The stalled reader is one connection the table is probing; the others
+    # are answered in their own time, not behind it.
+    report(wrong == 0 and slowest < 1.0 and st["given_up"] == 0, "stalled reader",
+           f"a reader stopped at 2 KB of 4 MB; 60 other requests answered ({wrong} wrong), "
+           f"the slowest in {slowest * 1e3:.0f} ms; the stalled one still held", started)
+
+
 def check_loss():
     started = time.time()
     netem("loss 5%")
@@ -311,6 +372,8 @@ def main() -> int:
         check_bytes(server)
         check_half_close()
         check_reset(server)
+        check_burst(server)
+        check_stalled_reader(server)
         check_keepalive()
     finally:
         server.stop()
