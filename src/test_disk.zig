@@ -286,15 +286,19 @@ pub const Disk = struct {
 
     /// `Volume.check`, with what it found kept, and **THE DISK UNCHANGED BY
     /// IT**, byte for byte: the check reports and never repairs.
+    ///
+    /// Unchanged is proven by the disk's count of writes, not by a copy of
+    /// it: the volume reaches the disk only through `blk`, and a copy of a
+    /// 35 MB FAT32 disk on every check was most of the time of the test that
+    /// checks after every stop (QUEUE.md item 79).
     pub fn check(d: *Disk) !Report {
-        const before = try testing.allocator.dupe(u8, d.bytes);
-        defer testing.allocator.free(before);
+        const writes = d.blk.writes;
         const seen = try testing.allocator.alloc(u8, d.vol.checkBytes());
         defer testing.allocator.free(seen);
         var r = Report{};
         r.health = try d.vol.check(seen, &r, Report.each);
         try testing.expectEqual(r.health.problems, r.len);
-        try testing.expect(std.mem.eql(u8, before, d.bytes));
+        try testing.expectEqual(writes, d.blk.writes);
         return r;
     }
 

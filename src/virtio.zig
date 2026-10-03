@@ -656,6 +656,12 @@ pub const Block = struct {
     /// A host test's way to make the disk fail: once this many requests have
     /// been served, every further one answers `blk_s_ioerr`.
     fail_after: ?u64 = null,
+    /// The same, counting only writes: once this many have been served,
+    /// every further request fails. A machine stopped after its Nth write
+    /// (QUEUE.md item 79); the reads between two writes change nothing.
+    fail_after_writes: ?u64 = null,
+    /// Writes served, on a disk in memory.
+    writes: u64 = 0,
 
     /// A disk of `bytes.len / 512` sectors held in `bytes`, which the caller
     /// owns. For host tests of what sits on a disk (`fat16.zig`, `io.zig`):
@@ -674,7 +680,9 @@ pub const Block = struct {
 
     fn memoryTransfer(self: *Block, disk: []u8, kind: u32, lba: u64, addr: u64, len: u32) u8 {
         if (self.fail_after) |n| if (self.requests >= n) return blk_s_ioerr;
+        if (self.fail_after_writes) |n| if (self.writes >= n) return blk_s_ioerr;
         self.requests +%= 1;
+        if (kind != blk_t_in) self.writes +%= 1;
         const at = lba * 512;
         if (at > disk.len or len > disk.len - at) return blk_s_ioerr;
         const there = disk[@intCast(at)..][0..len];

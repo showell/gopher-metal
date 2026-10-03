@@ -1337,6 +1337,8 @@ pub const Volume = struct {
 
     /// Makes a directory in `dir_cluster`. Its first cluster holds `.` and `..`,
     /// which every directory but the root has and which `fsck` checks for.
+    /// The entry goes last, so a machine stopped before it leaves no
+    /// directory and a leaked cluster.
     pub fn makeDirIn(self: *Volume, dir_cluster: Cluster, name: []const u8) Error!Cluster {
         if ((try self.find(dir_cluster, name))) |e| {
             if (e.isDirectory()) return e.first_cluster;
@@ -1416,6 +1418,11 @@ pub const Volume = struct {
     /// worse than refusing.
     ///
     /// The file must exist; `Dir.createFile` is what creates an empty one.
+    ///
+    /// A machine stopped part-way leaves the old file, whole: the data lands
+    /// past its size, and the size moves last. What else it may leave:
+    /// leaked clusters, or a chain longer than the size (see below), which
+    /// the next append fills.
     pub fn writeInto(self: *Volume, path: []const u8, offset: u32, bytes: []const u8) Error!void {
         if (bytes.len == 0) return;
         const entry = try self.open(path);
@@ -1436,21 +1443,28 @@ pub const Volume = struct {
 
         // An empty file has no chain at all (first_cluster 0), so the first
         // append is also the allocation.
+        //
+        // **A FILE'S CLUSTERS ARE COUNTED IN ITS CHAIN, NOT FROM ITS SIZE.**
+        // An append links its new clusters on, then writes the data, then
+        // the entry's size: the FAT and the entry are different sectors, so a
+        // machine stopped between the link and the entry leaves the old file,
+        // whole, on a chain longer than its size needs (the check's `long`;
+        // QUEUE.md item 79). Counted from the size, the next append linked
+        // more clusters past those, and the file stayed long for good;
+        // counted in the chain, it fills them first.
         var first = entry.first_cluster;
-        if (have == 0) {
+        if (have == 0 and first == 0) {
             first = try self.allocChain(need);
-        } else if (need > have) {
-            const extra = try self.allocChain(need - have);
-            try self.fatSet(try self.lastCluster(first), extra);
+        } else {
+            const end = try self.chainEnd(first);
+            if (need > end.clusters) {
+                const extra = try self.allocChain(need - end.clusters);
+                try self.fatSet(end.last, extra);
+            }
         }
 
         try self.writeAt(first, offset, bytes);
         try self.setEntry(entry, first, new_size);
-    }
-
-    /// The last cluster of a chain — where an extension links on.
-    fn lastCluster(self: *Volume, first: Cluster) Error!Cluster {
-        return (try self.chainEnd(first)).last;
     }
 
     /// A chain's last cluster, and how many clusters it holds.
@@ -1691,11 +1705,18 @@ pub const Volume = struct {
     /// FIRST removable entry and starts over. Quadratic in the number of
     /// entries, on an operation the application performs when a person deletes
     /// their account.
+    ///
+    /// **ONLY ABSENCE IS FINE.** Every other error is the caller's: a disk
+    /// that stopped answering used to read as "nothing there", and an account
+    /// deletion that removed nothing answered done (QUEUE.md item 79).
     pub fn removeTree(self: *Volume, path: []const u8) Error!void {
-        const entry = self.open(path) catch return; // absent is fine
+        const entry = self.open(path) catch |e| switch (e) {
+            Error.NotFound => return,
+            else => return e,
+        };
         if (!entry.isDirectory()) return self.remove(path);
         try self.removeTreeAt(entry.first_cluster, 0);
-        self.remove(path) catch {};
+        try self.remove(path);
     }
 
     fn removeTreeAt(self: *Volume, dir_cluster: Cluster, depth: u32) Error!void {
