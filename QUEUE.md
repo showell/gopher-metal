@@ -1108,7 +1108,7 @@ layer, last. 76-78 stand; take 79-83 before them.*
     a fixed seed so a failure repeats. Any request that stops metal, or
     that metal answers differently from Linux in a way that matters, is a
     finding with a test.
-82. **[CC: started]** **TCP under abuse.** TCP_TESTING.md's left-alive mutant
+82. **[CC: done; `tcp.zig` gives way to a stuck half-open under a SYN flood; found and fixed a stray-reset bug on real-burst eviction; tcp_test + native/judge_native burst/stalled checks]** **TCP under abuse.** TCP_TESTING.md's left-alive mutant
     (`sample-too-early`) aside: SYN floods against the 256-entry table,
     RST and FIN storms, half-open connections that never finish, windows
     of zero held open. In `tcp_sim` and against Linux's TCP as the peer
@@ -1271,6 +1271,38 @@ capture on the tap, or `tcp_sim`'s clock) before changing anything.
 ## Questions
 
 *(CC writes here; the box Claude or Steve answers under Answers.)*
+
+### CC check-in 22, 2026-10-03 (last seen: gopher-metal `master` `5953c9d`)
+
+**Item 82 (TCP under abuse) done.**
+
+- **SYN flood (`6914f03`):** spoofed SYNs that never finish their handshake
+  used to hold all 64 slots for 16-35 s each, locking every real client
+  out. Now a SYN that finds no free slot takes the slot of the oldest
+  **stuck** half-open (older than one round trip), dropped silently.
+- **A bug the native burst found and I fixed in the same commit:** a first
+  cut gave way to *any* half-open, which under a burst of **real**
+  connections evicted clients still mid-handshake — their ACK then hit a
+  reused slot and drew a stray reset (72 of 200 reset against Linux's own
+  TCP). The round-trip age guard fixes it: fresh connections are left
+  alone, so a real burst is let retry and only a flood is thinned.
+- **Tested three ways:**
+  - `tcp_test.zig`: the flood keeps no real client out; a fresh half-open
+    is not evicted; a reset/FIN storm takes no slot. Removing the eviction
+    or the age guard fails them.
+  - `native/judge_native.py` (`a6227d5`), against Linux's real TCP: a
+    `burst` of 200 slow connections (all answered whole, ~216
+    refused-and-retried, 0 stray resets now) and a `stalled reader` (holds
+    only its own slot).
+  - zero-window-held-open was already covered (`a window that stays shut is
+    given up on`, and the native stalled reader).
+- **`tcp.zig`'s `handle` changed, so the serving path changed.** The full
+  chat judge passes here (TCG). **Please gate the SYN-flood/eviction under
+  KVM**, and run `native/judge_native.py` on the box (it needs the TAP via
+  `sudo -n`, which worked for me only as root here).
+- **Left for later (TCP_TESTING §8):** Scapy for an RST at every offset and
+  overlapping retransmits; tcpdump+tshark on both sides.
+- **Next: 83 (the soak).**
 
 ### CC check-in 21, 2026-10-03 (last seen: gopher-metal `master` `5953c9d`; angry-gopher branch `49f47903`)
 
