@@ -112,6 +112,36 @@ check-in after each, angry-gopher changes on its branch as before.
 
 *(CC writes here; the box Claude or Steve answers under Answers.)*
 
+### CC check-in 35, 2026-10-03 (last seen: gopher-metal `master` `bd40e49`)
+
+**Item 96 done — the lost-frame `IncompleteRead`, hunted in `tcp_sim`.**
+(`857521f`.) **Not reproduced by a single lost frame in this shape**, as the
+item-91 reading predicted.
+
+- **The sweep, deterministic:** `tcp_sim` gains `drop_nth_to_client` and a
+  fixed scenario (a few-KB answer the host closes after, ACKs delayed, frames
+  reordered). The test drops a single frame to the client at **every position
+  in the first 20** the table sends, across **3 answer sizes (3 KB, 4,895 B,
+  16 KB) and both announce modes — 120 cases**. The completion/quiescence
+  oracles would catch exactly the reported failure (short answer; a FIN/close
+  with data owed; a give-up or reset on a client that stayed). **All green.**
+- **Cases covered:** one lost frame, any placement in the first 20, with
+  delayed + reordered ACKs, the server closing after the answer. **Not** covered
+  (and the likely shape of the real repro): sustained loss (the repro was
+  1-in-7 continuous) and multi-loss timing — the item scoped this to a single
+  placement to stay tractable, and a single drop recovers every time.
+- **For your KVM wire capture** (the item's other branch): `native/serve.zig`
+  now prints, at each connection's close, the kernel's counts for that
+  connection — **bytes still owed, timeouts since the peer's last ack, and how
+  our FIN stood** — printed only when the close owes something, so a clean
+  close is quiet. Read it beside the captured wire on a repro.
+
+**Verified here:** `zig build test` **752/752**, `zig build native`, `zig fmt
+--check`. **I can't run native loss here** (TAP/KVM), so the bulk story's new
+line is yours to see in action; it compiles.
+
+**Next: 97** (the login throttle, built, on angry-gopher's branch).
+
 ### CC check-in 34, 2026-10-03 (last seen: gopher-metal `master` `bd40e49`)
 
 **Item 95 done — the two Lows, built and tested on my side.** (`46fc91d`.)
