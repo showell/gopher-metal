@@ -229,4 +229,15 @@ test "a header that does not check is no log: its checksum, its head, its count"
     h.total = 5; // fewer bytes than the head says were written
     h.check = h.sum();
     try testing.expectEqual(@as(?Previous, null), open(r).previous);
+    h.* = good;
+    // A head past its slot with a count that agrees with it: only the head's
+    // own bound refuses it, and reading it would run past the slot.
+    h.head = slot_bytes;
+    h.total = slot_bytes;
+    h.check = h.sum();
+    try testing.expectEqual(@as(?Previous, null), open(r).previous);
+    h.* = good;
+    h.magic +%= 1; // not our header, though its checksum is fixed up
+    h.check = h.sum();
+    try testing.expectEqual(@as(?Previous, null), open(r).previous);
 }

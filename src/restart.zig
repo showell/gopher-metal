@@ -143,6 +143,17 @@ test "CMOS that holds no record reads as none: zeros, 0xFF, garbage, a bad check
     try testing.expectEqual(@as(?Record, null), Record.decode(zero));
     zero[0] = magic; // still none
     try testing.expectEqual(@as(?Record, null), Record.decode(zero));
+    // Not our magic, though the checksum is fixed up for it.
+    var other = (Record{ .count = 2, .at = 5, .reason = .failure }).encode();
+    other[0] = magic +% 1;
+    other[7] = checksum(other[0..7]);
+    try testing.expectEqual(@as(?Record, null), Record.decode(other));
+    // The checksum's own promise: a run of equal bytes, as blank CMOS reads,
+    // does not check, so it would not pass even without the magic.
+    for ([_]u8{ 0x00, 0xFF }) |v| {
+        const run: [record_len]u8 = @splat(v);
+        try testing.expect(checksum(run[0..7]) != v);
+    }
     // Every random 8 bytes that happens to begin with the magic: the checksum
     // turns almost all of them away.
     var prng = std.Random.DefaultPrng.init(7);
