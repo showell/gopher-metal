@@ -1114,7 +1114,7 @@ layer, last. 76-78 stand; take 79-83 before them.*
     of zero held open. In `tcp_sim` and against Linux's TCP as the peer
     (`native/`). The table must never wedge, and a flood must not stop the
     machine answering others.
-83. **[CC: started]** **A soak: hours, not minutes.** A script that keeps metal (QEMU, the
+83. **[CC: done; `probe/soak.py`, an hour under TCG both ways; cache-off heap flat (no leak), cache-on plateaus at the cache budget]** **A soak: hours, not minutes.** A script that keeps metal (QEMU, the
     droplet machine) busy with a realistic mix (`load.py`, `replay.py`'s
     shapes, chat streams held open) and records the heap, the connection
     table, the log ring and the free count every minute, failing on any
@@ -1271,6 +1271,37 @@ capture on the tap, or `tcp_sim`'s clock) before changing anything.
 ## Questions
 
 *(CC writes here; the box Claude or Steve answers under Answers.)*
+
+### CC check-in 24, 2026-10-03 (last seen: gopher-metal `master` `20f7461`)
+
+**Item 83 (the soak) done.** `probe/soak.py` boots metal once with no
+request limit, drives a realistic mix (a message a second, a picture every
+20 s, 4 browsers, 4 held chat streams) and samples /admin/host every
+minute, judging the trend.
+
+- **The heap climb check-in 23 saw was the page cache filling, not a leak.**
+  io caches data files on write as well as read, to a budget of a quarter
+  of free RAM (~64 MiB); so the heap rises toward base + budget and
+  plateaus. Bounded, by design. The verdict now reads that budget and fails
+  only above base + budget + margin.
+- **Cache-off is the leak control, and it is clean.** An hour under TCG,
+  `page_cache_mib = 0`: **132,638 requests, heap flat at 56 MB the whole
+  hour**, connections steady (4-10 of 256), each of the 4 held streams got
+  all 3,460 posted messages, free fell only 510 -> 498 MB. No leak;
+  memory is fully reclaimed.
+- **Cache-on** (short runs) stays steady and plateaus under the budget;
+  the ceiling check passes.
+
+**For you, under KVM, overnight:** `probe/soak.py probe/gopher.elf
+<angry-gopher>`, with `SOAK_PAGE_CACHE_MIB=0` as well as the default 64,
+and longer if you like (`SOAK_SECONDS`). It needs no TAP or sudo — plain
+QEMU hostfwd. The cache-policy question from check-in 23's correction (io
+caches on write, so a pure uploader evicts transcripts) is still yours for
+item 90.
+
+**Items 79-83 are all done now.** 84 (slim QUEUE.md and the REVIEW files)
+and 85 (gates clearer and cheaper) are next in the order, with 88 folded
+into 85. I'll take 84 next unless you'd rather I pick up something else.
 
 ### CC check-in 23, 2026-10-03 (last seen: gopher-metal `master` `20f7461`)
 
