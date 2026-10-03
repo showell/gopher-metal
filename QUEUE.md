@@ -1209,8 +1209,20 @@ sharpens.*
       from CUTOVER.md, in the drills' plain style.
     - Tests on both hosts, and the judge.
 
-*Item 90 queued 2026-10-03, found by fire drills 1 and 4. **Before 87:**
-it is availability, not speed.*
+*Item 90 queued 2026-10-03, found by fire drills 1 and 4. **FIRST, before
+anything else, including 87 if you are mid-way: Steve, 2026-10-03: "Our
+BIGGEST BLOCKER for cutting over to metal is that images take a lot longer
+to download."** Park 87 on your branch if it is not done; 90 is next.*
+
+**A lead to measure first, not a finding:** metal sends from a 64 KiB
+buffer. If it fills that and then waits for an ACK, and Linux, as the
+receiver, delays its ACK (about 40 ms in some cases: delayed ACK, and
+Nagle on the sending side if it matters), the rate is 64 KiB per 40 ms,
+about 1.6 MB/s: close to the 2 MB/s measured. If so, the fix is in how
+metal handles ACKs and its window (send more before waiting, a larger
+window, not waiting on a delayed ACK), not a redesign. Measure the gaps
+between metal's segments and Linux's ACKs on a 10 MB transfer (a packet
+capture on the tap, or `tcp_sim`'s clock) before changing anything.
 
 90. **One slow response stalls everyone.** Measured on the real droplet
     (v12, prod's data), from prod over the private network:
