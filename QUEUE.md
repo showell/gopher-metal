@@ -1084,7 +1084,9 @@ pass after the fire drills; (3) efficiency and clarity of the test gates;
 (4) admin fire drills (the box and Steve); (5) speed of the bare-metal
 layer, last. 76-78 stand; take 79-83 before them.*
 
-79. **Stop the machine at every write, and see what the disk says.** Item
+79. **[CC: done, `fat16` "every operation stopped after every write"; two
+    bugs fixed: removeTree said done on a failing disk, and an append after
+    a stopped one left its file long for good]** **Stop the machine at every write, and see what the disk says.** Item
     24 and the Store claim rewrites are "safe to stop"; prove it
     systematically. With the in-memory disk, run each FAT operation the
     application uses (append, write, replace, makeDir, remove,
@@ -1093,7 +1095,7 @@ layer, last. 76-78 stand; take 79-83 before them.*
     `Volume.check` and the oracle. Every outcome must be one the docs name
     ("the old file", "the new file", "a leaked cluster"), never a
     corrupted directory or a crossed chain. Fix what is not.
-80. **The device lies.** Fault injection in the in-memory `virtio.Block`
+80. **[CC: started]** **The device lies.** Fault injection in the in-memory `virtio.Block`
     (a read that fails, a short read, a write that reports success and
     lands nothing, as floor's faults do) and in the network stand-ins
     (dropped, duplicated, reordered frames). What does the kernel do with
