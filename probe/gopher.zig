@@ -278,12 +278,27 @@ pub fn kmain() noreturn {
     // a transcript two people are reading is read from memory, not walked to
     // and read from the disk on every send. Memory is taken as files are
     // kept, never more than this; what it cannot get, it does not keep.
+    //
+    // **NEVER MORE THAN A QUARTER OF WHAT IS FREE.** The request heap is an
+    // arena over the same pages, and a request larger than what it keeps grows
+    // it while serving; memory the cache held would be memory that request
+    // could not have. On a machine with little to spare the cache is smaller,
+    // and the boot says so.
     if (conf.page_cache_mib != 0) {
-        page_cache = metal.page_cache.PageCache.init(pages.allocator, @as(usize, conf.page_cache_mib) << 20, page_cache_largest);
+        const p = pages.stats();
+        const budget = @min(@as(usize, conf.page_cache_mib) << 20, (p.bytes_total - p.bytes_taken) / 4);
+        page_cache = metal.page_cache.PageCache.init(pages.allocator, budget, page_cache_largest);
         Io.keepPages(&page_cache);
         serial.put("  the data's files kept in memory: up to ");
-        serial.putDec(conf.page_cache_mib);
-        serial.put(" MiB, files of up to ");
+        serial.putDec(budget >> 20);
+        if (budget >> 20 < conf.page_cache_mib) {
+            serial.put(" MiB (a quarter of the ");
+            serial.putDec((p.bytes_total - p.bytes_taken) >> 20);
+            serial.put(" MiB free, not the ");
+            serial.putDec(conf.page_cache_mib);
+            serial.put(" asked)");
+        } else serial.put(" MiB");
+        serial.put(", files of up to ");
         serial.putDec(page_cache_largest >> 20);
         serial.put(" MiB\n");
     } else serial.put("  the data's files kept in memory: none (page_cache_mib = 0)\n");
