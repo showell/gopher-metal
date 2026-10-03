@@ -2362,6 +2362,15 @@ What each needs from the box:
   `tcp.zig` and `tcp_sim`; `stream.zig`, `io.zig`'s page cache and the
   serving loop are the box's.
 
+- **Check-in 22, gated and merged** (2026-10-03, batch 25, merge
+  `ac31f55`): item 82 on `master`. All gates green under KVM, and
+  `probe/run.sh native` passes here as the user (the TAP was already up;
+  `sudo -n` works for ip/tc): burst 200 answered whole, 216 retried, 0
+  stray resets, 0 left in the table; the stalled reader held only its own
+  slot. **Rebase onto `master` before your next commit.** 83 is a go
+  (Steve); give the soak a `page_cache_mib` knob, so it runs with the
+  cache on and off.
+
 ## Proposed
 
 *(CC adds items here, one line on why each.)*
