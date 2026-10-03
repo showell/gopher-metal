@@ -1077,6 +1077,68 @@ before that day.*
     site's own files?). Then the smallest next subtraction, and how the
     judge would show it changed nothing. Steve decides from it.
 
+*Items 79-86 queued 2026-10-03 morning. **Steve's priorities, in order:**
+(1) hardening, correctness and reliability of the bare-metal layer;
+(2) clarity and simplicity of the docs, kept right as you go, with a final
+pass after the fire drills; (3) efficiency and clarity of the test gates;
+(4) admin fire drills (the box and Steve); (5) speed of the bare-metal
+layer, last. 76-78 stand; take 79-83 before them.*
+
+79. **Stop the machine at every write, and see what the disk says.** Item
+    24 and the Store claim rewrites are "safe to stop"; prove it
+    systematically. With the in-memory disk, run each FAT operation the
+    application uses (append, write, replace, makeDir, remove,
+    removeTree, rename) and stop after the 1st, 2nd, ... Nth sector write,
+    for every N, on FAT16 and FAT32. Then mount the stopped image and run
+    `Volume.check` and the oracle. Every outcome must be one the docs name
+    ("the old file", "the new file", "a leaked cluster"), never a
+    corrupted directory or a crossed chain. Fix what is not.
+80. **The device lies.** Fault injection in the in-memory `virtio.Block`
+    (a read that fails, a short read, a write that reports success and
+    lands nothing, as floor's faults do) and in the network stand-ins
+    (dropped, duplicated, reordered frames). What does the kernel do with
+    each: refuse, retry, report, or carry on with bad data? Tests for the
+    answers you keep; fixes for any "carry on with bad data".
+81. **Requests a stranger could send.** Fuzz the request path on metal
+    against Linux, as the judge compares them: malformed request lines,
+    headers past every limit, chunked bodies that lie, pipelined requests,
+    `Range` edges, slow and half-closed connections. Grammar-guided, with
+    a fixed seed so a failure repeats. Any request that stops metal, or
+    that metal answers differently from Linux in a way that matters, is a
+    finding with a test.
+82. **TCP under abuse.** TCP_TESTING.md's left-alive mutant
+    (`sample-too-early`) aside: SYN floods against the 256-entry table,
+    RST and FIN storms, half-open connections that never finish, windows
+    of zero held open. In `tcp_sim` and against Linux's TCP as the peer
+    (`native/`). The table must never wedge, and a flood must not stop the
+    machine answering others.
+83. **A soak: hours, not minutes.** A script that keeps metal (QEMU, the
+    droplet machine) busy with a realistic mix (`load.py`, `replay.py`'s
+    shapes, chat streams held open) and records the heap, the connection
+    table, the log ring and the free count every minute, failing on any
+    trend that would end in a stop. Run an hour under TCG yourself; the box
+    runs it overnight under KVM.
+84. **QUEUE.md and the REVIEW files, made light.** QUEUE.md is over a
+    thousand lines; most of it is done. Move done items and old check-ins
+    to `QUEUE-DONE.md` (verbatim, nothing lost), leaving open items, the
+    current order, the last two check-ins and live answers. Gather the
+    REVIEW-*.md and DESIGN-*.md files under `docs/reviews/` and
+    `docs/designs/` with a one-line index each, and fix every link to
+    them. The README's first screen should tell a newcomer what this is,
+    where it stands, and which three files to read.
+85. **The gates, clearer and cheaper.** (a) `gates.sh quick`: the
+    two-minute tier (zig tests, kernels, probes, one judge story) for
+    every commit, and the full run for a batch. (b) Skip what cannot be
+    affected, said out loud, never silently: the FAT32 judge only when
+    `src/fat16*`, `src/io*` or the judge changed, with the reason printed.
+    (c) `GATES_PARALLEL=1` becomes the default once the box has seen it
+    green twice (batch 16 was the first).
+86. **Where metal's request time goes** (speed, last). The README's race
+    table has metal about 1 ms behind Linux on pages read from files, and
+    near level on the rest. Instrument one request's phases with the TSC
+    (accept, parse, route, read, write, close) and report where the time
+    goes under KVM. Report only: what to change is the next item.
+
 ## Box Claude
 
 - v6: gates, images, deploy with Steve, and the survival test (the marker
