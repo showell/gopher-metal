@@ -2468,12 +2468,15 @@ def linux_writes_bulk(linux_bin, content, work, mnt, messages: int) -> str:
 
 
 def slow_reader_failures(elf, linux_bin, content, work, mnt, report) -> int:
-    """**A CLIENT THAT READS SLOWLY GETS EVERY BYTE; ONE THAT STOPS IS LET GO.**
-    The transcript is fetched three ways from one boot: at full speed; by a
-    client that stops twice along the way; and by one that
-    never reads at all. The second must get exactly what the first got, with
-    the machine probing a shut window while it waited. The third must be let
-    go after the idle timeout, and the site must go on answering."""
+    """**A CLIENT THAT READS SLOWLY GETS EVERY BYTE; ONE THAT STOPS IS LET GO,
+    AND HOLDS NO ONE ELSE UP.** The transcript is fetched three ways from one
+    boot: at full speed; by a client that stops twice along the way; and by
+    one that never reads at all. The second must get exactly what the first
+    got, with the machine probing a shut window while it waited. While the
+    third is stalled, the next request must be answered at once, well inside
+    the idle time (QUEUE item 90: a response the send queue has no room for
+    is kept, and the handler returns); the third must then be let go after
+    the idle timeout, and say so."""
     label = "slow readers"
     # A pause must outlast the first retransmission timeout (a second) for the
     # window to be probed. The idle time must outlast the SECOND probe, which
@@ -2526,14 +2529,17 @@ def slow_reader_failures(elf, linux_bin, content, work, mnt, report) -> int:
         after = ask(port, step("the request after", "GET", "/nope"), scratch, patience=60)
         waited = time.time() - started
     finally:
+        # The stalled reader stays open until the kernel is done with it: the
+        # boot's last request is served, and a response still unread is let
+        # go after the idle time, which is what is checked below.
+        code, log = finish_kernel(qemu, serial)
         if stalled is not None:
             stalled.close()
-        code, log = finish_kernel(qemu, serial)
     if after.get("status") != 404:
         fail(f"the request after the stalled reader answered {after.get('status') or after.get('error')}")
-    elif waited < idle_ms / 1000:
-        fail(f"the request after the stalled reader was answered in {waited:.1f} s, before the "
-             f"{idle_ms} ms idle timeout — the stalled reader was never stalled")
+    elif waited >= idle_ms / 2000:
+        fail(f"the request after the stalled reader waited {waited:.1f} s: a reader that "
+             f"stopped held the machine (the idle time is {idle_ms} ms)")
     if code != 1:
         fail(f"the kernel exited {code}")
     if "the client stopped taking the response" not in log:

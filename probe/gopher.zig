@@ -525,6 +525,7 @@ pub fn kmain() noreturn {
     for (&draining, 0..) |*slot, i| {
         if (slot.*) |*d| {
             table.abandon(&wire, i);
+            serial.put("  let go at the end: the client stopped taking the response\n");
             d.spill.deinit();
             table.release(i);
             slot.* = null;
@@ -764,6 +765,7 @@ fn serviceDraining(wire: *stream.Wire, table: *tcp.Table, now: i96, idle_ns: u64
                 done = true;
             } else if (now - d.since >= idle_ns) {
                 table.abandon(wire, i);
+                serial.put("  let go: the client stopped taking the response\n");
                 done = true;
             }
         }
