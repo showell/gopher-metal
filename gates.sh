@@ -93,7 +93,9 @@ judge() {  # judge MACHINE [FAT]: one chat judge, output to $VERDICTS/gopher-MAC
     [ -n "$fat" ] && tag="$machine-fat$fat"
     # Set for this one command only: the steps after the judges must not
     # inherit it, as they did not before.
-    JUDGE_DROPLET=$droplet ${fat:+FAT=$fat} PROBE_WORK="$HOME/build/gopher-metal/probe-$tag" probe/run.sh gopher \
+    # Through `env`: an expansion before the command ends bash's assignment
+    # words, and an empty `${fat:+...}` made `PROBE_WORK=...` the command.
+    env JUDGE_DROPLET=$droplet ${fat:+FAT=$fat} PROBE_WORK="$HOME/build/gopher-metal/probe-$tag" probe/run.sh gopher \
         > "$VERDICTS/gopher-$tag.run" 2>&1
     echo $? > "$VERDICTS/gopher-$tag.code"
 }
