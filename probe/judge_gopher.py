@@ -56,6 +56,7 @@ import sys
 import tempfile
 import threading
 import time
+import urllib.parse
 import datetime
 import zoneinfo
 
@@ -755,7 +756,7 @@ QUICK = bool(os.environ.get("JUDGE_QUICK"))
 # silently complete run.
 GATES = ["cases", "members", "uids", "caps", "lynrummy", "streams-linux", "streams-metal", "budget", "churn",
          "bulk", "uploads", "slow", "lagging", "concurrent", "timeouts",
-         "damaged", "endurance", "stamina"]
+         "damaged", "endurance", "stamina", "admin-reset"]
 # The boots that exist to be long. The quick tier leaves them out; asking for
 # one by name still runs it.
 LONG = {"endurance", "stamina"}
@@ -2029,6 +2030,98 @@ def upload_story(port: int, session: str) -> dict:
     return out
 
 
+# ── the admin's lost password (QUEUE.md item 89) ─────────────────────────────
+#
+# **THE WAY BACK IN, ON BOTH HOSTS.** Metal: the boot disk's gopher-metal.conf
+# carries `admin_password_reset = Steve <hash>`; the boot applies it once,
+# only to a uid 1 named Steve. Linux: angry-gopher's ops/reset_admin_password
+# --local, with the server stopped. Either way the new password logs in and
+# the old one does not; a second boot of the same image changes nothing; and
+# a reset that names someone else is refused, the old password still good.
+
+RESET_PASSWORD = "a new password, after the drill"
+
+
+def admin_hash(gopher_root: str, password: str) -> str:
+    zig_server = os.path.join(gopher_root, "zig-server")
+    run(["zig", "build", "hash-password"], cwd=zig_server)
+    return subprocess.run([os.path.join(zig_server, "zig-out", "bin", "hash-password")],
+                          input=password, capture_output=True, text=True, check=True).stdout.strip()
+
+
+def logs_in(port: int, password: str) -> bool:
+    """Whether Steve's `password` is answered with a session."""
+    body = "name=Steve&password=" + urllib.parse.quote_plus(password) + "&action=login&next=%2Fchat"
+    conn = http.client.HTTPConnection("127.0.0.1", port, timeout=60)
+    conn.request("POST", "/login/full", body=body,
+                 headers={"Content-Type": "application/x-www-form-urlencoded"})
+    resp = conn.getresponse()
+    resp.read()
+    conn.close()
+    return any(k.lower() == "set-cookie" and re.match(r"gopher_auth=[^;]", v)
+               for k, v in resp.getheaders())
+
+
+def admin_reset_failures(elf, linux_bin, content, pristine, work, mnt, gopher_root, report) -> int:
+    failures = []
+    new_hash = admin_hash(gopher_root, RESET_PASSWORD)
+    expect = lambda ok, what: None if ok else failures.append(what)
+
+    def boot(image, scratch, reset_line, n):
+        disk_write(image, mnt, "gopher-metal.conf", request_limit_text(image, n) + reset_line)
+        qemu, port, serial = start_kernel(elf, image, scratch)
+        return qemu, port, serial
+
+    scratch = tempfile.mkdtemp(dir=work)
+    image = os.path.join(scratch, "disk.img")
+    shutil.copy(pristine, image)
+    line = f"admin_password_reset = Steve {new_hash}\n"
+
+    # The boot that applies it.
+    qemu, port, serial = boot(image, scratch, line, 2)
+    expect(logs_in(port, RESET_PASSWORD), "metal: the reset password did not log in")
+    expect(not logs_in(port, MEMBER_PASSWORD), "metal: the old password still logged in after the reset")
+    _, log = finish_kernel(qemu, serial)
+    expect("admin password reset for Steve: applied;" in log, "metal: the boot did not say it applied the reset")
+
+    # The same image again: once is once.
+    qemu, port, serial = boot(image, scratch, line, 1)
+    expect(logs_in(port, RESET_PASSWORD), "metal: the reset password did not log in on the second boot")
+    _, log = finish_kernel(qemu, serial)
+    expect("applied by an earlier boot; nothing changed" in log, "metal: the second boot did not say it had applied it before")
+
+    # Someone else's name: refused, the old password still good.
+    shutil.copy(pristine, image)
+    qemu, port, serial = boot(image, scratch, f"admin_password_reset = Mallory {new_hash}\n", 1)
+    expect(logs_in(port, MEMBER_PASSWORD), "metal: a reset for another name changed the admin's password")
+    _, log = finish_kernel(qemu, serial)
+    expect("REFUSED: uid 1 is not named so" in log, "metal: a reset for another name was not refused out loud")
+    shutil.rmtree(scratch, ignore_errors=True)
+
+    # Linux: ops/reset_admin_password --local, the server stopped meanwhile.
+    root = tempfile.mkdtemp(dir=work)
+    shutil.rmtree(root)
+    shutil.copytree(content, root)
+    reset = subprocess.run([os.path.join(gopher_root, "ops", "reset_admin_password"), "--local",
+                            os.path.join(root, "auth"), "--yes"],
+                           input=RESET_PASSWORD + "\n", capture_output=True, text=True)
+    expect(reset.returncode == 0, "linux: ops/reset_admin_password failed: " + reset.stderr.strip()[-200:])
+    server = LinuxServer(linux_bin, root, os.path.join(root, "server.log"))
+    try:
+        expect(logs_in(server.port, RESET_PASSWORD), "linux: the reset password did not log in")
+        expect(not logs_in(server.port, MEMBER_PASSWORD), "linux: the old password still logged in after the reset")
+    finally:
+        server.stop()
+    shutil.rmtree(root, ignore_errors=True)
+
+    for f in failures:
+        report(f"FAIL  admin reset: {f}")
+    if not failures:
+        report("ok    the admin's password reset: metal once, from its boot disk, and only for the admin; "
+               "Linux by ops/reset_admin_password; the new password logs in and the old does not")
+    return len(failures)
+
+
 def upload_failures(elf, linux_bin, content, pristine, work, mnt, report) -> int:
     """The same uploads to the machine and to Linux, and their answers compared.
     The stored file's name is random on both sides, so what is compared is the
@@ -2945,6 +3038,9 @@ def main() -> int:
     if running("uploads"):
         failures += upload_failures(elf, linux_bin, content, pristine, work, mnt, print)
         lap("uploads")
+    if running("admin-reset"):
+        failures += admin_reset_failures(elf, linux_bin, content, pristine, work, mnt, gopher_root, print)
+        lap("the admin's password reset")
     if running("slow"):
         failures += slow_reader_failures(elf, linux_bin, content, work, mnt, print)
         lap("slow readers")

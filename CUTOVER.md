@@ -22,6 +22,7 @@ The others explain a step, or are for another day:
 | [RESTART.md](RESTART.md) | restarting the machine after a crash: built, and off | why "Before the day" step 4 says off |
 | [droplet/RESTART-TEST.md](droplet/RESTART-TEST.md) | the console test that would let it be turned on | another day, not the cutover's |
 | [SECRET-LEAK.md](SECRET-LEAK.md) | what to do if a backup or the session secret leaks | if it happens |
+| [ADMIN-PASSWORD-LOST.md](ADMIN-PASSWORD-LOST.md) | the way back in when the admin password is lost, on prod and on metal | if it happens |
 | [README.md](README.md), "A deploy" | building and deploying a new boot image | step 9, and every deploy after |
 
 Placeholders, not real addresses: `<prod>` is the lynrummy.com droplet,

@@ -323,6 +323,22 @@ pub fn kmain() noreturn {
         serial.put(" MiB\n");
     } else serial.put("  the data's files kept in memory: none (page_cache_mib = 0)\n");
 
+    // **THE ADMIN'S LOST PASSWORD** (QUEUE.md item 89): a reset the boot
+    // disk carries, applied before anything is served, and once.
+    if (conf.reset) {
+        const r = metal.admin_reset.Reset{ .name = conf.reset_name[0..conf.reset_name_len], .hash = &conf.reset_hash };
+        serial.put("  admin password reset for ");
+        serial.put(r.name);
+        serial.put(": ");
+        serial.put(switch (metal.admin_reset.apply(base, r)) {
+            .applied => "applied; the old hash is auth/1/password.before-reset\n",
+            .already => "applied by an earlier boot; nothing changed\n",
+            .no_admin => "REFUSED: uid 1 has no password, so there is no admin to give one to; nothing changed\n",
+            .other_name => "REFUSED: uid 1 is not named so on this volume; nothing changed\n",
+            .failed => "FAILED: the volume would not read or write; the next boot tries again\n",
+        });
+    }
+
     const clock = metal.wallclock.start() catch |e| {
         serial.put("  wallclock: ");
         serial.put(@errorName(e));
@@ -1213,6 +1229,10 @@ fn logRequest(number: u64, what: []const u8, outcome: []const u8) void {
 ///     page_cache_mib = N      memory for the data's files read whole
 ///                             (`page_cache.zig`), 64 when absent; 0 keeps
 ///                             none, every read from the disk, as before
+///     admin_password_reset = Steve $2b$10$…
+///                             a new password hash for the admin, uid 1, if
+///                             uid 1 is named so; applied once, at boot
+///                             (`admin_reset.zig`, ADMIN-PASSWORD-LOST.md)
 ///     volume = 92DE-8831      the FAT serial (as `blkid` shows it) of the
 ///                             DigitalOcean volume the application's data is
 ///                             on. Set, that volume must be attached or the
@@ -1245,6 +1265,12 @@ const Config = struct {
     trusted_proxy: ?[4]u8 = null,
     /// Memory for the page cache, in MiB; 0 keeps none.
     page_cache_mib: u32 = 64,
+    /// The admin's password reset, kept here because the text it was read
+    /// from is freed: the name, and the 60-byte hash.
+    reset_name: [64]u8 = undefined,
+    reset_name_len: usize = 0,
+    reset_hash: [60]u8 = undefined,
+    reset: bool = false,
 };
 
 /// A droplet's two network cards, in PCI slot order: what `virtio.findNth` is
@@ -1303,6 +1329,14 @@ fn readConfig(io: Io, alloc: std.mem.Allocator) Config {
         } else if (std.mem.eql(u8, key, "volume")) {
             conf.volume = parseSerial(value) orelse
                 serial.fail(config_path ++ ": `volume` is a FAT serial, as blkid shows it: 92DE-8831");
+        } else if (std.mem.eql(u8, key, "admin_password_reset")) {
+            const r = metal.admin_reset.parse(value) orelse
+                serial.fail(config_path ++ ": `admin_password_reset` is the admin's name, then a bcrypt hash of cost 10 or more");
+            if (r.name.len > conf.reset_name.len) serial.fail(config_path ++ ": `admin_password_reset` names someone longer than 64 bytes");
+            @memcpy(conf.reset_name[0..r.name.len], r.name);
+            conf.reset_name_len = r.name.len;
+            @memcpy(&conf.reset_hash, r.hash[0..60]);
+            conf.reset = true;
         } else if (std.mem.eql(u8, key, "page_cache_mib")) {
             conf.page_cache_mib = std.fmt.parseInt(u32, value, 10) catch
                 serial.fail(config_path ++ ": `page_cache_mib` is a number of MiB, 0 for none");
@@ -1312,7 +1346,7 @@ fn readConfig(io: Io, alloc: std.mem.Allocator) Config {
                 serial.fail(config_path ++ ": `trusted_proxy` is an IPv4 address: 10.0.0.2");
             conf.trusted_proxy = a.bytes;
         } else {
-            serial.fail(config_path ++ ": the keys are `requests`, `idle_timeout_ms`, `streams`, `keepalive_ms`, `lose_one_sent_in`, `card`, `volume`, `trusted_proxy` and `page_cache_mib`");
+            serial.fail(config_path ++ ": the keys are `requests`, `idle_timeout_ms`, `streams`, `keepalive_ms`, `lose_one_sent_in`, `card`, `volume`, `trusted_proxy`, `page_cache_mib` and `admin_password_reset`");
         }
     }
     if (!said_anything) serial.fail(config_path ++ " is present but says nothing");

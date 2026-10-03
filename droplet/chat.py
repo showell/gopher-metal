@@ -17,10 +17,21 @@ the game store's per-address bounds (QUEUE.md item 52: 5 new players and 20 MB
 of game writes an hour) apply to the whole site at once; this says so.
 
     droplet/chat.py <out.img>
+    droplet/chat.py <out.img> --reset-admin-password NAME
+
+**THE ADMIN'S LOST PASSWORD** (QUEUE.md item 89, ADMIN-PASSWORD-LOST.md):
+with `--reset-admin-password NAME` this asks for a new password twice,
+hashes it here with angry-gopher's `hash-password` (the server's own bcrypt),
+and puts `admin_password_reset = NAME <hash>` in this image's
+gopher-metal.conf. The machine applies it at its next boot, once, and only if
+uid 1 on the volume is NAME. Only the hash is in the image, and nothing goes
+in the repository; the next deploy without the flag leaves the line out.
+Off a terminal, the password is the first line of stdin.
 
 Builds its disks with mtools, as the judge does (no root); JUDGE_MOUNT=1 in the
 environment builds them through a loop mount instead, which needs `sudo -n`.
 """
+import getpass
 import os
 import shutil
 import subprocess
@@ -43,11 +54,35 @@ SERIAL_FILE = os.path.join(HERE, "volume-serial")
 PROXY_FILE = os.path.join(HERE, "trusted-proxy")
 
 
+def admin_reset_line(name: str) -> str:
+    """`admin_password_reset = NAME <hash>`, the password asked for here and
+    hashed by angry-gopher's hash-password; only the hash leaves this
+    function."""
+    zig_server = os.path.join(GOPHER_ROOT, "zig-server")
+    subprocess.run(["zig", "build", "hash-password"], cwd=zig_server, check=True)
+    if sys.stdin.isatty():
+        password = getpass.getpass(f"New password for {name}: ")
+        if password != getpass.getpass("Again: "):
+            raise SystemExit("chat.py: the two passwords differ; no image made")
+    else:
+        password = sys.stdin.readline().rstrip("\r\n")
+    made = subprocess.run([os.path.join(zig_server, "zig-out", "bin", "hash-password")],
+                          input=password, capture_output=True, text=True)
+    if made.returncode != 0:
+        raise SystemExit("chat.py: " + made.stderr.strip())
+    return f"admin_password_reset = {name} {made.stdout.strip()}\n"
+
+
 def main() -> int:
-    if len(sys.argv) != 2:
+    args = sys.argv[1:]
+    reset = None
+    if len(args) == 3 and args[1] == "--reset-admin-password" and args[2].strip():
+        reset = args[2].strip()
+        args = args[:1]
+    if len(args) != 1:
         print(__doc__)
         return 2
-    out = sys.argv[1]
+    out = args[0]
     if not os.path.isfile(ELF):
         print(f"no {ELF}: ./port.sh && zig build gopher")
         return 1
@@ -71,7 +106,8 @@ def main() -> int:
         # only the private card, where prod's Caddy reaches it; and the volume.
         with open(os.path.join(content, "gopher-metal.conf"), "w") as f:
             f.write(f"idle_timeout_ms = 10000\ncard = private\nvolume = {serial}\n"
-                    + (f"trusted_proxy = {proxy}\n" if proxy else ""))
+                    + (f"trusted_proxy = {proxy}\n" if proxy else "")
+                    + (admin_reset_line(reset) if reset else ""))
         disk = os.path.join(work, "site.img")
         judge.build_disk(disk, content, os.path.join(work, "mnt"))
         last = judge.partition_last(disk)
@@ -81,7 +117,9 @@ def main() -> int:
             v.write(f.read((last - judge.PART_FIRST + 1) * judge.SECTOR))
         subprocess.run([os.path.join(HERE, "image.sh"), ELF, out, site], check=True)
     print(f"chat.py: {out}, {os.path.getsize(out) >> 20} MB, serving volume {serial}"
-          + (f", believing X-Forwarded-For from {proxy}" if proxy else ", believing no X-Forwarded-For"))
+          + (f", believing X-Forwarded-For from {proxy}" if proxy else ", believing no X-Forwarded-For")
+          + (f"; it resets the password of uid 1 if uid 1 is {reset!r}, at its first boot: "
+             "deploy it, log in, then deploy without the flag" if reset else ""))
     return 0
 
 

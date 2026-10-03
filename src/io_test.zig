@@ -551,6 +551,87 @@ test "the page cache is the disk: every change interleaved with reads, under evi
     try testing.expect(pc.held <= pc.budget);
 }
 
+// ── the admin's lost password (QUEUE.md item 89) ────────────────────────────
+
+const admin_reset = @import("admin_reset.zig");
+const old_hash = "$2a$10$TC9LJ0KU0TIrFl9Hk8FCAeU1bThg2GoSYXAqsjQLdIBSHIxGVfDza";
+const new_hash = "$2b$10$oxKybo3Oosmt0E6lXGVrnubZfb/VLlOFpGiHrMZAy0/KV3k.BbfMS";
+
+fn adminVolume() !Two {
+    const t = try Two.make(true);
+    try cwd.writeFile(io, .{ .sub_path = "auth/1/name", .data = "Steve" });
+    try cwd.writeFile(io, .{ .sub_path = "auth/1/password", .data = old_hash });
+    return t;
+}
+
+fn expectRead(path: []const u8, want: []const u8) !void {
+    const got = try cwd.readFileAlloc(io, path, testing.allocator, .limited(4096));
+    defer testing.allocator.free(got);
+    try testing.expectEqualStrings(want, got);
+}
+
+test "a reset for the admin by name applies once: the new hash in, the old one kept aside, and a second boot changes nothing" {
+    const t = try adminVolume();
+    defer t.deinit();
+    const r = admin_reset.parse("Steve " ++ new_hash).?;
+    try testing.expectEqual(admin_reset.Outcome.applied, admin_reset.apply(testing.allocator, r));
+    try expectRead("auth/1/password", new_hash);
+    try expectRead("auth/1/password.before-reset", old_hash);
+    try expectRead("auth/1/password-reset", new_hash);
+    try t.volume.expectFile("auth/1/password", new_hash); // on the volume, not just in io's cache
+
+    // The next boot, the line still in the image: nothing changes.
+    try testing.expectEqual(admin_reset.Outcome.already, admin_reset.apply(testing.allocator, r));
+    // And a password changed since is not put back.
+    try cwd.writeFile(io, .{ .sub_path = "auth/1/password", .data = old_hash });
+    try testing.expectEqual(admin_reset.Outcome.already, admin_reset.apply(testing.allocator, r));
+    try expectRead("auth/1/password", old_hash);
+}
+
+test "a reset is refused for another name, and where uid 1 is no member; nothing is written" {
+    {
+        const t = try adminVolume();
+        defer t.deinit();
+        try testing.expectEqual(admin_reset.Outcome.other_name, admin_reset.apply(testing.allocator, admin_reset.parse("Mallory " ++ new_hash).?));
+        try testing.expectEqual(admin_reset.Outcome.other_name, admin_reset.apply(testing.allocator, admin_reset.parse("steve " ++ new_hash).?));
+        try expectRead("auth/1/password", old_hash);
+        try testing.expectError(error.FileNotFound, cwd.statFile(io, "auth/1/password-reset", .{}));
+    }
+    {
+        const t = try Two.make(true);
+        defer t.deinit();
+        try cwd.writeFile(io, .{ .sub_path = "auth/1/name", .data = "Steve" }); // a name, no password
+        try testing.expectEqual(admin_reset.Outcome.no_admin, admin_reset.apply(testing.allocator, admin_reset.parse("Steve " ++ new_hash).?));
+        try testing.expectError(error.FileNotFound, cwd.statFile(io, "auth/1/password", .{}));
+    }
+}
+
+test "a reset that fails part-way is finished by the next boot, and the hash kept aside is still the one from before" {
+    var stop: u64 = 0;
+    var done = false;
+    while (!done) : (stop += 1) {
+        const t = try adminVolume();
+        defer t.deinit();
+        // A failure is what a stop leaves here: io holds nothing the disk does
+        // not, and the next boot reads the disk.
+        t.volume.label = "limit-admin-reset";
+        const r = admin_reset.parse("Steve " ++ new_hash).?;
+        t.volume.blk.fail_after_writes = t.volume.blk.writes + stop;
+        const first = admin_reset.apply(testing.allocator, r);
+        t.volume.blk.fail_after_writes = null;
+        done = first == .applied;
+        if (!done) try testing.expectEqual(admin_reset.Outcome.failed, first);
+        // The next boot: the volume mounted afresh from the disk.
+        try t.volume.mount(false);
+        t.resync(true);
+        const second = admin_reset.apply(testing.allocator, r);
+        try testing.expect(second == .applied or second == .already);
+        try expectRead("auth/1/password", new_hash);
+        try expectRead("auth/1/password.before-reset", old_hash);
+    }
+    try testing.expect(stop > 3);
+}
+
 test "a disk that fails a read is not a file that is absent: createFile errors and leaves the file whole" {
     const t = try Two.make(true);
     defer t.deinit();

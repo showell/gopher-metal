@@ -1189,7 +1189,7 @@ sharpens.*
 
 *Item 89 queued 2026-10-03, found by the first fire drill. After 87.*
 
-89. **[CC: started]** **The admin forgets the password: the way back in.** Fire drill 1
+89. **[CC: done; ADMIN-PASSWORD-LOST.md; the judge's `admin-reset` gate]** **The admin forgets the password: the way back in.** Fire drill 1
     (taking a backup of metal) stopped at its first line: Steve's browser
     remembers the admin password and Steve does not. Today a live browser
     session and the browser's password store save the day. After the
