@@ -1187,6 +1187,28 @@ sharpens.*
       the skip is printed with its reason, never silent;
     - say in the commit what moved and what the gates now cost.
 
+*Item 89 queued 2026-10-03, found by the first fire drill. After 87.*
+
+89. **The admin forgets the password: the way back in.** Fire drill 1
+    (taking a backup of metal) stopped at its first line: Steve's browser
+    remembers the admin password and Steve does not. Today a live browser
+    session and the browser's password store save the day. After the
+    cutover, with neither, there is no way in: metal has no shell, the
+    password is stored only as a hash, and the backup and secret routes
+    both ask for it.
+    - **A recovery path that needs no running session**, decided and
+      built: for instance a one-time reset carried in the boot disk's
+      `gopher-metal.conf` (a new hash for uid 1, applied once at boot,
+      logged, and refused if the volume's account is not the admin), set
+      by `droplet/chat.py` at the next deploy, never stored in the repo.
+      Say what each option costs and pick the simplest that cannot be
+      triggered by a request.
+    - **Linux's side too:** the same for prod before the cutover (a
+      script on prod that writes a new hash, with the server stopped).
+    - **A page in the runbooks:** "The admin password is lost", linked
+      from CUTOVER.md, in the drills' plain style.
+    - Tests on both hosts, and the judge.
+
 ## Box Claude
 
 - v6: gates, images, deploy with Steve, and the survival test (the marker
