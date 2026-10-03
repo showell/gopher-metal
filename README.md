@@ -277,6 +277,13 @@ blocked from it. What does and does not work there, found on 2026-10-02:
     checkout's fixtures (`block`, for one) cannot find them here.
   - **`ACCEL=tcg droplet/boot.sh` passes all seven probes**; `droplet.sh`
     takes `ACCEL=tcg` where there is no KVM.
+- **Disk.** The container's writable allowance is fixed (about 25 GB
+  free at the start), and `df` can mislead. zig's local caches grow with
+  every distinct build: tens of mutated builds, or a day of judges' scratch
+  under `/tmp`, fill it, and then even a command's output cannot be
+  written. Deleting a `.zig-cache` frees space at once and costs only a
+  rebuild. angry-gopher's `tools/mutate.py` builds each mutant in a cache
+  of its own and removes it.
 - **What cannot be judged there:**
   - **Resting with the APIC timer.** TCG offers no TSC-deadline timer, so
     `interrupts.startApic` refuses and the machine never rests.
