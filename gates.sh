@@ -50,9 +50,12 @@ mkdir -p "$VERDICTS"
 # two machines running at once. The output is the same either way, in the
 # same order.
 judge() {  # judge MACHINE: runs one chat judge, its output to $VERDICTS/MACHINE.run
-    local machine=$1
-    if [ "$machine" = droplet ]; then export JUDGE_DROPLET=1; else unset JUDGE_DROPLET; fi
-    PROBE_WORK="$HOME/build/gopher-metal/probe-$machine" probe/run.sh gopher > "$VERDICTS/gopher-$machine.run" 2>&1
+    local machine=$1 droplet=0
+    [ "$machine" = droplet ] && droplet=1
+    # Set for this one command only: the steps after the judges must not
+    # inherit it, as they did not before.
+    JUDGE_DROPLET=$droplet PROBE_WORK="$HOME/build/gopher-metal/probe-$machine" probe/run.sh gopher \
+        > "$VERDICTS/gopher-$machine.run" 2>&1
     echo $? > "$VERDICTS/gopher-$machine.code"
 }
 report() {  # report MACHINE: the verdict line and, on a failure, every line after it
