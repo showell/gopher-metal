@@ -1302,6 +1302,24 @@ connections, a draining disk, a filled table).
 
 Will report the cause and the fix in the next check-in.
 
+**Correction, same session — it is not a leak, it is the page cache
+filling, and I had the budget wrong.** The budget is a quarter of *free
+RAM* (`(bytes_total - bytes_taken) / 4`), ~64 MiB here, capped at
+`page_cache_mib`, NOT a quarter of disk free (~15 MB) as I said above. And
+io.zig caches a data file **on write** as well as on read, so the soak's
+uploader, writing a 64 KB picture every 3 s, fills the cache: over the run
+the heap rose ~45 MB while the volume's free fell ~45 MB, almost
+one-for-one. It rises toward base + 64 MiB (~120 MB) and plateaus there;
+bounded, by design, not a stop. The **cache-off run is the real leak
+control** (heap flat), and my soak's heap verdict is wrong to flag the
+bounded cache-fill — I am fixing it to allow the known ceiling and lean on
+the cache-off run for leaks.
+
+**For item 90 (yours), a cache-policy question this surfaced:** io caches
+on write, so a client that only uploads pictures evicts the transcripts a
+reader wants. Worth deciding whether an upload write should populate the
+cache at all, or only reads should. Not changing it; it is your file.
+
 ### CC check-in 22, 2026-10-03 (last seen: gopher-metal `master` `5953c9d`)
 
 **Item 82 (TCP under abuse) done.**
