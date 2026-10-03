@@ -33,8 +33,9 @@ box, `N` the volume's size in GiB, and `/dev/sdX` whatever `lsblk` shows.
 
 Each of these is done, and checked, at least a day before.
 
-1. **Everything is on `master` and green.** `gates.sh` passes with both
-   gopher judges, the droplet judge, and `FAT=32 probe/run.sh gopher`.
+1. **Everything is on `master` and green.** `gates.sh` passes: the two
+   gopher judges (FAT32, the default now — item 88), the droplet judge, and
+   the FAT16 judge when it ran (or `GATES_FAT16=1 ./gates.sh`).
    - GO: `GATES: PASS`.
 2. **prod runs the same angry-gopher commit as metal will.** Deploy it to
    prod first, as usual (angry-gopher's `deploy/README.md`). The two hosts

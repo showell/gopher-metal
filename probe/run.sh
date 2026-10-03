@@ -50,7 +50,10 @@ mkdir -p "$WORK"
 # vfat, append, replace and ladder, which mkfs.vfat their volumes here. FAT32
 # needs 65,525 clusters or more, so it is 40 MB at 512-byte clusters where
 # FAT16 is 16 MB. The fixture probes (block, fat16, fat16write, stdio) read
-# FAT16 fixtures either way. Default 16, as always.
+# FAT16 fixtures either way. The PROBES default to 16 here; the CHAT JUDGE
+# defaults to FAT32 (judge_gopher.py, item 88) — this FAT is not exported, so a
+# bare `probe/run.sh gopher` leaves the judge on its own default. `FAT=16` or
+# `FAT=32` on the command sets both.
 FAT="${FAT:-16}"
 case "$FAT" in
     16) mkfat=(-F 16 -S 512); fat_blocks=32768 ;;

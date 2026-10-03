@@ -407,11 +407,13 @@ def partition_last(image: str) -> int:
     return int(next(l for l in info.splitlines() if l.startswith("Last sector")).split()[2])
 
 
-# **FAT=32 SERVES THE WHOLE JUDGE FROM A FAT32 VOLUME** (QUEUE.md item 17,
-# FAT32.md "Then the chat judge"): build_disk formats it FAT32 at 512-byte
-# clusters, about 126,000 of them in 64 MiB. The site's own disk on the
-# droplet machine stays FAT16. Default 16.
-FAT_KIND = os.environ.get("FAT", "16")
+# **THE CHAT JUDGE DEFAULTS TO FAT32** (QUEUE.md item 88): prod's data is a
+# FAT32 volume now, so FAT32 is what the gate runs every time; `FAT=16` is the
+# extra run, which gates.sh takes only when src/fat16*, src/io*, the judge or
+# chat.py changed. build_disk formats FAT32 at 512-byte clusters, about
+# 126,000 of them in 64 MiB (item 17, FAT32.md "Then the chat judge"). The
+# site's own disk on the droplet machine stays FAT16 either way.
+FAT_KIND = os.environ.get("FAT", "32")
 
 
 def build_disk(image: str, content: str, mnt: str, size: int = 64 << 20,

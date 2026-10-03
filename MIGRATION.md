@@ -32,7 +32,8 @@ Every tool here says which format it makes or assumes:
 | `droplet/build_volume.py` | 2 GiB | `--fat 32 --gib N`: the cutover's volume |
 | `droplet/new_volume.py` (an empty volume) | 2 GiB | `--fat 32 --gib N`, N of 3 or more, 32 KiB clusters |
 | `droplet/compare_volume.py`, `tools/fat16_read.py` | read either kind, decided by cluster count | the same |
-| `probe/run.sh`, `probe/run.sh gopher` | the default | `FAT=32` |
+| `probe/run.sh` (probes) | `FAT=16`, the default | `FAT=32` |
+| `probe/run.sh gopher` (the chat judge) | `FAT=32`, the default now (item 88) | `FAT=16` |
 
 The hazards below are the same on both kinds, except that FAT32's root has
 no fixed limit of 512 entries.
