@@ -295,6 +295,65 @@ Prod's Linux server stays stopped, with its data as it was at step 1. **Do
 not start it** while metal serves: two hosts writing two copies of the
 same data cannot be merged.
 
+## Backups, after the cutover
+
+The first-day backup above, taken by hand, becomes a routine. Two kinds, for
+two kinds of loss:
+
+- **A DigitalOcean volume snapshot** restores the whole volume with no tooling
+  — the answer to the droplet or the volume being gone. **Take one just before
+  go-live** (in the console, once step 8 has written the volume and step 10's
+  boot is clean: a known-good restore point before the first visitor), then on
+  a schedule (the console can take them automatically; daily is plenty).
+- **A `/admin/backup` tar** restores the files without a volume restore — the
+  answer to "I need yesterday's data back," and the only one that travels off
+  DigitalOcean. Taken from `<prod>` over the private network, exactly the
+  first-day command, on a cron.
+
+**How often (Steve decides the interval), and what it costs.** FAT has no
+journal: a machine stopped mid-write loses only the one file it was writing,
+never the volume and never a half-written file (that is what the disk checks
+at boot confirm). So a crash is not what a backup interval guards against — a
+crash costs one in-flight message at most. **The interval is the window of
+messages you would lose only if the whole volume were lost** (the droplet
+destroyed, the volume corrupted beyond the disk check) between one backup and
+the next. Daily tars plus daily snapshots mean at most a day of chat in that
+rare case; hourly if a day is too much. It is chat, not a ledger (Steve's
+risk order), so the interval can be generous.
+
+**Encrypted at rest** (docs/reviews/REVIEW-admin-backup.md, finding 6). Every
+tar holds the session secret, every password hash, and any plain-text API
+key — Steve's biggest risk in a single file. So:
+
+- Encrypt each tar the moment it lands, before it touches any folder that
+  syncs to a cloud account, with a passphrase (`age`):
+
+      printf %s "$PW" | curl -s -b jar --data-urlencode password@- http://<metal>/admin/backup \
+          | age -p -o "gopher-backup-$(date +%F).tar.age"
+
+  `check_backup.py` runs on the plaintext, so check it *before* encrypting (or
+  decrypt, check, then trust it) — a `.tar.age` that will not decrypt is as
+  lost as a truncated tar.
+- **Never leave a plaintext tar at rest.** The one the first-day command
+  writes is used and then `shred`-ed or deleted; what is kept is the `.age`.
+- Keep the passphrase somewhere that is **not** beside the backups (a password
+  manager), or losing one loses the other.
+
+**Where, how many, and destroying old ones.** Keep them **off the droplet**,
+so losing the droplet does not lose its backups — on `<prod>` or `<box>`, or
+a cloud account (encrypted, so the sync is safe). Keep a rolling set (Steve
+decides: say 7 daily and 4 weekly) and **destroy the rest** — an old backup
+is every old password hash still in reach. Destroy with `shred -u` (or delete
+and empty, on a filesystem where shred does nothing), so a retired hash does
+not linger for the life of the disk.
+
+**Checking one is whole, and restoring it.** `droplet/check_backup.py` on the
+decrypted tar is the only proof it is whole (a cut-short tar still lists
+cleanly in `tar`). To put a backup back — after a loss, or to undo the cutover
+— follow **The way back** below: its backup path freezes metal, decrypts and
+checks the tar, unpacks it, compares, and switches. A volume snapshot instead
+is a console restore of the volume, then step 10's boot checks.
+
 ## The way back
 
 **Before step 12:** nothing has changed for anyone. Start prod again:
