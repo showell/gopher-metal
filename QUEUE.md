@@ -112,6 +112,45 @@ check-in after each, angry-gopher changes on its branch as before.
 
 *(CC writes here; the box Claude or Steve answers under Answers.)*
 
+### CC check-in 37, 2026-10-03 (last seen: gopher-metal `master` `bd40e49`)
+
+**Items 98 and 99 done — that closes the second order (95-99).**
+
+**98 — `droplet/backup.sh`, a by-hand backup of metal** (`2d93798`), plus
+`droplet/test_backup.py`. Run on prod over the private network: asks the admin
+password (`read -rs`, never argv or env), logs in and fetches `/admin/backup`,
+checks it whole, encrypts with `age -p` (a passphrase it asks for), keeps the
+newest 7 `.tar.age` and `shred -u`s the rest, and **never leaves a plaintext
+tar behind, even on failure** (an EXIT trap shreds the tar and the session
+jar). The test drives it against the judge's Linux `zig-server` under a pty
+(both `read -rs` and `age -p` read the terminal): a backup is written, decrypts
+and is whole; a wrong password fails; no plaintext is ever left; retention
+keeps the newest and shreds the rest — **all green here**. The box runs
+`backup.sh` against metal. CUTOVER.md's backups section now points at it and
+sets the schedule: **a daily DigitalOcean volume snapshot plus the tar by hand,
+both at 20:00 UTC**; the snapshot a `doctl` cron (an API token, not the admin
+password), the tar by hand since no admin password is stored on prod.
+- **One thing for you/Steve to confirm:** DigitalOcean's scheduling of *volume*
+  snapshots. Egress to its docs is blocked from here, so I wrote what it offers
+  as of my knowledge (scheduled "backups" are a Droplet feature; volume
+  snapshots are on-demand via console/API/`doctl`) with an explicit
+  "confirm against its current docs" caveat in CUTOVER.md. Please verify.
+
+**99 — the drill's checks made strict** (`daa39a9`). The flagged "first day:
+uptime" passed on 2 s twice (`>=`); now it must grow (`>`, 1.5 s wait). Two
+more that could not fail: the copy's file count must equal prod's **and** be
+non-zero, and the unsigned-cookie window must **move from a future time** to
+now, not merely be `<= now`. `--self-test` green end to end under TCG with all
+three: "up for 2 s (was 1, so it grew)", "was 4102444800 (a future time),
+now ...", 28/28 pages identical, the way back, nothing left behind.
+
+**CC's second order (95-99) is complete and on the branch for the morning
+gate.** 95 (the two Lows) and 96 (the sim sweep + close counts) and 99 are
+gopher-metal; 97's throttle is angry-gopher `ec49fe1e` + the judge's `throttle`
+gate; 98 is `backup.sh` + CUTOVER.md. All green on my side (host tests, lints,
+Linux end-to-end, the TCG drill); the KVM-only halves (the metal judge gates,
+the native bulk story's close counts, `backup.sh` against metal) are yours.
+
 ### CC check-in 36, 2026-10-03 (last seen: gopher-metal `master` `bd40e49`)
 
 **Item 97 done — the login throttle, built.** angry-gopher `ec49fe1e`
