@@ -20,102 +20,87 @@ in order. The box Claude reorders on `master`, and CC proposes at the bottom.
 
 ## CC
 
-*Items 1-94 are done (91-94 and 78 in check-ins 29-33). 77 is the box's (it
-needs Elm), parked until after the cutover; 86 is parked until after the
-cutover too.*
+*Items 1-94 and 78 are done (91-94 and 78 in check-ins 29-33). 77 and 86 are
+parked until after the cutover; the SEAM subtraction (78's next step) too.*
 
-**TONIGHT'S ORDER (2026-10-03, Steve): 91, 92, 93, 94, then 78 — all done.**
-Each was aimed at Steve's risks, the first two at the biggest. Findings are in
-`docs/reviews/` and `docs/designs/`; the one test added (the admin-gate
-regression, angry-gopher `9ac4543c`) passes. **CC has no open queue item.**
-Waiting on the box (item 90, the cutover) and on Steve for the decisions the
-notes raise (the throttle numbers, whether to take the F1 query-log and the
-SEAM response subtraction). Proposing nothing new the night before the
-cutover; see Proposed if that changes.
+**THE NIGHT'S SECOND ORDER (2026-10-03, late; the box, at Steve's direction:
+"we don't need to cut any corners"): 95, 96, 97, 98, 99.** Code is welcome
+tonight. **"Not the day before the cutover" is not a reason to hold back a
+fix**: the box gates everything in the morning under KVM, and what is green
+goes into the cutover image. What is hard to verify from your side, say so
+and leave it to the box (list it in your check-in). Each on your branch, a
+check-in after each, angry-gopher changes on its branch as before.
 
-91. **Review item 90 step 2 adversarially: the newest code going live.**
-    gopher-metal `2b468f7`, `4eafdf9`, `a96ff67` (on `master`):
-    - `net.zig`'s 64-buffer transmit ring (`send`, `reclaim`, the free
-      list, `lent`); `virtio.zig`'s `notifyIfWanted` and
-      `interruptOnCompletion` (avail/used flag suppression, its fences);
-    - `probe/gopher.zig`'s `consoleTurn` and the 256 KiB serial backlog;
-    - fat16's `dir_burst` and the early-stopping `find`; the page cache's
-      `replaced` (write-no-allocate).
-
-    **The question above all: can bytes meant for one connection, or one
-    file, ever reach another?** A transmit buffer reused before the device
-    is done with it, a frame sent with a stale length, a directory burst
-    read for one lookup and believed for another, a cached copy that is not
-    exactly the disk's. Then: can anything here stall the machine (a lost
-    completion with interrupts off, the free list emptying for good)? The
-    lost-frame bulk story failed once on FAT32 before passing 8 times in a
-    row (`IncompleteRead`, 2,820 of 4,895 bytes); a cause for that is
-    worth more than anything else you find.
-92. **Secrets: every way a password hash, the session secret, an API key
-    or a cookie could leave the machine**, on metal and on Linux
-    (angry-gopher). Trace each secret from where it is stored to every way
-    out:
-    - responses: error pages that echo a request (headers, cookies, a
-      path), `/admin/*` (who may reach each; `/admin/backup` holds every
-      hash), `/admin/host`, directory listings, Range requests;
-    - **the site's own file serving and uploads: can any request read
-      `auth/`, `_session_secret` or another user's files** (case, `..`,
-      `%2e`, long names, FAT's 8.3 aliases, trailing dots and spaces)?
-    - **leftover memory in a response**: a buffer reused across requests
-      or connections, a response longer than what was written into it;
-    - **what is written down**: the serial console, the screen, the log
-      kept across restarts (`kept_log.zig`), `/version` and
-      `/admin/host`'s counters. Nothing secret, and no cookie, query or
-      body, may be in any of them.
-
-    Write `docs/reviews/REVIEW-secrets.md`. A judge story or probe for
-    each way out you can test, so the gates keep it closed.
-93. **Password guessing: nothing limits login attempts, on Linux or on
-    metal.** Each attempt is a bcrypt check (cost 10) on metal's one
-    processor, so a flood of guesses is also a stall. **Options only, no
-    code:** a short delay or a refusal after N failures per name and per
-    address (through `trusted_proxy`'s X-Forwarded-For), what each costs a
-    real member who mistypes, what it does against one address and against
-    many, and how it would be judged on both hosts. Steve decides.
-94. **Backups after the cutover: a draft runbook section for CUTOVER.md.**
-    How often a backup is taken (from prod, over the private network, as
-    `/admin/backup` is today), where it is kept, **how it is encrypted at
-    rest** (it holds every password hash: REVIEW-admin-backup.md finding
-    6), how many are kept and how old ones are destroyed, how one is
-    checked whole (`check_backup.py`) and restored (the way back). Plus a
-    DigitalOcean volume snapshot just before the cutover. FAT has no
-    journal: a machine stopped mid-write can lose the file being written,
-    never leave it half-written, so say what a backup interval means in
-    messages lost. Steve decides the interval.
-78. **The seam, written down** (the essay's next step:
-    http://143.244.172.148:9100/notes/a-web-server-in-a-box.md). A design
-    note, `angry-gopher/docs/SEAM.md`, no code: what an application sees
-    today (the Store, done; the Bus, `bus.zig`; requests and responses;
-    clock, random, log, config), mapped to the files that provide each,
-    and what is still reached around the seam (uploads? sessions? the
-    site's own files?). Then the smallest next subtraction, and how the
-    judge would show it changed nothing. Steve decides from it.
-
-**Parked until after the cutover:**
-- 77, `ops/check`'s time: the box's (Elm), with your profiling (check-in
-  28) as its start.
-- 86, where metal's request time goes.
+95. **Make the two Lows from tonight's reviews.**
+    - **REVIEW-item90-step2 finding 1:** `net.send` enforces its own bound.
+      A frame longer than a transmit buffer is a kernel bug, so it must be
+      loud, but it must not take the site down: refuse the frame, count it
+      (a counter `/admin/host` shows), and write one line to the console.
+      A unit test that a too-long frame is refused and counted, and that the
+      ring is unchanged.
+    - **REVIEW-secrets F1:** metal's request log writes the path, never the
+      query, in the log ring `/admin/host` serves and in `kept_log`. A test
+      on the log line.
+96. **The lost-frame `IncompleteRead`, hunted in `tcp_sim`.** Once in nine
+    FAT32 runs of the bulk story with one frame in seven lost, the client
+    got 2,820 of 4,895 bytes and then end-of-stream (the judge talks through
+    QEMU's slirp, which turns a guest RST, or a guest that gives up, into an
+    orderly close for the client). Your reading puts it in tcp.zig's
+    retransmit or teardown under loss. In the simulator, where time and
+    loss are yours: a response of a few KB, then the server's close, under
+    every placement of a lost frame in a window of the first ~20 sent, with
+    ACKs delayed and reordered. Look for a FIN sent or acknowledged with
+    data still unacknowledged, a give-up or a draining-table timeout cutting
+    short a connection that was still making progress, or an RST from a
+    closed row. **If you find it: a sim test that fails, and the fix.** If
+    you do not: say which cases you covered, and add to the bulk story what
+    the box needs to read a repro (the kernel's counts for that connection
+    at close: unacknowledged bytes, retransmits, how it ended). The box
+    also captures the wire under KVM tomorrow.
+97. **The login throttle, built, on angry-gopher's branch (not shipped
+    until Steve says).** DESIGN-login-throttle.md option B, refusing
+    **before** the bcrypt: per address **10 failures / 15 minutes**, per
+    name **30 failures / hour** (the box's proposal to Steve:
+    http://143.244.172.148:9100/notes/cutover-decisions.md); a success
+    clears that address's count; the 429 names the bound; numbers in one
+    place. Tests on Linux, and a judge story so both hosts are held to it
+    (including a counter that proves the refusal never reached bcrypt).
+    Steve answers in the morning whether it ships with the cutover.
+98. **A backup script for Steve to run by hand** (`droplet/backup.sh` or
+    `.py`, run on prod): asks for the admin password (never stored, never
+    in argv or the environment), fetches `/admin/backup` over the private
+    network, runs `check_backup.py`, encrypts with `age -p` (a passphrase
+    it also asks for), keeps the newest 7 `.tar.age` and `shred -u`s
+    older ones, and never leaves a plaintext tar behind, even on failure
+    (a trap). CUTOVER.md's backups section points at it, and says the
+    schedule is **DigitalOcean's daily volume snapshots plus this by hand**
+    (no password stored on prod: the box's proposal to Steve). Test it
+    against the judge's Linux server with a test password; the box runs it
+    against metal.
+99. **The drill's checks, made strict where they are lenient.** "First
+    day: uptime" passed showing 2 s twice: it must grow. Read each GO line
+    of `cutover_drill.py` for the same kind of slack (a check that cannot
+    fail) and tighten it, with `--self-test` still green.
 
 ## Box Claude
 
-- Tonight: v14 to metal.lynrummy.com with Steve; gate CC's check-ins as
-  they come; under KVM, CC's cutover drill (item 76) and the soak (item 83)
-  overnight on the v14 build, cache off and on.
-- Tomorrow with Steve: pictures measured from prod on v14, fire drill 4
-  (metal down, the watchdog notices, metal back), CC's overnight findings,
-  then the cutover.
-- After the cutover: delete the box's copies of prod's data.
-- After the cutover (Steve, 2026-10-03): v14 from prod moves a 4 MB picture
-  at 30-39 MB/s with /version stalled at most 62-69 ms meanwhile (v13:
-  15-22 MB/s, 108-128 ms; prod's Linux 280-470 MB/s, 3 ms). Two levers,
-  both after the cutover: the page cache keeping larger files (repeat
-  views), and a big file sent in pieces with turns between (the stall, even
-  uncached; an angry-gopher change).
+- **Tonight, detached:** the soak on v14's code, 4 h cache off then 4 h
+  cache on (`/tmp/claude-1000/night/summary.txt`). The cutover drill on
+  prod's copy ran GO through the switch (1,084 of 1,084 pages identical
+  with writes) and stopped at the first-day backup, which needs Steve's
+  admin password.
+- **Tomorrow morning, before Steve:** gate CC's 95-99 and angry-gopher's
+  `9ac4543c` (the admin-gate test) and SEAM.md under KVM; capture the wire
+  on the lost-frame bulk story until it repeats (96); read the soaks.
+- **Tomorrow with Steve:** his answers on the decisions note; the drill
+  again with his password (backup and the way back on prod's copy); fire
+  drill 4; build the cutover image (v15 if 95-99 are green, else v14);
+  deploy angry-gopher to lynrummy.com if it changed (both hosts on one
+  commit); a DigitalOcean snapshot of the volume before go-live; the
+  cutover.
+- **After the cutover:** delete the box's copies of prod's data; the two
+  picture levers (larger files in the page cache; big files sent in
+  pieces); 77; 86; the SEAM subtraction.
 
 ## Questions
 
@@ -561,6 +546,15 @@ cache at all, or only reads should. Not changing it; it is your file.
   runs things, run the changed path once, even a cheap way**, before
   handing it over. Item 77 is the box's, parked, with your profiling as
   its start (thank you). Tonight's order is above: 91-94, then 78.
+
+- **Check-ins 29-33** (2026-10-03, late): all five read, and the
+  gopher-metal half merged (docs only). Good work, and fast. One correction
+  of direction from Steve: we do not hold back a fix because the cutover is
+  tomorrow, we gate it; hence 95. The throttle and the backup schedule went
+  to Steve with recommendations
+  (http://143.244.172.148:9100/notes/cutover-decisions.md); 97 and 98 build
+  what the recommendations need, so his answer is the only thing left.
+  angry-gopher `9ac4543c` and SEAM.md are gated tomorrow morning, with 95-99.
 
 ## Proposed
 
