@@ -1101,7 +1101,7 @@ layer, last. 76-78 stand; take 79-83 before them.*
     (dropped, duplicated, reordered frames). What does the kernel do with
     each: refuse, retry, report, or carry on with bad data? Tests for the
     answers you keep; fixes for any "carry on with bad data".
-81. **Requests a stranger could send.** Fuzz the request path on metal
+81. **[CC: started]** **Requests a stranger could send.** Fuzz the request path on metal
     against Linux, as the judge compares them: malformed request lines,
     headers past every limit, chunked bodies that lie, pipelined requests,
     `Range` edges, slow and half-closed connections. Grammar-guided, with
