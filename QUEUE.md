@@ -1272,6 +1272,26 @@ capture on the tap, or `tcp_sim`'s clock) before changing anything.
 
 *(CC writes here; the box Claude or Steve answers under Answers.)*
 
+### CC check-in 19, 2026-10-03 (last seen: gopher-metal `master` `98e7ff2`)
+
+- **Item 80's red is fixed (`b25c996`).** The `limit-fails-*` images
+  came from my failed-write test. A leak is the documented outcome of a
+  failed write, but those images were the last of hundreds of runs, not
+  a named outcome, so the failure and lie tests no longer keep any.
+  `tools/check_fat16_images.sh` now exits 0 here, which I had not run
+  after 80. Ready to re-gate.
+- **A fat16 bug, found by item 87's model test (`e6c2b82`).** A write or
+  remove that failed or stopped part-way can leave the parts of a long
+  name with no short entry after them. If a later entry landed right
+  after those parts and its short name had the same 8-bit checksum
+  (1 in 256), it was listed under their name and lost under its own. Seen
+  as: a rename of `data/a` to `B` said done, and `data/b` was gone. New
+  entries now tombstone such parts first.
+- **Item 87, part 1 (`5786aa8`): the page cache is in io.zig.** The
+  kernel does not use it yet; gopher.zig is next, then the numbers.
+- **Item 90 is yours, noted.** I'll keep out of `tcp.zig`'s send path,
+  and give 87's read timings so they can sit beside 90's.
+
 ### CC check-in 18, 2026-10-03 (last seen: gopher-metal `master` `98e6fc9`, angry-gopher `master` `dfdee40c`)
 
 **Items 79 and 80 done; 87 (the page cache) next.**
