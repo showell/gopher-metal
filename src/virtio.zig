@@ -662,6 +662,27 @@ pub const Block = struct {
     fail_after_writes: ?u64 = null,
     /// Writes served, on a disk in memory.
     writes: u64 = 0,
+    /// A host test's lie, told once, at request number `at` (counted as
+    /// `requests` counts) on a disk in memory (QUEUE.md item 80).
+    fault: ?Fault = null,
+
+    pub const Fault = struct {
+        at: u64,
+        kind: enum {
+            /// The request answers `blk_s_ioerr`, and the next one is served.
+            fails,
+            /// A write answers OK and nothing lands.
+            lands_nothing,
+            /// A write of more than one sector answers OK and only its first
+            /// half lands: a torn write.
+            torn,
+            /// A read answers OK with other bytes than the disk's: what a
+            /// short read leaves in the buffer, or a device that lies.
+            garbage,
+        },
+        /// The bytes `garbage` reads.
+        seed: u8 = 0xA5,
+    };
 
     /// A disk of `bytes.len / 512` sectors held in `bytes`, which the caller
     /// owns. For host tests of what sits on a disk (`fat16.zig`, `io.zig`):
@@ -681,12 +702,28 @@ pub const Block = struct {
     fn memoryTransfer(self: *Block, disk: []u8, kind: u32, lba: u64, addr: u64, len: u32) u8 {
         if (self.fail_after) |n| if (self.requests >= n) return blk_s_ioerr;
         if (self.fail_after_writes) |n| if (self.writes >= n) return blk_s_ioerr;
+        const number = self.requests;
         self.requests +%= 1;
         if (kind != blk_t_in) self.writes +%= 1;
         const at = lba * 512;
         if (at > disk.len or len > disk.len - at) return blk_s_ioerr;
         const there = disk[@intCast(at)..][0..len];
         const here: [*]u8 = @ptrFromInt(@as(usize, @intCast(addr)));
+        if (self.fault) |f| if (f.at == number) {
+            switch (f.kind) {
+                .fails => return blk_s_ioerr,
+                .lands_nothing => if (kind != blk_t_in) return blk_s_ok,
+                .torn => if (kind != blk_t_in and len > 512) {
+                    const half = len / 512 / 2 * 512;
+                    @memcpy(there[0..half], here[0..half]);
+                    return blk_s_ok;
+                },
+                .garbage => if (kind == blk_t_in) {
+                    for (here[0..len], 0..) |*b, i| b.* = @truncate(i *% 167 +% f.seed);
+                    return blk_s_ok;
+                },
+            }
+        };
         if (kind == blk_t_in) @memcpy(here[0..len], there) else @memcpy(there, here[0..len]);
         return blk_s_ok;
     }

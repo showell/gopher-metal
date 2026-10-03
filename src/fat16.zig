@@ -866,6 +866,14 @@ pub const Volume = struct {
     /// Sets the FAT entry for a cluster, **in every copy of the FAT**. A
     /// volume whose second FAT disagrees with its first is one that other
     /// tools will quietly repair, or quietly believe.
+    ///
+    /// **WHAT IS HELD MOVES ONLY WITH THE FIRST COPY.** The kept free count,
+    /// and the FAT when it is held, change once the first copy's write has
+    /// landed, and not when it fails: they moved first, and a write the device
+    /// refused left them saying a cluster had changed that had not, for as
+    /// long as the machine ran (QUEUE.md item 80). Once the first copy has
+    /// landed it is the FAT (cacheFat), so a later copy's failure is an
+    /// error and changes nothing held.
     fn fatSet(self: *Volume, cluster: Cluster, value: Cluster) Error!void {
         try self.forgetFsInfo();
         const width = self.entryBytes();
@@ -876,9 +884,14 @@ pub const Volume = struct {
             // into line with it — so it is written to each copy whole, and no
             // copy is read back first.
             const sector = fat[in_sector * sector_size ..][0..sector_size];
-            self.keepCount(self.entryIn(sector, at % sector_size / width), value);
+            const old = self.entryIn(sector, at % sector_size / width);
             self.putEntry(sector, at % sector_size, value);
-            var c: u32 = 0;
+            self.writeSector(self.fat_start + in_sector, sector) catch |e| {
+                self.putEntry(sector, at % sector_size, old);
+                return e;
+            };
+            self.keepCount(old, value);
+            var c: u32 = 1;
             while (c < self.num_fats) : (c += 1) {
                 try self.writeSector(self.fat_start + c * self.sectors_per_fat + in_sector, sector);
             }
@@ -889,9 +902,10 @@ pub const Volume = struct {
             const lba = self.fat_start + copy * self.sectors_per_fat + in_sector;
             try self.readSector(lba, self.scratch);
             // The first copy is the one every read here follows.
-            if (copy == 0) self.keepCount(self.entryIn(self.scratch, at % sector_size / width), value);
+            const old = self.entryIn(self.scratch, at % sector_size / width);
             self.putEntry(self.scratch, at % sector_size, value);
             try self.writeSector(lba, self.scratch);
+            if (copy == 0) self.keepCount(old, value);
         }
     }
 
@@ -900,9 +914,13 @@ pub const Volume = struct {
     /// boot sector's copy of it (FAT32.md §7). Both are hints, which Linux
     /// recomputes when they say 0xFFFFFFFF; one left set and wrong is what
     /// fsck.fat reports. One sector write a copy, once a mount.
+    ///
+    /// Marked done once both writes have landed: marked first, a write the
+    /// device refused left a count set and wrong for as long as the machine
+    /// ran (QUEUE.md item 80). A failure is an error, and the next change
+    /// tries again.
     fn forgetFsInfo(self: *Volume) Error!void {
         if (self.kind != .fat32 or self.fsinfo_unknown) return;
-        self.fsinfo_unknown = true;
         for ([_]u32{ self.fsinfo_sector, self.backup_boot + 1 }) |lba| {
             if (lba == 0 or lba >= self.fat_start) continue; // no such sector in the reserved area
             try self.readSector(lba, self.scratch);
@@ -911,6 +929,7 @@ pub const Volume = struct {
             std.mem.writeInt(u32, self.scratch[492..496], 0xFFFF_FFFF, .little);
             try self.writeSector(lba, self.scratch);
         }
+        self.fsinfo_unknown = true;
     }
 
     /// Moves the kept free count for one FAT entry going from `old` to `new`.

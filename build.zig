@@ -264,6 +264,27 @@ pub fn build(b: *std.Build) void {
         }),
     });
     test_step.dependOn(&b.addRunArtifact(fat16_unit).step);
+    // The stops and the lying disk (QUEUE.md items 79-80): hundreds of runs
+    // each, so binaries of their own, run beside fat16_test's: one for the
+    // stops and the failed requests, one for the lies. Every test in the file
+    // is named by one filter or the other.
+    const fat16_faults_opts = fat16_opts.createModule();
+    for ([_][]const []const u8{
+        &.{ "every operation stopped after every write", "a request that fails is an error" },
+        &.{"a disk that lies"},
+    }, [_][]const u8{ "fat16_faults_test", "fat16_lies_test" }) |filters, name| {
+        const unit = b.addTest(.{
+            .name = name,
+            .filters = filters,
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("src/fat16_faults_test.zig"),
+                .target = b.graph.host,
+                .optimize = .ReleaseSafe,
+                .imports = &.{.{ .name = "fat16_test_options", .module = fat16_faults_opts }},
+            }),
+        });
+        test_step.dependOn(&b.addRunArtifact(unit).step);
+    }
 
     const starts = [_]struct { isn: u32, peer: u32 }{
         .{ .isn = 2000, .peer = 5000 }, // where the tests were written
