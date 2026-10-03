@@ -758,7 +758,7 @@ QUICK = bool(os.environ.get("JUDGE_QUICK"))
 # silently complete run.
 GATES = ["cases", "members", "uids", "caps", "lynrummy", "streams-linux", "streams-metal", "budget", "churn",
          "bulk", "uploads", "slow", "lagging", "concurrent", "timeouts",
-         "damaged", "endurance", "stamina", "admin-reset"]
+         "damaged", "endurance", "stamina", "admin-reset", "throttle"]
 # The boots that exist to be long. The quick tier leaves them out; asking for
 # one by name still runs it.
 LONG = {"endurance", "stamina"}
@@ -2130,6 +2130,79 @@ def admin_reset_failures(elf, linux_bin, content, pristine, work, mnt, gopher_ro
     return len(failures)
 
 
+def login_throttle_failures(elf, linux_bin, content, pristine, work, mnt, report) -> int:
+    """**BOTH HOSTS HELD TO THE LOGIN THROTTLE** (QUEUE.md item 97). On each
+    host: ten wrong sign-ins for a member are answered (the wrong-password page,
+    200); the eleventh, over the per-address bound, is refused (429); and a
+    CORRECT password over the bound is refused too (the refusal is before the
+    hash, so it cannot tell right from wrong). `/version`'s
+    `login_throttle.refused` counter climbing is the proof the refusal never
+    reached bcrypt. The throttle is in-memory and identical on both hosts, so
+    the eleventh is refused on both; this is its own boot, so the lockout it
+    leaves touches no other gate."""
+    failures = []
+    expect = lambda ok, what: None if ok else failures.append(what)
+    wrong = "name=apoorva&password=nope&action=login&next=%2Fchat"
+    right = "name=apoorva&password=correct+horse+battery+staple&action=login&next=%2Fchat"
+
+    def post(port, body):
+        conn = http.client.HTTPConnection("127.0.0.1", port, timeout=60)
+        conn.request("POST", "/login/full", body=body,
+                     headers={"Content-Type": "application/x-www-form-urlencoded"})
+        resp = conn.getresponse()
+        resp.read()
+        conn.close()
+        return resp.status
+
+    def refused_count(port):
+        conn = http.client.HTTPConnection("127.0.0.1", port, timeout=60)
+        conn.request("GET", "/version")
+        resp = conn.getresponse()
+        body = resp.read()
+        conn.close()
+        return json.loads(body).get("login_throttle", {}).get("refused")
+
+    def drive(host, port):
+        for i in range(10):  # login_throttle.addr_fails
+            st = post(port, wrong)
+            expect(st == 200, f"{host}: wrong sign-in #{i + 1} was {st}, not the 200 wrong-password page")
+        expect(post(port, wrong) == 429, f"{host}: the 11th wrong sign-in was not refused 429")
+        expect(post(port, right) == 429, f"{host}: a correct sign-in over the bound was not refused 429 "
+                                         "(so the refusal is not before the hash)")
+        n = refused_count(port)
+        expect(n is not None and n >= 2, f"{host}: /version login_throttle.refused is {n}, did not climb to >= 2")
+
+    # metal, its own boot (the lockout it leaves is this gate's alone)
+    scratch = tempfile.mkdtemp(dir=work)
+    image = os.path.join(scratch, "disk.img")
+    shutil.copy(pristine, image)
+    disk_write(image, mnt, "gopher-metal.conf", request_limit_text(image, 40))
+    qemu, port, serial = start_kernel(elf, image, scratch)
+    try:
+        drive("metal", port)
+    finally:
+        finish_kernel(qemu, serial)
+    shutil.rmtree(scratch, ignore_errors=True)
+
+    # Linux, a fresh copy of the same data
+    root = tempfile.mkdtemp(dir=work)
+    shutil.rmtree(root)
+    shutil.copytree(content, root)
+    server = LinuxServer(linux_bin, root, os.path.join(root, "server.log"))
+    try:
+        drive("linux", server.port)
+    finally:
+        server.stop()
+    shutil.rmtree(root, ignore_errors=True)
+
+    for f in failures:
+        report(f"FAIL  login throttle: {f}")
+    if not failures:
+        report("ok    login throttle: ten wrong sign-ins answered, the 11th and a correct one over the bound "
+               "refused 429 before the hash (/version counter climbed), on metal and Linux")
+    return len(failures)
+
+
 def upload_failures(elf, linux_bin, content, pristine, work, mnt, report) -> int:
     """The same uploads to the machine and to Linux, and their answers compared.
     The stored file's name is random on both sides, so what is compared is the
@@ -3049,6 +3122,9 @@ def main() -> int:
     if running("admin-reset"):
         failures += admin_reset_failures(elf, linux_bin, content, pristine, work, mnt, gopher_root, print)
         lap("the admin's password reset")
+    if running("throttle"):
+        failures += login_throttle_failures(elf, linux_bin, content, pristine, work, mnt, print)
+        lap("the login throttle")
     if running("slow"):
         failures += slow_reader_failures(elf, linux_bin, content, work, mnt, print)
         lap("slow readers")
