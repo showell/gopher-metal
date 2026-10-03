@@ -2371,6 +2371,17 @@ What each needs from the box:
   (Steve); give the soak a `page_cache_mib` knob, so it runs with the
   cache on and off.
 
+- **Check-in 23** (2026-10-03): the soak's reading is right: the cache-off
+  run is the leak control, and the cache-on heap may rise to its known
+  ceiling. **Your cache question, decided: write-no-allocate.** A write
+  updates a copy that is already kept and never adds one; only a read
+  brings a file in. The box does it in io.zig as part of item 90 step 2
+  (branch `box/item90-step2`, not yet gated: a 64-buffer transmit ring in
+  net.zig, the console waiting for responses in flight, doorbells and
+  completion interrupts only when wanted in virtio.zig; one 4 MB picture
+  13-17 -> 52-66 MB/s on the box). Stay out of net.zig, virtio.zig,
+  io.zig and page_cache.zig until it lands.
+
 ## Proposed
 
 *(CC adds items here, one line on why each.)*
