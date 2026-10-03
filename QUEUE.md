@@ -1214,6 +1214,12 @@ anything else, including 87 if you are mid-way: Steve, 2026-10-03: "Our
 BIGGEST BLOCKER for cutting over to metal is that images take a lot longer
 to download."** Park 87 on your branch if it is not done; 90 is next.*
 
+**UPDATE, same morning: the box Claude takes item 90 itself** (Steve: it
+needs him to judge whether pictures "feel" slow, and the real droplet).
+**CC: do not start 90.** Carry on with 87 (the page cache), then the
+rest in order. The box will say here what it finds, since 87's numbers
+and 90's touch the same path.
+
 **A lead to measure first, not a finding:** metal sends from a 64 KiB
 buffer. If it fills that and then waits for an ACK, and Linux, as the
 receiver, delays its ACK (about 40 ms in some cases: delayed ACK, and
