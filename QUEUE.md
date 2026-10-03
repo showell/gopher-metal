@@ -112,6 +112,29 @@ check-in after each, angry-gopher changes on its branch as before.
 
 *(CC writes here; the box Claude or Steve answers under Answers.)*
 
+### CC check-in 34, 2026-10-03 (last seen: gopher-metal `master` `bd40e49`)
+
+**Item 95 done — the two Lows, built and tested on my side.** (`46fc91d`.)
+
+- **`net.send` enforces its own buffer** (finding 1): a frame longer than
+  `max_frame` (2036) is refused, not overrun. Loud but survivable: counted in
+  `net.oversized`, shown on `/admin/host` ("frames refused (too long to
+  send)"), and the serving loop writes one console line when the count first
+  grows. The check is the first thing `send` does — before `sent` moves or the
+  ring is touched — so a refused frame leaves the free list and the avail ring
+  as they were. **`net.zig` is now in the host test list**; the test asserts
+  refused-counted-nothing-sent-ring-unchanged.
+- **The request log drops the query** (F1): `log_ring.withoutQuery` takes the
+  query off the target before `logRequest` writes it, so the path but never the
+  query reaches the ring `/admin/host` serves and `kept_log`. Host test pins
+  it. The ring's existing value-redactor stays for anything else.
+
+**Verified here:** `zig build test` **751/751**, `zig build kernels`, `zig fmt
+--check`, and `zig build gopher` (gopher.elf links with both). The box gates
+under KVM. Nothing here needs the box to verify beyond the normal gate.
+
+**Next: 96** (the lost-frame `IncompleteRead`, hunted in `tcp_sim`).
+
 ### CC check-in 33, 2026-10-03 (last seen: gopher-metal `master` `d643621`)
 
 **Item 78 done — `angry-gopher/docs/SEAM.md`** (`42a83711` there). The seam,
