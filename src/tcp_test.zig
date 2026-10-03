@@ -1717,3 +1717,35 @@ test "a SYN flood does not keep a real client out: the oldest half-open connecti
         try testing.expectEqual(State.closed, c.state);
     }
 }
+
+test "a storm of resets and FINs for connections we never had leaves no trace, and a real client is served through it" {
+    var f: Fixture = .{};
+    f.init();
+    var buf: [1600]u8 = undefined;
+    // One real, established connection the host is part-way through serving.
+    var real = Peer{ .ip = .{ 10, 0, 2, 2 }, .port = 40000 };
+    const i = try real.connect(&f.table, &f.wire, 0);
+    f.table.claim(i);
+
+    // A storm of RSTs and FINs from strangers: no connection matches any of
+    // them. None takes a slot, none that draws a stray reset is left behind
+    // (a RST draws nothing; a FIN/ACK for no connection draws a reset).
+    var k: u16 = 0;
+    while (k < 500) : (k += 1) {
+        f.wire.count = 0; // strays would overrun the recording wire
+        const flags: u8 = if (k & 1 == 0) flag_rst else (flag_fin | flag_ack);
+        const p = Peer{ .ip = .{ 198, 51, 100, @intCast(k & 0xFF) }, .port = 30000 + k };
+        _ = handle(&f.table, &f.wire, p.frame(&buf, flags, p.seq, ""), @as(i96, k) * ms);
+    }
+    // No slot was taken: the real one, and nothing else, is in use.
+    for (f.table.conns, 0..) |c, s| {
+        if (s == i) {
+            try testing.expectEqual(State.established, c.state);
+        } else try testing.expectEqual(State.closed, c.state);
+    }
+
+    // The real client is still served: its request arrives and is pending.
+    const r = real.write(&f.table, &f.wire, "GET / HTTP/1.1\r\n\r\n", 500 * ms);
+    try testing.expectEqual(Event.data, r.event);
+    try testing.expectEqualStrings("GET / HTTP/1.1\r\n\r\n", f.table.conns[i].pending());
+}

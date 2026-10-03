@@ -366,6 +366,22 @@ This is the only strategy that tests against a peer we did not write, so it
 is the only one that catches a bug the model peer (§3) shares with the
 table.
 
+**Done so far (QUEUE.md item 82):** `native/judge_native.py` has a `burst`
+check (200 slow connections at once, well past the 64 slots: refused and
+retried by Linux, all answered, table clean) and a `stalled reader` check
+(a client that stops reading holds only its own slot, others answered
+promptly). The burst found a real bug: a full table gave way to any
+half-open connection, evicting real clients mid-handshake so their ACK drew
+a stray reset. The fix (give way only to a half-open older than a round
+trip) is in `tcp.zig`, with host tests in `tcp_test.zig`:
+- a SYN flood keeps no real client out (the oldest *stuck* half-open gives
+  way; a fresh one does not);
+- a storm of resets and FINs for connections we never had takes no slot and
+  a real client is served through it.
+Still open from the list above: Scapy for the cases a polite Linux client
+never makes (an RST at every offset, overlapping retransmissions), and
+`tcpdump` + `tshark` on both sides.
+
 ## 9. Host-loop latency as a measured invariant
 
 Bugs A and B were not in `tcp.zig` at all. They were in the loop that drives
