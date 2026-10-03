@@ -107,6 +107,12 @@ as you go. Nothing tonight is a speed item.
   (metal down, the watchdog notices, metal back), CC's overnight findings,
   then the cutover.
 - After the cutover: delete the box's copies of prod's data.
+- After the cutover (Steve, 2026-10-03): v14 from prod moves a 4 MB picture
+  at 30-39 MB/s with /version stalled at most 62-69 ms meanwhile (v13:
+  15-22 MB/s, 108-128 ms; prod's Linux 280-470 MB/s, 3 ms). Two levers,
+  both after the cutover: the page cache keeping larger files (repeat
+  views), and a big file sent in pieces with turns between (the stall, even
+  uncached; an angry-gopher change).
 
 ## Questions
 
