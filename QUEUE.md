@@ -1169,6 +1169,24 @@ item you are on.*
       is on localhost, metal is one hop away), so the comparison with
       Linux is fair. This also answers part of item 86.
 
+*Item 88 queued 2026-10-03 (Steve). Take it with item 85, which it
+sharpens.*
+
+88. **FAT16 stays, but its testing gets out of the way.** Steve: "Let's
+    keep FAT16 around. The boot disk's site partition is enough to justify
+    it. We should try to streamline its testing to some degree (make it
+    easy to skip)." Prod's data is FAT32 now (metal's volume since the test
+    migration, `5C8C-BFBD`, 16 GiB). So:
+    - **the chat judge's default becomes FAT32** (`FAT=32` is today's
+      extra run); its FAT16 run becomes the extra one;
+    - **FAT16 keeps:** its unit tests in `zig build test`, the boot disk's
+      site partition (every droplet boot reads it), and
+      `check_fat16_images.sh`'s FAT16 images;
+    - **the FAT16 judge run is skipped unless** `src/fat16*`, `src/io*`,
+      the judge or `chat.py` changed, or `GATES_FAT16=1` asks for it, and
+      the skip is printed with its reason, never silent;
+    - say in the commit what moved and what the gates now cost.
+
 ## Box Claude
 
 - v6: gates, images, deploy with Steve, and the survival test (the marker
@@ -2009,6 +2027,18 @@ What each needs from the box:
   not 30. 75 and the overnight polish are gating now; the box then runs
   `rehearse.sh` as itself and the `--mount` rehearsal, as you asked. The
   CLOUD.md line about your disk is in.
+
+- **The test migration, 2026-10-03:** CUTOVER.md steps 2-11 on the real
+  droplet and a new 16 GiB volume, prod unfrozen. Steps 2-6 on the box:
+  GO (540 of 540 pages identical). Steps 8-10 by Steve at the console:
+  GO. Step 11 from prod (a fresh copy on loopback against metal over the
+  private network): 538 of 540 identical read-only. The two differences
+  were the admin and game rosters' "last seen" times, which moved on
+  unfrozen prod. With writes, one more: a message Steve wrote on metal
+  mid-run, which it caught. **For `compare_hosts.py`:** report times
+  that only reflect activity ("last seen") apart from content, so an
+  unfrozen comparison is not noisy; the real cutover is frozen anyway.
+  `droplet/volume-serial` is the new volume's.
 
 ## Proposed
 
