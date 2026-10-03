@@ -56,8 +56,66 @@ pub var ring: log_ring.Ring linksection(".data") = .{ .buf = &ring_bytes };
 
 pub fn put(bytes: []const u8) void {
     ring.write(bytes);
+    if (deferred and pend_len + bytes.len <= pend.len) {
+        for (bytes) |b| {
+            pend[(pend_at + pend_len) % pend.len] = b;
+            pend_len += 1;
+        }
+        return;
+    }
+    // Not deferring, or the backlog is full: what waits goes first, so the
+    // order on the screen and the port is the order written.
+    flushPending();
     screen.put(bytes);
     putPort(bytes);
+}
+
+/// **THE CONSOLE, OUT OF THE WAY OF THE REQUESTS.** Every byte written to the
+/// screen or the port is a trip out to the hypervisor, and a request's log
+/// (about 300 bytes) cost about 7 ms on the port and as much again on the
+/// screen, during which the machine served no one: the next request waited,
+/// and the connection that had been answered was not even closed. While
+/// `deferred`, `put` writes the ring at once (the status page sees it) and
+/// keeps the screen's and the port's copy here; the host drains it with
+/// `drain` when it has nothing else to do.
+///
+/// **NOTHING IS LOST, AND A FAILURE IS NEVER LATE.** A backlog that fills is
+/// written out first, then the rest directly, as before; `fail`, a panic and
+/// the exit door write the whole backlog before their own message.
+pub var deferred: bool = false;
+var pend: [256 * 1024]u8 = undefined;
+var pend_at: usize = 0;
+var pend_len: usize = 0;
+
+/// Bytes waiting for the screen and the port.
+pub fn pending() usize {
+    return pend_len;
+}
+
+/// Writes at most `budget` waiting bytes to the screen and the port.
+pub fn drain(budget: usize) void {
+    var left = @min(budget, pend_len);
+    while (left > 0) {
+        const run = @min(left, pend.len - pend_at);
+        const chunk = pend[pend_at .. pend_at + run];
+        screen.put(chunk);
+        putPort(chunk);
+        pend_at = (pend_at + run) % pend.len;
+        pend_len -= run;
+        left -= run;
+    }
+}
+
+/// Writes every waiting byte.
+pub fn flushPending() void {
+    drain(pend_len);
+}
+
+/// Stops deferring, and writes what waits: before anything that must be seen
+/// now (a failure, a panic, the end).
+pub fn immediate() void {
+    deferred = false;
+    flushPending();
 }
 
 /// The serial port alone, without the screen. For a handler that may have
@@ -109,6 +167,7 @@ pub fn putMac(a: [6]u8) void {
 /// QEMU's isa-debug-exit: the guest ends with `code << 1 | 1`, so 0 arrives as
 /// 1 and 1 arrives as 3. The run script maps them back.
 pub fn exitQemu(code: u8) noreturn {
+    immediate();
     outb(0xF4, code);
     while (true) asm volatile ("hlt");
 }
@@ -120,6 +179,7 @@ pub fn exitQemu(code: u8) noreturn {
 pub var on_fatal: ?*const fn (restart.Reason, []const u8) noreturn linksection(".data") = null;
 
 pub fn fail(why: []const u8) noreturn {
+    immediate();
     put("FAIL: ");
     put(why);
     put("\n");

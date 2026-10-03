@@ -164,6 +164,26 @@ const Held = struct {
     stuck_una: u32 = 0,
 };
 var held: [max_connections]?Held = @splat(null);
+
+/// **RESPONSES STILL ON THEIR WAY**, after their handler finished: what the
+/// send queue had no room for (`stream.Spill`), indexed by connection, as
+/// `held` is. Every turn of the network queues more of each as its peer's
+/// window opens; one that is empty is closed, one that has not moved for the
+/// idle time is reset. Meanwhile the connection stays claimed, and the
+/// machine serves the next request.
+const Draining = struct {
+    spill: stream.Spill,
+    since: i96,
+    una: u32,
+};
+var draining: [max_connections]?Draining = @splat(null);
+var draining_now: usize = 0;
+/// The most bytes one connection may keep (a whole upload of a few MB fits;
+/// a larger response waits for room, as before spills).
+const spill_cap = 32 * 1024 * 1024;
+/// How much of the console's backlog one idle turn writes (serial.drain): at
+/// a few tens of microseconds a byte, a millisecond or two.
+const console_budget = 64;
 var held_now: usize = 0;
 var held_most: usize = 0;
 var streams_ended: u64 = 0;
@@ -461,6 +481,8 @@ pub fn kmain() noreturn {
     // - **The goodbyes, when the boot ends.** Connections still closing are
     //   given two seconds of turns, then the machine stops.
     var deepest: usize = 0;
+    // From here the console waits for idle turns (serial.deferred).
+    serial.deferred = true;
     while (limit == null or served < limit.?) {
         open_now = table.inUse();
         busiest = @max(busiest, open_now);
@@ -473,6 +495,12 @@ pub fn kmain() noreturn {
             served += 1;
             letGo(&wire, &table, pick, served);
         } else {
+            // Nothing to serve: the console's turn, a little at a time so a
+            // request that arrives meanwhile waits at most this much.
+            if (serial.pending() > 0) {
+                serial.drain(console_budget);
+                continue;
+            }
             if (arrived == null) interrupts.rest();
             continue;
         }
@@ -486,8 +514,25 @@ pub fn kmain() noreturn {
         deepest = reportStack(deepest);
     }
 
-    // The boot is over: every stream still held ends with it, and the
-    // goodbyes are given a moment to be acknowledged.
+    // The boot is over: the console is written out in full from here.
+    serial.immediate();
+    // Responses still on their way are given the idle time
+    // to finish (their turns run inside `pump`), then the rest are reset.
+    const draining_from = Io.awakeNs() orelse 0;
+    while (draining_now > 0 and (Io.awakeNs() orelse 0) - draining_from < conf.idle_ns) {
+        if (stream.pump(&wire, &table, lease.address) == null) interrupts.rest();
+    }
+    for (&draining, 0..) |*slot, i| {
+        if (slot.*) |*d| {
+            table.abandon(&wire, i);
+            d.spill.deinit();
+            table.release(i);
+            slot.* = null;
+            draining_now -= 1;
+        }
+    }
+    // Every stream still held ends with it, and the goodbyes are given a
+    // moment to be acknowledged.
     stream.after_arrivals = null;
     for (&held) |*slot| {
         if (slot.* != null) endStream(slot, &wire, &table, &hub, .stopping);
@@ -599,6 +644,10 @@ fn serveOne(
     defer if (!kept_open) table.release(i);
     var s = stream.Stream.init(wire, table, i, address, &read_buf, &write_buf);
     s.idle_ns = idle_ns;
+    var spill = stream.Spill{ .gpa = hub.gpa, .cap = spill_cap };
+    var spill_kept = false;
+    defer if (!spill_kept) spill.deinit();
+    s.spill = &spill;
 
     // **WHAT THIS MACHINE'S OWN CLOCK SAYS EACH REQUEST COST.** How long the
     // connection had been open before its turn came — the client finishing
@@ -654,6 +703,13 @@ fn serveOne(
             if (oldestHeld(table)) |slot| endStream(slot, wire, table, hub, .displaced);
         }
         held[i] = .{ .conn = i, .kept = kept, .last_write = Io.awakeNs() orelse 0 };
+        // What the head and backlog left in the spill goes ahead of every live
+        // frame, as the carry the stream already drains first.
+        if (spill.pending().len > 0) {
+            if (hub.gpa.dupe(u8, spill.pending())) |rest| {
+                held[i].?.carry = rest;
+            } else |_| {}
+        }
         held_now += 1;
         held_most = @max(held_most, held_now);
         kept_open = true;
@@ -663,6 +719,18 @@ fn serveOne(
     // in this flush — and is the same event either way.
     if (s.timed_out) outcome = "the client stopped taking the response";
     const done_at = Io.awakeNs() orelse 0;
+    // **THE CONNECTION IS LET GO BEFORE ITS LOG IS WRITTEN**, so the client is
+    // done when the response is, not when the console has caught up.
+    if (!kept_open) {
+        if (s.timed_out) {
+            table.abandon(wire, i);
+        } else if (spill.pending().len > 0 and table.conns[i].state == .established) {
+            draining[i] = .{ .spill = spill, .since = Io.awakeNs() orelse 0, .una = table.conns[i].una };
+            draining_now += 1;
+            spill_kept = true;
+            kept_open = true;
+        } else close(wire, table, i);
+    }
     logRequest(number, what, outcome);
     serial.put("    waited ");
     serial.putDec(@intCast(@divTrunc(head_at - opened_at, 1000)));
@@ -674,12 +742,38 @@ fn serveOne(
     serial.put(" disk requests taking ");
     serial.putDec(@intCast(@divTrunc(Io.ticksToNs(disk_after.ticks -% disk_before.ticks), 1000)));
     serial.put(" us\n");
-    if (kept_open) return;
-    // A client that stopped taking the response has had its idle time
-    // already: it is reset rather than waited on again for a goodbye.
-    if (s.timed_out) {
-        table.abandon(wire, i);
-    } else close(wire, table, i);
+}
+
+/// One pass over the responses still on their way: queue more of each, close
+/// the ones that are done, reset the ones whose peer stopped taking them.
+fn serviceDraining(wire: *stream.Wire, table: *tcp.Table, now: i96, idle_ns: u64) void {
+    if (draining_now == 0) return;
+    for (&draining, 0..) |*slot, i| {
+        const d = if (slot.*) |*d| d else continue;
+        const c = &table.conns[i];
+        var done = false;
+        if (c.state != .established) {
+            done = true;
+        } else {
+            if (d.spill.push(table, i) > 0 or c.una != d.una) {
+                d.since = now;
+                d.una = c.una;
+            }
+            if (d.spill.pending().len == 0) {
+                close(wire, table, i);
+                done = true;
+            } else if (now - d.since >= idle_ns) {
+                table.abandon(wire, i);
+                done = true;
+            }
+        }
+        if (done) {
+            d.spill.deinit();
+            table.release(i);
+            slot.* = null;
+            draining_now -= 1;
+        }
+    }
 }
 
 /// What a turn of the held streams needs, set once the network is up.
@@ -699,8 +793,10 @@ fn streamTurn() void {
     if (in_turn) return;
     in_turn = true;
     defer in_turn = false;
-    serviceStreams(t.wire, t.table, t.hub, stream_scratch.allocator(), Io.awakeNs() orelse 0, t.conf);
+    const now = Io.awakeNs() orelse 0;
+    serviceStreams(t.wire, t.table, t.hub, stream_scratch.allocator(), now, t.conf);
     stream_scratch.reset();
+    serviceDraining(t.wire, t.table, now, t.conf.idle_ns);
 }
 
 /// One pass over the held streams: end the ones whose client has gone, queue
@@ -1351,6 +1447,7 @@ fn waitSeconds(s: u32) void {
 
 pub const panic = std.debug.FullPanic(panicImpl);
 fn panicImpl(msg: []const u8, _: ?usize) noreturn {
+    serial.immediate();
     serial.put("PANIC: ");
     serial.put(msg);
     serial.put("\n");

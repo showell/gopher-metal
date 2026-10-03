@@ -156,6 +156,49 @@ pub fn pump(wire: *Wire, table: *tcp.Table, ip: [4]u8) ?tcp.Result {
     return last;
 }
 
+/// **THE REST OF A RESPONSE THE SEND QUEUE HAD NO ROOM FOR**, kept in memory
+/// so the handler can finish without waiting for the peer to take it.
+///
+/// The machine runs one handler at a time. A handler that waited for a slow
+/// peer to take a 4 MB picture held every other request for as long as that
+/// took (on a droplet, about 0.15 s a picture, and a page of pictures queued
+/// each behind the last). With a spill, the handler queues what fits in the
+/// connection's send queue, keeps the rest here, and returns; the host drains
+/// it on every turn of the network as the peer's window opens.
+///
+/// **BOUNDED, AND THEN THE OLD WAY.** A connection keeps at most `cap` bytes,
+/// and every spill together at most `spill_limit`; past either, the write
+/// waits for room exactly as it did before spills existed.
+pub const Spill = struct {
+    gpa: std.mem.Allocator,
+    cap: usize,
+    buf: std.ArrayList(u8) = .empty,
+    /// How much of `buf` has gone to the send queue.
+    at: usize = 0,
+
+    pub fn pending(self: *const Spill) []const u8 {
+        return self.buf.items[self.at..];
+    }
+
+    /// Hands what fits to connection `i`'s send queue; how much it took.
+    pub fn push(self: *Spill, table: *tcp.Table, i: usize) usize {
+        const n = table.queue(i, self.pending());
+        self.at += n;
+        return n;
+    }
+
+    pub fn deinit(self: *Spill) void {
+        spilled_bytes -= self.buf.items.len;
+        self.buf.deinit(self.gpa);
+        self.* = .{ .gpa = self.gpa, .cap = self.cap };
+    }
+};
+
+/// Every spill's bytes together, against `spill_limit`.
+pub var spilled_bytes: usize = 0;
+/// The most every spill together may hold.
+pub var spill_limit: usize = 128 * 1024 * 1024;
+
 /// One connection of the table, as a reader and a writer.
 pub const Stream = struct {
     wire: *Wire,
@@ -172,6 +215,10 @@ pub const Stream = struct {
     /// host logs "the client stopped sending" rather than an error name that
     /// could equally mean the NIC fell over.
     timed_out: bool = false,
+
+    /// Where a write keeps what the send queue has no room for, when the host
+    /// gives it one (`Spill`). Null: a write waits for room.
+    spill: ?*Spill = null,
 
     reader_iface: Reader,
     writer_iface: Writer,
@@ -257,6 +304,24 @@ pub const Stream = struct {
     fn sendAll(self: *Stream, bytes: []const u8) error{WriteFailed}!void {
         self.timed_out = false;
         var at: usize = 0;
+        if (self.spill) |sp| {
+            // Bytes go straight to the send queue only while nothing waits
+            // ahead of them in the spill: order is the peer's to rely on.
+            if (sp.pending().len == 0) {
+                if (self.conn().state != .established) return error.WriteFailed;
+                at = self.table.queue(self.index, bytes);
+            }
+            const rest = bytes[at..];
+            if (rest.len == 0) return;
+            if (sp.buf.items.len + rest.len <= sp.cap and spilled_bytes + rest.len <= spill_limit) {
+                if (sp.buf.appendSlice(sp.gpa, rest)) |_| {
+                    spilled_bytes += rest.len;
+                    return;
+                } else |_| {}
+            }
+            // Too much to keep: what is kept goes first, waiting as before.
+            try self.drainSpill(sp);
+        }
         var since = self.clock();
         var una = self.conn().una;
         while (at < bytes.len) {
@@ -269,6 +334,28 @@ pub const Stream = struct {
                 una = c.una;
             }
             if (at == bytes.len) break;
+            if (self.clock() - since >= self.idle_ns) {
+                self.timed_out = true;
+                return error.WriteFailed;
+            }
+            self.pumpOrRest();
+        }
+    }
+
+    /// Waits until everything in the spill is in the send queue, for as long
+    /// as the peer keeps taking something: the old way, for a spill that is
+    /// full.
+    fn drainSpill(self: *Stream, sp: *Spill) error{WriteFailed}!void {
+        var since = self.clock();
+        var una = self.conn().una;
+        while (sp.pending().len > 0) {
+            const c = self.conn();
+            if (c.state != .established) return error.WriteFailed;
+            if (sp.push(self.table, self.index) > 0 or c.una != una) {
+                since = self.clock();
+                una = c.una;
+            }
+            if (sp.pending().len == 0) break;
             if (self.clock() - since >= self.idle_ns) {
                 self.timed_out = true;
                 return error.WriteFailed;
