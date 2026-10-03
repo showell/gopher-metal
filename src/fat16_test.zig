@@ -1185,6 +1185,66 @@ test "FAT32: a volume this machine cannot write safely is refused at mount, each
     try testing.expectEqual(@as(?u32, 0x3232_3232), v.serial);
 }
 
+test "FAT16: a boot sector this machine cannot trust is refused at mount, each with its own error" {
+    const bytes = try testing.allocator.alloc(u8, test_disk.small.sectors * test_disk.sector);
+    defer testing.allocator.free(bytes);
+    var blk = virtio.Block.inMemory(bytes);
+    var scratch: [test_disk.sector]u8 align(16) = undefined;
+    // Where the data begins on the volume test_disk.small makes, from its
+    // own fields, so a total just past it, or short of it, can be written.
+    test_disk.format(bytes, test_disk.small);
+    const reserved = std.mem.readInt(u16, bytes[14..16], .little);
+    const per_fat = std.mem.readInt(u16, bytes[22..24], .little);
+    const root_sectors = std.mem.readInt(u16, bytes[17..19], .little) * 32 / test_disk.sector;
+    const data_start: u32 = reserved + @as(u32, bytes[16]) * per_fat + root_sectors;
+
+    const Case = struct { what: []const u8, offset: usize, value: u32, size: u8, want: fat16.Error };
+    const cases = [_]Case{
+        .{ .what = "no 55 AA", .offset = 510, .value = 0, .size = 1, .want = fat16.Error.BadBootSector },
+        .{ .what = "1,024-byte sectors", .offset = 11, .value = 1024, .size = 2, .want = fat16.Error.NotFat16 },
+        .{ .what = "no sectors a cluster", .offset = 13, .value = 0, .size = 1, .want = fat16.Error.BadBootSector },
+        .{ .what = "255 sectors a cluster", .offset = 13, .value = 255, .size = 1, .want = fat16.Error.BadBootSector },
+        .{ .what = "no reserved sectors", .offset = 14, .value = 0, .size = 2, .want = fat16.Error.BadBootSector },
+        .{ .what = "no FATs", .offset = 16, .value = 0, .size = 1, .want = fat16.Error.BadBootSector },
+        .{ .what = "three FATs", .offset = 16, .value = 3, .size = 1, .want = fat16.Error.BadBootSector },
+        .{ .what = "a FAT of no sectors", .offset = 22, .value = 0, .size = 2, .want = fat16.Error.BadBootSector },
+        .{ .what = "no sectors at all", .offset = 19, .value = 0, .size = 2, .want = fat16.Error.BadBootSector },
+        .{ .what = "a volume that ends before its data", .offset = 19, .value = data_start, .size = 2, .want = fat16.Error.BadBootSector },
+        .{ .what = "too few clusters for FAT16 (FAT12)", .offset = 19, .value = data_start + 100, .size = 2, .want = fat16.Error.NotFat16 },
+        .{ .what = "a FAT16 with no root entries", .offset = 17, .value = 0, .size = 2, .want = fat16.Error.BadBootSector },
+    };
+    for (cases) |c| {
+        test_disk.format(bytes, test_disk.small);
+        switch (c.size) {
+            1 => bytes[c.offset] = @intCast(c.value),
+            2 => std.mem.writeInt(u16, bytes[c.offset..][0..2], @intCast(c.value), .little),
+            else => unreachable,
+        }
+        // The 32-bit total is 0 on this shape, so the 16-bit one is the size.
+        testing.expectError(c.want, fat16.Volume.mount(&blk, &scratch, 0)) catch |e| {
+            std.debug.print("refusing {s}\n", .{c.what});
+            return e;
+        };
+    }
+    // And the same volume, untouched, mounts.
+    test_disk.format(bytes, test_disk.small);
+    const v = try fat16.Volume.mount(&blk, &scratch, 0);
+    try testing.expectEqual(fat16.Kind.fat16, v.kind);
+}
+
+test "a FAT is held only in a buffer that holds all of it, and a file past 4 GiB is refused before anything is written" {
+    const d = try Disk.make("refused-sizes", small, false);
+    defer d.deinit();
+    const short = try testing.allocator.alloc(u8, d.vol.fatBytes() - 1);
+    defer testing.allocator.free(short);
+    try testing.expectError(fat16.Error.TooBig, d.vol.cacheFat(short));
+    // A file of 4 GiB: FAT's size field is 32 bits. The size is checked
+    // before a byte of it is read, so the slice need not be backed.
+    const huge = @as([*]const u8, @ptrFromInt(0x1000))[0 .. 1 << 32];
+    try testing.expectError(fat16.Error.TooBig, d.vol.writeFile("data/huge", huge));
+    try testing.expectEqual(d.free(), d.vol.free_clusters);
+}
+
 // ---- the free-cluster cursor (FAT32.md §8) -----------------------------------
 
 /// Every cluster below the cursor is in use, read from the FAT on the disk:
