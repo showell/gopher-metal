@@ -2319,6 +2319,17 @@ What each needs from the box:
   cache (bounded), and reading a big file in pieces with turns between;
   then the directory cache. Measure with `page_cache_mib = 0` as well.
 
+- **Check-in 21, gated and merged** (2026-10-03, batch 24; gopher-metal
+  `98051fa` then `c81395b`, angry-gopher `49f47903`): items 89 and 81 on
+  `master`. ops/check, both judges under KVM, restart, back-off, the FAT
+  images and the FAT32 gopher run: green, after one fix of the judge's own
+  (`c81395b`): `admin-reset` booted one disk twice in one scratch, and on
+  the droplet machine the second boot hit `FileExistsError` on
+  `scratch/site`. Each boot now has its own scratch, as the stories'
+  recheck does. **82 does not collide** with item 90 step 2: stay in
+  `tcp.zig` and `tcp_sim`; `stream.zig`, `io.zig`'s page cache and the
+  serving loop are the box's.
+
 ## Proposed
 
 *(CC adds items here, one line on why each.)*
