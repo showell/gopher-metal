@@ -69,7 +69,9 @@
 //! - **Our FIN, queued** (`fin == .queued`). Sent by the first `transmit`
 //!   after the last queued byte. Bounded by: the bytes ahead of it (above).
 //! - **Our SYN-ACK, unanswered** (`syn_received`). Sent again at `rto_at`.
-//!   Bounded by: `max_retries`, the same as bytes on the wire.
+//!   Bounded by: `max_retries`, the same as bytes on the wire; and, when the
+//!   table is full, by the next SYN, to which the oldest half-open older than
+//!   a round trip gives way.
 //! - **The peer's FIN, after ours was acknowledged.** Waited for until
 //!   `fin_wait_until`. Bounded by: `fin_wait_ns` (30 s), then a reset.
 //! - **A reopened window the peer may not have seen** (`window_news`).
@@ -85,8 +87,9 @@
 //! **NOT QUEUED AT ALL**, so nothing can be left waiting: an acknowledgement
 //! (every in-order segment is acknowledged as it is taken; there is no
 //! delayed ACK), a segment out of order (dropped and re-acknowledged; the
-//! peer's timer sends it again), and a SYN that finds no free slot (dropped
-//! and counted; the peer's SYN timer tries again).
+//! peer's timer sends it again), and a SYN that finds no free slot and no
+//! stuck half-open connection to take the place of (dropped and counted; the
+//! peer's SYN timer tries again).
 
 const proto = @import("proto.zig");
 
@@ -392,6 +395,9 @@ pub const Table = struct {
     /// SYNs dropped because every slot was taken — what Linux does when its
     /// accept queue is full. The peer retries; the count says it happened.
     refused: u64 = 0,
+    /// Half-open connections given way to a new SYN when the table was full
+    /// (a SYN flood's, as a rule): see `handle`.
+    half_open_given_way: u64 = 0,
     /// Segments sent again, whether a timer or the peer's duplicate
     /// acknowledgements asked for it.
     retransmits: u64 = 0,
@@ -440,6 +446,35 @@ pub const Table = struct {
             if (c.state == .closed and !c.claimed) return i;
         }
         return null;
+    }
+
+    /// **A FULL TABLE GIVES WAY TO A NEW SYN AT ITS OLDEST STUCK HALF-OPEN
+    /// CONNECTION** (QUEUE.md item 82). A connection waiting on the answer to
+    /// its SYN-ACK holds its slot until `max_retries` timeouts, 16 to 35
+    /// seconds; spoofed SYNs, which never answer, filled every slot that way
+    /// and kept every real client out for as long as they came.
+    ///
+    /// **ONLY A STUCK ONE: older than a round trip.** A real client completes
+    /// its handshake in one round trip, far under `min_rto_ns`; a flood's
+    /// half-open sits there. Giving way to any half-open at all evicted real
+    /// clients mid-handshake under a burst, and their ACK then drew a stray
+    /// reset (found against Linux's own TCP, native/judge_native.py's burst).
+    /// So a connection younger than `min_rto_ns` is left alone, and when every
+    /// slot is that fresh the SYN is refused as before — a real burst is let
+    /// retry, a flood is thinned. The one given way is dropped without a word
+    /// (a reset to a spoofed address is a reset to someone else). An
+    /// established connection never gives way.
+    fn oldestHalfOpen(self: *Table, now: i96) ?usize {
+        var oldest: ?usize = null;
+        for (self.conns, 0..) |c, i| {
+            if (c.state != .syn_received or c.claimed) continue;
+            if (now - c.opened_at < min_rto_ns) continue;
+            if (oldest == null or c.opened_at < self.conns[oldest.?].opened_at) oldest = i;
+        }
+        const i = oldest orelse return null;
+        self.conns[i].state = .closed;
+        self.half_open_given_way += 1;
+        return i;
     }
 
     /// Builds and sends one segment on connection `i`, numbered `seq`. A SYN
@@ -826,7 +861,7 @@ pub const Table = struct {
                 self.refuse(wire, .{ .mac = pkt.src_mac, .ip = pkt.src_ip, .port = src_port }, seq, number, flags, data.len);
                 return .{ .event = .nothing };
             }
-            const slot = self.free() orelse {
+            const slot = self.free() orelse self.oldestHalfOpen(now) orelse {
                 self.refused += 1;
                 return .{ .event = .nothing };
             };

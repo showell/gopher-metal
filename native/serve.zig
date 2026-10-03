@@ -141,12 +141,13 @@ fn begin(i: usize, request: []const u8, table: *tcp.Table) void {
             \\fast_retransmits {d}
             \\samples {d}
             \\measured_us {d}
+            \\half_open_given_way {d}
             \\
         , .{
-            served,            closes,       in_use,         table.refused,
-            table.retransmits, table.probes, table.given_up, table.fin_waits_expired,
-            table.strays,      table.damaged, table.fast_retransmits,
-            table.samples,     table.measured_ns / 1000,
+            served,                   closes,                    in_use,                 table.refused,
+            table.retransmits,        table.probes,              table.given_up,         table.fin_waits_expired,
+            table.strays,             table.damaged,             table.fast_retransmits, table.samples,
+            table.measured_ns / 1000, table.half_open_given_way,
         }) catch "overflow";
         a.body_len = body.len;
     } else if (std.mem.eql(u8, path, "/quit")) {
