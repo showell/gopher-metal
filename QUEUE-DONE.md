@@ -2178,3 +2178,53 @@ What each needs from the box:
     (`page_cache_mib = 0`); Steve asks that speed work be measured with it
     off as well as on.
 
+
+## Item 90 as first queued (2026-10-03)
+
+*Still open, and the box's; QUEUE.md has where it stands.*
+
+*Item 90 queued 2026-10-03, found by fire drills 1 and 4. **FIRST, before
+anything else, including 87 if you are mid-way: Steve, 2026-10-03: "Our
+BIGGEST BLOCKER for cutting over to metal is that images take a lot longer
+to download."** Park 87 on your branch if it is not done; 90 is next.*
+
+**UPDATE, same morning: the box Claude takes item 90 itself** (Steve: it
+needs him to judge whether pictures "feel" slow, and the real droplet).
+**CC: do not start 90.** Carry on with 87 (the page cache), then the
+rest in order. The box will say here what it finds, since 87's numbers
+and 90's touch the same path.
+
+**A lead to measure first, not a finding:** metal sends from a 64 KiB
+buffer. If it fills that and then waits for an ACK, and Linux, as the
+receiver, delays its ACK (about 40 ms in some cases: delayed ACK, and
+Nagle on the sending side if it matters), the rate is 64 KiB per 40 ms,
+about 1.6 MB/s: close to the 2 MB/s measured. If so, the fix is in how
+metal handles ACKs and its window (send more before waiting, a larger
+window, not waiting on a delayed ACK), not a redesign. Measure the gaps
+between metal's segments and Linux's ACKs on a 10 MB transfer (a packet
+capture on the tap, or `tcp_sim`'s clock) before changing anything.
+
+90. **One slow response stalls everyone.** Measured on the real droplet
+    (v12, prod's data), from prod over the private network:
+    - the admin backup streamed at about 2 MB/s, and metal answered
+      nothing else for its two minutes (known: REVIEW-admin-backup.md
+      finding 3);
+    - with Steve logging in and opening chat (pictures in the
+      transcripts), three `GET /version` in a row from prod took **5 s
+      (timed out), 1.46 s, 0.8 ms**. The watchdog's first look at metal
+      timed out the same way.
+
+    So one person loading a few pictures can stall the site for seconds.
+    After the cutover that is everyone's site.
+    - **Find where the time goes** in sending one large response: the
+      send window, the segment size, waiting for each ACK, the 64 KiB send
+      buffer, the loop turning only between whole responses. Measure on
+      the droplet machine under QEMU with a 10 MB file, and say what
+      Linux's TCP does differently for the same transfer.
+    - **Then make a large response stop holding the machine:** interleave
+      sending with serving other connections (the loop already turns
+      while `sendAll` waits for room, so this may be close), and raise
+      the single-connection rate toward what the private network allows.
+    - **Test:** while a 10 MB response streams to a slow reader, other
+      requests are answered within a bound you set and test (say 50 ms),
+      on both hosts in the judge. Linux will pass it today; metal must.

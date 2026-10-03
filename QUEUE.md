@@ -3,15 +3,13 @@
 Shared by the cloud Claude (CC) and the box Claude; see `CLOUD.md`. Items are
 in order. The box Claude reorders on `master`, and CC proposes at the bottom.
 
-## Context, 2026-10-02
+## Context, 2026-10-03
 
-- **metal.lynrummy.com runs v5:**
-  - chat's data on a 2 GiB DigitalOcean volume, the site on the boot disk;
-  - test data only.
-- **v6 is being built:**
-  - CC's virtio MSI-X fix;
-  - the two-disk review's fixes;
-  - the volume named by serial.
+- **metal.lynrummy.com runs v13** (gopher-metal `a3fb34e`): chat's data on
+  a DigitalOcean volume (FAT32), a copy of prod's, the site on the boot
+  disk.
+- **lynrummy.com (Linux) runs angry-gopher `49f47903`** (items 89 and 81).
+- **The cutover's blocker is item 90** (pictures), the box's.
 - **Steve's direction:**
   - **The cutover will be all at once, fully committed.** No apps-first
     split.
@@ -24,13 +22,14 @@ in order. The box Claude reorders on `master`, and CC proposes at the bottom.
 
 ## CC
 
-*Items 1–75, 79–83, 87 and 89 are done — in `QUEUE-DONE.md`.*
+*Items 1–75, 79–84, 87 and 89 are done — in `QUEUE-DONE.md`.*
 
-*Items 76-78 queued 2026-10-03 (box Claude, keeping the queue full). The
-cutover is rehearsed (MIGRATION.md, FAT16 and FAT32); what is left is
-mostly Steve's (v9 on metal, the restart test at the console, the session
-decision) and the day itself. These three are what the box would want
-before that day.*
+**The order now: 85 with 88, then 76, 77, 78, then 86.** Steve's
+priorities, in order: (1) hardening, correctness and reliability of the
+bare-metal layer; (2) clarity and simplicity of the docs, kept right as you
+go, with a final pass after the fire drills; (3) efficiency and clarity of
+the test gates; (4) admin fire drills (the box and Steve); (5) speed of the
+bare-metal layer, last.
 
 76. **A dress rehearsal of CUTOVER.md itself, as a script.** Not the data
     steps alone (rehearse.sh does those) but the whole runbook against
@@ -43,7 +42,7 @@ before that day.*
     go/no-go lines becomes a check that prints GO or NO-GO. Where the
     runbook and the script disagree, fix the runbook. The box runs it
     under KVM.
-77. **`ops/check` in angry-gopher takes about 155 s.** Time each of its
+77. **`ops/check` in angry-gopher takes about 120-155 s.** Time each of its
     steps, say which dominate, and cut what waits rather than works, as
     item 74 did for the probes (55 s from 177 s). No check may be dropped
     or skipped to get there.
@@ -55,27 +54,12 @@ before that day.*
     and what is still reached around the seam (uploads? sessions? the
     site's own files?). Then the smallest next subtraction, and how the
     judge would show it changed nothing. Steve decides from it.
-
-*Items 79-86 queued 2026-10-03 morning. **Steve's priorities, in order:**
-(1) hardening, correctness and reliability of the bare-metal layer;
-(2) clarity and simplicity of the docs, kept right as you go, with a final
-pass after the fire drills; (3) efficiency and clarity of the test gates;
-(4) admin fire drills (the box and Steve); (5) speed of the bare-metal
-layer, last. 76-78 stand; take 79-83 before them.*
-
-84. **[CC: done; this file slimmed to the open items (the rest in `QUEUE-DONE.md`), reviews/designs under `docs/`, README's first screen]** **QUEUE.md and the REVIEW files, made light.** QUEUE.md is over a
-    thousand lines; most of it is done. Move done items and old check-ins
-    to `QUEUE-DONE.md` (verbatim, nothing lost), leaving open items, the
-    current order, the last two check-ins and live answers. Gather the
-    REVIEW-*.md and DESIGN-*.md files under `docs/reviews/` and
-    `docs/designs/` with a one-line index each, and fix every link to
-    them. The README's first screen should tell a newcomer what this is,
-    where it stands, and which three files to read.
 85. **The gates, clearer and cheaper.** (a) `gates.sh quick`: the
     two-minute tier (zig tests, kernels, probes, one judge story) for
     every commit, and the full run for a batch. (b) Skip what cannot be
-    affected, said out loud, never silently: the FAT32 judge only when
-    `src/fat16*`, `src/io*` or the judge changed, with the reason printed.
+    affected, said out loud, never silently. **Item 88 decides which FAT
+    run that is:** FAT32 is the default judge run, and the FAT16 run is
+    the one skipped unless its files changed.
     (c) `GATES_PARALLEL=1` becomes the default once the box has seen it
     green twice (batch 16 was the first).
 86. **Where metal's request time goes** (speed, last). The README's race
@@ -83,6 +67,8 @@ layer, last. 76-78 stand; take 79-83 before them.*
     near level on the rest. Instrument one request's phases with the TSC
     (accept, parse, route, read, write, close) and report where the time
     goes under KVM. Report only: what to change is the next item.
+    **Not before item 90 step 2 lands:** it instruments the serving loop
+    the box is changing.
 
 *Item 88 queued 2026-10-03 (Steve). Take it with item 85, which it
 sharpens.*
@@ -102,64 +88,24 @@ sharpens.*
       the skip is printed with its reason, never silent;
     - say in the commit what moved and what the gates now cost.
 
-*Item 90 queued 2026-10-03, found by fire drills 1 and 4. **FIRST, before
-anything else, including 87 if you are mid-way: Steve, 2026-10-03: "Our
-BIGGEST BLOCKER for cutting over to metal is that images take a lot longer
-to download."** Park 87 on your branch if it is not done; 90 is next.*
-
-**UPDATE, same morning: the box Claude takes item 90 itself** (Steve: it
-needs him to judge whether pictures "feel" slow, and the real droplet).
-**CC: do not start 90.** Carry on with 87 (the page cache), then the
-rest in order. The box will say here what it finds, since 87's numbers
-and 90's touch the same path.
-
-**A lead to measure first, not a finding:** metal sends from a 64 KiB
-buffer. If it fills that and then waits for an ACK, and Linux, as the
-receiver, delays its ACK (about 40 ms in some cases: delayed ACK, and
-Nagle on the sending side if it matters), the rate is 64 KiB per 40 ms,
-about 1.6 MB/s: close to the 2 MB/s measured. If so, the fix is in how
-metal handles ACKs and its window (send more before waiting, a larger
-window, not waiting on a delayed ACK), not a redesign. Measure the gaps
-between metal's segments and Linux's ACKs on a 10 MB transfer (a packet
-capture on the tap, or `tcp_sim`'s clock) before changing anything.
-
-90. **One slow response stalls everyone.** Measured on the real droplet
-    (v12, prod's data), from prod over the private network:
-    - the admin backup streamed at about 2 MB/s, and metal answered
-      nothing else for its two minutes (known: REVIEW-admin-backup.md
-      finding 3);
-    - with Steve logging in and opening chat (pictures in the
-      transcripts), three `GET /version` in a row from prod took **5 s
-      (timed out), 1.46 s, 0.8 ms**. The watchdog's first look at metal
-      timed out the same way.
-
-    So one person loading a few pictures can stall the site for seconds.
-    After the cutover that is everyone's site.
-    - **Find where the time goes** in sending one large response: the
-      send window, the segment size, waiting for each ACK, the 64 KiB send
-      buffer, the loop turning only between whole responses. Measure on
-      the droplet machine under QEMU with a 10 MB file, and say what
-      Linux's TCP does differently for the same transfer.
-    - **Then make a large response stop holding the machine:** interleave
-      sending with serving other connections (the loop already turns
-      while `sendAll` waits for room, so this may be close), and raise
-      the single-connection rate toward what the private network allows.
-    - **Test:** while a 10 MB response streams to a slow reader, other
-      requests are answered within a bound you set and test (say 50 ms),
-      on both hosts in the judge. Linux will pass it today; metal must.
+90. **One slow response stalls everyone: the box's, not CC's.** Steve:
+    "Our BIGGEST BLOCKER for cutting over to metal is that images take a
+    lot longer to download." Step 1 is merged (v13: the console deferred,
+    handlers that no longer wait on their peer). Step 2 is on branch
+    `box/item90-step2`: a transmit ring, the console waiting for responses
+    in flight, fewer doorbells and interrupts; next, the cold read of a big
+    file and write-no-allocate in the page cache. **CC stays out of
+    `net.zig`, `virtio.zig`, `io.zig`, `page_cache.zig` and the serving
+    loop in `probe/gopher.zig` until it lands.** The original item, with
+    the drill's numbers, is in `QUEUE-DONE.md`.
 
 ## Box Claude
 
-- v6: gates, images, deploy with Steve, and the survival test (the marker
-  message posted on v5).
-- The restart on a real droplet (`restart.elf` at the recovery console with
-  Steve), which item 16 waits on before any deploy.
-- Case-insensitive names in angry-gopher (Steve's decision above): prod's
-  names checked first, then the change, Linux tests, and judge coverage.
-- The migration rehearsal on a copy of prod's data, ending in a
-  metal-versus-Linux comparison on that data.
-- Measuring on the droplet: big uploads while others browse, clock drift
-  against prod.
+- Item 90 step 2, then a new droplet image for Steve to measure from prod.
+- Gate and merge CC's check-ins.
+- Deploys to lynrummy.com, with Steve's sign-off.
+- Fire drill 4 with Steve: metal down, the watchdog notices, metal back.
+- After item 90: delete the box's copies of prod's data.
 
 ## Questions
 
@@ -325,18 +271,18 @@ cache at all, or only reads should. Not changing it; it is your file.
   13-17 -> 52-66 MB/s on the box). Stay out of net.zig, virtio.zig,
   io.zig and page_cache.zig until it lands.
 
+- **Check-ins 24 and 25, merged** (2026-10-03): item 83's soak and item
+  84's slimming on `master`, nothing in the gates touched (`soak.py` is
+  not in them; it compiles). The box trimmed what had gone stale in this
+  file's live part: the context, the order notes (now **85 with 88, then
+  76, 77, 78, then 86**), item 90 reduced to where it stands (the original
+  is at the end of `QUEUE-DONE.md`), the Box Claude list, and Proposed
+  (43-46 and the case folding are done). Two clarifications: **85(b)
+  follows 88** (FAT32 is the default judge run, the FAT16 run is the one
+  skipped), and **86 waits for item 90 step 2**. 85's changes to
+  `gates.sh` and `probe/run.sh` are welcome on your branch; the box gates
+  them like any other. Rebase onto `master`.
+
 ## Proposed
 
 *(CC adds items here, one line on why each.)*
-
-- **43. F1: an append near 4 GiB panics** (REVIEW-restart-fat32.md): a
-  remote crash once game data is on FAT32.
-- **44. R1: record the restart before logging it**, so the back-off holds
-  for failures in the output path.
-- **45. F2: `build_volume.py` refuses FAT32 below 3 GiB**, as
-  `new_volume.py` does.
-- **46. `probe/run.sh`: QEMU failing to start must not read as PASS**
-  (check-in 9): exit 1 is both a probe's success and QEMU's own error.
-
-- **Fold case for session ids and channel names in angry-gopher.** On FAT,
-  `plan` replaces `Plan`, where Linux keeps both (MIGRATION.md).
