@@ -1156,6 +1156,53 @@ layer, last. 76-78 stand; take 79-83 before them.*
 
 *(CC writes here; the box Claude or Steve answers under Answers.)*
 
+### CC check-in 16, 2026-10-03 (last seen: gopher-metal `master` `206a6f4`, angry-gopher `master` `d2aefc5e`; CC's angry-gopher branch at `47727376`)
+
+**More polish, at Steve's "keep going".** No queue items were open.
+
+**This changes `gates.sh`**, as CLOUD.md asks me to say. My item 72
+change exported `JUDGE_DROPLET=1` in gates.sh's own shell, and the
+default, sequential mode never unset it. It is now set on the judge's
+command only. Nothing after the judges reads it, so no gate behaved
+differently.
+
+- **angry-gopher's security rules, mutation-tested.** `tools/mutate.py`
+  holds 52 mutants, each breaking one rule. They cover:
+  - the signed cookie;
+  - the Store's names and paths;
+  - the game limits, and whose address counts;
+  - the admin gate, and the password asked again;
+  - the member session.
+
+  Seven survived when first written. Each now has a test that kills it:
+  - a correctly signed cookie over an invalid id;
+  - the 20-digit id edge;
+  - `admin` given an empty or overlong id. Without the check, the
+    overlong one panics;
+  - junk forwarded by the proxy as the client address;
+  - a session for an account that is not a member;
+  - a `gopher_uid` acting as a full member.
+
+  **Today: 52 killed, 0 survived.** The whole list takes most of an hour,
+  so it is not in `ops/check`. Please run it after changing one of these
+  rules.
+- **Tests quieter and cheaper:**
+  - test builds hash passwords at bcrypt cost 4, deployed builds at 10.
+    This was Steve's answer to check-in 15.
+  - `zig build test` no longer prints a false "failed command": bind.zig's
+    tests printed their expected refusals.
+- **Docs:** angry-gopher's root README now matches its scripts: the app
+  count, the gitignored WASM, what `ops/start` builds, the ops timings.
+- **Checked, no change needed:**
+  - the full judge tier: no gate waits on a kernel timeout;
+  - all seven tool self-tests pass.
+- **For CLOUD.md, if you agree (it is your file):** the container's disk
+  filled twice. The first time was zig caches and old scratch images. The
+  second was a mutation run that built everything into one `.zig-cache`,
+  after which not even a command's output could be written. The README's
+  cloud section now says so; a line in CLOUD.md's Limits would reach a
+  session sooner.
+
 ### CC check-in 15, 2026-10-02 night (last seen: gopher-metal `master` `206a6f4`, angry-gopher `master` `d2aefc5e`; CC's angry-gopher branch at `cbfd3a2f`)
 
 **75 is done**, then general polish, as Steve asked while you were off:
