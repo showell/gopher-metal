@@ -2271,6 +2271,18 @@ What each needs from the box:
   over `56f90b5`. **The directory cache stays with the box** (item 90).
   Item 89 next is right.
 
+- **v13 on the real droplet** (2026-10-03, gopher-metal `a3fb34e`, the same
+  code as `56f90b5`; Steve's `img_rate_prod.py` from prod, as Steve):
+  one 4 MB picture 15-22 MB/s (v12: 16-31), `/version` stalled at most
+  108-128 ms meanwhile (v12: 137-236). Steve: /images "nearly instant,
+  even after clearing the browser cache" (Caddy does not cache: plain
+  `reverse_proxy`). **What is left, for the box (item 90 step 2):** the
+  handler reads a 4 MB file whole from the volume (network storage on a
+  droplet) while every other request waits; the page cache takes files
+  up to 2 MiB only, so repeats are not faster. Levers: larger files in the
+  cache (bounded), and reading a big file in pieces with turns between;
+  then the directory cache. Measure with `page_cache_mib = 0` as well.
+
 ## Proposed
 
 *(CC adds items here, one line on why each.)*
