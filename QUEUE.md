@@ -20,15 +20,18 @@ in order. The box Claude reorders on `master`, and CC proposes at the bottom.
 
 ## CC
 
-*Items 1-76, 79-85, 87-90 are done. 77 is the box's (it needs Elm), parked
-until after the cutover; 86 is parked until after the cutover too.*
+*Items 1-94 are done (91-94 and 78 in check-ins 29-33). 77 is the box's (it
+needs Elm), parked until after the cutover; 86 is parked until after the
+cutover too.*
 
-**TONIGHT'S ORDER (2026-10-03, Steve): 91, 92, 93, 94, then 78.** Each
-one is aimed at Steve's risks above, the first two at the biggest. Write
-findings in `docs/reviews/` in `REVIEW-interrupts.md`'s shape; a High
-finding comes with a test that fails without the fix, and the fix, on your
-branch for the box to gate. Check in after each item, so the box can gate
-as you go. Nothing tonight is a speed item.
+**TONIGHT'S ORDER (2026-10-03, Steve): 91, 92, 93, 94, then 78 — all done.**
+Each was aimed at Steve's risks, the first two at the biggest. Findings are in
+`docs/reviews/` and `docs/designs/`; the one test added (the admin-gate
+regression, angry-gopher `9ac4543c`) passes. **CC has no open queue item.**
+Waiting on the box (item 90, the cutover) and on Steve for the decisions the
+notes raise (the throttle numbers, whether to take the F1 query-log and the
+SEAM response subtraction). Proposing nothing new the night before the
+cutover; see Proposed if that changes.
 
 91. **Review item 90 step 2 adversarially: the newest code going live.**
     gopher-metal `2b468f7`, `4eafdf9`, `a96ff67` (on `master`):
@@ -117,6 +120,32 @@ as you go. Nothing tonight is a speed item.
 ## Questions
 
 *(CC writes here; the box Claude or Steve answers under Answers.)*
+
+### CC check-in 33, 2026-10-03 (last seen: gopher-metal `master` `d643621`)
+
+**Item 78 done — `angry-gopher/docs/SEAM.md`** (`42a83711` there). The seam,
+written down: the `io` value (clock `Io.Clock.now`, randomness `io.random`,
+and the disk the Store reads), the Store (`store.zig`), the Bus (`bus.zig`),
+the roots (`roots.zig`), and HTTP — whose **input** half is already behind
+`http.zig` (the `lint_head_access` poka-yoke) but whose **output** half is not.
+
+- **Still reached around the seam:** `req.respond` on `std.http.Server.Request`,
+  directly, in **34 files**. Uploads, sessions and site files are all *through*
+  the Store now (so not around it); the app has no log seam because the host
+  logs.
+- **The smallest next subtraction:** pull `req.respond` behind `http.zig`
+  (give it `ok`/`json`/`html` beside its `notFound`/`redirect`), move the 34
+  files to it, and add a response-access lint beside the head one — so the
+  app's whole `std.http` dependency becomes `http.zig`'s small surface.
+- **How the judge shows it changed nothing:** it moves calls, not logic, so the
+  existing byte-for-byte chat judge (`N identical, 0 different`) passing
+  unchanged on both hosts is the proof; the new lint going green is the second
+  half. Steve decides whether to take it now or after the cutover — not urgent,
+  not risky.
+
+**That closes CC's tonight order (91, 92, 93, 94, 78) and CC's open queue.**
+Standing by for the box (item 90, the cutover) and for Steve's calls on the
+notes. Not proposing new work the night before the cutover.
 
 ### CC check-in 32, 2026-10-03 (last seen: gopher-metal `master` `d643621`)
 
