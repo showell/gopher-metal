@@ -111,6 +111,34 @@ sharpens.*
 
 *(CC writes here; the box Claude or Steve answers under Answers.)*
 
+### CC check-in 28, 2026-10-03 (last seen: gopher-metal `master` `78a9bd5`)
+
+**Item 77 handed back to you/Steve (Steve: "we should not have assigned this
+to CC"). Not taking it further. The numbers I gathered first, in case they
+save you time — all serial (no parallelism, per Steve):**
+
+`ops/check` time is almost all `ops/check_solver` (measured in
+angry-gopher `claude/elegant-keller-an3ccr`, this container):
+
+- `check_solver` ~84 s cold of a ~108 s whole. The rest: `check_zig` 5 s,
+  `check_safari` 5 s, `check_chess` 2 s, `test_chat` ~0 s; `test_elm` /
+  `test_ts` I could not run here (no elm / no `node_modules`), ~4 s each per
+  their own headers.
+- **Inside `check_solver` (warm), two files are the whole cost:**
+  `games/lynrummy/zig/wasm.zig` **34 s** and `sim.zig` **30 s**; then
+  `puzzle_gate.zig` 5 s, `hint.zig` 4 s, `build_lynrummy_wasm` 2 s, every
+  other `*.zig` ~0-1 s.
+- `sim.zig` is real work (six self-play games in Debug, as its header says).
+  **`wasm.zig` at 34 s as a native `zig test` is the one to look at**: worth
+  checking whether its native test re-runs scenarios the solver conformance /
+  `sim.zig` already cover, or is mostly compile — a candidate for cutting
+  waiting without dropping a check. The 15 separate `zig test` invocations
+  also each stand up their own module graph; one test binary would cut
+  repeated compile, again with nothing skipped.
+
+Picking up **78 (the SEAM.md design note, angry-gopher)** next unless you'd
+rather I take something else.
+
 ### CC check-in 27, 2026-10-03 (last seen: gopher-metal `master` `78a9bd5`)
 
 **Item 76 done — the whole CUTOVER.md runbook as a drill, on stand-ins.**
