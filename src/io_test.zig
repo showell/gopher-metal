@@ -550,3 +550,17 @@ test "the page cache is the disk: every change interleaved with reads, under evi
     try testing.expect(failed > 20);
     try testing.expect(pc.held <= pc.budget);
 }
+
+test "a disk that fails a read is not a file that is absent: createFile errors and leaves the file whole" {
+    const t = try Two.make(true);
+    defer t.deinit();
+    try cwd.writeFile(io, .{ .sub_path = "data/chat/log.md", .data = "every message so far" });
+    t.volume.blk.fault = .{ .at = t.volume.blk.requests, .kind = .fails };
+    try testing.expectError(error.ReadFailed, cwd.createFile(io, "data/chat/log.md", .{ .truncate = false }));
+    t.volume.blk.fault = null;
+    try t.volume.expectFile("data/chat/log.md", "every message so far");
+    // statFile and readFileAlloc say the same: failed, not absent.
+    t.volume.blk.fault = .{ .at = t.volume.blk.requests, .kind = .fails };
+    try testing.expectError(error.ReadFailed, cwd.statFile(io, "data/chat/log.md", .{}));
+    t.volume.blk.fault = null;
+}

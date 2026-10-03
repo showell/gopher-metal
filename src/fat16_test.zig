@@ -888,6 +888,24 @@ test "a long name's orphan parts are tombstoned before a new entry is written af
     }
 }
 
+test "a path through a file names nothing, whatever the file's bytes spell" {
+    for (configs) |cfg| {
+        const d = try Disk.make("through-a-file", cfg.shape, cfg.cached);
+        defer d.deinit();
+        // A file whose first 32 bytes are a directory entry for "X", a file
+        // of 5 bytes at cluster 2: what a walk through it would find.
+        var bytes = [_]u8{0} ** 64;
+        @memcpy(bytes[0..11], "X          ");
+        bytes[11] = 0x20;
+        bytes[26] = 2;
+        bytes[28] = 5;
+        try d.vol.writeFile("data/f", &bytes);
+        try testing.expectError(fat16.Error.NotFound, d.vol.open("data/f/x"));
+        try testing.expectError(fat16.Error.NotFound, d.vol.open("data/f/x/y"));
+        try testing.expect(!(try d.vol.open("data/f")).isDirectory());
+    }
+}
+
 // ---- rename, for a replace that survives a crash (QUEUE item 24) -------------
 
 test "rename moves a file to a new name, and over a file, keeping that file's name" {

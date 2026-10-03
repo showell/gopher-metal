@@ -253,6 +253,19 @@ fn cacheable(path: []const u8) bool {
     return data_dirs.len != 0 and placeOf(path) == .site;
 }
 
+/// **ABSENT, OR A DISK THAT WOULD NOT SAY: NOT THE SAME ANSWER.** fat16's
+/// `open`, its errors as the application's: NotFound is FileNotFound, and a
+/// read that failed is ReadFailed. Every failure was FileNotFound, so a disk
+/// error read as "no such file": `createFile` then made the file afresh,
+/// emptying one that was there, and the admin's reset took the admin for
+/// absent (QUEUE.md item 89).
+fn openEntry(v: *fat16.Volume, path: []const u8) Error!fat16.Entry {
+    return v.open(path) catch |e| switch (e) {
+        error.NotFound => Error.FileNotFound,
+        else => Error.ReadFailed,
+    };
+}
+
 /// The volume to read `path` from.
 fn reading(path: []const u8) Error!*fat16.Volume {
     return volumeAt(placeOf(path) orelse return Error.FileNotFound);
@@ -391,7 +404,7 @@ pub const File = struct {
             return n;
         };
         const v = try reading(self.path[0..self.path_len]);
-        const e = v.open(self.path[0..self.path_len]) catch return Error.FileNotFound;
+        const e = try openEntry(v, self.path[0..self.path_len]);
         if (e.isDirectory()) return Error.IsDir;
         if (offset >= e.size) return 0;
         return v.readAt(e, @intCast(offset), buffer) catch return Error.ReadFailed;
@@ -546,7 +559,7 @@ pub const Dir = struct {
         self.fromRoot();
         const place = placeOf(sub_path) orelse return Error.FileNotFound;
         const v = try volumeAt(place);
-        const e = v.open(sub_path) catch return Error.FileNotFound;
+        const e = try openEntry(v, sub_path);
         if (!e.isDirectory()) return Error.NotDir;
         return .{ .cluster = e.first_cluster, .place = place };
     }
@@ -554,7 +567,7 @@ pub const Dir = struct {
     pub fn openFile(self: Dir, _: Self, sub_path: []const u8, _: OpenFileOptions) Error!File {
         self.fromRoot();
         const v = try reading(sub_path);
-        const e = v.open(sub_path) catch return Error.FileNotFound;
+        const e = try openEntry(v, sub_path);
         if (e.isDirectory()) return Error.IsDir;
         return File.at(e, sub_path);
     }
@@ -562,7 +575,7 @@ pub const Dir = struct {
     pub fn statFile(self: Dir, _: Self, sub_path: []const u8, _: StatFileOptions) Error!Stat {
         self.fromRoot();
         const v = try reading(sub_path);
-        const e = v.open(sub_path) catch return Error.FileNotFound;
+        const e = try openEntry(v, sub_path);
         return .{
             .size = e.size,
             .kind = if (e.isDirectory()) .directory else .file,
@@ -595,7 +608,7 @@ pub const Dir = struct {
             return out;
         };
         const v = try reading(sub_path);
-        const e = v.open(sub_path) catch return Error.FileNotFound;
+        const e = try openEntry(v, sub_path);
         if (e.isDirectory()) return Error.IsDir;
         if (e.size > @intFromEnum(limit)) return Error.StreamTooLong;
 
@@ -670,7 +683,12 @@ pub const Dir = struct {
         const v = try writing(sub_path);
         const truncate = opts.truncate;
 
-        const existing: ?fat16.Entry = v.open(sub_path) catch null;
+        // Absent: made. A disk that would not say is an error, never taken
+        // for absent: that emptied a file that was there (QUEUE.md item 89).
+        const existing: ?fat16.Entry = openEntry(v, sub_path) catch |e| switch (e) {
+            Error.FileNotFound => null,
+            else => return e,
+        };
         if (existing) |e| {
             if (e.isDirectory()) return Error.IsDir;
         }
@@ -680,7 +698,7 @@ pub const Dir = struct {
             try self.writeFile(ignored, .{ .sub_path = sub_path, .data = "" });
         }
 
-        const e = v.open(sub_path) catch return Error.FileNotFound;
+        const e = try openEntry(v, sub_path);
         return File.at(e, sub_path);
     }
 

@@ -799,6 +799,10 @@ pub const Volume = struct {
             var end = at;
             while (end < path.len and path[end] != '/') end += 1;
             if (end > at) {
+                // **NOT THROUGH A FILE.** `a/b` with `a` a file read a's bytes
+                // as directory entries, and could find in them whatever they
+                // spelled. A path through a file names nothing.
+                if (result) |r| if (!r.isDirectory()) return Error.NotFound;
                 const e = (try self.find(cluster, path[at..end])) orelse return Error.NotFound;
                 result = e;
                 cluster = e.first_cluster;
