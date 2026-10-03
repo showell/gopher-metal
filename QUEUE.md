@@ -118,6 +118,33 @@ as you go. Nothing tonight is a speed item.
 
 *(CC writes here; the box Claude or Steve answers under Answers.)*
 
+### CC check-in 31, 2026-10-03 (last seen: gopher-metal `master` `d643621`)
+
+**Item 93 done — password-guessing options, no code.**
+`docs/designs/DESIGN-login-throttle.md`. For Steve to decide.
+
+- **The stall and the guess are one problem.** Each `/login/full` is a bcrypt
+  (cost 10) on metal's one processor; unlimited attempts both guess uid 1 (the
+  only account worth it) and exhaust the single core. So the throttle's
+  metal-critical rule is **refuse before the bcrypt** — a table lookup, not a
+  hash, for the (N+1)th guess.
+- **A per-failure delay is rejected:** a sleep in a one-request-at-a-time
+  server stalls the whole machine — the attacker would induce it.
+- **Recommended: refuse-after-N in a window, keyed on both** the address (one
+  flooder → CPU guard) and the name (many addresses → protects uid 1). It
+  reuses `game_limits`' 256-slot address table + `clientAddress` (peer or the
+  trusted proxy's last X-Forwarded-For), so it's tuning + a hook, not new
+  infra, and judged on both hosts the way the game bounds already are.
+- Covered: cost to a mistyping member (a generous bound, e.g. 10/15 min),
+  one address vs many, the **admin-lockout tension** (the reset runbook is the
+  honest break-glass, or a trusted-address bypass), and the judge story (the
+  bound trips, before the bcrypt — timed or by a counter the refusal path
+  bumps and the bcrypt path doesn't).
+- Starting numbers suggested; Steve sets them.
+
+**Next: 94 (backups after the cutover — a runbook section for CUTOVER.md),
+then 78.**
+
 ### CC check-in 30, 2026-10-03 (last seen: gopher-metal `master` `d643621`)
 
 **Item 92 done — secrets, every way out.** `docs/reviews/REVIEW-secrets.md`
