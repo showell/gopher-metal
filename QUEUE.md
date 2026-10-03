@@ -1095,7 +1095,7 @@ layer, last. 76-78 stand; take 79-83 before them.*
     `Volume.check` and the oracle. Every outcome must be one the docs name
     ("the old file", "the new file", "a leaked cluster"), never a
     corrupted directory or a crossed chain. Fix what is not.
-80. **[CC: started]** **The device lies.** Fault injection in the in-memory `virtio.Block`
+80. **[CC: done, `af207c4`, `ea019de`; three held values fixed to move only with the disk]** **The device lies.** Fault injection in the in-memory `virtio.Block`
     (a read that fails, a short read, a write that reports success and
     lands nothing, as floor's faults do) and in the network stand-ins
     (dropped, duplicated, reordered frames). What does the kernel do with
@@ -1144,7 +1144,7 @@ layer, last. 76-78 stand; take 79-83 before them.*
 *Item 87 queued 2026-10-03 at Steve's request: take it right after the
 item you are on.*
 
-87. **A page cache on metal, and what it buys.** Steve: "It's certainly
+87. **[CC: started]** **A page cache on metal, and what it buys.** Steve: "It's certainly
     common for two active users to hit the same chat transcript. We could
     store almost all the chat transcripts in memory." Prod today (the
     rehearsal copy): 47 transcripts, 2.3 MB in all, the largest 362 KB;
@@ -1271,6 +1271,59 @@ capture on the tap, or `tcp_sim`'s clock) before changing anything.
 ## Questions
 
 *(CC writes here; the box Claude or Steve answers under Answers.)*
+
+### CC check-in 18, 2026-10-03 (last seen: gopher-metal `master` `98e6fc9`, angry-gopher `master` `dfdee40c`)
+
+**Items 79 and 80 done; 87 (the page cache) next.**
+
+- **`5f08fc5`, already merged, matters more now that metal's volume is
+  prod's data.** Before it, a machine stopped between the two FAT copies'
+  writes could never boot again: `cacheFat` refused copies that differ,
+  and `mountFat` stops the machine on that refusal, restart after
+  restart. The first copy now rules, as on Linux. The boot logs a line
+  when it repairs: `N sectors of the second FAT differed from the
+  first`. **Please grep for it in metal's serial logs from now on**; it
+  should be rare.
+- **Item 80 (`af207c4`)**, a request that fails while the machine carries
+  on. Three values held in memory moved before the write that confirms
+  them and stayed wrong after it failed:
+  - the kept free count, which the game store's floor reads;
+  - the held FAT sector;
+  - FAT32's "FSInfo marked unknown" flag, which left FSInfo's count set
+    and wrong.
+
+  All three now move only once the first copy has landed.
+- **What a disk that lies leaves.** A lie here means a request answered
+  OK with something else done. No panic or hang ever, and the next boot
+  always mounts and runs its check. Out of about 700 runs of each lie:
+
+  | Lie | Damage the boot's check reports | Silently wrong data |
+  |---|---|---|
+  | Lost write | 76 (6 of them crossed chains) | 32 |
+  | Torn write | 0 | 10 |
+  | Read of wrong bytes | 77 | 26 |
+
+  FAT has no checksums, so this is the limit, and I left it at that.
+- **A durability question for you (not a change).**
+  - **virtio-blk:** this driver never negotiates FLUSH. QEMU then turns
+    off the device's write cache, so a completed write is durable.
+  - **The volume is virtio-SCSI:** we send WRITE(10) with no FUA and never
+    SYNCHRONIZE CACHE. If DigitalOcean's SCSI disk reports a write cache
+    (WCE=1 in its caching mode page), a write metal was told is done
+    could be lost if the hypervisor crashes. Linux on the same volume
+    flushes; metal does not. A machine that only restarts loses nothing,
+    because QEMU keeps the data.
+  - **Could the box find out?** From the droplet's recovery console,
+    `sdparm --get=WCE /dev/sda`, or from Linux on prod for its own
+    volume. If WCE=1, the fix is a SYNCHRONIZE CACHE after each finished
+    application write. I would write it, but only you can test it.
+- **Network (`ea019de`):** 200,000 seeded damaged frames through UDP,
+  ARP and DHCP's parsers: no panic, and every slice stays inside its
+  frame. Nothing was wrong.
+- **Gate cost:** the stop and fault tests are two more ReleaseSafe test
+  binaries, run in parallel. `zig build test` warm takes 16.2 s, against
+  14.6 s on master before 79.
+- **Item 88 noted.** I'll take it with 85, after 81-83.
 
 ### CC check-in 17, 2026-10-03 (last seen: gopher-metal `master` `206a6f4`, angry-gopher `master` `d2aefc5e`; CC's angry-gopher branch at `47727376`)
 
