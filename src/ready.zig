@@ -175,3 +175,18 @@ test "a method that takes no body is ready however it is framed" {
     const get = "GET / HTTP/1.1\r\nHost: x\r\nContent-Length: 10\r\n\r\n";
     try testing.expectEqual(Readiness.ready, check(get, false, room));
 }
+
+// **STD'S HEAD PARSER, PINNED AS IT IS** (HEAD-PARSER-BUG.md). A head ended
+// by a bare "\n\n" is found or missed by how the bytes are split: fed in
+// pieces of 32 bytes or more, a vector holding exactly two CR/LF bytes is
+// checked only at its own end. This test fails when an upgraded zig fixes it;
+// then probe/fuzz_requests.py's bare-LF allowance and that page can go.
+test "std.http.HeadParser misses a bare-LF end in the middle of a vector (a std bug, pinned)" {
+    const req = "GET /x/x/x/x/x/x/x/x/x/x/x/x/x/x/x/x/x/x/x/x/x/x/x/x/x/x/x/x/x/x/x/x/x/x/x/x/x/x/x/x/x/x/x/x/x/x/x/x/x/x/ \nHost: metal.lynrummy.com\nContent-Length: 1\nContent-Length: 6\n\n\xffGET /version HTTP/1.1\r\nHost: x\r\n\r\n";
+    var one_by_one: std.http.HeadParser = .{};
+    var at: usize = 0;
+    while (one_by_one.state != .finished) : (at += 1) _ = one_by_one.feed(req[at .. at + 1]);
+    try testing.expectEqual(@as(usize, 169), at); // the "\n\n" after the headers
+    var whole: std.http.HeadParser = .{};
+    try testing.expectEqual(@as(usize, req.len), whole.feed(req)); // past it, to the "\r\n\r\n"
+}

@@ -1,0 +1,53 @@
+# zig's `std.http.HeadParser` and a bare-LF head end
+
+Found by `probe/fuzz_requests.py` (QUEUE.md item 81), with zig 0.16.0.
+
+## What happens
+
+`HeadParser.feed` finds the end of a request head: `\r\n\r\n`, or a bare
+`\n\n`, which it also accepts. **Whether it finds a bare `\n\n` depends on how
+the bytes are split between calls.**
+- Fed in pieces under 32 bytes, it finds every one.
+- Fed in larger pieces, it uses a vector path. When a vector holds exactly
+  two (or three) CR/LF bytes, it checks only the vector's last two (or three)
+  bytes. Two wrong answers follow, both seen here:
+  - a `\n\n` elsewhere in that vector is missed, and parsing runs on to a
+    later end (the request the fuzzer found: the end at 169 bytes when fed
+    a byte at a time, at 204 when fed whole);
+  - a `\n\n` that is found is reported short of its end (the reproducer
+    below: 134 a byte at a time, 132 whole).
+
+The same bytes can therefore have one head or another, by how they were
+read.
+
+## Here
+
+Linux reads a connection in large pieces, and metal in TCP segments, so the
+two hosts can answer such a request differently:
+- one finds the head at the `\n\n` and rejects a bad request line;
+- the other reads on, past it, and answers whatever it then finds.
+
+**Real traffic never meets it.** Caddy, in front of both hosts, sends CRLF,
+and metal is reachable only on the private network. So nothing in either
+host works around it. `src/ready.zig` pins today's behaviour in a test that
+fails when an upgraded zig fixes it. The fuzzer counts such cases apart, not
+as differences.
+
+## For an upstream report
+
+```zig
+const std = @import("std");
+test "HeadParser finds a bare-LF end whatever the read size" {
+    const req = "GET /" ++ "x/" ** 50 ++ " \nHost: a\nContent-Length: 1\n\n" ++
+        "\xffGET / HTTP/1.1\r\nHost: x\r\n\r\n";
+    var a: std.http.HeadParser = .{};
+    var at: usize = 0;
+    while (a.state != .finished) : (at += 1) _ = a.feed(req[at .. at + 1]);
+    var b: std.http.HeadParser = .{};
+    try std.testing.expectEqual(at, b.feed(req)); // fails: expected 134, found 132
+}
+```
+
+**The cause:** `feed`'s `else` branch, cases `2` and `3` of `matches`. They
+look only at `chunk[vector_len - 2 ..]` and `chunk[vector_len - 3 ..]`, where
+the `4...vector_len` case scans every position.
