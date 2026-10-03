@@ -50,6 +50,23 @@ Each of these is done, and checked, at least a day before.
    - GO: it exits 0, and its comparisons end `0 different`. Write down how
      long each step took; the day's freeze is about their sum, plus steps
      8 and 9.
+
+   And **the whole runbook, not just the data steps**, as a script
+   (QUEUE.md item 76): a Linux "prod" in a namespace of its own behind a
+   small proxy that stands in for Caddy, metal on the droplet's machine, and
+   each GO/NO-GO line below said out loud — the freeze (the proxy goes 502),
+   the copy, the volume, the boot, the comparison, the switch to metal, the
+   first-day checks and a whole backup, and the way back through
+   `extract_volume.py` to Linux again:
+
+       droplet/cutover_drill.sh COPY --fat 32 --gib N
+
+   - GO: it exits 0, every line `GO`. Two steps one machine cannot stand in
+     for, so the drill substitutes and says so: step 8's recovery-console
+     `dd` (the drill boots metal on the image it built directly), and the
+     way back's live compare against metal (the volume path has metal in
+     recovery, so `extract_volume.py`'s own check that the tree matches the
+     volume is the comparison; the backup path keeps metal up).
 4. **The restart stays off** (RESTART.md) unless a real droplet has been
    seen to restart after a reset (droplet/RESTART-TEST.md). A failure while serving
    then halts the machine, and the first-day watch catches it.
@@ -301,11 +318,19 @@ same data cannot be merged.
 3. **Put it on prod.** Move prod's `data/` and `auth/` aside (keep them),
    copy `back/data` and `back/auth` in, then `sudo systemctl start
    gopher-server`.
-4. **Compare before switching back:**
+4. **Compare before switching back.** Which comparison depends on how step 2
+   took the data off:
+   - **The backup path keeps metal serving**, so compare prod against it:
 
-       droplet/compare_hosts.py back http://127.0.0.1:9001 http://<metal>
+         droplet/compare_hosts.py back http://127.0.0.1:9001 http://<metal>
 
-   - GO: `0 different`.
+     - GO: `0 different`.
+   - **The volume path has metal in the recovery console** (not serving), so
+     `extract_volume.py`'s own check in step 2 — that the extracted tree
+     matches the volume byte for byte — is the comparison. Confirm prod now
+     serves the writes from metal (the new topics and uploads are there).
+     - GO: `compare_volume.py finds the tree and the volume the same`, and
+       the metal-era writes show on prod.
 5. **Point Caddy back at prod's own server**, and reload it.
 
 - GO: `/admin/host` says `Linux, zig-server`, and the messages written on
