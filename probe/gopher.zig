@@ -185,6 +185,15 @@ var write_buf: [64 * 1024]u8 align(16) = undefined;
 /// being a fixed array inside the kernel image.
 const request_heap_bytes = 32 * 1024 * 1024;
 
+/// The page cache (`metal.page_cache`), its size from the config. In `.bss`:
+/// its table of names is a megabyte, and the files' bytes are taken from the
+/// pages as they are kept.
+var page_cache: metal.page_cache.PageCache = undefined;
+/// The largest file it keeps: every transcript (prod's largest is 362 KB),
+/// and not most pictures, which are read from the disk as before rather
+/// than pushing transcripts out.
+const page_cache_largest = 2 << 20;
+
 const config_path = "gopher-metal.conf";
 
 /// **THE APPLICATION'S DATA**: the two directories `router.roots.point` is
@@ -265,6 +274,19 @@ pub fn kmain() noreturn {
         Io.keepData(&data_dirs, null);
         serial.put("  chat's data: the boot disk\n");
     }
+    // **THE DATA'S FILES, KEPT AFTER THEIR FIRST READ** (QUEUE.md item 87):
+    // a transcript two people are reading is read from memory, not walked to
+    // and read from the disk on every send. Memory is taken as files are
+    // kept, never more than this; what it cannot get, it does not keep.
+    if (conf.page_cache_mib != 0) {
+        page_cache = metal.page_cache.PageCache.init(pages.allocator, @as(usize, conf.page_cache_mib) << 20, page_cache_largest);
+        Io.keepPages(&page_cache);
+        serial.put("  the data's files kept in memory: up to ");
+        serial.putDec(conf.page_cache_mib);
+        serial.put(" MiB, files of up to ");
+        serial.putDec(page_cache_largest >> 20);
+        serial.put(" MiB\n");
+    } else serial.put("  the data's files kept in memory: none (page_cache_mib = 0)\n");
 
     const clock = metal.wallclock.start() catch |e| {
         serial.put("  wallclock: ");
@@ -1075,6 +1097,9 @@ fn logRequest(number: u64, what: []const u8, outcome: []const u8) void {
 ///                             A droplet's are public then private in PCI slot
 ///                             order; chat there belongs on the private one,
 ///                             behind prod's Caddy.
+///     page_cache_mib = N      memory for the data's files read whole
+///                             (`page_cache.zig`), 64 when absent; 0 keeps
+///                             none, every read from the disk, as before
 ///     volume = 92DE-8831      the FAT serial (as `blkid` shows it) of the
 ///                             DigitalOcean volume the application's data is
 ///                             on. Set, that volume must be attached or the
@@ -1105,6 +1130,8 @@ const Config = struct {
     /// through Caddy that is one address for everyone, so the game store's
     /// bounds on what one address may do become bounds on the whole site.
     trusted_proxy: ?[4]u8 = null,
+    /// Memory for the page cache, in MiB; 0 keeps none.
+    page_cache_mib: u32 = 64,
 };
 
 /// A droplet's two network cards, in PCI slot order: what `virtio.findNth` is
@@ -1163,12 +1190,16 @@ fn readConfig(io: Io, alloc: std.mem.Allocator) Config {
         } else if (std.mem.eql(u8, key, "volume")) {
             conf.volume = parseSerial(value) orelse
                 serial.fail(config_path ++ ": `volume` is a FAT serial, as blkid shows it: 92DE-8831");
+        } else if (std.mem.eql(u8, key, "page_cache_mib")) {
+            conf.page_cache_mib = std.fmt.parseInt(u32, value, 10) catch
+                serial.fail(config_path ++ ": `page_cache_mib` is a number of MiB, 0 for none");
+            if (conf.page_cache_mib > 1024) serial.fail(config_path ++ ": `page_cache_mib` past 1024 is more memory than a droplet has to spare");
         } else if (std.mem.eql(u8, key, "trusted_proxy")) {
             const a = std.Io.net.Ip4Address.parse(value, 0) catch
                 serial.fail(config_path ++ ": `trusted_proxy` is an IPv4 address: 10.0.0.2");
             conf.trusted_proxy = a.bytes;
         } else {
-            serial.fail(config_path ++ ": the keys are `requests`, `idle_timeout_ms`, `streams`, `keepalive_ms`, `lose_one_sent_in`, `card`, `volume` and `trusted_proxy`");
+            serial.fail(config_path ++ ": the keys are `requests`, `idle_timeout_ms`, `streams`, `keepalive_ms`, `lose_one_sent_in`, `card`, `volume`, `trusted_proxy` and `page_cache_mib`");
         }
     }
     if (!said_anything) serial.fail(config_path ++ " is present but says nothing");
@@ -1220,19 +1251,30 @@ fn metalFacts(io: Io, alloc: std.mem.Allocator) anyerror![]const router.host_sta
     try add(&facts, alloc, "site files in memory", "{d} kept, {d} KB of {d} KB; {d} reads answered from them", .{
         kept.count, kept.used >> 10, @as(usize, Io.SiteCache.capacity) >> 10, kept.hits,
     });
+    if (Io.pageCache()) |pc| {
+        try add(&facts, alloc, "data files in memory", "{d} kept, {d} MB of {d} MB; {d} reads answered from them, {d} from the disk; {d} pushed out", .{
+            pc.count, pc.held >> 20, pc.budget >> 20, pc.hits, pc.misses, pc.evicted,
+        });
+    } else try add(&facts, alloc, "data files in memory", "none (page_cache_mib = 0)", .{});
     const work = diskWork();
     try add(&facts, alloc, "disk requests", "{d}, busy {d} ms in all", .{ work.requests, @divTrunc(Io.ticksToNs(work.ticks), std.time.ns_per_ms) });
     try add(&facts, alloc, "NMIs", "{d}", .{interrupts.nmis});
     return facts.items;
 }
 
+/// What the host status page calls a volume: it said FAT16 of every one,
+/// and metal's volume is FAT32.
+fn kindName(v: *const fat16.Volume) []const u8 {
+    return if (v.kind == .fat32) "FAT32" else "FAT16";
+}
+
 fn addVolume(facts: *std.ArrayList(router.host_status.Fact), alloc: std.mem.Allocator, label: []const u8, v: *fat16.Volume) !void {
     var serial_text: [9]u8 = undefined;
     const named = if (v.serial) |n| serialText(&serial_text, n) else "no serial";
     const value = if (v.space()) |sp|
-        try std.fmt.allocPrint(alloc, "FAT16, serial {s}: {d} MB free of {d} MB", .{ named, sp.free >> 20, sp.total >> 20 })
+        try std.fmt.allocPrint(alloc, "{s}, serial {s}: {d} MB free of {d} MB", .{ kindName(v), named, sp.free >> 20, sp.total >> 20 })
     else |e|
-        try std.fmt.allocPrint(alloc, "FAT16, serial {s}: free space unreadable ({s})", .{ named, @errorName(e) });
+        try std.fmt.allocPrint(alloc, "{s}, serial {s}: free space unreadable ({s})", .{ kindName(v), named, @errorName(e) });
     try facts.append(alloc, .{ .label = label, .value = value });
 }
 

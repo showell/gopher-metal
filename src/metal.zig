@@ -22,6 +22,7 @@ pub const gpt = @import("gpt.zig");
 pub const fat16 = @import("fat16.zig");
 pub const rng = @import("rng.zig");
 pub const io = @import("io.zig");
+pub const page_cache = @import("page_cache.zig");
 pub const port = @import("port.zig");
 pub const tsc = @import("tsc.zig");
 pub const rtc = @import("rtc.zig");

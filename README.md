@@ -370,6 +370,7 @@ gopher-metal http probe
 | `src/tcp.zig` | a table of connections: handshake, windows, retransmission, close |
 | `src/stream.zig` | that connection as a `std.Io.Reader` and a `std.Io.Writer` |
 | `src/io.zig` | `Io.Dir`, `Io.Clock`, `Io.Mutex`, `Io.Group` — the surface the application calls |
+| `src/page_cache.zig` | the data's files kept whole in memory after their first read, write-through, below the application (QUEUE item 87); `page_cache_mib` in `gopher-metal.conf`, 64 by default |
 | `src/port.zig`, `src/tsc.zig` | x86 port I/O, and the timestamp counter |
 | `src/pit.zig` | the interval timer, used once: to measure the TSC's rate |
 | `src/rtc.zig` | the CMOS clock — the device half, and a pure half with host tests |
