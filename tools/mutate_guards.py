@@ -208,7 +208,7 @@ def run(mutants) -> int:
                 out = r.stdout + r.stderr
                 if r.returncode == 0:
                     verdict = "SURVIVED"
-                elif "failed:" in out or "terminated with signal" in out or "panic" in out:
+                elif "failed:" in out or "failed without output" in out or "terminated with signal" in out or "panic" in out:
                     verdict = "killed"
                 else:
                     verdict = "did not compile"
