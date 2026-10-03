@@ -3,8 +3,8 @@
 //! Two virtqueues, and the asymmetry between them is the whole of the driver.
 //! **The receive queue is filled with empty buffers before the device is told
 //! it may run**, because a device with nowhere to put a frame drops it; the
-//! transmit queue is filled one buffer at a time, when there is something to
-//! send. Every buffer, in both directions, carries a 12-byte virtio header in
+//! transmit queue is filled as there is something to send, and its buffers
+//! come back as the device finishes with them. Every buffer, in both directions, carries a 12-byte virtio header in
 //! front of the ethernet frame.
 //!
 //! Nothing here interprets a frame. That is `proto.zig`'s job, and keeping the
@@ -23,11 +23,19 @@
 //!   drops what arrives: the wait is bounded, by loss, and TCP sends again.
 //! - **A receive buffer handed out by `poll`.** Returned by `recycle`, which
 //!   `pump` defers to the end of the frame's turn. Bounded by: that turn.
-//! - **A frame being sent** (`send`). One buffer, reused, so `send` waits
-//!   until the device has taken it, resting between looks. Bounded by: the
-//!   device alone — nothing here gives up. A device that stopped taking
-//!   frames would stop the machine; on a droplet the device's own thread
-//!   needs this processor, which the rest gives back.
+//! - **Frames being sent** (`send`). `tx_buffers` of them may be with the
+//!   device at once; `send` hands a frame over and returns, and takes back
+//!   the buffers the device has finished with on its way in. Only when every
+//!   buffer is still the device's does it wait, resting between looks.
+//!   Bounded by: the device alone — nothing here gives up. A device that
+//!   stopped taking frames would stop the machine; on a droplet the device's
+//!   own thread needs this processor, which the rest gives back.
+//!
+//! **WHY MANY, NOT ONE** (QUEUE.md item 90): with one buffer, every frame
+//! waited for the device to take it, a trip through the hypervisor's network
+//! thread and an interrupt, about 65 us under KVM. A response went out one
+//! segment per trip, about 20 MB/s however wide the peer's window, where
+//! Linux on the same droplet sends 200-475.
 
 const virtio = @import("virtio.zig");
 const interrupts = @import("interrupts.zig");
@@ -57,24 +65,34 @@ const feature_mac: u32 = 1 << 5;
 /// for the header in front and is a round number the device likes.
 pub const buffer_size: usize = 2048;
 pub const rx_buffers: u16 = 8;
+/// Frames that may be with the device at once: a peer's whole 64 KiB window
+/// of full segments (45) with room to spare.
+pub const tx_buffers: u16 = 64;
 
 pub const Q = virtio.Queue(rx_buffers);
+pub const TxQ = virtio.Queue(tx_buffers);
 
 /// The rings and the buffers, which the caller owns and keeps for as long as
 /// the device is up. Identity-mapped, because a descriptor carries a PHYSICAL
 /// address.
 pub const Memory = struct {
     rx_ring: Q.RingType align(16) = undefined,
-    tx_ring: Q.RingType align(16) = undefined,
+    tx_ring: TxQ.RingType align(16) = undefined,
     rx_bufs: [rx_buffers][buffer_size]u8 align(16) = undefined,
-    tx_buf: [buffer_size]u8 align(16) = undefined,
+    tx_bufs: [tx_buffers][buffer_size]u8 align(16) = undefined,
 };
 
 pub const Net = struct {
     device: virtio.Device,
     rx: Q,
-    tx: Q,
+    tx: TxQ,
     mem: *Memory,
+    /// The transmit buffers that are ours to fill: `free[0..free_len]`.
+    free: [tx_buffers]u16 = undefined,
+    free_len: u16 = 0,
+    /// Which transmit buffers are the device's, so a completion naming one
+    /// it was not given is passed over rather than handed out twice.
+    lent: [tx_buffers]bool = [_]bool{false} ** tx_buffers,
     /// Our own hardware address, from the device.
     mac: [6]u8,
     /// Frames sent since the device came up.
@@ -86,7 +104,7 @@ pub const Net = struct {
         // set before they are enabled.
         const device = virtio.prepareMsix(found);
         var rx = try Q.setup(device, 0, &mem.rx_ring);
-        const tx = try Q.setup(device, 1, &mem.tx_ring);
+        const tx = try TxQ.setup(device, 1, &mem.tx_ring);
 
         // **EVERY RECEIVE BUFFER IS OFFERED BEFORE DRIVER_OK.** A frame that
         // arrives with no buffer waiting is dropped, and the first frame we
@@ -107,29 +125,60 @@ pub const Net = struct {
 
         try virtio.driverOk(device, st);
         rx.notify();
-        return .{ .device = device, .rx = rx, .tx = tx, .mem = mem, .mac = mac };
+        var net: Net = .{ .device = device, .rx = rx, .tx = tx, .mem = mem, .mac = mac };
+        // Finished frames are taken back on the next `send`; an interrupt for
+        // each would only wake the machine to do it sooner.
+        net.tx.interruptOnCompletion(false);
+        while (net.free_len < tx_buffers) : (net.free_len += 1) net.free[net.free_len] = net.free_len;
+        return net;
     }
 
-    /// Sends one frame, and waits for the device to say it took it. Waiting is
-    /// what keeps `tx_buf` safe to reuse on the next call.
+    /// Hands one frame to the device and returns; the frame is copied, so the
+    /// caller's bytes are free at once. Waits only when every transmit buffer
+    /// is still the device's.
     pub fn send(self: *Net, frame: []const u8) void {
         self.sent +%= 1;
-        const hdr: *Header = @ptrCast(@alignCast(&self.mem.tx_buf));
+        self.reclaim();
+        // The device's thread takes the frames; on a droplet it needs this
+        // processor to do it, so the wait rests rather than spins.
+        if (self.free_len == 0) {
+            // Now a completion is worth an interrupt: it ends the wait. One
+            // that landed before the flag changed is found by `reclaim`.
+            self.tx.interruptOnCompletion(true);
+            self.reclaim();
+            while (self.free_len == 0) {
+                interrupts.rest();
+                self.reclaim();
+            }
+            self.tx.interruptOnCompletion(false);
+        }
+        self.free_len -= 1;
+        const id = self.free[self.free_len];
+        self.lent[id] = true;
+        const buf = &self.mem.tx_bufs[id];
+        const hdr: *Header = @ptrCast(@alignCast(buf));
         hdr.* = .{};
-        @memcpy(self.mem.tx_buf[@sizeOf(Header)..][0..frame.len], frame);
+        @memcpy(buf[@sizeOf(Header)..][0..frame.len], frame);
 
-        self.tx.ring.desc[0] = .{
-            .addr = @intFromPtr(&self.mem.tx_buf),
+        self.tx.ring.desc[id] = .{
+            .addr = @intFromPtr(buf),
             .len = @intCast(@sizeOf(Header) + frame.len),
             .flags = 0,
             .next = 0,
         };
-        self.tx.offer(0);
-        self.tx.notify();
-        // The device's thread takes the frame; on a droplet it needs this
-        // processor to do it, so the wait rests rather than spins.
-        while (self.tx.take() == null) interrupts.rest();
-        virtio.ack(self.device);
+        self.tx.offer(id);
+        self.tx.notifyIfWanted();
+    }
+
+    /// Takes back every transmit buffer the device has finished with.
+    fn reclaim(self: *Net) void {
+        while (self.tx.take()) |e| {
+            virtio.ack(self.device);
+            if (e.id >= tx_buffers or !self.lent[e.id]) continue;
+            self.lent[e.id] = false;
+            self.free[self.free_len] = @intCast(e.id);
+            self.free_len += 1;
+        }
     }
 
     /// From now on both queues interrupt this processor at `vector` when
@@ -176,6 +225,6 @@ pub const Net = struct {
             .next = 0,
         };
         self.rx.offer(id);
-        self.rx.notify();
+        self.rx.notifyIfWanted();
     }
 };
