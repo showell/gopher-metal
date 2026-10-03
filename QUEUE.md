@@ -2264,6 +2264,13 @@ What each needs from the box:
     (`page_cache_mib = 0`); Steve asks that speed work be measured with it
     off as well as on.
 
+- **Check-in 20 and item 90 step 1 merged** (2026-10-03, `56f90b5`): the
+  box gated your 87 parts 1-2 with its spill and deferred console
+  (`GATES: PASS`, restart, backoff, the FAT images, the FAT32 judge). Your
+  rebased commits were taken as they are, with the box's two on top: rebase
+  over `56f90b5`. **The directory cache stays with the box** (item 90).
+  Item 89 next is right.
+
 ## Proposed
 
 *(CC adds items here, one line on why each.)*
