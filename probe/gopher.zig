@@ -56,6 +56,7 @@ const gm_build = @import("gm_build");
 
 /// The application, as it is.
 const router = @import("router.zig");
+const edge = router.edge;
 const Bus = router.Bus;
 const Hub = router.Hub;
 const streams = router.streams;
@@ -674,6 +675,17 @@ fn serveOne(
 
     var server = std.http.Server.init(s.reader(), s.writer());
     var req = server.receiveHead() catch |e| {
+        // **A HEAD PAST THE READ BUFFER IS ANSWERED 431, AS LINUX ANSWERS IT**
+        // (angry-gopher's server.zig, handleConn): counted for /version, and
+        // the same bytes. Metal closed without a word, so a browser with an
+        // oversized cookie saw an empty reply (QUEUE.md item 81, found by
+        // probe/fuzz_requests.py).
+        if (e == error.HttpHeadersOversize) {
+            edge.count(.header_too_large);
+            s.writer().writeAll("HTTP/1.1 431 Request Header Fields Too Large\r\n" ++
+                "connection: close\r\ncontent-length: 0\r\n\r\n") catch {};
+            s.writer().flush() catch {};
+        }
         logRequest(number, "(no request)", if (s.timed_out)
             "the client stopped sending, and was let go"
         else

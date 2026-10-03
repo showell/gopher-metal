@@ -19,8 +19,19 @@
 //!   - **A body too big for the connection's buffer.** Nothing drains that
 //!     buffer until the handler runs, so a body that cannot fit in it would
 //!     shut the window and never arrive.
+//!
+//! **NOR A HEAD THE WINDOW HAS SHUT ON.** A head that has not ended when the
+//! buffer is too full for the peer to send another segment into (tcp.zig's
+//! `tight`: a sender avoiding a silly window sends nothing smaller) will not
+//! end while it waits. It is served as it is: the handler's reads drain the
+//! buffer and reopen the window, so a head that fits ends as any other, and
+//! one larger than the buffer is refused by `std.http.Server` as oversized,
+//! which the host answers 431, as Linux does. It used to wait out the idle
+//! time and be let go with no answer (QUEUE.md item 81, found by
+//! probe/fuzz_requests.py).
 
 const std = @import("std");
+const tcp = @import("tcp.zig");
 
 pub const Readiness = enum {
     /// Keep waiting.
@@ -38,7 +49,11 @@ pub const Readiness = enum {
 pub fn check(pending: []const u8, peer_done: bool, capacity: usize) Readiness {
     var parser: std.http.HeadParser = .{};
     const head_len = parser.feed(pending);
-    if (parser.state != .finished) return if (peer_done) .abandoned else .waiting;
+    if (parser.state != .finished) {
+        const left = capacity - @min(pending.len, capacity);
+        if (left < @min(@as(usize, tcp.our_mss), capacity / 2)) return .ready;
+        return if (peer_done) .abandoned else .waiting;
+    }
 
     // A head std cannot parse is served: the handler rejects it there, with
     // the same words Linux uses.
@@ -81,6 +96,19 @@ test "a head split exactly at its end is not, until the last byte arrives" {
 
 test "bare newlines end a head too, as std's parser allows" {
     try testing.expectEqual(Readiness.ready, check("GET / HTTP/1.1\nHost: x\n\n", false, room));
+}
+
+test "a head the window has shut on is served, unended: a segment's room or less left" {
+    var buf: [room]u8 = undefined;
+    const start = "GET / HTTP/1.1\r\nX-Long: ";
+    @memcpy(buf[0..start.len], start);
+    @memset(buf[start.len..], 'v');
+    // Room for a whole segment: the peer can still send, so wait.
+    try testing.expectEqual(Readiness.waiting, check(buf[0 .. room - tcp.our_mss], false, room));
+    // Less: a sender avoiding a silly window sends nothing more.
+    try testing.expectEqual(Readiness.ready, check(buf[0 .. room - tcp.our_mss + 1], false, room));
+    try testing.expectEqual(Readiness.ready, check(&buf, false, room));
+    try testing.expectEqual(Readiness.ready, check(&buf, true, room));
 }
 
 test "a peer that closed without a whole head is served, to be logged and let go" {
