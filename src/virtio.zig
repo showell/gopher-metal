@@ -360,6 +360,14 @@ pub const desc_flag_next: u16 = 1;
 /// The DEVICE writes this buffer; without it the device reads.
 pub const desc_flag_write: u16 = 2;
 
+/// In the used ring's flags, set by the device: it is already working
+/// through the queue and needs no doorbell (VIRTQ_USED_F_NO_NOTIFY).
+pub const used_flag_no_notify: u16 = 1;
+/// In the available ring's flags, set by us: we will look for completions
+/// ourselves and want no interrupt for them (VIRTQ_AVAIL_F_NO_INTERRUPT).
+/// A hint the device may ignore.
+pub const avail_flag_no_interrupt: u16 = 1;
+
 /// A virtqueue's three rings, laid out as one block of memory the caller owns.
 /// The device is told where each ring is and then reads and writes them
 /// directly: no ports, no copying, one doorbell.
@@ -463,6 +471,22 @@ pub fn Queue(comptime size: u16) type {
             self.ring.avail_ring[self.ring.avail_idx % size] = head;
             fence();
             self.ring.avail_idx +%= 1;
+            fence();
+        }
+
+        /// **A DOORBELL ONLY WHEN THE DEVICE WANTS ONE** (virtio §2.7.7). Each
+        /// ring of it is a trip out to the hypervisor; a device already
+        /// working through the queue says so in the used ring's flags, read
+        /// after `offer` has published the new entries.
+        pub fn notifyIfWanted(self: *Self) void {
+            fence();
+            const flags = @as(*volatile u16, @ptrCast(&self.ring.used_flags)).*;
+            if (flags & used_flag_no_notify == 0) self.notify();
+        }
+
+        /// Whether the device interrupts when it completes something here.
+        pub fn interruptOnCompletion(self: *Self, on: bool) void {
+            @as(*volatile u16, @ptrCast(&self.ring.avail_flags)).* = if (on) 0 else avail_flag_no_interrupt;
             fence();
         }
 

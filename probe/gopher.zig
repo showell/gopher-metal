@@ -183,8 +183,24 @@ var draining_now: usize = 0;
 /// a larger response waits for room, as before spills).
 const spill_cap = 32 * 1024 * 1024;
 /// How much of the console's backlog one idle turn writes (serial.drain): at
-/// a few tens of microseconds a byte, a millisecond or two.
-const console_budget = 64;
+/// a few tens of microseconds a byte, under a millisecond, which is how long
+/// a request that arrives meanwhile waits for it.
+const console_budget = 16;
+
+/// **THE CONSOLE WAITS FOR THE RESPONSES** (QUEUE.md item 90). While a
+/// connection has bytes the peer has not acknowledged, its acknowledgements
+/// are what lets the rest go out, and a console turn taken then holds them:
+/// a 4 MB picture spent half its time behind the console's turns. So the
+/// console is written only once nothing is on its way, or once its backlog
+/// is half full, so it never reaches the point where `put` writes directly.
+fn consoleTurn(table: *const tcp.Table) bool {
+    if (serial.pending() == 0) return false;
+    if (serial.pending() >= serial.backlog / 2) return true;
+    for (table.conns) |*c| {
+        if (c.queued() > 0) return false;
+    }
+    return draining_now == 0;
+}
 var held_now: usize = 0;
 var held_most: usize = 0;
 var streams_ended: u64 = 0;
@@ -514,7 +530,7 @@ pub fn kmain() noreturn {
         } else {
             // Nothing to serve: the console's turn, a little at a time so a
             // request that arrives meanwhile waits at most this much.
-            if (serial.pending() > 0) {
+            if (consoleTurn(&table)) {
                 serial.drain(console_budget);
                 continue;
             }

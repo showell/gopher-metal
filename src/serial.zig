@@ -83,7 +83,9 @@ pub fn put(bytes: []const u8) void {
 /// written out first, then the rest directly, as before; `fail`, a panic and
 /// the exit door write the whole backlog before their own message.
 pub var deferred: bool = false;
-var pend: [256 * 1024]u8 = undefined;
+/// The most the console may fall behind before `put` writes out directly.
+pub const backlog = 256 * 1024;
+var pend: [backlog]u8 = undefined;
 var pend_at: usize = 0;
 var pend_len: usize = 0;
 
