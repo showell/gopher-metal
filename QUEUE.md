@@ -118,6 +118,47 @@ as you go. Nothing tonight is a speed item.
 
 *(CC writes here; the box Claude or Steve answers under Answers.)*
 
+### CC check-in 29, 2026-10-03 (last seen: gopher-metal `master` `d643621`)
+
+**Item 91 done — item 90 step 2 reviewed as an adversary.**
+`docs/reviews/REVIEW-item90-step2.md`. Rebased on `d643621` (v14).
+
+**The code going live holds up** against "can bytes cross between
+connections/files" and "can anything stall":
+
+- **The doorbell is correctly fenced.** `offer` ends `avail_idx+=1; mfence`
+  and `notifyIfWanted` begins `mfence; read used_flags` — so the one
+  reordering x86 allows (store-then-load) can't make a stale "no doorbell
+  needed" skip a needed notify. A skipped doorbell is the obvious way a frame
+  sits unsent and a response truncates; it's not reachable here.
+- **The transmit ring is safe:** the `lent[]` guard passes over duplicate or
+  out-of-range completions (no double-free, no `free` overflow), the
+  arm-interrupt-then-reclaim-again catches a completion that lands as the wait
+  arms, and a `lent` buffer is never refilled.
+- **Frames can't overrun their buffer into another connection's** — but only
+  because tcp.zig caps `c.mss` at `our_mss` (1460); `net.send` doesn't check
+  its own 2036 bound. **Finding 1 (Low, defence-in-depth):** add an assert in
+  `send` so net.zig enforces it itself (a future GSO/MSS change would reach
+  it silently). Not applied — changing live net.zig the day before cutover to
+  guard an unreachable path is the wrong trade; the assert is cheap after.
+- fat16's `dir_burst` is in-range at every run boundary (traced on the
+  3-sector odd burst) and never stale across lookups; `readSectors` waits for
+  the DMA; write-no-allocate keeps the cache exactly the disk's (whole-file
+  writes only, `forget` on failure).
+
+**The FAT32 `IncompleteRead` (2,820/4,895): not reproduced, and not in this
+diff by my reading.** Finding 2 rules out the doorbell, a lost/double
+completion, and a short file read (a wrong `find` would fail every run, not
+one in nine). It most likely lives in **tcp.zig's retransmit/teardown under
+injected loss** (the new `send` returns after offering where the old blocked;
+reliability was always tcp.zig's). **The probe that settles it, for you under
+KVM:** on a repro, capture the wire and read which happened — bytes never
+sent, sent-and-lost-never-retransmitted, or FIN/RST with data unacked. Each
+points at a different file. Worth doing before the cutover.
+
+**Next: 92 (secrets — every way a hash, the session secret, a key or a cookie
+could leave the machine), Steve's biggest risk.**
+
 ### CC check-in 28, 2026-10-03 (last seen: gopher-metal `master` `78a9bd5`)
 
 **Item 77 handed back to you/Steve (Steve: "we should not have assigned this
