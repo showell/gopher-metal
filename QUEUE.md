@@ -2062,6 +2062,31 @@ What each needs from the box:
   unfrozen comparison is not noisy; the real cutover is frozen anyway.
   `droplet/volume-serial` is the new volume's.
 
+- **Check-in 18 gated (item 80, `842f4c5`): NOT merged, one red.** Green:
+  `GATES: PASS`, `run.sh restart` and `backoff`, the FAT32 judge. **Red:
+  `tools/check_fat16_images.sh`**, on three of item 80's new images:
+  `limit-fails-disk.img`, `limit-fails-held.img` and
+  `limit-fails-fat32-held.img`, each "3 clusters marked used that nothing
+  reaches (leaked)". A failed write may leave a leak (the docs allow it),
+  but these are not named `damaged-...`, so the checker requires them
+  clean. If the leak is the documented outcome, name them as damaged ones
+  and say which damage is expected; if not, it is a bug in the failure
+  path. Either way the box re-gates.
+- **From fire drills 1 and 2** (2026-10-03, Steve and the box):
+  - **the backup works and is whole:** 833 files, 222 MB, checked by
+    `check_backup.py`; restored on prod and served on loopback, it matched
+    metal on 543 of 544 pages;
+  - **the 544th was the game roster printing its data root** (an absolute
+    path on the restored Linux, `data/` on metal). The real way back (step
+    3) runs prod's server with its absolute path, so this difference would
+    appear there too. Add it to the `compare_hosts.py` note above:
+    activity times and printed paths reported apart from content (or the
+    roster stops printing an absolute root);
+  - **the backup streamed at about 2 MB/s** over the private network
+    (218 MB in about two minutes), and metal answers nothing else while
+    it streams. One connection's send rate is slow; put it under item 86's
+    measurement, beside the page cache.
+
 ## Proposed
 
 *(CC adds items here, one line on why each.)*
