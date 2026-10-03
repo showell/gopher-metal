@@ -16,3 +16,4 @@ F1").
 - [REVIEW-first-line.md](REVIEW-first-line.md) — the boot that printed its first line and stopped.
 - [REVIEW-signed-uid-and-limits.md](REVIEW-signed-uid-and-limits.md) — the signed `gopher_uid` and the game store's limits.
 - [REVIEW-fixed-sizes.md](REVIEW-fixed-sizes.md) — metal's fixed sizes against data that grows.
+- [REVIEW-item90-step2.md](REVIEW-item90-step2.md) — item 90 step 2: net.zig's transmit ring, virtio's doorbell/interrupt suppression, fat16's directory burst, write-no-allocate.
