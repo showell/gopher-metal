@@ -363,7 +363,7 @@ pub fn kmain() noreturn {
     var blk = blk_mem.bring(base) catch serial.fail("the block device would not come up");
     var vol = fat16.Volume.mount(&blk, &scratch, 0) catch serial.fail("the disk does not start with a FAT16 volume");
     const fat = pages.allocator.alloc(u8, vol.fatBytes()) catch serial.fail("no memory to hold the FAT");
-    vol.cacheFat(fat) catch serial.fail("the FAT could not be held in memory");
+    _ = vol.cacheFat(fat) catch serial.fail("the FAT could not be held in memory");
     Io.mount(vol);
     const io = Io.io();
 

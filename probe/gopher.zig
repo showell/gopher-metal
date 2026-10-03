@@ -944,12 +944,21 @@ fn mountFat(blk: *virtio.Block, scratch: *[fat16.sector_size]u8, what: []const u
     }
     const fat_cache = pages.allocator.alloc(u8, vol.fatBytes()) catch
         serial.fail("no memory to hold the FAT");
-    vol.cacheFat(fat_cache) catch |e| {
+    const repaired = vol.cacheFat(fat_cache) catch |e| {
         serial.put("  fat cache: ");
         serial.put(@errorName(e));
         serial.put("\n");
         serial.fail("the FAT could not be held in memory");
     };
+    // A machine stopped between the first FAT copy's write and the second's
+    // leaves them apart; the first is the FAT (fat16.cacheFat).
+    if (repaired > 0) {
+        serial.put("  ");
+        serial.put(what);
+        serial.put(": ");
+        serial.putDec(repaired);
+        serial.put(" sectors of the second FAT differed from the first, and were written from it\n");
+    }
     serial.put("  ");
     serial.put(what);
     serial.put(if (vol.kind == .fat32) ": FAT32 at LBA " else ": FAT16 at LBA ");

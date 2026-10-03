@@ -137,7 +137,7 @@ pub fn kmain() noreturn {
     var vol = fat16.Volume.mount(&blk, &scratch, 0) catch
         serial.fail("this is not the FAT16 volume the probe expects");
     if (cache_fat) {
-        vol.cacheFat(&fat_cache) catch |e| {
+        _ = vol.cacheFat(&fat_cache) catch |e| {
             serial.put("  fat cache: ");
             serial.put(@errorName(e));
             serial.put("\n");

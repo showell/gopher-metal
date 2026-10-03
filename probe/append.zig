@@ -266,12 +266,13 @@ fn readThroughCachedFat(vol: *fat16.Volume) void {
         serial.put(" sectors\n");
         serial.fail("this volume no longer tests a FAT read split across requests: use smaller clusters");
     }
-    vol.cacheFat(&fat_cache) catch |e| {
+    const repaired = vol.cacheFat(&fat_cache) catch |e| {
         serial.put("  fat cache: ");
         serial.put(@errorName(e));
         serial.put("\n");
         serial.fail("a FAT larger than one request could not be read into memory");
     };
+    if (repaired != 0) serial.fail("the FAT read in pieces is not the second FAT: a split read put a piece in the wrong place");
     Io.mount(vol.*);
 
     const entry = vol.open("big.txt") catch serial.fail("big.txt is gone");

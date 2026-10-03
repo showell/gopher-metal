@@ -46,7 +46,6 @@ pub const Error = error{
     BadName,
     Full,
     DirectoryFull,
-    FatsDisagree,
     /// FAT32 with mirroring off (BPB_ExtFlags bit 7): one FAT is live and the
     /// rest stale, and this machine writes every copy (FAT32.md §3).
     NotMirrored,
@@ -350,36 +349,49 @@ pub const Volume = struct {
         return @as(usize, self.sectors_per_fat) * sector_size;
     }
 
-    /// Reads the FAT into `buf` and uses it from then on.
+    /// Reads the FAT into `buf` and uses it from then on. Answers how many
+    /// sectors of the other copies it brought into line with the first.
     ///
-    /// **EVERY COPY MUST AGREE FIRST.** From here a change is written to each
-    /// copy as the whole cached sector, so a second FAT that disagreed anywhere
-    /// in a sector would be silently overwritten with the first — a repair
-    /// nobody asked for, on a volume some other tool may have its own opinion
-    /// about. A volume whose copies disagree is refused instead, and stays
-    /// uncached.
+    /// **WHERE THE COPIES DISAGREE, THE FIRST IS THE FAT.** Every change here
+    /// writes the first copy, then the others (`fatSet`), so a machine stopped
+    /// between the two leaves them apart by a sector, the first the newer.
+    /// Linux's vfat reads only the first, too. This used to refuse such a
+    /// volume, and the boot stopped on the refusal, so a machine stopped at
+    /// that moment could never boot again (QUEUE.md item 80). Now each sector
+    /// of another copy that differs is written from the first, and the count
+    /// is the caller's to report: from here a change is written to each copy
+    /// as the whole cached sector, so a copy left apart would be overwritten
+    /// piecemeal anyway, saying nothing.
     ///
     /// `buf` must be identity-mapped, because the device writes FAT sectors
     /// straight out of it.
-    pub fn cacheFat(self: *Volume, buf: []u8) Error!void {
+    pub fn cacheFat(self: *Volume, buf: []u8) Error!u32 {
         if (buf.len < self.fatBytes()) return Error.TooBig;
         const fat = buf[0..self.fatBytes()];
         try self.readSectors(self.fat_start, self.sectors_per_fat, fat.ptr);
         // The other copies are compared in runs, not a sector at a time: a
         // FAT32 FAT of 12.5 MiB is 25,600 sectors (FAT32.md §9).
         var run: [run_sectors * sector_size]u8 align(16) = undefined;
+        var repaired: u32 = 0;
         var copy: u32 = 1;
         while (copy < self.num_fats) : (copy += 1) {
             var s: u32 = 0;
             while (s < self.sectors_per_fat) {
                 const n = @min(run_sectors, self.sectors_per_fat - s);
-                try self.readSectors(self.fat_start + copy * self.sectors_per_fat + s, n, &run);
-                if (!std.mem.eql(u8, run[0 .. n * sector_size], fat[s * sector_size ..][0 .. n * sector_size]))
-                    return Error.FatsDisagree;
+                const at = self.fat_start + copy * self.sectors_per_fat + s;
+                try self.readSectors(at, n, &run);
+                var k: u32 = 0;
+                while (k < n) : (k += 1) {
+                    const first = fat[(s + k) * sector_size ..][0..sector_size];
+                    if (std.mem.eql(u8, run[k * sector_size ..][0..sector_size], first)) continue;
+                    try self.writeSector(at + k, first);
+                    repaired += 1;
+                }
                 s += n;
             }
         }
         self.fat = fat;
+        return repaired;
     }
 
     /// Reads the boot sector and works out where everything is.
@@ -860,8 +872,8 @@ pub const Volume = struct {
         const at = @as(u32, cluster) * width;
         const in_sector = at / sector_size;
         if (self.fat) |fat| {
-            // The cached sector is the truth — cacheFat checked every copy
-            // agreed with it — so it is written to each copy whole, and no
+            // The cached sector is the truth — cacheFat brought every copy
+            // into line with it — so it is written to each copy whole, and no
             // copy is read back first.
             const sector = fat[in_sector * sector_size ..][0..sector_size];
             self.keepCount(self.entryIn(sector, at % sector_size / width), value);

@@ -571,8 +571,8 @@ test "the check finds FAT copies that differ" {
         const d = try Disk.make("damaged-check-fats", shape, cached);
         defer d.deinit();
         try d.vol.writeFile("f", "x");
-        // The second copy only, and not mounted again: a held FAT would refuse
-        // the volume, which is cacheFat's business, not the check's.
+        // The second copy only, and not mounted again: a held FAT would bring
+        // the copies into line, which is cacheFat's business, not the check's.
         const l = Layout.of(d.bytes);
         l.set(d.bytes, 1, 300, l.end());
         l.set(d.bytes, 1, 1000, l.end());
@@ -944,9 +944,9 @@ test "a rename stopped at any point leaves the old file or the new, whole, and a
                 finished = true;
             } else |_| {}
             d.blk.fail_after = null;
-            // Read back from the FAT on the disk: a held FAT refuses copies
-            // that differ at mount (FatsDisagree), which a stop can leave.
-            try d.mount(false);
+            // Mounted again as the boot does, FAT held or not: a held FAT
+            // brings copies a stop left apart into line (cacheFat).
+            try d.mount(cached);
 
             const got = try d.read("data/rec");
             defer testing.allocator.free(got);
@@ -975,6 +975,35 @@ test "a rename stopped at any point leaves the old file or the new, whole, and a
         }
         // It took more than one request, so the loop did stop it part-way.
         try testing.expect(stop > 2);
+    }
+}
+
+test "a FAT whose copies differ is held as the first, and the others are written from it" {
+    for (formats) |shape| {
+        const d = try Disk.make("fats-brought-into-line", shape, false);
+        defer d.deinit();
+        try d.vol.writeFile("data/f", "x");
+        // As a machine stopped between the copies' writes leaves them: the
+        // second behind the first, in two sectors.
+        const l = Layout.of(d.bytes);
+        const per_sector: usize = if (shape.kind == .fat32) test_disk.sector / 4 else test_disk.sector / 2;
+        l.set(d.bytes, 1, 3 * per_sector + 7, l.end());
+        l.set(d.bytes, 1, 9 * per_sector + 1, l.end());
+        try testing.expect(!d.fatsAgree());
+        const writes = d.blk.writes;
+
+        try d.mount(true);
+        try testing.expectEqual(@as(u32, 2), d.repaired);
+        try testing.expectEqual(writes + 2, d.blk.writes); // those two sectors, nothing else
+        try testing.expect(d.fatsAgree());
+        try testing.expectEqual(@as(u32, 0), l.get(d.bytes, 0, 3 * per_sector + 7));
+        try d.expectFile("data/f", "x");
+        const r = try d.check();
+        try r.expect(&.{});
+        // Agreeing copies are left alone.
+        try d.mount(true);
+        try testing.expectEqual(@as(u32, 0), d.repaired);
+        try testing.expectEqual(writes + 2, d.blk.writes);
     }
 }
 
@@ -1297,11 +1326,11 @@ test "every operation stopped after every write leaves an outcome its doc names,
                 d.blk.fail_after_writes = null;
                 if (!finished and !std.mem.eql(u8, before, d.bytes)) seen_partial = true;
 
-                // The next boot: mounted again, the FAT read from the disk.
-                // (A FAT held in memory refuses copies that differ at mount,
-                // which a stop can leave; the kernel reads the FAT from the
-                // disk.)
-                try d.mount(false);
+                // The next boot: mounted again as before. The kernel holds
+                // the FAT, and copies a stop left apart are brought into line
+                // with the first at that mount (cacheFat); that used to
+                // refuse the volume, and the machine never booted again.
+                try d.mount(cfg.cached);
                 var outcome: u64 = 0;
                 for (op.want) |w| {
                     const got = try stateOf(d, w.path, &buf);

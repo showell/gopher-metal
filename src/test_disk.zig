@@ -202,6 +202,8 @@ pub const Disk = struct {
     scratch: [sector]u8 align(16) = undefined,
     fat_cache: ?[]u8 = null,
     vol: fat16.Volume = undefined,
+    /// FAT sectors the last mount's `cacheFat` brought into line.
+    repaired: u32 = 0,
 
     /// Formats `shape` into a fresh disk and mounts it, holding its FAT in
     /// memory if `cached`. Heap-allocated: the volume points at the block and
@@ -222,7 +224,7 @@ pub const Disk = struct {
         d.fat_cache = null;
         if (cached) {
             d.fat_cache = try testing.allocator.alloc(u8, d.vol.fatBytes());
-            try d.vol.cacheFat(d.fat_cache.?);
+            d.repaired = try d.vol.cacheFat(d.fat_cache.?);
         }
     }
 

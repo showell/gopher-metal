@@ -215,7 +215,8 @@ mechanical commit, or not at all.
   `clusterSector`, and only their types change.
 - **Rules:**
   - every FAT copy is written on every change;
-  - copies that disagree at mount are refused;
+  - where copies disagree at mount, the first is the FAT, and the others
+    are written from it (a machine stopped between two copies' writes);
   - nothing here allocates;
   - a failed allocation leaves nothing behind.
 - **`Io.Dir`** above it, and the application above that: not one call site
