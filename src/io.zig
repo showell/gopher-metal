@@ -653,7 +653,7 @@ pub const Dir = struct {
                 else => Error.WriteFailed,
             };
         };
-        if (pc) |c| c.put(options.sub_path, options.data);
+        if (pc) |c| c.replaced(options.sub_path, options.data);
     }
 
     /// mkdir -p. The application calls it before nearly every write, because

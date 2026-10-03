@@ -144,8 +144,8 @@ pub const PageCache = struct {
         return true;
     }
 
-    /// `path` is now `bytes` on the disk: a whole-file write that landed, or
-    /// a file just read whole.
+    /// `path` is now `bytes` on the disk, just read whole: kept, room
+    /// allowing.
     pub fn put(self: *PageCache, path: []const u8, bytes: []const u8) void {
         var kb: [max_key]u8 = undefined;
         const key = keyOf(path, &kb) orelse return;
@@ -168,6 +168,18 @@ pub const PageCache = struct {
         self.used[i] = self.clock;
         self.held += size;
         self.count += 1;
+    }
+
+    /// `path` was written whole on the disk as `bytes`. **A WRITE NEVER
+    /// BRINGS A FILE IN** (write-no-allocate): a kept copy is replaced, and a
+    /// file not kept stays out. Only a read is a sign the file will be read
+    /// again; a client that only uploads pictures would otherwise push out
+    /// every transcript a reader wants (CC's soak, QUEUE.md item 83).
+    pub fn replaced(self: *PageCache, path: []const u8, bytes: []const u8) void {
+        var kb: [max_key]u8 = undefined;
+        const key = keyOf(path, &kb) orelse return;
+        if (self.find(key) == null) return;
+        self.put(path, bytes);
     }
 
     fn dropOldest(self: *PageCache) bool {
@@ -278,6 +290,18 @@ test "a file put is got back, under any spelling FAT takes for it" {
     try testing.expectEqual(@as(usize, 1), c.count);
     try testing.expectEqualStrings("changed", c.get("data/chat/plan.md").?);
     try testing.expectEqual(@as(usize, PageCache.page), c.held);
+}
+
+test "a whole-file write replaces a kept copy and never brings a file in" {
+    const c = try make(1 << 20, 64 << 10);
+    defer done(c);
+    c.replaced("data/uploads/picture", "an upload");
+    try testing.expect(c.get("data/uploads/picture") == null);
+    try testing.expectEqual(@as(usize, 0), c.count);
+    c.put("data/chat/plan.md", "the plan");
+    c.replaced("DATA/chat/Plan.md", "changed");
+    try testing.expectEqual(@as(usize, 1), c.count);
+    try testing.expectEqualStrings("changed", c.get("data/chat/plan.md").?);
 }
 
 test "appends and overwrites land in the kept copy; a hole or a file grown past largest is dropped" {
