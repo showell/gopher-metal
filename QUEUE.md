@@ -1144,7 +1144,7 @@ layer, last. 76-78 stand; take 79-83 before them.*
 *Item 87 queued 2026-10-03 at Steve's request: take it right after the
 item you are on.*
 
-87. **[CC: started]** **A page cache on metal, and what it buys.** Steve: "It's certainly
+87. **[CC: done, `5786aa8` `788a32f` `5b53fd8`; the chat judge passes on it here (TCG); KVM numbers are the box's: `probe/bench_page_cache.py`]** **A page cache on metal, and what it buys.** Steve: "It's certainly
     common for two active users to hit the same chat transcript. We could
     store almost all the chat transcripts in memory." Prod today (the
     rehearsal copy): 47 transcripts, 2.3 MB in all, the largest 362 KB;
