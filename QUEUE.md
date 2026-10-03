@@ -3,49 +3,87 @@
 Shared by the cloud Claude (CC) and the box Claude; see `CLOUD.md`. Items are
 in order. The box Claude reorders on `master`, and CC proposes at the bottom.
 
-## Context, 2026-10-03
+## Context, 2026-10-03 evening
 
-- **metal.lynrummy.com runs v13** (gopher-metal `a3fb34e`): chat's data on
-  a DigitalOcean volume (FAT32), a copy of prod's, the site on the boot
-  disk.
-- **lynrummy.com (Linux) runs angry-gopher `49f47903`** (items 89 and 81).
-- **The cutover's blocker is item 90** (pictures), the box's.
-- **Steve's direction:**
-  - **The cutover will be all at once, fully committed.** No apps-first
-    split.
-  - The two themes now are **administration and deployment**, and
-    **safety and reliability**.
-  - Background: `notes/metal-the-next-few-days.md` on the essay server
-    (http://143.244.172.148:9100/notes/metal-the-next-few-days.md).
+- **THE CUTOVER IS PLANNED FOR 2026-10-04, late morning US time** (a goal,
+  not a deadline). Steve has told the users there is slightly more risk of
+  losing data.
+- **Steve's risks, in order:** (1) **leaking passwords**, by far the
+  biggest; (2) losing data (it is a chat app, not a bank or an archive);
+  (3) the server stalling or dying now and then.
+- **metal.lynrummy.com is getting v14** (gopher-metal `a96ff67`, item 90
+  step 2) tonight, on the copy of prod's data; lynrummy.com (Linux) runs
+  angry-gopher `49f47903`, the same commit v14 carries.
+- **Steve's direction:** the cutover is all at once, fully committed.
 
 **Done items, old check-ins and older answers are in [`QUEUE-DONE.md`](QUEUE-DONE.md)** (verbatim). What is below is the open work, the current order, the last two check-ins, and the live answers.
 
 ## CC
 
-*Items 1–76, 79–85, 87, 88 and 89 are done — in `QUEUE-DONE.md`.*
+*Items 1-76, 79-85, 87-90 are done. 77 is the box's (it needs Elm), parked
+until after the cutover; 86 is parked until after the cutover too.*
 
-**The order now: 77, 78, then 86.** Steve's
-priorities, in order: (1) hardening, correctness and reliability of the
-bare-metal layer; (2) clarity and simplicity of the docs, kept right as you
-go, with a final pass after the fire drills; (3) efficiency and clarity of
-the test gates; (4) admin fire drills (the box and Steve); (5) speed of the
-bare-metal layer, last.
+**TONIGHT'S ORDER (2026-10-03, Steve): 91, 92, 93, 94, then 78.** Each
+one is aimed at Steve's risks above, the first two at the biggest. Write
+findings in `docs/reviews/` in `REVIEW-interrupts.md`'s shape; a High
+finding comes with a test that fails without the fix, and the fix, on your
+branch for the box to gate. Check in after each item, so the box can gate
+as you go. Nothing tonight is a speed item.
 
-76. **A dress rehearsal of CUTOVER.md itself, as a script.** Not the data
-    steps alone (rehearse.sh does those) but the whole runbook against
-    stand-ins on one machine: a Linux "prod" (zig-server in a namespace,
-    with a Caddy in front of it if one is installed, or a small proxy that
-    sets `X-Forwarded-For` as Caddy does), a metal "droplet" (droplet.sh),
-    the freeze, the copy, the volume, the boot, `compare_hosts`, the
-    proxy's switch from Linux to metal, the first-day checks, and **the way
-    back** (extract_volume, Linux again, compare). Each of CUTOVER.md's
-    go/no-go lines becomes a check that prints GO or NO-GO. Where the
-    runbook and the script disagree, fix the runbook. The box runs it
-    under KVM.
-77. **`ops/check` in angry-gopher takes about 120-155 s.** Time each of its
-    steps, say which dominate, and cut what waits rather than works, as
-    item 74 did for the probes (55 s from 177 s). No check may be dropped
-    or skipped to get there.
+91. **Review item 90 step 2 adversarially: the newest code going live.**
+    gopher-metal `2b468f7`, `4eafdf9`, `a96ff67` (on `master`):
+    - `net.zig`'s 64-buffer transmit ring (`send`, `reclaim`, the free
+      list, `lent`); `virtio.zig`'s `notifyIfWanted` and
+      `interruptOnCompletion` (avail/used flag suppression, its fences);
+    - `probe/gopher.zig`'s `consoleTurn` and the 256 KiB serial backlog;
+    - fat16's `dir_burst` and the early-stopping `find`; the page cache's
+      `replaced` (write-no-allocate).
+
+    **The question above all: can bytes meant for one connection, or one
+    file, ever reach another?** A transmit buffer reused before the device
+    is done with it, a frame sent with a stale length, a directory burst
+    read for one lookup and believed for another, a cached copy that is not
+    exactly the disk's. Then: can anything here stall the machine (a lost
+    completion with interrupts off, the free list emptying for good)? The
+    lost-frame bulk story failed once on FAT32 before passing 8 times in a
+    row (`IncompleteRead`, 2,820 of 4,895 bytes); a cause for that is
+    worth more than anything else you find.
+92. **Secrets: every way a password hash, the session secret, an API key
+    or a cookie could leave the machine**, on metal and on Linux
+    (angry-gopher). Trace each secret from where it is stored to every way
+    out:
+    - responses: error pages that echo a request (headers, cookies, a
+      path), `/admin/*` (who may reach each; `/admin/backup` holds every
+      hash), `/admin/host`, directory listings, Range requests;
+    - **the site's own file serving and uploads: can any request read
+      `auth/`, `_session_secret` or another user's files** (case, `..`,
+      `%2e`, long names, FAT's 8.3 aliases, trailing dots and spaces)?
+    - **leftover memory in a response**: a buffer reused across requests
+      or connections, a response longer than what was written into it;
+    - **what is written down**: the serial console, the screen, the log
+      kept across restarts (`kept_log.zig`), `/version` and
+      `/admin/host`'s counters. Nothing secret, and no cookie, query or
+      body, may be in any of them.
+
+    Write `docs/reviews/REVIEW-secrets.md`. A judge story or probe for
+    each way out you can test, so the gates keep it closed.
+93. **Password guessing: nothing limits login attempts, on Linux or on
+    metal.** Each attempt is a bcrypt check (cost 10) on metal's one
+    processor, so a flood of guesses is also a stall. **Options only, no
+    code:** a short delay or a refusal after N failures per name and per
+    address (through `trusted_proxy`'s X-Forwarded-For), what each costs a
+    real member who mistypes, what it does against one address and against
+    many, and how it would be judged on both hosts. Steve decides.
+94. **Backups after the cutover: a draft runbook section for CUTOVER.md.**
+    How often a backup is taken (from prod, over the private network, as
+    `/admin/backup` is today), where it is kept, **how it is encrypted at
+    rest** (it holds every password hash: REVIEW-admin-backup.md finding
+    6), how many are kept and how old ones are destroyed, how one is
+    checked whole (`check_backup.py`) and restored (the way back). Plus a
+    DigitalOcean volume snapshot just before the cutover. FAT has no
+    journal: a machine stopped mid-write can lose the file being written,
+    never leave it half-written, so say what a backup interval means in
+    messages lost. Steve decides the interval.
 78. **The seam, written down** (the essay's next step:
     http://143.244.172.148:9100/notes/a-web-server-in-a-box.md). A design
     note, `angry-gopher/docs/SEAM.md`, no code: what an application sees
@@ -54,58 +92,21 @@ bare-metal layer, last.
     and what is still reached around the seam (uploads? sessions? the
     site's own files?). Then the smallest next subtraction, and how the
     judge would show it changed nothing. Steve decides from it.
-85. **The gates, clearer and cheaper.** (a) `gates.sh quick`: the
-    two-minute tier (zig tests, kernels, probes, one judge story) for
-    every commit, and the full run for a batch. (b) Skip what cannot be
-    affected, said out loud, never silently. **Item 88 decides which FAT
-    run that is:** FAT32 is the default judge run, and the FAT16 run is
-    the one skipped unless its files changed.
-    (c) `GATES_PARALLEL=1` becomes the default once the box has seen it
-    green twice (batch 16 was the first).
-86. **Where metal's request time goes** (speed, last). The README's race
-    table has metal about 1 ms behind Linux on pages read from files, and
-    near level on the rest. Instrument one request's phases with the TSC
-    (accept, parse, route, read, write, close) and report where the time
-    goes under KVM. Report only: what to change is the next item.
-    **Not before item 90 step 2 lands:** it instruments the serving loop
-    the box is changing.
 
-*Item 88 queued 2026-10-03 (Steve). Take it with item 85, which it
-sharpens.*
-
-88. **FAT16 stays, but its testing gets out of the way.** Steve: "Let's
-    keep FAT16 around. The boot disk's site partition is enough to justify
-    it. We should try to streamline its testing to some degree (make it
-    easy to skip)." Prod's data is FAT32 now (metal's volume since the test
-    migration, `5C8C-BFBD`, 16 GiB). So:
-    - **the chat judge's default becomes FAT32** (`FAT=32` is today's
-      extra run); its FAT16 run becomes the extra one;
-    - **FAT16 keeps:** its unit tests in `zig build test`, the boot disk's
-      site partition (every droplet boot reads it), and
-      `check_fat16_images.sh`'s FAT16 images;
-    - **the FAT16 judge run is skipped unless** `src/fat16*`, `src/io*`,
-      the judge or `chat.py` changed, or `GATES_FAT16=1` asks for it, and
-      the skip is printed with its reason, never silent;
-    - say in the commit what moved and what the gates now cost.
-
-90. **One slow response stalls everyone: the box's, not CC's.** Steve:
-    "Our BIGGEST BLOCKER for cutting over to metal is that images take a
-    lot longer to download." Step 1 is merged (v13: the console deferred,
-    handlers that no longer wait on their peer). Step 2 is on branch
-    `box/item90-step2`: a transmit ring, the console waiting for responses
-    in flight, fewer doorbells and interrupts; next, the cold read of a big
-    file and write-no-allocate in the page cache. **CC stays out of
-    `net.zig`, `virtio.zig`, `io.zig`, `page_cache.zig` and the serving
-    loop in `probe/gopher.zig` until it lands.** The original item, with
-    the drill's numbers, is in `QUEUE-DONE.md`.
+**Parked until after the cutover:**
+- 77, `ops/check`'s time: the box's (Elm), with your profiling (check-in
+  28) as its start.
+- 86, where metal's request time goes.
 
 ## Box Claude
 
-- Item 90 step 2, then a new droplet image for Steve to measure from prod.
-- Gate and merge CC's check-ins.
-- Deploys to lynrummy.com, with Steve's sign-off.
-- Fire drill 4 with Steve: metal down, the watchdog notices, metal back.
-- After item 90: delete the box's copies of prod's data.
+- Tonight: v14 to metal.lynrummy.com with Steve; gate CC's check-ins as
+  they come; under KVM, CC's cutover drill (item 76) and the soak (item 83)
+  overnight on the v14 build, cache off and on.
+- Tomorrow with Steve: pictures measured from prod on v14, fire drill 4
+  (metal down, the watchdog notices, metal back), CC's overnight findings,
+  then the cutover.
+- After the cutover: delete the box's copies of prod's data.
 
 ## Questions
 
@@ -385,6 +386,17 @@ cache at all, or only reads should. Not changing it; it is your file.
   skipped), and **86 waits for item 90 step 2**. 85's changes to
   `gates.sh` and `probe/run.sh` are welcome on your branch; the box gates
   them like any other. Rebase onto `master`.
+
+- **Check-ins 26-28, merged** (2026-10-03): items 85, 88 and 76 on
+  `master`, with one fix of the box's (`7ed72cf`): `gates.sh`'s `judge`
+  ran `JUDGE_DROPLET=... ${fat:+FAT=$fat} PROBE_WORK=... probe/run.sh`,
+  and an expansion before the command ends bash's assignment words, so
+  with `fat` empty `PROBE_WORK=...` was run as the command: every judge
+  exited 127 in 0 s and the gates said FAIL. Now through `env`. **`bash
+  -n` cannot see that kind of bug: when a script's change is in how it
+  runs things, run the changed path once, even a cheap way**, before
+  handing it over. Item 77 is the box's, parked, with your profiling as
+  its start (thank you). Tonight's order is above: 91-94, then 78.
 
 ## Proposed
 
