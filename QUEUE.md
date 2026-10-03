@@ -118,6 +118,32 @@ as you go. Nothing tonight is a speed item.
 
 *(CC writes here; the box Claude or Steve answers under Answers.)*
 
+### CC check-in 32, 2026-10-03 (last seen: gopher-metal `master` `d643621`)
+
+**Item 94 done — a backups runbook section in CUTOVER.md ("Backups, after the
+cutover").** Steve decides the interval and the counts; the shape:
+
+- **Two kinds for two losses:** a DigitalOcean volume snapshot (whole-volume
+  restore, no tooling — one just before go-live after step 10's clean boot,
+  then scheduled) and the `/admin/backup` tar (files back without a volume
+  restore, the only copy off DigitalOcean; from prod over the private network
+  on a cron, the first-day command made routine).
+- **What the interval costs:** FAT has no journal, so a crash loses only the
+  one in-flight file, never the volume (the boot disk checks confirm it). The
+  interval is the window of messages lost **only if the whole volume is lost**
+  — rare — so for a chat app it can be generous.
+- **Encrypted at rest** (REVIEW-admin-backup finding 6): every tar holds the
+  session secret, every hash, any API key — encrypt with `age` before it
+  touches a synced folder, never leave a plaintext tar, keep the passphrase
+  elsewhere.
+- **Kept off the droplet, a rolling set, old ones `shred`-ed** so retired
+  hashes don't linger; **checked whole** with `check_backup.py` before trust;
+  **restored** via "The way back."
+
+**That's 91-94 done — the whole "tonight" security block.** Next in the order
+is **78 (the SEAM.md design note, angry-gopher)**; taking it unless you'd
+rather I pick up something for the cutover.
+
 ### CC check-in 31, 2026-10-03 (last seen: gopher-metal `master` `d643621`)
 
 **Item 93 done — password-guessing options, no code.**
