@@ -1014,15 +1014,31 @@ pub const Volume = struct {
     /// next sector" past a cluster edge is usually some other file's data. A long
     /// name whose parts straddled the edge wrote its tail there. findRun already
     /// walked the directory properly; now it hands over what it walked.
+    ///
+    /// **AND THE ORPHANS JUST BEFORE IT.** A long name's parts must be followed
+    /// at once by their short entry, so live parts followed by a free slot are
+    /// an orphan: what a write or a remove that failed or stopped part-way
+    /// leaves. Harmless while the slot after them stays free; but the reader
+    /// ties a long name to the entry after it by an 8-bit checksum, so a new
+    /// entry written there whose short name happens to sum the same (1 in
+    /// 256: `B` and `C~1` do) is listed under the orphan's name and lost
+    /// under its own (QUEUE.md item 87, found by the page cache's test).
+    /// writeEntry tombstones them first.
     const Run = struct {
         slots: [max_long_parts + 1]Slot = undefined,
         len: u32 = 0,
+        orphans: [max_long_parts]Slot = undefined,
+        orphans_len: u32 = 0,
     };
 
     fn findRun(self: *Volume, dir_cluster: Cluster, needed: u32) Error!Run {
         if (needed == 0 or needed > max_long_parts + 1) return Error.BadName;
         var walk = try Walk.start(self, dir_cluster);
         var run = Run{};
+        // Live long-name parts since the last other entry: the last of them,
+        // in order, as many as a name has.
+        var parts: [max_long_parts]Slot = undefined;
+        var parts_len: u32 = 0;
 
         while (true) {
             try self.readSector(walk.lba, self.scratch);
@@ -1030,11 +1046,24 @@ pub const Volume = struct {
             while (at + dirent_size <= sector_size) : (at += dirent_size) {
                 const first = self.scratch[at];
                 if (first == 0x00 or first == 0xE5) {
+                    if (run.len == 0) {
+                        @memcpy(run.orphans[0..parts_len], parts[0..parts_len]);
+                        run.orphans_len = parts_len;
+                    }
+                    parts_len = 0;
                     run.slots[run.len] = .{ .lba = walk.lba, .at = at };
                     run.len += 1;
                     if (run.len == needed) return run;
                 } else {
                     run.len = 0;
+                    if (self.scratch[at + 11] == attr_long_name) {
+                        if (parts_len == parts.len) {
+                            std.mem.copyForwards(Slot, parts[0 .. parts.len - 1], parts[1..]);
+                            parts_len -= 1;
+                        }
+                        parts[parts_len] = .{ .lba = walk.lba, .at = at };
+                        parts_len += 1;
+                    } else parts_len = 0;
                 }
             }
             // A run MAY straddle sectors and clusters: the walk says where the
@@ -1213,6 +1242,14 @@ pub const Volume = struct {
         const parts = longParts(name);
         const sum = shortChecksum(short);
         if (run.len != parts + 1) return Error.BadName; // the run was sized for another name
+
+        // An orphan just before the run goes first (see Run): a stop after
+        // this leaves it gone and the run still free.
+        for (run.orphans[0..run.orphans_len]) |o| {
+            try self.readSector(o.lba, self.scratch);
+            self.scratch[o.at] = 0xE5;
+            try self.writeSector(o.lba, self.scratch);
+        }
 
         var next: u32 = 0;
         var part: u32 = parts;

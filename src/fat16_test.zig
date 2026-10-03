@@ -866,6 +866,28 @@ test "a file written over a directory's name is refused, and the directory and i
     }
 }
 
+test "a long name's orphan parts are tombstoned before a new entry is written after them, so it is not listed under their name" {
+    for (configs) |cfg| {
+        const d = try Disk.make("orphan-long-name", cfg.shape, cfg.cached);
+        defer d.deinit();
+        // "c" is stored as a long name and the alias C~1, whose checksum is
+        // 0xC0; so is the short name B's. Tombstone c's short entry alone, as
+        // a remove stopped between its two steps leaves it: the long part
+        // is an orphan, followed by a free slot.
+        try d.vol.writeFile("data/c", "");
+        const c = try d.vol.open("data/c");
+        d.bytes[(d.vol.start_lba + c.lba) * test_disk.sector + c.slot] = 0xE5;
+        try d.mount(cfg.cached);
+
+        try d.vol.writeFile("data/B", "bee");
+        try d.expectFile("data/b", "bee");
+        try testing.expectError(fat16.Error.NotFound, d.vol.open("data/c"));
+        const dir = try d.vol.open("data");
+        var buf: [64]u8 = undefined;
+        try testing.expectEqualStrings("B", try d.names(dir.first_cluster, &buf));
+    }
+}
+
 // ---- rename, for a replace that survives a crash (QUEUE item 24) -------------
 
 test "rename moves a file to a new name, and over a file, keeping that file's name" {
