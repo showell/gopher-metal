@@ -129,6 +129,34 @@ const Scenario = struct {
     /// The host tells the table it made room, as `streamFn` does; otherwise
     /// the table has to notice by itself.
     host_announces: bool,
+    /// **DETERMINISTIC LOSS, FOR THE SWEEP** (QUEUE.md item 96): drop the
+    /// frame at this 0-based index among all frames the table sends the client,
+    /// once. Null for the random scenarios, which lose by `loss`.
+    drop_nth_to_client: ?u64 = null,
+
+    /// A fixed scenario for the item-96 sweep: a few-KB answer the host closes
+    /// after, clean except for one dropped frame to the client, with ACKs
+    /// delayed and frames reordered (jitter). This is the shape the lost-frame
+    /// `IncompleteRead` was seen in, made deterministic.
+    fn fixed(answer_len: usize, drop_nth: ?u64, announces: bool) Scenario {
+        return .{
+            .request_len = 200,
+            .answer_len = answer_len,
+            .loss = 0,
+            .lossy_until = 0,
+            .duplicate = 0,
+            .corrupt = 0,
+            .delay_ns = 500_000,
+            .jitter_ns = 3 * ns_per_ms, // reorders frames of the same moment
+            .delayed_ack_ns = 40 * ns_per_ms,
+            .half_close = false,
+            .host_stall_ns = 0,
+            .client_stall_ns = 0,
+            .vanish_at = null,
+            .host_announces = announces,
+            .drop_nth_to_client = drop_nth,
+        };
+    }
 
     fn choose(rng: std.Random) Scenario {
         const lossiness = rng.uintLessThan(u8, 3);
@@ -173,9 +201,21 @@ const Network = struct {
     corrupted: u64 = 0,
     /// Frames dropped because too many were in flight: a router's queue.
     overflowed: u64 = 0,
+    /// Frames the table has sent the client, for `drop_nth_to_client`.
+    to_client: u64 = 0,
 
     fn send(self: *Network, rng: std.Random, sc: *const Scenario, now: i96, to_table: bool, frame: []const u8) void {
         self.sent += 1;
+        // The deterministic drop (item 96): one chosen frame to the client,
+        // whatever the clock. Counted as lost, like any other.
+        if (!to_table) {
+            const nth = self.to_client;
+            self.to_client += 1;
+            if (sc.drop_nth_to_client == nth) {
+                self.lost += 1;
+                return;
+            }
+        }
         if (now < sc.lossy_until and rng.float(f64) < sc.loss) {
             self.lost += 1;
             return;
@@ -785,6 +825,21 @@ const Sim = struct {
         self.prng = std.Random.DefaultPrng.init(seed);
         self.rng = self.prng.random();
         self.sc = Scenario.choose(self.rng);
+        self.build();
+    }
+
+    /// Like `init`, but with a chosen scenario (the item-96 sweep). The seed
+    /// still seeds the RNG, so jitter — which is what reorders frames — is
+    /// deterministic per (seed, scenario).
+    fn initScenario(self: *Sim, seed: u64, sc: Scenario) void {
+        self.seed = seed;
+        self.prng = std.Random.DefaultPrng.init(seed);
+        self.rng = self.prng.random();
+        self.sc = sc;
+        self.build();
+    }
+
+    fn build(self: *Sim) void {
         self.now = 0;
         self.net = .{};
         self.host = .{};
@@ -925,4 +980,31 @@ const regressions = [_]u64{
 
 test "the table against a simulated network and an RFC 9293 client, a handful of seeds" {
     for (seeds) |seed| try runSeed(seed);
+}
+
+// **THE LOST-FRAME IncompleteRead, HUNTED** (QUEUE.md item 96). The bug was
+// seen once in nine FAT32 runs of the bulk story with one frame in seven lost:
+// the client got 2,820 of 4,895 bytes and then end-of-stream. Here, where loss
+// and time are ours, a few-KB answer the host closes after is run under every
+// placement of a single lost frame to the client in the first 20 it sends,
+// with ACKs delayed and frames reordered. The completion oracle in judge
+// catches exactly the reported failure — a short answer, or a FIN/close with
+// data still owed, or a give-up/reset on a client that stayed. A failing n
+// is the repro; a clean sweep says the bug is not a single lost frame in this
+// shape, and the box reads a wire capture under KVM (the bulk story carries
+// the per-connection close counts it needs).
+test "item 96: one lost frame to the client, swept over the first 20, always recovers" {
+    for ([_]bool{ true, false }) |announces| {
+        for ([_]usize{ 3000, 4895, 16000 }) |answer| {
+            for (0..20) |n| {
+                const sim = try std.testing.allocator.create(Sim);
+                defer std.testing.allocator.destroy(sim);
+                sim.initScenario(90_000 + n, Scenario.fixed(answer, @intCast(n), announces));
+                sim.run() catch |e| {
+                    std.debug.print("item 96: dropping frame #{d} to the client (answer {d} B, announces {any}) did not recover\n", .{ n, answer, announces });
+                    return e;
+                };
+            }
+        }
+    }
 }

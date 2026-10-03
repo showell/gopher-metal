@@ -228,6 +228,18 @@ pub fn main(init: std.process.Init.Minimal) !void {
             switch (r.event) {
                 .closed => {
                     closes += 1;
+                    // **WHAT THE BOX NEEDS TO READ A LOST-FRAME REPRO**
+                    // (QUEUE.md item 96): the kernel's counts for this
+                    // connection at close — bytes we queued the peer never
+                    // acknowledged, timeouts since its last ack, and how our
+                    // FIN stood. A clean close is silent (nothing owed, no
+                    // retries); a short answer (the IncompleteRead) prints its
+                    // debt, beside the wire the box captures under KVM.
+                    const c = &table.conns[r.index];
+                    if (c.queued() != 0 or c.retries != 0) std.debug.print(
+                        "serve: conn {d} closed owing {d} byte(s), {d} timeout(s) since the last ack, our FIN {s}\n",
+                        .{ r.index, c.queued(), c.retries, @tagName(c.fin) },
+                    );
                     answers[r.index].active = false;
                     table.release(r.index);
                 },
