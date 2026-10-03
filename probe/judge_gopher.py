@@ -2067,10 +2067,16 @@ def admin_reset_failures(elf, linux_bin, content, pristine, work, mnt, gopher_ro
     new_hash = admin_hash(gopher_root, RESET_PASSWORD)
     expect = lambda ok, what: None if ok else failures.append(what)
 
-    def boot(image, scratch, reset_line, n):
+    # **A SCRATCH PER BOOT**: on the droplet machine a boot splits the site
+    # off into its scratch (split_site_off), so a later boot of the same disk
+    # gets the site put back from the earlier one's scratch first.
+    def boot(image, reset_line, n, after=None):
+        bscratch = tempfile.mkdtemp(dir=scratch)
+        if DROPLET and after is not None:
+            restore_site(image, os.path.join(after, "site"), mnt)
         disk_write(image, mnt, "gopher-metal.conf", request_limit_text(image, n) + reset_line)
-        qemu, port, serial = start_kernel(elf, image, scratch)
-        return qemu, port, serial
+        qemu, port, serial = start_kernel(elf, image, bscratch)
+        return qemu, port, serial, bscratch
 
     scratch = tempfile.mkdtemp(dir=work)
     image = os.path.join(scratch, "disk.img")
@@ -2078,21 +2084,21 @@ def admin_reset_failures(elf, linux_bin, content, pristine, work, mnt, gopher_ro
     line = f"admin_password_reset = Steve {new_hash}\n"
 
     # The boot that applies it.
-    qemu, port, serial = boot(image, scratch, line, 2)
+    qemu, port, serial, first = boot(image, line, 2)
     expect(logs_in(port, RESET_PASSWORD), "metal: the reset password did not log in")
     expect(not logs_in(port, MEMBER_PASSWORD), "metal: the old password still logged in after the reset")
     _, log = finish_kernel(qemu, serial)
     expect("admin password reset for Steve: applied;" in log, "metal: the boot did not say it applied the reset")
 
     # The same image again: once is once.
-    qemu, port, serial = boot(image, scratch, line, 1)
+    qemu, port, serial, _ = boot(image, line, 1, after=first)
     expect(logs_in(port, RESET_PASSWORD), "metal: the reset password did not log in on the second boot")
     _, log = finish_kernel(qemu, serial)
     expect("applied by an earlier boot; nothing changed" in log, "metal: the second boot did not say it had applied it before")
 
     # Someone else's name: refused, the old password still good.
     shutil.copy(pristine, image)
-    qemu, port, serial = boot(image, scratch, f"admin_password_reset = Mallory {new_hash}\n", 1)
+    qemu, port, serial, _ = boot(image, f"admin_password_reset = Mallory {new_hash}\n", 1)
     expect(logs_in(port, MEMBER_PASSWORD), "metal: a reset for another name changed the admin's password")
     _, log = finish_kernel(qemu, serial)
     expect("REFUSED: uid 1 is not named so" in log, "metal: a reset for another name was not refused out loud")
