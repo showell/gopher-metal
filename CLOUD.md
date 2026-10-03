@@ -72,6 +72,11 @@ the gates.
 
 ## Limits
 
+- **Your container's disk is small, and zig fills it.** It filled twice on
+  2026-10-02/03: zig caches and old scratch images, then a mutation run
+  that built everything into one `.zig-cache`, after which not even a
+  command's output could be written. Clear `.zig-cache` and scratch images
+  between large runs, and give a mutation run a cache it removes after.
 - Do not edit:
   - deployment state: `droplet/volume-serial`, prod's Caddy file;
   - anything that names a real machine's address.

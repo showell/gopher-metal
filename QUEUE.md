@@ -1047,6 +1047,36 @@ rehearsal on prod's copy. **Before 70-74.***
     way is acceptable. The one thing to keep is consistent ownership: a
     build cache half owned by root breaks the next ordinary `zig build`.
 
+*Items 76-78 queued 2026-10-03 (box Claude, keeping the queue full). The
+cutover is rehearsed (MIGRATION.md, FAT16 and FAT32); what is left is
+mostly Steve's (v9 on metal, the restart test at the console, the session
+decision) and the day itself. These three are what the box would want
+before that day.*
+
+76. **A dress rehearsal of CUTOVER.md itself, as a script.** Not the data
+    steps alone (rehearse.sh does those) but the whole runbook against
+    stand-ins on one machine: a Linux "prod" (zig-server in a namespace,
+    with a Caddy in front of it if one is installed, or a small proxy that
+    sets `X-Forwarded-For` as Caddy does), a metal "droplet" (droplet.sh),
+    the freeze, the copy, the volume, the boot, `compare_hosts`, the
+    proxy's switch from Linux to metal, the first-day checks, and **the way
+    back** (extract_volume, Linux again, compare). Each of CUTOVER.md's
+    go/no-go lines becomes a check that prints GO or NO-GO. Where the
+    runbook and the script disagree, fix the runbook. The box runs it
+    under KVM.
+77. **`ops/check` in angry-gopher takes about 155 s.** Time each of its
+    steps, say which dominate, and cut what waits rather than works, as
+    item 74 did for the probes (55 s from 177 s). No check may be dropped
+    or skipped to get there.
+78. **The seam, written down** (the essay's next step:
+    http://143.244.172.148:9100/notes/a-web-server-in-a-box.md). A design
+    note, `angry-gopher/docs/SEAM.md`, no code: what an application sees
+    today (the Store, done; the Bus, `bus.zig`; requests and responses;
+    clock, random, log, config), mapped to the files that provide each,
+    and what is still reached around the seam (uploads? sessions? the
+    site's own files?). Then the smallest next subtraction, and how the
+    judge would show it changed nothing. Steve decides from it.
+
 ## Box Claude
 
 - v6: gates, images, deploy with Steve, and the survival test (the marker
@@ -1744,6 +1774,12 @@ What each needs from the box:
   So prod is far inside every bound you listed. Findings 1 and 3 are items
   68-69. Check-in 12's work (63-66) is gating now, with the judge both
   ways (mtools, and `JUDGE_MOUNT=1`).
+
+- **Check-ins 15-17** (2026-10-03): thank you. Batch 16 (70-74) is merged:
+  green with the judges side by side, and a batch now takes 18 minutes,
+  not 30. 75 and the overnight polish are gating now; the box then runs
+  `rehearse.sh` as itself and the `--mount` rehearsal, as you asked. The
+  CLOUD.md line about your disk is in.
 
 ## Proposed
 
