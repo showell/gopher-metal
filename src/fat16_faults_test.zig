@@ -22,12 +22,20 @@ const configs = blk: {
 };
 
 /// `test_disk.Disk`, kept as an image when the tests are asked to keep them
-/// (-Dfat16-images).
+/// (-Dfat16-images), for tools/check_fat16_images.sh to judge.
 const Disk = struct {
     fn make(label: []const u8, shape: Shape, cached: bool) !*test_disk.Disk {
         const d = try test_disk.Disk.make(label, shape, cached);
         d.images_dir = options.images_dir;
         return d;
+    }
+
+    /// Not kept: a disk the tests failed or lied to on purpose, run after
+    /// run, whose last state may hold the damage that allows (a leak), and
+    /// is no one outcome to name. The stop test keeps its images itself,
+    /// each named by what the check found.
+    fn makeUnkept(label: []const u8, shape: Shape, cached: bool) !*test_disk.Disk {
+        return test_disk.Disk.make(label, shape, cached);
     }
 };
 
@@ -459,7 +467,7 @@ fn heldIsDisk(d: *test_disk.Disk, op: []const u8, kind: []const u8, n: u64) !voi
 
 /// How many requests `op` makes on a fresh disk, from its setup on.
 fn requestsOf(op: Stopped, cfg: anytype) !u64 {
-    const d = try Disk.make("limit-count", cfg.shape, cfg.cached);
+    const d = try Disk.makeUnkept("limit-count", cfg.shape, cfg.cached);
     defer d.deinit();
     try op.setup(&d.vol);
     setFsInfo(d);
@@ -479,7 +487,7 @@ test "a request that fails is an error, and the machine carries on with nothing 
             if (cfg.shape.kind == .fat32 and !cfg.cached) continue;
             const kind = if (cfg.shape.kind == .fat32) "FAT32" else "FAT16";
             const total = try requestsOf(op, cfg);
-            const d = try Disk.make("limit-fails", cfg.shape, cfg.cached);
+            const d = try Disk.makeUnkept("limit-fails", cfg.shape, cfg.cached);
             defer d.deinit();
             try op.setup(&d.vol);
             setFsInfo(d);
@@ -543,7 +551,7 @@ test "a disk that lies (a write that lands nothing or half, a read of other byte
                 // lies is the same code on both, and FAT32's disk is 35 MB.
                 if (cfg.shape.kind == .fat32 and lie != .garbage) continue;
                 const total = try requestsOf(op, cfg);
-                const d = try Disk.make("limit-lies", cfg.shape, cfg.cached);
+                const d = try Disk.makeUnkept("limit-lies", cfg.shape, cfg.cached);
                 defer d.deinit();
                 try op.setup(&d.vol);
                 setFsInfo(d);
