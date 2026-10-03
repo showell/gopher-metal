@@ -65,7 +65,8 @@ check-in after each, angry-gopher changes on its branch as before.
     clears that address's count; the 429 names the bound; numbers in one
     place. Tests on Linux, and a judge story so both hosts are held to it
     (including a counter that proves the refusal never reached bcrypt).
-    Steve answers in the morning whether it ships with the cutover.
+    **Steve, 2026-10-03: yes, with the cutover**, if the box's gates are
+    green in the morning; the numbers as above.
 98. **A backup script for Steve to run by hand** (`droplet/backup.sh` or
     `.py`, run on prod): asks for the admin password (never stored, never
     in argv or the environment), fetches `/admin/backup` over the private
@@ -74,7 +75,12 @@ check-in after each, angry-gopher changes on its branch as before.
     older ones, and never leaves a plaintext tar behind, even on failure
     (a trap). CUTOVER.md's backups section points at it, and says the
     schedule is **DigitalOcean's daily volume snapshots plus this by hand**
-    (no password stored on prod: the box's proposal to Steve). Test it
+    (no password stored on prod: **Steve agreed, 2026-10-03**). **Backups
+    happen at 20:00 UTC** (Steve: awake then; Apoorva usually asleep): the
+    snapshot scheduled for then if DigitalOcean allows a time, and Steve's
+    by-hand tar then. Say in CUTOVER.md what DigitalOcean actually offers
+    for scheduling volume snapshots (check its docs; do not assume), and if
+    it offers none, how the box or Steve takes one daily. Test it
     against the judge's Linux server with a test password; the box runs it
     against metal.
 99. **The drill's checks, made strict where they are lenient.** "First
