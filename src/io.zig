@@ -189,6 +189,31 @@ pub const SiteCache = struct {
 
 var site_cache: SiteCache = .{};
 
+test "the site cache keeps what fits, up to its capacity, and not a byte past it" {
+    const c = try std.testing.allocator.create(SiteCache);
+    defer std.testing.allocator.destroy(c);
+    c.* = .{};
+    var file: [SiteCache.largest]u8 = undefined;
+    var name: [16]u8 = undefined;
+    // Eight of the largest file it keeps are exactly its capacity.
+    const fill = SiteCache.capacity / SiteCache.largest;
+    for (0..fill) |k| {
+        @memset(&file, @truncate(k));
+        c.keep(try std.fmt.bufPrint(&name, "gallery/{d}", .{k}), &file);
+    }
+    try std.testing.expectEqual(@as(usize, SiteCache.capacity), c.used);
+    try std.testing.expectEqual(fill, c.count);
+    // One byte more is not kept, and what is kept is untouched.
+    c.keep("pages/one-more", "x");
+    try std.testing.expectEqual(fill, c.count);
+    try std.testing.expect(c.find("pages/one-more") == null);
+    for (0..fill) |k| {
+        const got = c.find(try std.fmt.bufPrint(&name, "gallery/{d}", .{k})).?;
+        try std.testing.expectEqual(SiteCache.largest, got.len);
+        try std.testing.expectEqual(@as(u8, @truncate(k)), got[got.len - 1]);
+    }
+}
+
 /// The site cache, for a host's report and the tests.
 pub fn siteCache() *SiteCache {
     return &site_cache;
