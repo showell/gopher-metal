@@ -21,8 +21,9 @@ can reach. The commands below are short because the console cannot paste.
 ## 1. Put the probe on the droplet's disk
 
 In DigitalOcean's control panel, for the gopher-metal droplet:
-1. **Power off**.
-2. **Recovery**: choose "Boot from Recovery ISO", then **Power on**.
+1. **Recovery**: choose "Boot from Recovery ISO".
+2. **Power cycle** (DigitalOcean's panel has no separate power-off for this;
+   setting Recovery and restarting is the way in).
 3. Open the **Recovery Console**.
 
 Then type:

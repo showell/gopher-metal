@@ -156,19 +156,15 @@ code, so it must use only `putPort` and the restart path.
   chipset, which also resets the devices. The triple fault resets the
   processor, and QEMU resets the machine for it; real hardware may not.
 
-**Not measured here, for the box Claude:**
-- **Under KVM:** run `probe/restart.elf` through a copy of
-  `droplet/droplet.sh` with `-no-reboot` removed (the cloud container has
-  no KVM).
-- **On a real droplet**, booted from `droplet/image.sh probe/restart.elf`,
-  read through the recovery console (droplet/RESTART-TEST.md, step by
-  step). This one matters most, and is the
-  one thing this note cannot settle.
-  - DigitalOcean may run its guests with libvirt's `on_reboot` set to
-    something other than `restart`. If a guest's reset powers the droplet
-    off instead, a restart is worse than a halt.
-  - The probe tells: it either comes back with `boot 2`, or the droplet
-    shows as off.
+**Measured on a real droplet** (2026-10-03, Steve at DigitalOcean's
+recovery console, droplet/RESTART-TEST.md): `restart.elf` reached
+`boot 4`, "restarted by a triple fault", `PASS`. **All three ways restart
+the droplet; none powers it off.** CMOS and RAM past the kernel survived
+each, as under QEMU. Under KVM on the box, the same probe through a
+`droplet.sh` without `-no-reboot` also reaches `boot 4` and `PASS`.
+
+So the restart is safe to turn on for a droplet: a failure while serving
+resets the machine, and it comes back.
 
 ## How the judge tells a restart from a halt
 
