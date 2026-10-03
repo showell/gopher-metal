@@ -1108,7 +1108,7 @@ layer, last. 76-78 stand; take 79-83 before them.*
     a fixed seed so a failure repeats. Any request that stops metal, or
     that metal answers differently from Linux in a way that matters, is a
     finding with a test.
-82. **TCP under abuse.** TCP_TESTING.md's left-alive mutant
+82. **[CC: started]** **TCP under abuse.** TCP_TESTING.md's left-alive mutant
     (`sample-too-early`) aside: SYN floods against the 256-entry table,
     RST and FIN storms, half-open connections that never finish, windows
     of zero held open. In `tcp_sim` and against Linux's TCP as the peer
