@@ -452,3 +452,101 @@ test "a site file larger than the cache keeps is read from the disk each time, a
     try testing.expectEqualSlices(u8, big, try cwd.readFileAlloc(io, "gallery/big.webp", a, .unlimited));
     try testing.expect(t.site.blk.requests > before);
 }
+
+// ── the page cache (QUEUE.md item 87) ───────────────────────────────────────
+
+const PageCache = @import("page_cache.zig").PageCache;
+
+/// What `path` holds on the data volume, read past io and its cache: its
+/// bytes (in `buf`), or null when there is no file.
+fn onDisk(path: []const u8, buf: []u8) !?[]const u8 {
+    const v = io_mod.dataVolume().?;
+    const e = v.open(path) catch return null;
+    if (e.isDirectory()) return null;
+    const n = try v.readFile(e, buf);
+    return buf[0..n];
+}
+
+test "the page cache is the disk: every change interleaved with reads, under evictions and failed writes" {
+    const t = try Two.make(true);
+    defer t.deinit();
+    // Writes fail part-way here, which leaves what a stop leaves (leaked
+    // clusters, chains longer than their files): not a healthy volume.
+    t.volume.label = "limit-page-cache";
+    // Small, so files are pushed out and read back in all the time.
+    const pc = try testing.allocator.create(PageCache);
+    defer testing.allocator.destroy(pc);
+    pc.* = PageCache.init(testing.allocator, 12 * PageCache.page, 5 * PageCache.page);
+    io_mod.keepPages(pc);
+    defer io_mod.keepPages(null);
+
+    // Paths in a few directories, some spelled two ways, one a directory's
+    // name too, so a tree removed takes files a rename moved into it.
+    const paths = [_][]const u8{ "data/a", "data/b", "DATA/B", "data/c/x", "data/c/y", "data/C/Y", "data/c/d/z", "data/e" };
+    const dirs = [_][]const u8{ "data/c", "data/c/d" };
+    var prng = std.Random.DefaultPrng.init(87);
+    const r = prng.random();
+    var bytes: [30_000]u8 = undefined;
+    var disk_buf: [200_000]u8 = undefined;
+    var pos_buf: [200_000]u8 = undefined;
+    var failed: u32 = 0;
+
+    for (0..3000) |k| {
+        const p = paths[r.uintLessThan(usize, paths.len)];
+        const q = paths[r.uintLessThan(usize, paths.len)];
+        const n = r.uintAtMost(usize, if (r.boolean()) 600 else bytes.len);
+        for (bytes[0..n], 0..) |*b, i| b.* = @truncate(i *% 7 +% k);
+        // One operation in eight has a disk request fail part-way.
+        if (r.uintLessThan(u8, 8) == 0) {
+            t.volume.blk.fault = .{ .at = t.volume.blk.requests + r.uintLessThan(u64, 40), .kind = .fails };
+        }
+        const ok = switch (r.uintLessThan(u8, 9)) {
+            0, 1 => cwd.writeFile(io, .{ .sub_path = p, .data = bytes[0..n] }),
+            2, 3 => append: {
+                const f = cwd.createFile(io, p, .{ .truncate = false }) catch |e| break :append e;
+                const st = f.stat(io) catch |e| break :append e;
+                break :append f.writePositionalAll(io, bytes[0..@min(n, 3000)], st.size);
+            },
+            4 => over: {
+                const f = cwd.createFile(io, p, .{ .truncate = false }) catch |e| break :over e;
+                const st = f.stat(io) catch |e| break :over e;
+                break :over f.writePositionalAll(io, bytes[0..@min(n, 50)], r.uintAtMost(u64, st.size));
+            },
+            // Across directories too: refused, and the cache must say so.
+            5 => cwd.rename(p, cwd, q, io),
+            6 => cwd.deleteFile(io, p),
+            7 => cwd.deleteTree(io, dirs[r.uintLessThan(usize, dirs.len)]),
+            else => cwd.createDirPath(io, dirs[r.uintLessThan(usize, dirs.len)]),
+        };
+        if (t.volume.blk.fault != null) {
+            if (ok) |_| {} else |_| failed += 1;
+            t.volume.blk.fault = null;
+        }
+
+        // Every path, through io (the cache first) and past it: the same.
+        for (paths) |path| {
+            const want = try onDisk(path, &disk_buf);
+            const got = cwd.readFileAlloc(io, path, testing.allocator, .unlimited) catch |e| switch (e) {
+                error.FileNotFound, error.IsDir => null,
+                else => return e,
+            };
+            defer if (got) |g| testing.allocator.free(g);
+            if ((want == null) != (got == null) or (want != null and !std.mem.eql(u8, want.?, got.?))) {
+                std.debug.print("after operation {d}: {s} is {d} bytes on the disk, and io says {d}\n", .{ k, path, if (want) |w| w.len else 0, if (got) |g| g.len else 0 });
+                return error.TestUnexpectedResult;
+            }
+            // A positional read from a random offset, as a Range request.
+            if (want) |w| {
+                const f = try cwd.openFile(io, path, .{});
+                const off = r.uintAtMost(usize, w.len);
+                const m = try f.readPositionalAll(io, pos_buf[0..r.uintAtMost(usize, 4000)], off);
+                try testing.expectEqualSlices(u8, w[off..][0..m], pos_buf[0..m]);
+            }
+        }
+    }
+    // The cache was used, pushed out, and survived failures.
+    try testing.expect(pc.hits > 1000);
+    try testing.expect(pc.evicted > 50);
+    try testing.expect(failed > 20);
+    try testing.expect(pc.held <= pc.budget);
+}

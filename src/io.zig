@@ -28,6 +28,7 @@
 const std = @import("std");
 const serial = @import("serial.zig");
 const stack = @import("stack.zig");
+const PageCache = @import("page_cache.zig").PageCache;
 const fat16 = @import("fat16.zig");
 const rng = @import("rng.zig");
 const tsc = @import("tsc.zig");
@@ -75,6 +76,7 @@ var data_dirs: []const []const u8 = &.{};
 /// The volume every path is resolved against, until `keepData` names the
 /// directories that are the application's data.
 pub fn mount(v: fat16.Volume) void {
+    if (page_cache) |pc| pc.clear();
     site = v;
     site_cache.clear(); // what it kept was another volume's
     // **THE FILESYSTEM GETS THIS MACHINE'S CLOCK.** FAT16 entries carry a date,
@@ -93,6 +95,32 @@ pub fn keepData(dirs: []const []const u8, on: ?fat16.Volume) void {
     data_dirs = dirs;
     data = on;
     if (data) |*d| d.clock = realUnixOrNull;
+    // Another volume, or the same one read afresh: nothing kept is known to
+    // be its.
+    if (page_cache) |pc| pc.clear();
+}
+
+/// **THE DATA'S FILES, KEPT AFTER THEIR FIRST READ** (`page_cache.zig`,
+/// QUEUE.md item 87): from here on a data file is read from `pc` when it is
+/// there, and every change io makes to a data file is told to it. Null:
+/// none kept (the probes, and a host that gives it no memory).
+pub fn keepPages(pc: ?*PageCache) void {
+    if (page_cache) |old| old.clear();
+    page_cache = pc;
+}
+
+var page_cache: ?*PageCache = null;
+
+/// The page cache, for a host's report and the tests.
+pub fn pageCache() ?*PageCache {
+    return page_cache;
+}
+
+/// The page cache, if `path` is a data file it keeps.
+fn pagesFor(path: []const u8) ?*PageCache {
+    const pc = page_cache orelse return null;
+    if (data_dirs.len == 0 or placeOf(path) != .data) return null;
+    return pc;
 }
 
 /// The two volumes, for a host's status report: the site's, and the data's
@@ -356,6 +384,12 @@ pub const File = struct {
     /// It re-opens by PATH rather than trusting the entry captured at open: an
     /// append since then has moved the size, and a read must see it.
     pub fn readPositionalAll(self: File, _: Self, buffer: []u8, offset: u64) Error!usize {
+        if (pagesFor(self.path[0..self.path_len])) |pc| if (pc.get(self.path[0..self.path_len])) |kept| {
+            if (offset >= kept.len) return 0;
+            const n = @min(buffer.len, kept.len - @as(usize, @intCast(offset)));
+            @memcpy(buffer[0..n], kept[@intCast(offset)..][0..n]);
+            return n;
+        };
         const v = try reading(self.path[0..self.path_len]);
         const e = v.open(self.path[0..self.path_len]) catch return Error.FileNotFound;
         if (e.isDirectory()) return Error.IsDir;
@@ -376,13 +410,19 @@ pub const File = struct {
     /// held. See fat16.writeInto.
     pub fn writePositionalAll(self: File, _: Self, bytes: []const u8, offset: u64) Error!void {
         if (offset > 0xFFFF_FFFF) return Error.NoSpaceLeft;
-        const v = try writing(self.path[0..self.path_len]);
-        v.writeInto(self.path[0..self.path_len], @intCast(offset), bytes) catch |e| switch (e) {
-            error.NotFound => return Error.FileNotFound,
-            error.BadName => return Error.NameTooLong,
-            error.Full, error.DirectoryFull, error.TooBig => return Error.NoSpaceLeft,
-            else => return Error.WriteFailed,
+        const path = self.path[0..self.path_len];
+        const v = try writing(path);
+        const pc = pagesFor(path);
+        v.writeInto(path, @intCast(offset), bytes) catch |e| {
+            if (pc) |c| c.forget(path);
+            return switch (e) {
+                error.NotFound => Error.FileNotFound,
+                error.BadName => Error.NameTooLong,
+                error.Full, error.DirectoryFull, error.TooBig => Error.NoSpaceLeft,
+                else => Error.WriteFailed,
+            };
         };
+        if (pc) |c| c.wrote(path, @intCast(offset), bytes);
     }
 };
 
@@ -539,6 +579,13 @@ pub const Dir = struct {
     pub fn readFileAlloc(self: Dir, ignored: Self, sub_path: []const u8, gpa: std.mem.Allocator, limit: Limit) Error![]u8 {
         self.fromRoot();
         _ = ignored;
+        const pc = pagesFor(sub_path);
+        if (pc) |c| if (c.get(sub_path)) |kept| {
+            if (kept.len > @intFromEnum(limit)) return Error.StreamTooLong;
+            const out = gpa.alloc(u8, kept.len) catch return Error.OutOfMemory;
+            @memcpy(out, kept);
+            return out;
+        };
         const keepable = cacheable(sub_path);
         if (keepable) if (site_cache.find(sub_path)) |kept| {
             if (kept.len > @intFromEnum(limit)) return Error.StreamTooLong;
@@ -555,6 +602,7 @@ pub const Dir = struct {
         const out = gpa.alloc(u8, e.size) catch return Error.OutOfMemory;
         const n = v.readFile(e, out) catch return Error.ReadFailed;
         if (keepable) site_cache.keep(sub_path, out[0..n]);
+        if (pc) |c| if (n == e.size) c.put(sub_path, out[0..n]);
         return out[0..n];
     }
 
@@ -582,12 +630,17 @@ pub const Dir = struct {
         // quietly replacing the file anyway.
         if (!options.flags.truncate) @panic("writeFile with .flags.truncate = false is not implemented on this machine");
         const v = try writing(options.sub_path);
-        v.writeFile(options.sub_path, options.data) catch |e| switch (e) {
-            error.BadName => return Error.NameTooLong,
-            error.IsDirectory => return Error.IsDir,
-            error.Full, error.DirectoryFull => return Error.NoSpaceLeft,
-            else => return Error.WriteFailed,
+        const pc = pagesFor(options.sub_path);
+        v.writeFile(options.sub_path, options.data) catch |e| {
+            if (pc) |c| c.forget(options.sub_path);
+            return switch (e) {
+                error.BadName => Error.NameTooLong,
+                error.IsDirectory => Error.IsDir,
+                error.Full, error.DirectoryFull => Error.NoSpaceLeft,
+                else => Error.WriteFailed,
+            };
         };
+        if (pc) |c| c.put(options.sub_path, options.data);
     }
 
     /// mkdir -p. The application calls it before nearly every write, because
@@ -637,6 +690,7 @@ pub const Dir = struct {
     pub fn deleteFile(self: Dir, _: Self, sub_path: []const u8) Error!void {
         self.fromRoot();
         const v = try writing(sub_path);
+        if (pagesFor(sub_path)) |c| c.forget(sub_path);
         v.remove(sub_path) catch |e| switch (e) {
             error.NotFound => return Error.FileNotFound,
             else => return Error.WriteFailed,
@@ -653,13 +707,21 @@ pub const Dir = struct {
         new_dir.fromRoot();
         const v = try writing(old_sub_path);
         if (try writing(new_sub_path) != v) return Error.WriteFailed;
-        v.rename(old_sub_path, new_sub_path) catch |e| switch (e) {
-            error.NotFound => return Error.FileNotFound,
-            error.IsDirectory => return Error.IsDir,
-            error.BadName => return Error.NameTooLong,
-            error.Full, error.DirectoryFull => return Error.NoSpaceLeft,
-            else => return Error.WriteFailed,
+        const pc = pagesFor(old_sub_path) orelse pagesFor(new_sub_path);
+        v.rename(old_sub_path, new_sub_path) catch |e| {
+            if (pc) |c| {
+                c.forget(old_sub_path);
+                c.forget(new_sub_path);
+            }
+            return switch (e) {
+                error.NotFound => Error.FileNotFound,
+                error.IsDirectory => Error.IsDir,
+                error.BadName => Error.NameTooLong,
+                error.Full, error.DirectoryFull => Error.NoSpaceLeft,
+                else => Error.WriteFailed,
+            };
         };
+        if (pc) |c| c.renamed(old_sub_path, new_sub_path);
     }
 
     /// deleteTree removes a directory and everything under it — a released
@@ -668,6 +730,7 @@ pub const Dir = struct {
     pub fn deleteTree(self: Dir, _: Self, sub_path: []const u8) Error!void {
         self.fromRoot();
         const v = try writing(sub_path);
+        if (pagesFor(sub_path)) |c| c.forgetTree(sub_path);
         v.removeTree(sub_path) catch return Error.WriteFailed;
     }
 
