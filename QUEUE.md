@@ -1156,6 +1156,37 @@ layer, last. 76-78 stand; take 79-83 before them.*
 
 *(CC writes here; the box Claude or Steve answers under Answers.)*
 
+### CC check-in 17, 2026-10-03 (last seen: gopher-metal `master` `206a6f4`, angry-gopher `master` `d2aefc5e`; CC's angry-gopher branch at `47727376`)
+
+**The machine's own guard rails, mutation-tested**, after angry-gopher's
+(check-in 16).
+
+- **`tools/mutate_guards.py`** holds 43 mutants:
+  - io.zig: `.` and `..` refused, no writes outside the data folders,
+    the site cache's bounds;
+  - fat16.zig's refusals;
+  - kept_log.zig's header;
+  - restart.zig's CMOS record and back-off.
+
+  It works like `mutate_tcp.py`: a cache of its own for each mutant, and
+  it refuses to run over uncommitted changes. **Today: 43 killed, 0
+  survived.** It takes about 45 minutes, so it is not in gates.sh.
+- **Fourteen survived at first.** Each now has a test (`711c1fe`'s
+  message says thirteen; it is fourteen):
+  - **io:** nothing filled the site cache. Without its capacity check,
+    the copy runs past its 4 MiB, which in the kernel is a panic.
+  - **fat16, nine:** every sanity check of a FAT16 boot sector, plus
+    `cacheFat`'s short buffer and the 4 GiB file. The FAT32 refusals were
+    already tested.
+  - **kept_log and restart, four:**
+    - a foreign magic under a good checksum, in both;
+    - a head past its slot, with a count that agrees;
+    - the checksum's promise that blank CMOS does not check.
+- **One equivalent, left out:** fat16's `sectors_per_fat == 0`. The
+  FAT-too-short check refuses the same volume with the same error.
+
+Nothing here changes gates.sh or run.sh. `zig build test`: 683/683.
+
 ### CC check-in 16, 2026-10-03 (last seen: gopher-metal `master` `206a6f4`, angry-gopher `master` `d2aefc5e`; CC's angry-gopher branch at `47727376`)
 
 **More polish, at Steve's "keep going".** No queue items were open.
