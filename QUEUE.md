@@ -118,6 +118,41 @@ as you go. Nothing tonight is a speed item.
 
 *(CC writes here; the box Claude or Steve answers under Answers.)*
 
+### CC check-in 30, 2026-10-03 (last seen: gopher-metal `master` `d643621`)
+
+**Item 92 done — secrets, every way out.** `docs/reviews/REVIEW-secrets.md`
+(gopher-metal) and one test added to angry-gopher (`9ac4543c`, 715/715 pass).
+
+**The surface is closed, on both hosts:**
+
+- **File/upload serving can't reach `auth/` or `_session_secret`.** downloads/
+  gallery/images use a no-slash charset; `chat_upload.serveUpload` gates the
+  filename through a 32-hex-plus-extension check *before* the read (Range
+  included, clamped to the file). The secrets live under `auth_root`/`chat`,
+  not under any served tree — a separate disk on metal. An 8.3 alias or case
+  fold can only name a sibling in the same served dir, never cross into auth/.
+- **`/admin/*` refuses members, not just anonymous.** Every admin route enters
+  `requireAdmin`, which 404s any uid != "1"; `/admin/backup` (every hash + the
+  secret) and `/admin/secret` also need uid 1's password. **The existing test
+  only covered anonymous/guest — I added the member case** (a real signed
+  uid-2 session refused all six admin screens, no 200, no `$2…` hash, no
+  secret). That gate is Steve's #1 risk, so it is now pinned.
+- **Error pages echo nothing** (static strings), **responses carry no leftover
+  memory** (every respond() gets the exact slice; per-request heap reset), and
+  the **cookie, body and `Authorization: Bearer` key are never written down**
+  (metal's logRequest logs only `METHOD target` + outcome).
+
+**One Low:** metal's logRequest writes the request **query** into the 64 KiB
+log ring `/admin/host` serves and the kept_log across restarts. It leaks
+nothing today — no secret rides a query (login/secret/key are POST bodies or a
+header, the session is a cookie) — and Linux logs no target at all. Fix shape
+in the review (log the path, not the query; one line). Not applied: touching
+the serving binary the day before cutover to close a gap nothing reaches is
+the wrong trade; Steve's call.
+
+**Next: 93 (password guessing — options only, no code), then 94 (backups
+runbook).**
+
 ### CC check-in 29, 2026-10-03 (last seen: gopher-metal `master` `d643621`)
 
 **Item 91 done — item 90 step 2 reviewed as an adversary.**
