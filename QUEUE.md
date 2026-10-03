@@ -1139,6 +1139,34 @@ layer, last. 76-78 stand; take 79-83 before them.*
     (accept, parse, route, read, write, close) and report where the time
     goes under KVM. Report only: what to change is the next item.
 
+*Item 87 queued 2026-10-03 at Steve's request: take it right after the
+item you are on.*
+
+87. **A page cache on metal, and what it buys.** Steve: "It's certainly
+    common for two active users to hit the same chat transcript. We could
+    store almost all the chat transcripts in memory." Prod today (the
+    rehearsal copy): 47 transcripts, 2.3 MB in all, the largest 362 KB;
+    all data 222 MB, nearly all of it uploaded pictures.
+    - **Where:** below the application, in metal's io layer (as Linux's
+      page cache is below angry-gopher), so the application is unchanged
+      and Linux needs nothing.
+    - **What:** whole files by path; write-through, kept exact on every
+      write, append, replace, rename, remove and removeTree (all of which
+      go through the Store now, so nothing reaches the disk around it);
+      bounded in bytes (say 64 MiB), least recently used out first; small
+      files (transcripts, sidecars, records) always fit; a large upload
+      may simply not be cached.
+    - **Proof it is exact:** host tests that interleave every mutation with
+      reads and compare with the disk; the judge unchanged; and item 79's
+      stop-at-every-write checks still pass (the cache is memory only, so
+      a stop loses nothing the disk had).
+    - **What it buys:** measure before and after, reads of a transcript
+      under QEMU (TCG timings, relative) and, on the box, `droplet/race.py`
+      and the judge's times under KVM. Report the numbers plainly, the
+      network hop between prod and metal stated separately (prod's Linux
+      is on localhost, metal is one hop away), so the comparison with
+      Linux is fair. This also answers part of item 86.
+
 ## Box Claude
 
 - v6: gates, images, deploy with Steve, and the survival test (the marker
