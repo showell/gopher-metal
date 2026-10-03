@@ -22,9 +22,9 @@ in order. The box Claude reorders on `master`, and CC proposes at the bottom.
 
 ## CC
 
-*Items 1–75, 79–84, 87 and 89 are done — in `QUEUE-DONE.md`.*
+*Items 1–75, 79–85, 87, 88 and 89 are done — in `QUEUE-DONE.md`.*
 
-**The order now: 85 with 88, then 76, 77, 78, then 86.** Steve's
+**The order now: 76, 77, 78, then 86.** Steve's
 priorities, in order: (1) hardening, correctness and reliability of the
 bare-metal layer; (2) clarity and simplicity of the docs, kept right as you
 go, with a final pass after the fire drills; (3) efficiency and clarity of
@@ -110,6 +110,41 @@ sharpens.*
 ## Questions
 
 *(CC writes here; the box Claude or Steve answers under Answers.)*
+
+### CC check-in 26, 2026-10-03 (last seen: gopher-metal `master` `78a9bd5`)
+
+**Items 85 and 88 done (one commit).** The gates are clearer and cheaper,
+and FAT16's testing is out of the way. **These change `gates.sh` and
+`probe/run.sh`, which run on your machine (CLOUD.md) — please gate them
+under KVM; I ran what I can here (`bash -n`, the two judges green on their
+new defaults) but not the full suite.**
+
+- **`./gates.sh quick`** — a two-minute tier for a single commit: `zig build
+  test`, the kernels, gopher.elf, the probes, and one chat-judge story
+  (members, FAT32) on microvm. `./gates.sh` with no arg is the full batch
+  run, unchanged in coverage.
+- **FAT32 is the default chat judge now** (88): `judge_gopher.py`'s
+  `FAT_KIND` defaults to `32`, since prod's data is FAT32. The full run does
+  the two FAT32 judges (microvm, droplet) every time.
+- **The FAT16 judge is the extra, skipped unless it could be affected**: it
+  runs when `src/fat16*`, `src/io*`, the judge or `droplet/chat.py` changed
+  since `GATES_BASE` (default `origin/master`), or `GATES_FAT16=1`. The skip
+  is printed with its reason, never silent. FAT16 stays covered every run by
+  `zig build test` and `tools/check_fat16_images.sh`.
+- **`GATES_PARALLEL=1` is the default now** (85c): you've seen it green from
+  batch 16 on. `GATES_PARALLEL=0` serializes; the output is the same either
+  way.
+- **What it costs:** quick is one story on one machine (~2 min) vs the full
+  ~20; the full run drops the always-on FAT16 judge (one of three) unless
+  FAT code changed, and runs the two FAT32 judges side by side — a batch
+  touching no FAT code is two judges wide, not three deep. `probe/run.sh`,
+  `CUTOVER.md` and `MIGRATION.md` note that the probes still default FAT16
+  while the chat judge now defaults FAT32.
+
+**Next: 76 (the CUTOVER.md dress rehearsal as a script), then 77, 78.** 76's
+script runs under KVM on your side; I'll write it to print GO/NO-GO per
+CUTOVER line and fix the runbook where they disagree, then hand it to you to
+run.
 
 ### CC check-in 25, 2026-10-03 (last seen: gopher-metal `master` `20f7461`)
 
