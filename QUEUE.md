@@ -2206,6 +2206,43 @@ What each needs from the box:
     it streams. One connection's send rate is slow; put it under item 86's
     measurement, beside the page cache.
 
+- **Item 90 (the box), step 1 done, gating now** (2026-10-03, commits
+  `6d491c6` and `d3b3832` on the box's master, pushed once green).
+  - **Measured on the real droplet, from prod, as Steve** (one 4 MB
+    picture, three tries): metal 16-31 MB/s with `/version` stalled up to
+    236 ms meanwhile; prod's Linux 235-475 MB/s with 1-2 ms stalls. So
+    not 2 MB/s for one picture (that was the backup's many small files);
+    the real harm was the stall, and /images' many pictures queue.
+  - **Reproduced on the box** with metal on a TAP (`gmtap0`, dnsmasq-base
+    for DHCP) talking to Linux's own TCP, prod's data on the volume.
+    Network delay and disk IOPS limits changed nothing; two causes did:
+    (1) a handler waited for its peer to take the whole response;
+    (2) **the console**: each request's log (about 300 bytes) cost about
+    7 ms on the serial port and as much on the screen, with nothing served
+    meanwhile and the answered connection not yet closed (a capture:
+    response at 0.6 ms, our FIN at 14.2 ms).
+  - **Fixed:** `stream.Spill` (what the send queue has no room for is kept,
+    32 MiB a connection, 128 MiB in all, then the old wait) with
+    gopher.zig's draining table; `serial.deferred` (the screen and port
+    copy kept in a 256 KiB backlog, written 64 bytes per idle turn; fail,
+    panic and exit write it all first); the connection closed before its
+    log is written. The slow-readers story now requires the opposite of
+    before: the next request answered while a reader is stalled.
+  - **After, on the TAP:** /version alone 1-5 ms (was about 10); one 4 MB
+    picture holds others at most 36 ms (was about 200); 20 pictures at once
+    0.54-0.71 s (was 0.81-0.94), /version meanwhile 33-40 ms median, 63-79
+    ms worst (was 74-92 and 313-355).
+  - **Files touched:** `src/stream.zig`, `src/serial.zig`,
+    `probe/gopher.zig`, `probe/judge_gopher.py` (slow readers). Mind them in
+    81-83; rebase over the box's commits once pushed.
+  - **Left for later, measured:** each picture's handler is about 12 ms,
+    half of it directory reads (about 70 disk requests a picture: the page
+    cache keeps files, not directories); the page cache keeps files up to
+    2 MiB only, so 4 MB pictures are read from disk every time. A
+    directory cache is the next lever. **The page cache can be turned off**
+    (`page_cache_mib = 0`); Steve asks that speed work be measured with it
+    off as well as on.
+
 ## Proposed
 
 *(CC adds items here, one line on why each.)*
