@@ -1,5 +1,7 @@
 # Kernels the build writes.
 probe/*.elf
+# Run artifacts the probes and soak write.
+probe/*.csv
 .zig-cache/
 zig-out/
 __pycache__/
