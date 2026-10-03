@@ -1101,7 +1101,7 @@ layer, last. 76-78 stand; take 79-83 before them.*
     (dropped, duplicated, reordered frames). What does the kernel do with
     each: refuse, retry, report, or carry on with bad data? Tests for the
     answers you keep; fixes for any "carry on with bad data".
-81. **[CC: started]** **Requests a stranger could send.** Fuzz the request path on metal
+81. **[CC: done; `probe/fuzz_requests.py`; a head past 16 KB now answered 431, as Linux; std's HeadParser bug in HEAD-PARSER-BUG.md]** **Requests a stranger could send.** Fuzz the request path on metal
     against Linux, as the judge compares them: malformed request lines,
     headers past every limit, chunked bodies that lie, pipelined requests,
     `Range` edges, slow and half-closed connections. Grammar-guided, with
@@ -1271,6 +1271,42 @@ capture on the tap, or `tcp_sim`'s clock) before changing anything.
 ## Questions
 
 *(CC writes here; the box Claude or Steve answers under Answers.)*
+
+### CC check-in 21, 2026-10-03 (last seen: gopher-metal `master` `5953c9d`; angry-gopher branch `49f47903`)
+
+**Items 89 and 81 done.**
+
+- **89, the admin's lost password.** `ADMIN-PASSWORD-LOST.md`, linked
+  from CUTOVER.md.
+  - **Prod:** angry-gopher's `ops/reset_admin_password`.
+  - **Metal:** `droplet/chat.py --reset-admin-password NAME`. The boot
+    applies it once, only to uid 1 by that name.
+  - **Tested:** the judge's new `admin-reset` gate passes here.
+  - **Two io bugs found on the way (`0b36067`):**
+    - a disk read that failed was taken for "no such file", so
+      `createFile` could empty a transcript;
+    - fat16 walked through a file in a path.
+- **81, requests a stranger could send.** `probe/fuzz_requests.py`, run
+  2,300 cases over two seeds, plus a Range pass.
+  - **Metal never stopped answering.**
+  - **One real difference, fixed (`44e14d7` and angry-gopher
+    `49f47903`):** a request head over 16 KB, such as an oversized
+    cookie, waited out the idle time and got no answer, holding a slot.
+    It now gets 431 at once, as on Linux, and is counted in /version.
+    The cause was in `ready.check`: a sender avoiding a silly window
+    never fills the buffer.
+  - **A std bug, not ours (`HEAD-PARSER-BUG.md`):** `HeadParser` finds a
+    bare-LF head end differently depending on how the bytes were split
+    into reads. Caddy sends CRLF, so real traffic never meets it. A test
+    pins it, and the page has a reproducer if Steve wants to report it
+    upstream.
+  - **Range on uploads:** 129 headers, all answered alike.
+- **The full chat judge passes here** on the branch before 81's last
+  commits. Please gate `ready.zig` and gopher.zig's 431 under KVM: it
+  changes when a connection is first served.
+- **Next: 82 (TCP under abuse).** I'll stay off `stream.zig` and the
+  serving loop while item 90's step 2 is yours; 82 is `tcp.zig` and
+  `tcp_sim`. Say if that collides.
 
 ### CC check-in 20, 2026-10-03 (last seen: gopher-metal `master` `43136ab`)
 
