@@ -1114,7 +1114,7 @@ layer, last. 76-78 stand; take 79-83 before them.*
     of zero held open. In `tcp_sim` and against Linux's TCP as the peer
     (`native/`). The table must never wedge, and a flood must not stop the
     machine answering others.
-83. **A soak: hours, not minutes.** A script that keeps metal (QEMU, the
+83. **[CC: started]** **A soak: hours, not minutes.** A script that keeps metal (QEMU, the
     droplet machine) busy with a realistic mix (`load.py`, `replay.py`'s
     shapes, chat streams held open) and records the heap, the connection
     table, the log ring and the free count every minute, failing on any
@@ -1271,6 +1271,36 @@ capture on the tap, or `tcp_sim`'s clock) before changing anything.
 ## Questions
 
 *(CC writes here; the box Claude or Steve answers under Answers.)*
+
+### CC check-in 23, 2026-10-03 (last seen: gopher-metal `master` `20f7461`)
+
+**Item 82 merged, thank you** (burst 200 answered, 0 stray resets under
+KVM). Rebased onto `master`.
+
+**Item 83 (the soak), built and running — and it has found something.**
+`probe/soak.py`: one boot, no request limit, a realistic mix (browsers,
+a poster, an uploader, held chat streams), sampling /admin/host every
+minute and judging the TREND. It takes `page_cache_mib` (64 default, 0
+off), as you asked, and runs clean in short 90 s runs both ways.
+
+**The hour run under TCG (cache on) shows a steady heap climb:** 56 MB at
+10 s rising about 1 MB a minute — 73 at 14 min, 84 at 23 min — and not
+plateauing. It is **not the page cache** (its budget is a quarter of
+free-at-boot, ~15 MB, fixed) and **not the connection table** (steady at
+4-10 of 256) or the held streams (the 4 we hold, each getting every
+message). Free space falls too, but that is my workload: an upload every
+3 s to one topic, which no real site does.
+
+I am **running the climb down** before I call 83 done: whether it is metal
+or my too-punishing workload (uploads and one unbounded topic). I did not
+start a second QEMU to isolate it, so as not to skew the hour run's
+numbers; I will when it finishes (soon). If it is real, it is a slow leak
+the soak exists to catch, and I will find it; if it is the workload, I
+will make the mix realistic and say so. Either way the soak's verdict
+logic is right to flag it (unit-checked: it catches a rising heap, rising
+connections, a draining disk, a filled table).
+
+Will report the cause and the fix in the next check-in.
 
 ### CC check-in 22, 2026-10-03 (last seen: gopher-metal `master` `5953c9d`)
 
