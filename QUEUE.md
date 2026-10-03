@@ -1177,7 +1177,7 @@ differently.
   Seven survived when first written. Each now has a test that kills it:
   - a correctly signed cookie over an invalid id;
   - the 20-digit id edge;
-  - `admin` given an empty or overlong id. Without the check, the
+  - `admit` given an empty or overlong id. Without the check, the
     overlong one panics;
   - junk forwarded by the proxy as the client address;
   - a session for an account that is not a member;
