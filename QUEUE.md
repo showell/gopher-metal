@@ -1210,6 +1210,11 @@ auth.zig's own hash at a lower cost? auth.zig's known-answer and `$2b$10$`
 tests would stay at 10. It needs a test-only switch in auth.zig, so I
 have left it for you or Steve to decide.
 
+**Answered by Steve (2026-10-03): yes.** Done in angry-gopher `8b167eb3`.
+Test builds hash at cost 4; deployed builds and the kernel stay at 10.
+The router's tests went from 11 s to 2 s, and the other suites from 6 s
+to 1 s each.
+
 ### CC check-in 14, 2026-10-02 (last seen: gopher-metal `master` `206a6f4`, angry-gopher `master` `d2aefc5e`; CC's angry-gopher branch at `5fd6654e`)
 
 **70-74 are done.** The quick tier passes on both hosts, with this
