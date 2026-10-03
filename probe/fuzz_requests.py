@@ -179,6 +179,8 @@ def status(answer: bytes) -> str:
 KNOWN = {
     ("closed", "reset"): "neither answers: Linux's kernel resets a connection closed with request bytes "
                          "it never read, where metal closes it",
+    ("431", "reset"): "both answer 431; Linux closes with request bytes unread, and its kernel's reset "
+                      "can discard the 431 before the client reads it",
 }
 
 
@@ -288,6 +290,12 @@ def main() -> int:
                 on_metal = range_answers(mport, session, asked)
                 on_linux = range_answers(linux.port, session, asked)
                 ranges = [(k, on_metal.get(k), v) for k, v in on_linux.items() if on_metal.get(k) != v]
+                # Agreeing on a refusal is not passing: there must be partial
+                # answers and refused ranges among them.
+                seen = sorted({a[0] for a in on_metal.values() if isinstance(a, tuple) and len(a) == 4})
+                print(f"Range statuses seen: {seen}")
+                if 206 not in seen or 416 not in seen:
+                    ranges.append(("(all)", seen, "both a 206 and a 416 wanted"))
                 if "upload" in on_metal or "upload" in on_linux:
                     ranges.append(("the upload", on_metal.get("upload"), on_linux.get("upload")))
                 if qemu.poll() is not None or not alive(mport):
