@@ -22,9 +22,9 @@ in order. The box Claude reorders on `master`, and CC proposes at the bottom.
 
 ## CC
 
-*Items 1–75, 79–85, 87, 88 and 89 are done — in `QUEUE-DONE.md`.*
+*Items 1–76, 79–85, 87, 88 and 89 are done — in `QUEUE-DONE.md`.*
 
-**The order now: 76, 77, 78, then 86.** Steve's
+**The order now: 77, 78, then 86.** Steve's
 priorities, in order: (1) hardening, correctness and reliability of the
 bare-metal layer; (2) clarity and simplicity of the docs, kept right as you
 go, with a final pass after the fire drills; (3) efficiency and clarity of
@@ -110,6 +110,46 @@ sharpens.*
 ## Questions
 
 *(CC writes here; the box Claude or Steve answers under Answers.)*
+
+### CC check-in 27, 2026-10-03 (last seen: gopher-metal `master` `78a9bd5`)
+
+**Item 76 done — the whole CUTOVER.md runbook as a drill, on stand-ins.**
+`droplet/cutover_drill.sh COPY --fat 32 --gib N` walks the runbook in order
+and turns each CUTOVER GO/NO-GO line into a line that says GO or NO-GO:
+
+- **a Linux "prod"** (zig-server) in a namespace of its own, reached only
+  over a veth, as prod's Caddy reaches it over the private network;
+- **a small proxy stands in for Caddy** — adds X-Forwarded-For, answers 502
+  when its upstream is down, and is *switched* from prod to metal and back.
+  (No real Caddy even when installed: the switch is the one piece the drill
+  drives, and this needs no root or config file. It runs where
+  `check.sh`-style gates do.)
+- **metal** (probe/gopher.elf) on the droplet's machine, the volume attached.
+
+It does the freeze (the proxy goes 502), the copy + the unsigned-window
+close, check/build/compare the volume, boot metal, compare metal with prod's
+Linux (read-only and with writes), switch the proxy to metal, the first-day
+checks (identity, a growing uptime, a backup `check_backup.py` says is whole),
+then the way back — freeze metal, `extract_volume` off it, Linux again, and
+confirm metal's writes came back. Counts and anonymised labels only; it stops
+and removes everything it starts (servers, QEMU, proxy, namespace, veth,
+scratch) and clears a killed run's leftovers next time.
+
+**Verified here (no KVM):** `cutover_drill.sh --self-test` exits 0 end to end
+under **TCG** — every runbook line GO, the backup whole, the way back through
+extract_volume, nothing named, nothing left behind. **Please run it under KVM**
+on your side (it needs `sudo -n` for the namespace/veth, like rehearse.sh);
+it is not in `gates.sh` (a pre-day tool, run on demand like rehearse). I did
+not touch `gates.sh` or `probe/run.sh`.
+
+**Two stand-in substitutions, said out loud in the drill and in CUTOVER.md:**
+step 8's recovery-console `dd` (the drill boots metal on the image it built),
+and the way back's live compare when the volume path has metal in recovery
+(extract_volume's own tree==volume check is the comparison). CUTOVER.md's
+"Before the day" and "The way back" now name the drill and both.
+
+**Next: 77** (time `ops/check`'s 120-155 s and cut what waits), then 78 (the
+SEAM.md design note). Both are in angry-gopher.
 
 ### CC check-in 26, 2026-10-03 (last seen: gopher-metal `master` `78a9bd5`)
 
