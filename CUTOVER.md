@@ -302,13 +302,33 @@ two kinds of loss:
 
 - **A DigitalOcean volume snapshot** restores the whole volume with no tooling
   — the answer to the droplet or the volume being gone. **Take one just before
-  go-live** (in the console, once step 8 has written the volume and step 10's
-  boot is clean: a known-good restore point before the first visitor), then on
-  a schedule (the console can take them automatically; daily is plenty).
+  go-live** (once step 8 has written the volume and step 10's boot is clean: a
+  known-good restore point before the first visitor), then daily.
 - **A `/admin/backup` tar** restores the files without a volume restore — the
   answer to "I need yesterday's data back," and the only one that travels off
-  DigitalOcean. Taken from `<prod>` over the private network, exactly the
-  first-day command, on a cron.
+  DigitalOcean. Taken from `<prod>` over the private network by
+  **`droplet/backup.sh`**, by hand.
+
+**The schedule: a daily volume snapshot, and the tar by hand, both at 20:00
+UTC** (Steve is awake then; Apoorva is usually asleep, so a backup catches the
+quietest copy). The two are split because of where the admin password lives:
+
+- **The volume snapshot is automated** with a DigitalOcean API token, which is
+  not the admin password, so a cron can take it. **What DigitalOcean offers
+  for scheduling volume snapshots — confirm against its current docs before
+  relying on this** (its product pages are not reachable from the build
+  environment, and the feature set changes): as of this writing, DigitalOcean's
+  *scheduled* "backups" are a **Droplet** feature, while **block-storage volume
+  snapshots are on-demand** (the console, the API, or `doctl compute volume
+  snapshot <volume-id>`). So the daily snapshot is a cron on `<box>` or
+  `<prod>` running `doctl compute volume snapshot` at 20:00 UTC and deleting
+  snapshots older than the retention you keep (`doctl compute snapshot delete`).
+  If DigitalOcean has since added native scheduled volume snapshots, use that
+  instead and drop the cron.
+- **The tar is by hand**, because `/admin/backup` needs the admin password and
+  **no admin password is stored on `<prod>`** (Steve agreed, 2026-10-03):
+  `droplet/backup.sh` asks for it each run, so Steve runs it himself at 20:00
+  UTC. It cannot be a cron.
 
 **How often (Steve decides the interval), and what it costs.** FAT has no
 journal: a machine stopped mid-write loses only the one file it was writing,
@@ -321,38 +341,34 @@ the next. Daily tars plus daily snapshots mean at most a day of chat in that
 rare case; hourly if a day is too much. It is chat, not a ledger (Steve's
 risk order), so the interval can be generous.
 
-**Encrypted at rest** (docs/reviews/REVIEW-admin-backup.md, finding 6). Every
+**`droplet/backup.sh` does the tar end to end** (QUEUE.md item 98). Run it on
+`<prod>`:
+
+    droplet/backup.sh http://<metal>
+
+It asks for the admin password (twice over the wire, never on a command line or
+in the environment), fetches `/admin/backup`, checks it whole with
+`check_backup.py`, encrypts it at rest with a passphrase it also asks for
+(`age -p`), keeps the newest seven `.tar.age` and `shred -u`s the rest, and
+**never leaves a plaintext tar behind, even on failure** (a trap). `GOPHER_ADMIN`
+sets the admin name (default Steve), `GOPHER_BACKUP_KEEP` the count (default 7),
+and its second argument the directory.
+
+**Encrypted at rest** (docs/reviews/REVIEW-admin-backup.md, finding 6): every
 tar holds the session secret, every password hash, and any plain-text API
-key — Steve's biggest risk in a single file. So:
+key — Steve's biggest risk in one file — so the script keeps only the
+encrypted `.age`, never a plaintext tar. Keep the passphrase somewhere that is
+**not** beside the backups (a password manager): losing one loses the other.
+Keep the backups **off the droplet** (on `<box>`, or a cloud account — the
+`.age` is safe to sync), so losing the droplet does not lose them.
 
-- Encrypt each tar the moment it lands, before it touches any folder that
-  syncs to a cloud account, with a passphrase (`age`):
-
-      printf %s "$PW" | curl -s -b jar --data-urlencode password@- http://<metal>/admin/backup \
-          | age -p -o "gopher-backup-$(date +%F).tar.age"
-
-  `check_backup.py` runs on the plaintext, so check it *before* encrypting (or
-  decrypt, check, then trust it) — a `.tar.age` that will not decrypt is as
-  lost as a truncated tar.
-- **Never leave a plaintext tar at rest.** The one the first-day command
-  writes is used and then `shred`-ed or deleted; what is kept is the `.age`.
-- Keep the passphrase somewhere that is **not** beside the backups (a password
-  manager), or losing one loses the other.
-
-**Where, how many, and destroying old ones.** Keep them **off the droplet**,
-so losing the droplet does not lose its backups — on `<prod>` or `<box>`, or
-a cloud account (encrypted, so the sync is safe). Keep a rolling set (Steve
-decides: say 7 daily and 4 weekly) and **destroy the rest** — an old backup
-is every old password hash still in reach. Destroy with `shred -u` (or delete
-and empty, on a filesystem where shred does nothing), so a retired hash does
-not linger for the life of the disk.
-
-**Checking one is whole, and restoring it.** `droplet/check_backup.py` on the
-decrypted tar is the only proof it is whole (a cut-short tar still lists
-cleanly in `tar`). To put a backup back — after a loss, or to undo the cutover
-— follow **The way back** below: its backup path freezes metal, decrypts and
-checks the tar, unpacks it, compares, and switches. A volume snapshot instead
-is a console restore of the volume, then step 10's boot checks.
+**Checking one is whole, and restoring it.** The script runs
+`droplet/check_backup.py` before trusting a tar (a cut-short tar still lists
+cleanly in `tar`, so this is the only proof). To put a backup back — after a
+loss, or to undo the cutover — decrypt it (`age -d`, the same passphrase),
+check it whole, and follow **The way back** below: its backup path freezes
+metal, unpacks the tar, compares, and switches. A volume snapshot instead is a
+console restore of the volume, then step 10's boot checks.
 
 ## The way back
 
