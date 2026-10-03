@@ -316,16 +316,25 @@ def drill(src, fat, gib, keep_writes):
             shutil.copytree(os.path.join(prod_data, d), os.path.join(copy, d))
         a = count_files(*(os.path.join(prod_data, d) for d in G.DATA_DIRS))
         b = count_files(*(os.path.join(copy, d) for d in G.DATA_DIRS))
-        say("2. copy prod's data (same file count)", "GO" if a == b else "NO-GO", f"{b} files")
-        if a != b:
-            raise NoGo("the copy has a different file count")
+        # Same count AND not nothing: 0 == 0 would pass a copy of an empty tree.
+        say("2. copy prod's data (same file count)", "GO" if a == b and b > 0 else "NO-GO", f"{b} files")
+        if a != b or b == 0:
+            raise NoGo("the copy has a different file count" if a != b else "the copy is empty")
         window = os.path.join(copy, "data", "players", "unsigned-window")
+        before = int(open(window).read().strip()) if os.path.exists(window) else 0
         now = int(time.time())
         with open(window, "w") as f:
             f.write(f"{now}\n")
         shut = int(open(window).read().strip())
-        say("2. close the unsigned-cookie window", "GO" if shut <= now else "NO-GO",
-            "re-signs an unsigned cookie once, now, on the copy")
+        # It must have MOVED from a future time to now-or-earlier, not merely be
+        # <= now (which a window already closed would pass without proving this
+        # step did it).
+        moved = shut <= now and before > now
+        say("2. close the unsigned-cookie window", "GO" if moved else "NO-GO",
+            f"was {before} (a future time), now {shut}: re-signs an unsigned cookie once"
+            if moved else f"did not move from a future time to now (was {before}, now {shut})")
+        if not moved:
+            raise NoGo("the unsigned-cookie window did not close")
 
         # 3. Check it.
         findings, summary = check_volume_tree.check(copy, volume=size, fat=fat)
@@ -430,14 +439,18 @@ def first_day(port, scratch):
     # /admin/host: metal's identity and a growing uptime.
     secret_cookie = {"Cookie": mint("1", int(time.time()), _secret_of(scratch))}
     _, b1, _ = through_proxy(port, "GET", "/admin/host", secret_cookie)
-    time.sleep(1.2)
+    time.sleep(1.5)  # more than one of the host clock's whole seconds
     _, b2, _ = through_proxy(port, "GET", "/admin/host", secret_cookie)
     is_metal = b"gopher-metal" in b2
-    grew = _uptime(b2) is not None and _uptime(b1) is not None and _uptime(b2) >= _uptime(b1)
+    u1, u2 = _uptime(b1), _uptime(b2)
+    # **IT MUST GROW, not merely not-shrink** (QUEUE.md item 99): a stuck clock
+    # that showed the same uptime twice passed the old `>=`. `>` with a 1.5 s
+    # wait, against a whole-second uptime, demands the clock actually moved.
+    grew = u1 is not None and u2 is not None and u2 > u1
     free = b"free" in b2.lower()  # the volume's free space, informational
     say("first day: /admin/host, identity and uptime", "GO" if is_metal and grew else "NO-GO",
-        f"gopher-metal, up for {_uptime(b2)} s (was {_uptime(b1)})" + (", free space shown" if free else "")
-        if is_metal and grew else "not metal's page, or uptime did not grow")
+        f"gopher-metal, up for {u2} s (was {u1}, so it grew)" + (", free space shown" if free else "")
+        if is_metal and grew else f"not metal's page, or uptime did not grow (was {u1}, now {u2})")
     if not (is_metal and grew):
         raise NoGo("the first-day checks")
     # A backup, taken as the runbook takes it: log in with the password, then
