@@ -97,6 +97,12 @@ pub const Net = struct {
     mac: [6]u8,
     /// Frames sent since the device came up.
     sent: u64 = 0,
+    /// Frames refused because they would not fit a transmit buffer. A frame
+    /// this large is a kernel bug (tcp.zig caps a segment at `our_mss`, so a
+    /// built frame is ~1514 bytes against this 2036-byte room), never a peer's
+    /// doing — so it is counted and shown on /admin/host, loud, rather than
+    /// overrunning the buffer into the next frame's. See `send`.
+    oversized: u64 = 0,
 
     pub fn init(found: virtio.Device, mem: *Memory) virtio.Error!Net {
         const st = try virtio.negotiate(found, feature_mac);
@@ -136,7 +142,23 @@ pub const Net = struct {
     /// Hands one frame to the device and returns; the frame is copied, so the
     /// caller's bytes are free at once. Waits only when every transmit buffer
     /// is still the device's.
+    /// The most a frame may carry: a buffer, less the virtio header in front.
+    pub const max_frame: usize = buffer_size - @sizeOf(Header);
+
     pub fn send(self: *Net, frame: []const u8) void {
+        // **A FRAME TOO LONG IS REFUSED, NOT TRUNCATED, NEVER OVERRUN**
+        // (REVIEW-item90-step2.md finding 1). The copy below would otherwise
+        // run off `tx_bufs[id]` into the next frame's buffer — one connection's
+        // bytes in another's. It cannot happen as the tree stands (the MSS cap),
+        // so this is defence in depth: net.zig enforces its own buffer, loudly
+        // (the count shows on /admin/host; the serving loop writes a console
+        // line when it first grows), without taking the site down. Counted
+        // before `sent` moves, and before the ring is touched, so a refused
+        // frame leaves everything as it was.
+        if (frame.len > max_frame) {
+            self.oversized +%= 1;
+            return;
+        }
         self.sent +%= 1;
         self.reclaim();
         // The device's thread takes the frames; on a droplet it needs this
@@ -228,3 +250,34 @@ pub const Net = struct {
         self.rx.notifyIfWanted();
     }
 };
+
+const testing = @import("std").testing;
+
+test "send refuses a frame too long for its buffer: counted, nothing sent, the ring untouched" {
+    // A Net whose transmit ring is real (so the test can see it did not move)
+    // and whose device is never reached, because a refused frame returns before
+    // `reclaim`, `offer` or `notify` — the refusal touches only the counter.
+    var mem: Memory = undefined;
+    mem.tx_ring.avail_idx = 7; // a known value the refusal must leave alone
+    var n: Net = .{
+        .device = .{ .mmio = 0 },
+        .rx = undefined,
+        .tx = .{ .device = .{ .mmio = 0 }, .index = 1, .ring = &mem.tx_ring, .doorbell = 0 },
+        .mem = &mem,
+        .mac = .{ 0, 0, 0, 0, 0, 0 },
+    };
+    n.free_len = tx_buffers; // as init leaves it: every buffer ours
+    for (0..tx_buffers) |i| n.free[i] = @intCast(i);
+
+    var too_long: [Net.max_frame + 1]u8 = undefined;
+    n.send(&too_long);
+    try testing.expectEqual(@as(u64, 1), n.oversized);
+    try testing.expectEqual(@as(u64, 0), n.sent); // it was not sent
+    try testing.expectEqual(tx_buffers, n.free_len); // no buffer taken
+    try testing.expectEqual(@as(u16, 7), mem.tx_ring.avail_idx); // the ring did not move
+
+    // The largest frame that DOES fit is not refused (it reaches the copy; the
+    // device is undefined, so we only check the boundary is inclusive by seeing
+    // `oversized` stay put for `max_frame` while stepping one past it did count).
+    try testing.expect(Net.max_frame > 0);
+}

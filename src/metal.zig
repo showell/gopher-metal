@@ -7,6 +7,7 @@ pub const stack = @import("stack.zig");
 pub const pvh = @import("pvh.zig");
 pub const pages = @import("pages.zig");
 pub const serial = @import("serial.zig");
+pub const log_ring = @import("log_ring.zig");
 pub const screen = @import("screen.zig");
 pub const virtio = @import("virtio.zig");
 pub const scsi = @import("scsi.zig");

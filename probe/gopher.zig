@@ -514,6 +514,7 @@ pub fn kmain() noreturn {
     // - **The goodbyes, when the boot ends.** Connections still closing are
     //   given two seconds of turns, then the machine stops.
     var deepest: usize = 0;
+    var oversized_seen: u64 = 0; // net.oversized last reported to the console
     // From here the console waits for idle turns (serial.deferred).
     serial.deferred = true;
     while (limit == null or served < limit.?) {
@@ -545,6 +546,13 @@ pub fn kmain() noreturn {
         serial.put(" bytes\n");
         request_heap.reset();
         deepest = reportStack(deepest);
+        // **LOUD, ONCE PER OCCURRENCE** (REVIEW-item90-step2.md finding 1): a
+        // frame too long to send is a kernel bug net.zig refused rather than
+        // overrun. The count is on /admin/host; this is the console line.
+        if (nic.oversized != oversized_seen) {
+            oversized_seen = nic.oversized;
+            serial.put("  net: a frame too long to send was refused (a kernel bug); /admin/host counts them\n");
+        }
     }
 
     // The boot is over: the console is written out in full from here.
@@ -712,11 +720,13 @@ fn serveOne(
     req.head.keep_alive = false;
 
     // The target is borrowed from the read buffer, which the handler may
-    // consume; copy it for the log now.
+    // consume; copy it for the log now — the PATH only, never the query, which
+    // is not the log's to keep (serial.log_ring.withoutQuery; QUEUE.md item 95).
     var what_buf: [300]u8 = undefined;
+    const path = metal.log_ring.withoutQuery(req.head.target);
     const what = std.fmt.bufPrint(&what_buf, "{s} {s}", .{
         @tagName(req.head.method),
-        req.head.target[0..@min(req.head.target.len, 256)],
+        path[0..@min(path.len, 256)],
     }) catch "(unprintable)";
 
     const head_at = Io.awakeNs() orelse 0;
@@ -1439,6 +1449,7 @@ fn metalFacts(io: Io, alloc: std.mem.Allocator) anyerror![]const router.host_sta
     const work = diskWork();
     try add(&facts, alloc, "disk requests", "{d}, busy {d} ms in all", .{ work.requests, @divTrunc(Io.ticksToNs(work.ticks), std.time.ns_per_ms) });
     try add(&facts, alloc, "NMIs", "{d}", .{interrupts.nmis});
+    if (turning) |t| try add(&facts, alloc, "frames refused (too long to send)", "{d}", .{t.wire.nic.oversized});
     return facts.items;
 }
 

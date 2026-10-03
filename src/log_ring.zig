@@ -35,6 +35,24 @@ const std = @import("std");
 
 /// A ring over a buffer it is given. The buffer is separate so that the ring
 /// itself, a few words, can live in `.data` where the loader writes it,
+/// **THE REQUEST LOG WRITES THE PATH, NEVER THE QUERY** (QUEUE.md item 95,
+/// REVIEW-secrets.md finding 1). The redactor below takes a secret VALUE out of
+/// a query by its key; this takes the whole query off the request target before
+/// it is ever logged, so a future query-borne token under a key the redactor
+/// does not know never reaches the ring `/admin/host` serves or `kept_log`. The
+/// path is what a reader of the log wants; the query is not the log's to keep.
+pub fn withoutQuery(target: []const u8) []const u8 {
+    return target[0 .. std.mem.indexOfScalar(u8, target, '?') orelse target.len];
+}
+
+test "the request log keeps the path and drops the query, secret or not" {
+    try testing.expectEqualStrings("/login/full", withoutQuery("/login/full?password=hunter2&next=/chat"));
+    try testing.expectEqualStrings("/x", withoutQuery("/x?token=0123456789abcdef"));
+    try testing.expectEqualStrings("/chat/c/1_2/topic", withoutQuery("/chat/c/1_2/topic")); // no query, unchanged
+    try testing.expectEqualStrings("/", withoutQuery("/?")); // empty query
+    try testing.expectEqualStrings("", withoutQuery("")); // nothing at all
+}
+
 /// while the buffer lives in `.bss` (see `serial.ring`).
 pub const Ring = struct {
     buf: []u8,
