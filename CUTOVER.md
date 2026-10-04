@@ -264,6 +264,12 @@ test name had, for the main site:
     sudo caddy validate --config /etc/caddy/Caddyfile
     sudo systemctl reload caddy
 
+Then say, on prod, that Linux no longer serves — remove the marker `ops/deploy`
+and the watchdog read (absent = metal serves, QUEUE item 109), so neither
+restarts the stopped Linux server:
+
+    rm -f ~/linux-serves
+
 - GO:
   - `https://lynrummy.com/version` names the same commit as step 2;
   - `/admin/host` says `gopher-metal, with no operating system`;
@@ -383,8 +389,11 @@ console restore of the volume, then step 10's boot checks.
 
 ## The way back
 
-**Before step 12:** nothing has changed for anyone. Start prod again:
+**Before step 12:** nothing has changed for anyone. Start prod again, and say
+Linux serves so `ops/deploy` and the watchdog treat it as the subject (QUEUE
+item 109):
 
+    touch ~/linux-serves
     sudo systemctl start gopher-server
 
 **After step 12, once people have written on metal:**
@@ -422,7 +431,10 @@ console restore of the volume, then step 10's boot checks.
      serves the writes from metal (the new topics and uploads are there).
      - GO: `compare_volume.py finds the tree and the volume the same`, and
        the metal-era writes show on prod.
-5. **Point Caddy back at prod's own server**, and reload it.
+5. **Point Caddy back at prod's own server**, and reload it. Say Linux serves,
+   so `ops/deploy` and the watchdog make it the subject again (QUEUE item 109):
+
+       touch ~/linux-serves
 
 - GO: `/admin/host` says `Linux, zig-server`, and the messages written on
   metal are there.
