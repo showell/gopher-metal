@@ -36,14 +36,25 @@ token from Steve), and the encrypted tar by hand with `droplet/backup.sh` on
 prod (`age` is installed there). Until then, chat's only copies are the live
 volume and prod's frozen pre-cutover data.
 
-**Three files to read, in order:**
+**Two files to read, in order:**
 1. this README — what metal is, how it is built and tested, and how it
    compares with Linux.
 2. [`CUTOVER.md`](CUTOVER.md) — the plan to go live, its go/no-go steps, and
    the way back.
-3. [`CLOUD.md`](CLOUD.md) and [`QUEUE.md`](QUEUE.md) — how the two Claudes
-   share the work, and the live queue of what is open (done work is in
-   `QUEUE-DONE.md`).
+
+**Who works on it:** Claude on the dev box, with Steve. The cloud session
+that built most of this through a shared work queue retired on 2026-10-04,
+and the queue files went with it (`QUEUE.md`, `QUEUE-DONE.md`, `CLOUD.md`,
+`CC-FEEDBACK.md`; all in `git show 3cd662c:QUEUE.md` and its siblings).
+A "QUEUE item N" in a comment or commit names an item there.
+
+**Open (2026-10-04):**
+- Backups (above).
+- v16: items 102 (pictures kept in the page cache), 104 (`/admin/retire`),
+  105 (big uploads streamed) and 106 (the session secret into `auth/`), with
+  angry-gopher's 107 (the watchdog watches metal, and sees a restart) and
+  109 (`ops/deploy` refuses to start prod's Linux server unless
+  `~/linux-serves` is on prod). Gated under KVM, then shipped as one image.
 
 ## Where it runs: https://lynrummy.com
 
@@ -268,51 +279,6 @@ PASS net |   server : 10.0.2.2
 PASS http | curl got "hello from no Linux"
 PASS stdhttp | curl got "hello from std.http.Server, with no Linux under it"
 ```
-
-## Working from a Claude Code cloud session
-
-A cloud session is a fresh container with no KVM, and ziglang.org is
-blocked from it. What does and does not work there, found on 2026-10-02:
-
-- **zig.** `.claude/hooks/session-start.sh` installs 0.16.0 from PyPI's
-  `ziglang` package. It runs async, so a `zig` command in the first seconds
-  of a fresh container may find nothing yet. Once it is installed,
-  `zig build test`, `kernels`, `hello` and `native` all work.
-- **The real server builds.** Clone angry-gopher; the git proxy serves the
-  public repository:
-
-      git clone --depth 1 https://github.com/showell/angry-gopher ~/showell/angry-gopher
-      GOPHER_SRC=~/showell/angry-gopher/zig-server/src ./port.sh
-      zig build gopher -Dgopher=$HOME/build/gopher-metal/port -Dgopher-root=$HOME/showell/angry-gopher
-
-  Seven of the assets in `gen/assets.zig` are front-end build products that
-  are not in git (`.wasm`, compiled Elm `.js`). For a compile check, create
-  them as empty files: the build embeds them, but compiling does not read
-  them.
-- **QEMU.**
-  - **Installing it:** `apt-get install qemu-system-x86 dosfstools gdisk`
-    works, and gives QEMU 8.2 with no KVM.
-  - **`probe/run.sh` runs.** The judges' self-test reads the host's TSC
-    rate (`HOST_TSC_HZ` overrides it). Probes that need the Cobblestone
-    checkout's fixtures (`block`, for one) cannot find them here.
-  - **`ACCEL=tcg droplet/boot.sh` passes all seven probes**; `droplet.sh`
-    takes `ACCEL=tcg` where there is no KVM.
-- **Disk.** The container's writable allowance is fixed (about 25 GB
-  free at the start), and `df` can mislead. zig's local caches grow with
-  every distinct build: tens of mutated builds, or a day of judges' scratch
-  under `/tmp`, fill it, and then even a command's output cannot be
-  written. Deleting a `.zig-cache` frees space at once and costs only a
-  rebuild. angry-gopher's `tools/mutate.py` builds each mutant in a cache
-  of its own and removes it.
-- **What cannot be judged there:**
-  - **Resting with the APIC timer.** TCG offers no TSC-deadline timer, so
-    `interrupts.startApic` refuses and the machine never rests.
-  - **The judge's `JUDGE_MOUNT=1`**, which reads the disks through Linux's
-    vfat driver: the container's kernel has no `vfat`. The chat judge
-    itself runs here, through mtools, under TCG (the quick tier in about
-    two minutes; `apt-get install mtools` if it is missing).
-
-  Both are judged on a machine with KVM.
 
 ## The one that matters
 
