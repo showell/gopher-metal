@@ -464,6 +464,13 @@ pub fn kmain() noreturn {
     var request_heap = RequestHeap.init(pages.allocator, request_heap_bytes);
     if (!request_heap.preheat())
         serial.fail("the machine has not enough memory for a request heap");
+    // **THE SESSION SECRET MOVES INTO auth/, ONCE** (QUEUE.md item 106): a
+    // volume written before the move keeps it in data/chat/; carry it over
+    // before the first request so no session is lost. No-op once it is in auth/.
+    {
+        router.roots.migrateSecret(io, request_heap.allocator());
+        request_heap.reset();
+    }
     // **THE HOST CONTRACT'S FOURTH STEP**, and the machine does it as Linux
     // does: every chat session gets its last-message record before the first
     // request, so /chat/recent never reads a transcript in full — and so the

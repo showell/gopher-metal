@@ -390,7 +390,7 @@ def drill(src, fat, gib, keep_writes):
 
         # 12. Switch the proxy from prod to metal.
         proxy.retarget(("127.0.0.1", metal_port))
-        secret = open(os.path.join(copy, "data", "chat", "_session_secret"), "rb").read()
+        secret = _read_secret(copy)
         vcode = proxy_code(proxy.port, "/version")
         _, host_body, _ = through_proxy(proxy.port, "GET", "/admin/host",
                                         {"Cookie": mint("1", int(time.time()), secret)})
@@ -480,8 +480,18 @@ def first_day(port, scratch):
         raise NoGo("the first-day backup")
 
 
+def _read_secret(copy):
+    """The copy's session secret, from auth/ (QUEUE item 106) or, on a tree from
+    before the move, data/chat/."""
+    for rel in (("auth", "_session_secret"), ("data", "chat", "_session_secret")):
+        p = os.path.join(copy, *rel)
+        if os.path.exists(p):
+            return open(p, "rb").read()
+    raise FileNotFoundError(f"no _session_secret in auth/ or data/chat/ under {copy}")
+
+
 def _secret_of(scratch):
-    return open(os.path.join(scratch, "copy", "data", "chat", "_session_secret"), "rb").read()
+    return _read_secret(os.path.join(scratch, "copy"))
 
 
 def _uptime(body):

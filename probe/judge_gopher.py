@@ -379,7 +379,11 @@ def stage(root: str, gopher_root: str) -> None:
     write(root, "auth/2/name", "apoorva")
     write(root, "auth/2/password", MEMBER_HASH)
     write(root, "auth/next-id.txt", "3\n")
-    with open(os.path.join(root, "data/chat/_session_secret"), "wb") as f:
+    # The session secret lives in auth/ now (QUEUE.md item 106): auth/ holds
+    # every secret, data/ none. A tree written before the move keeps it in
+    # data/chat/, and the server carries it over at boot — the `secret` gate
+    # tests that migration; here the fixture is already in the new place.
+    with open(os.path.join(root, "auth/_session_secret"), "wb") as f:
         f.write(SESSION_SECRET)
     write(root, "data/players/next-id.txt", "2\n")
     # **COOKIES FROM BEFORE THEY WERE SIGNED** (QUEUE.md item 51): a player
@@ -758,7 +762,7 @@ QUICK = bool(os.environ.get("JUDGE_QUICK"))
 # silently complete run.
 GATES = ["cases", "members", "uids", "caps", "lynrummy", "streams-linux", "streams-metal", "budget", "churn",
          "bulk", "uploads", "slow", "lagging", "concurrent", "timeouts",
-         "damaged", "endurance", "stamina", "admin-reset", "throttle", "retire"]
+         "damaged", "endurance", "stamina", "admin-reset", "throttle", "retire", "secret"]
 # The boots that exist to be long. The quick tier leaves them out; asking for
 # one by name still runs it.
 LONG = {"endurance", "stamina"}
@@ -2394,6 +2398,83 @@ def retire_failures(elf, linux_bin, content, pristine, work, mnt, gopher_root, r
     return len(failures)
 
 
+def secret_failures(elf, linux_bin, content, pristine, work, mnt, gopher_root, report) -> int:
+    """**THE SESSION SECRET IN auth/, SAME ANSWER BEFORE AND AFTER THE MOVE**
+    (QUEUE.md item 106). auth/ holds every secret now, data/ none. A tree
+    written before the move keeps `_session_secret` in data/chat/; the server
+    carries it to auth/ at boot so no session is lost. This boots each host two
+    ways — the secret native in auth/, and seeded in the old data/chat/ — and in
+    both a session minted with that secret is honored (GET /chat answers 200, not
+    the login redirect). On Linux, which this can inspect, the old-place boot
+    must leave the secret in auth/ and gone from data/chat/ (never two copies)."""
+    failures = []
+    expect = lambda ok, what: None if ok else failures.append(what)
+    session = mint_session("1", int(time.time()))
+
+    def seed(root, where):
+        """Stage the tree, then put the one session secret at `where`."""
+        stage(root, gopher_root)  # writes auth/_session_secret
+        os.remove(os.path.join(root, "auth", "_session_secret"))
+        p = os.path.join(root, *where.split("/"), "_session_secret")
+        os.makedirs(os.path.dirname(p), exist_ok=True)
+        with open(p, "wb") as f:
+            f.write(SESSION_SECRET)
+
+    def chat_status(port):
+        conn = http.client.HTTPConnection("127.0.0.1", port, timeout=60)
+        conn.request("GET", "/chat", headers={"Cookie": session})
+        r = conn.getresponse()
+        r.read()
+        conn.close()
+        return r.status
+
+    def on_metal(where):
+        scratch = tempfile.mkdtemp(dir=work)
+        root = os.path.join(scratch, "content")
+        seed(root, where)
+        image = os.path.join(scratch, "disk.img")
+        build_disk(image, root, os.path.join(scratch, "mnt"))
+        set_request_limit(image, 5, os.path.join(scratch, "mnt"), idle_timeout_ms=60000)
+        qemu, port, serial = start_kernel(elf, image, scratch)
+        try:
+            return chat_status(port)
+        finally:
+            finish_kernel(qemu, serial)
+            shutil.rmtree(scratch, ignore_errors=True)
+
+    def on_linux(where):
+        root = tempfile.mkdtemp(dir=work)
+        shutil.rmtree(root)
+        os.makedirs(root)
+        seed(root, where)
+        server = LinuxServer(linux_bin, root, os.path.join(root, "server.log"))
+        try:
+            st = chat_status(server.port)
+        finally:
+            server.stop()
+        moved = (os.path.exists(os.path.join(root, "auth", "_session_secret"))
+                 and not os.path.exists(os.path.join(root, "data", "chat", "_session_secret")))
+        shutil.rmtree(root, ignore_errors=True)
+        return st, moved
+
+    # Native (auth/): the session is honored on both hosts.
+    expect(on_metal("auth") == 200, "metal: a session was not honored with the secret native in auth/")
+    linux_native, _ = on_linux("auth")
+    expect(linux_native == 200, "linux: a session was not honored with the secret native in auth/")
+    # Old place (data/chat/): the boot carries it over, and the session still works.
+    expect(on_metal("data/chat") == 200, "metal: a session was lost when the secret started in data/chat/ (migration)")
+    linux_old, linux_moved = on_linux("data/chat")
+    expect(linux_old == 200, "linux: a session was lost when the secret started in data/chat/ (migration)")
+    expect(linux_moved, "linux: after boot the secret was not in auth/ alone (migration left it in data/chat/ or nowhere)")
+
+    for f in failures:
+        report(f"FAIL  secret: {f}")
+    if not failures:
+        report("ok    secret: a session is honored with the secret in auth/ and when carried over from data/chat/, "
+               "on metal and Linux; the move leaves it in auth/ alone")
+    return len(failures)
+
+
 def upload_failures(elf, linux_bin, content, pristine, work, mnt, report) -> int:
     """The same uploads to the machine and to Linux, and their answers compared.
     The stored file's name is random on both sides, so what is compared is the
@@ -3319,6 +3400,9 @@ def main() -> int:
     if running("retire"):
         failures += retire_failures(elf, linux_bin, content, pristine, work, mnt, gopher_root, print)
         lap("retiring old topics and users")
+    if running("secret"):
+        failures += secret_failures(elf, linux_bin, content, pristine, work, mnt, gopher_root, print)
+        lap("the session secret in auth/")
     if running("slow"):
         failures += slow_reader_failures(elf, linux_bin, content, work, mnt, print)
         lap("slow readers")

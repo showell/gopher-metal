@@ -8,7 +8,8 @@ rehearsal's comparison, kept for the cutover day.
 `COPY` is the data both hosts serve (it holds `data/` and `auth/`); it is
 only read, to know which pages exist. Each page is asked of both hosts as
 `--uid` (default 1, the admin), with a session minted from the copy's own
-secret (`data/chat/_session_secret`, or `--secret`), and compared by status
+secret (`auth/_session_secret`, or `data/chat/_session_secret` on a tree from
+before QUEUE item 106, or `--secret`), and compared by status
 and SHA-256 of the body. With `--netns NAME`, B is asked through
 `ip netns exec NAME`, as the box reaches metal's private card.
 
@@ -193,13 +194,23 @@ def write_on(base: str, cookie: str, conv: str, topic: str, netns: str = None) -
     return Written(start, int(time.time()), name)
 
 
+def read_secret(copy: str) -> bytes:
+    """The copy's session secret, from auth/ (QUEUE item 106) or, on a tree
+    written before the move, data/chat/."""
+    for rel in ("auth/_session_secret", "data/chat/_session_secret"):
+        p = os.path.join(copy, *rel.split("/"))
+        if os.path.exists(p):
+            with open(p, "rb") as f:
+                return f.read()
+    raise FileNotFoundError(f"no _session_secret in auth/ or data/chat/ under {copy}")
+
+
 def compare(copy: str, a: str, b: str, uid: str = "1", secret: bytes = None, netns: str = None,
             writes: bool = False) -> tuple:
     """(how many pages, [(label, what differs)]), with no name from the data.
     With `writes`, the comparison is made again after the writes."""
     if secret is None:
-        with open(os.path.join(copy, "data", "chat", "_session_secret"), "rb") as f:
-            secret = f.read()
+        secret = read_secret(copy)
     cookie = mint_session(secret, uid, int(time.time()))
     walked = pages(copy, uid)
     n, differ = len(walked), walk(walked, a, b, cookie, netns)

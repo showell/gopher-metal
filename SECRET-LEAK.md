@@ -7,7 +7,8 @@ about session lifetimes.
 
 ## What the secret is, and what a leak gives away
 
-`data/chat/_session_secret` signs both cookies the site sets:
+`auth/_session_secret` (it moved there from `data/chat/` in QUEUE item 106, so
+`auth/` holds every secret and `data/` none) signs both cookies the site sets:
 - **every member's session** (`gopher_auth`);
 - **every player's identity** (`gopher_uid`).
 Whoever has it can make either for anyone, offline, for as long as it
