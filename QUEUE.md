@@ -104,8 +104,11 @@ may be a fresh one someone just made; keep what we cannot date.
 and 108 read well; the box gates them with v16. 108 does not merge as it
 stands: 109 replaces its guard.
 
-109. **`ops/deploy` fails CLOSED** (angry-gopher; Steve 2026-10-04). 108's
-     guard fails open, in three ways:
+109. **`ops/deploy` fails CLOSED** (angry-gopher; Steve 2026-10-04).
+     *(CC: DONE — angry-gopher `035dfeb2` (the inverted `~/linux-serves` guard,
+     watchdog reads it the same way, both tests), gopher-metal `8ef21d7`
+     (CUTOVER.md marker steps). This supersedes 108's guard. See check-in 45.)*
+     108's guard fails open, in three ways:
      - `ssh "$DEPLOY_HOST" "test -f ~/metal-serves"` returning non-zero for
        ANY reason (network, key, host down) reads as "metal does not serve",
        and the script builds and restarts the Linux server.
@@ -192,6 +195,203 @@ stands: 109 replaces its guard.
 ## Questions
 
 *(CC writes here; the box Claude or Steve answers under Answers.)*
+
+### CC check-in 45, 2026-10-04 (last seen: gopher-metal `master` `be8ca27`)
+
+**Item 109 done — `ops/deploy` fails CLOSED, and you were right about 108.** My
+108 guard failed open the three ways you named. 109 inverts it.
+
+- **angry-gopher `035dfeb2`:** `ops/deploy` builds and restarts the Linux
+  server ONLY on a clean "yes" — the marker `~/linux-serves` present on prod,
+  `ssh` exit 0. Absent (exit 1) is the production state (metal serves): it
+  refreshes the watchdog and stops. `ssh` exit 255, or any other code, REFUSES
+  and names what it saw — it never guesses "Linux serves" (`|| code=$?` reads
+  the exit without `set -e` dying on it). Metal-serving mode ships the
+  **watchdog only** — pages/ and gallery/ ride the gopher-metal image now, since
+  metal serves them from its boot disk, so shipping them to prod would ship
+  content nothing serves. `deploy/watchdog.py` reads the SAME marker the SAME
+  way (absent = metal serves), so there is one marker and its absence is
+  production. `ops/test_deploy` pins every path (present/absent/ssh-fail/other);
+  `deploy/test_watchdog.py` pins the inversion.
+- **gopher-metal `8ef21d7`:** CUTOVER.md's way back creates `~/linux-serves`
+  (restarting prod), and the cutover (step 12) removes it.
+
+**Verified here:** `ops/test_deploy` (17 checks) and `deploy/test_watchdog.py`
+(12 tests) green; `bash -n` clean.
+
+**That clears 109** — and with it everything you've queued (100-109). 102, 104,
+105 sit on the branches for the v16 gate; 106, 107, 109 are done on the
+branches. Nothing else is assigned; I'll pick up the next item on the next
+fetch.
+
+### CC check-in 44, 2026-10-04 (last seen: gopher-metal `master` `267d3ac`)
+
+**Item 106 done — that clears your whole 108/107/106 order.** The session secret
+now lives in `auth/`, so **`auth/` holds every secret and `data/` holds none**.
+
+- **angry-gopher `6a5ef8c1`:** `roots.point` points `_session_secret` (and its
+  `.previous`/`.previous-until`) at `auth/`; `roots.migrateSecret` carries an
+  existing one over from `data/chat/` **once** at startup — new copy written and
+  read back before the old is removed, so a stop in between is finished next boot
+  and there are **never two copies**. Both hosts call it after `roots.point`,
+  before the first request (server.zig; metal in gopher-metal `0f1bcfc`).
+- **gopher-metal `0f1bcfc`:** the judge's new `secret` gate boots each host with
+  the secret native in `auth/` AND seeded in the old `data/chat/`, and in both a
+  minted session is honored — **the same answer before and after the move** —
+  leaving it in `auth/` alone (checked on Linux). `compare_hosts.py` and
+  `cutover_drill.py` read `auth/` with a `data/chat/` fallback, so they work on a
+  copy from either side of the move; `SECRET-LEAK.md` names the new path.
+  `check_backup.py` already matched `*_session_secret` wherever it sits, so it
+  needed no change.
+
+**Verified here:** angry-gopher `zig build test` + lints + fmt; the gopher kernel
+builds; under TCG the new `secret` gate is green on metal and Linux, and
+`members` (session-dependent) stays green with the new fixture.
+
+**Two things left for you (I can't from here):**
+1. **The volume-layout tools** `droplet/check_volume_tree.py`, `build_volume.py`
+   and `extract_volume.py` still name `data/chat/_session_secret` — they describe
+   the on-disk layout of the live v15 volume, which still has it there. Once v16
+   (with 106) has booted on the volume and the migration has run, the secret is
+   at `auth/_session_secret`; update those three then. I left them so they match
+   the volume as it is today, not as it will be.
+2. **Gate 106 under KVM** with the rest, as planned for v16.
+
+**That empties the queue on my side** — 108, 107, 106 all done; 102, 104, 105
+sit on the branches for the v16 gate. Nothing else is assigned. I'll pick up
+whatever you queue next on the next fetch.
+
+### CC check-in 43, 2026-10-04 (last seen: gopher-metal `master` `267d3ac`)
+
+**108, 107, and your 104 answer — all done, on angry-gopher `0c6d9f25`.** All
+merged to angry-gopher's branch; these three are its own, no gopher-metal
+change (the `uploads`/`retire` gates from 104/105 already carry).
+
+- **104 (your answer):** a topic we cannot date is now KEPT, not retired — only
+  a topic with a datable message older than the cutoff goes. (angry-gopher
+  `6bda2b66`.) Thanks.
+- **108 — `ops/deploy` refuses to start Linux while metal serves.** It reads the
+  marker `~/metal-serves` on the prod host: while present it ships the content
+  trees (pages/, gallery/) and the watchdog, and **does not build or start the
+  Linux server**, saying the program now ships as a gopher-metal image. Marker
+  absent (pre-cutover / fallback) → the full deploy as before. `ops/test_deploy`
+  stubs ssh/rsync/scp and pins that the service is never restarted and no binary
+  ships while content + watchdog do. `deploy/README.md` says what a deploy is
+  now.
+- **107 — the watchdog, metal as the subject.** Same `~/metal-serves` marker: a
+  stopped local server reads OK ("as expected"), a running one WARNs (two
+  servers split the data), and `overall` follows metal + the host's own health.
+  metal's clock is measured against this NTP-kept host's clock when serving.
+  **Restarts show:** `/version` now carries `started_ms` (home.zig, both hosts);
+  a new `metal-uptime` check WARNs when it changes between polls, so a 13-17 s
+  restart that fell between two 60 s polls lands in `watchdog.log` — the thing
+  fire drill 4 missed. `deploy/test_watchdog.py` has 5 new tests.
+
+**One judgement call (107), say the word if you'd rather:** `started_ms` is
+stamped on the FIRST `/version` after boot (the watchdog polls within a cycle),
+not at the instant of boot — enough to DETECT a restart (the value changes),
+which is what "restarts must show" needs, but the reported uptime can be up to a
+poll short. The alternative is wiring true boot time through the host seam
+(server.zig `started_unix`, metal's `booted_unix`), which touches both repos.
+
+**Next: 106** (the session secret into `auth/`), the last of the three. 102,
+104, 105 still sit unmerged on the branches for your v16 gate.
+
+### CC check-in 42, 2026-10-04 (last seen: gopher-metal `master` `b0c133d`)
+
+**Item 105 built, on the branch — merges after the cutover.** The plain GET of
+a stored upload read the whole file into the request heap before sending it (up
+to the 10 MiB image cap, or 100 MiB for a screencast downloaded whole — the
+file's size in RAM per request on metal's growable heap).
+
+- **angry-gopher `a984f0db`:** the serve path splits at `whole_read_max`
+  (4 MiB). A file up to it is read whole — the read 102's page cache keeps —
+  and a bigger one is **streamed in 256 KiB pieces**, so the heap holds a piece.
+  The stream is **chunked, not content-length**: a content-length broken by a
+  device fault mid-serve would trip std's `end()` assert and panic the machine;
+  chunked just ends short. The Range path is unchanged (already bounded to one
+  `range_window`). HEAD streams and reads nothing.
+- **How it composes with 102 (you asked for this):** `whole_read_max` is set to
+  the page cache's default `largest` (4 MiB), so "small enough to cache" and
+  "small enough to hold whole" are the same line — a kept picture is served from
+  memory, a file too big to keep is streamed. **They are two constants in two
+  repos; if you raise the cache's `largest` under KVM, raise `whole_read_max`
+  (chat_upload.zig) to match**, or files between the two stream instead of
+  caching. Both default to 4 MiB today.
+- **gopher-metal:** the `uploads` gate now posts a 5 MB picture (over the cap)
+  and reads it back byte for byte, compared metal-vs-Linux, so the stream path
+  is exercised and both hosts must agree.
+
+**Verified here:** angry-gopher `zig build test` (full suite), portable +
+head-access lints, `zig fmt`; the gopher kernel builds; and under TCG the
+`uploads` gate (with the 5 MB streamed picture) and `bulk` are both green on
+metal and Linux. The KVM run is yours.
+
+**That clears the morning order and 104/105.** Remaining CC items are all
+after the cutover: 106 (session secret into `auth/`) and the new 107 (the
+watchdog). I will pick them up once the cutover is done, or on your word. 102,
+104, 105 all sit on the branches unmerged, as planned.
+
+### CC check-in 41, 2026-10-04 (last seen: gopher-metal `master` `a2552a8`)
+
+**Item 104 built, on the branches — merges after the cutover.** It is the
+by-hand retire turned into `/admin/retire`, so it runs on metal (no shell)
+through the Store's own paths.
+
+- **angry-gopher `2fc9d638`:** `chat_retire.zig` is the engine — a dry run that
+  lists what would go (by kind and name, **never a body**) and a confirm that
+  removes it. Old topics (newest `date:` older than N days, or no dated
+  message) with their `.count`/`.lastauthor`/`.reactions.jsonl`/`.uploads/`;
+  users not kept, everywhere they live (auth, players, users, chat/users,
+  lynrummy, every DM `a_b` with them, their `.channel` line; never
+  `next-id.txt`); then a kept user's `last-conv`/`last-sessions`/`pinned-sessions`
+  into a conversation now gone. **The dry run projects the post-removal state,
+  so it equals the confirm and a second confirm is a no-op.** `admin_retire.zig`
+  is the screen: password-gated preview, then a password-gated confirm,
+  throttled like `/admin/backup`. router.zig's item-92 pin now covers it too.
+- **gopher-metal (this branch):** a judge `retire` gate stages one tree on both
+  hosts, drives the screen as the admin, and holds them to the same answer —
+  same counts, every kept user's resume pages serving (no 404/500), a no-op
+  second run. New gate in `GATES` (not `LONG`), so the full gopher run picks it
+  up (~1 min under TCG, less under KVM); `gates.sh`/`run.sh` unchanged.
+
+**Verified here:** angry-gopher `zig build test`, portable + head-access lints,
+`zig fmt`; `zig build gopher` builds the screen in; and the `retire` gate itself
+**green end to end under TCG** (metal + Linux both booted). The KVM run is yours
+with the rest.
+
+**One judgement call to flag:** a topic with **no dated message** (empty or
+hand-damaged) counts as old and is retired. That matches "retire when the
+newest message is older than N days" (there is no newer one) and keeps the tree
+tidy, but if you would rather keep a freshly-created empty topic, say so and I
+will skip null-date topics instead.
+
+**Next: 105** (lever 2, streaming big uploads in pieces — composes with 102),
+then 106 (the session secret into `auth/`). Both after the cutover.
+
+### CC check-in 40, 2026-10-04 (last seen: gopher-metal `master` `8be6534`)
+
+**Synced to your merge.** 100/101 are in `master`; I reset my branch onto
+`8be6534` and it now carries **only item 102** (`42f8935`), rebuilt clean on
+the new base — my old 100/101 and check-in-38 commits are gone (they were
+yours to merge, and you did). 103 noted as done by you on prod; nothing of my
+abandoned `ops/retire` was ever committed.
+
+**Item 102 still built, still unmerged, as planned.** Verified again on the new
+base: `zig build test` green, `zig build gopher` builds, `zig fmt` clean. The
+short of it is unchanged from check-in 39: pictures were not cached at any size
+(the serve path, `readPositionalAll`, read from the cache but never populated
+it); a whole-file read now brings the file in, and the per-file cap is
+`page_cache_largest_kib` (default 4 MiB, max 10240). The KVM measurement that
+sets the final cap is yours after the cutover — `DESIGN-picture-cache.md` says
+exactly what to measure.
+
+**Starting 104** (retire as an admin screen) next, on its branch, to merge
+after the cutover. I had already mapped the chat store layout fully for the
+abandoned 103 script, so 104 is that knowledge turned into `/admin/retire` the
+right way — through the store's own paths so metal's FAT volume stays
+consistent — with a dry-run list, a password-reentry confirm, and a judge story
+so both hosts agree. 105 (lever 2) composes with 102 and follows.
 
 ### CC check-in 38, 2026-10-04 (last seen: gopher-metal `master` `e2fc701`)
 
