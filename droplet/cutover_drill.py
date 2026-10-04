@@ -51,6 +51,7 @@ import hashlib
 import hmac
 import http.client
 import os
+import re
 import shutil
 import signal
 import socket
@@ -483,19 +484,17 @@ def _secret_of(scratch):
 
 
 def _uptime(body):
-    """The 'up for N s' the host page prints, as an int, or None."""
+    """The 'up for' the host page prints, in seconds, or None. It reads as
+    host_status.duration writes it: "45s", "1m 05s", "2h 03m 07s", "3d 4h 05m"."""
     text = body.decode("latin-1")
     i = text.find("up for")
     if i < 0:
         return None
-    rest = text[i + 6:].lstrip()
-    num = ""
-    for ch in rest:
-        if ch.isdigit():
-            num += ch
-        elif num:
-            break
-    return int(num) if num else None
+    m = re.match(r"[^0-9]*((?:\d+[dhms]\s*)+)", text[i + 6:])
+    if not m:
+        return None
+    unit = {"d": 86400, "h": 3600, "m": 60, "s": 1}
+    return sum(int(n) * unit[u] for n, u in re.findall(r"(\d+)([dhms])", m.group(1)))
 
 
 def way_back(started, scratch, proxy, metal_proc, volume, copy):
