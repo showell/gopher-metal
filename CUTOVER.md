@@ -72,11 +72,15 @@ Each of these is done, and checked, at least a day before.
    then halts the machine, and the first-day watch catches it.
    - GO: the boot image is built without `-Drestart=true` (the default),
      or the measurement is written up.
-5. **A new, empty DigitalOcean volume** for prod's data: FAT32, N GiB
-   (16 is room for every user's 1 GiB cap many times over), in nyc2, made
-   in the DigitalOcean console. It is not the test site's volume, and it is
-   not attached to anything yet.
-   - GO: it is listed, unattached, at N GiB.
+5. **The volume for prod's data is the test site's own**: the 16 GiB
+   volume in nyc2 already attached to the gopher-metal droplet (FAT32,
+   serial `5C8C-BFBD`, holding a copy of prod's data from 2026-10-03).
+   Step 8 overwrites all of it, so what is on it does not matter, and the
+   stale copy of prod's data (password hashes among it) goes with it. 16 GiB
+   is room for every user's 1 GiB cap many times over. (Decided 2026-10-04:
+   reusing it takes the attach and detach out of step 8.)
+   - GO: the console lists one 16 GiB volume, attached to the gopher-metal
+     droplet.
 6. **The way back is tried once**, on the rehearsal's volume:
    `droplet/extract_volume.py VOLUME.img OUT/` gives back a tree that
    `compare_volume.py` finds identical.
@@ -187,17 +191,15 @@ where `<metal>`'s recovery console can fetch them.
 
 ### 8. Write the volume, from the recovery console
 
-In the DigitalOcean console:
-- attach the new volume to the gopher-metal droplet, and **detach the test
-  site's volume**;
-- boot the droplet into the recovery console.
-
-Then type:
+In the DigitalOcean console, boot the gopher-metal droplet into the
+recovery console. The volume stays attached as it is. Then type:
 
     lsblk
+    blkid
 
-Find the disk that is **N GiB** with nothing on it. That is `/dev/sdX`. It
-is not the boot disk, which is smaller.
+Find the disk that is **16 GiB** and whose partition `blkid` shows as
+`TYPE="vfat"` with `UUID="5C8C-BFBD"` (the test site's data, about to be
+replaced). That is `/dev/sdX`. It is not the boot disk, which is smaller.
 
     curl -s http://<box>/prod-volume.img.gz | gunzip | dd of=/dev/sdX bs=4M conv=fsync status=progress
     blkid /dev/sdX1
