@@ -31,6 +31,34 @@ green before the cutover image is built they ship with it, otherwise right
 after. 102 is on a branch and **does not merge until after the cutover**
 (Steve: the picture levers wait).
 
+**NEXT, after 102 (2026-10-04, the box): 104, 105, both on branches that
+merge AFTER the cutover.** 100 and 101 are merged (angry-gopher `2ea3f2d1`,
+gopher-metal's judge `262824d` cherry-picked) and gating for v15; 102 stays
+on your branch, unmerged, as planned.
+
+104. **Retiring old topics and users, as an admin screen** (angry-gopher, so
+     it runs on metal too; metal has no shell). The box did it by hand on
+     prod today: a topic is retired when its newest message (`date:` lines)
+     is older than N days, with its sidecars (`.count`, `.lastauthor`,
+     `.reactions.jsonl`, `.uploads/`); a user not on a keep list is removed
+     everywhere it lives (`~/Auth/<id>`, `players/<id>`, `users/<id>`,
+     `chat/users/<id>`, `lynrummy/<id>`, every pair conversation `a_b` with
+     it, its id in each `.channel`; never `next-id.txt`); then every kept
+     user's `last-conv`, `last-sessions/`, `pinned-sessions/` entries that
+     name something missing are dropped. A conversation left with no topics
+     is fine (the app offers to start one). The screen: `/admin/retire`,
+     admin-only, a dry run that lists what would go (names and counts, never
+     a body), and a confirm that does it, behind the admin password
+     re-entry (throttled like `/admin/backup`). It must write through the
+     same store paths the app uses so metal's FAT volume stays consistent.
+     Tests on Linux; a judge story so both hosts agree.
+105. **Picture lever 2, on a branch: big files sent in pieces** (angry-gopher).
+     Today a big upload is read whole into memory before it is sent. Stream
+     it in fixed pieces from the store on both hosts, so the request heap
+     holds a piece, not the file. Read 102 first: the two must compose (a
+     kept file is sent from the cache; a file too big to keep is streamed).
+     Tests, and the judge's `bulk` and `uploads` gates green on Linux.
+
 100. **Throttle every bcrypt, not only sign-in.** `login_throttle` guards
      `/login/full`'s check, but three other paths still run a bcrypt with no
      bound: **creating an account** (`setUserPassword`, `login.zig:199,203`),
