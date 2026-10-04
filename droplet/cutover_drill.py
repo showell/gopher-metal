@@ -60,6 +60,7 @@ import sys
 import tempfile
 import threading
 import time
+import urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -457,7 +458,7 @@ def first_day(port, scratch):
         raise NoGo("the first-day checks")
     # A backup, taken as the runbook takes it: log in with the password, then
     # ask for the archive with it, and let check_backup.py say it is whole.
-    body = (f"name=Steve&password={ADMIN_PASSWORD.replace(' ', '+')}&action=login&next=%2Fchat")
+    body = (f"name=Steve&password={urllib.parse.quote_plus(ADMIN_PASSWORD)}&action=login&next=%2Fchat")
     _, _, cookies = through_proxy(port, "POST", "/login/full", {"Content-Type": "application/x-www-form-urlencoded"}, body)
     jar = next((c.split(";", 1)[0] for c in cookies if c.startswith("gopher_auth=")), None)
     if not jar:
@@ -466,7 +467,7 @@ def first_day(port, scratch):
         raise NoGo("the first-day backup")
     status, tar, _ = through_proxy(port, "POST", "/admin/backup",
                                    {"Cookie": jar, "Content-Type": "application/x-www-form-urlencoded"},
-                                   f"password={ADMIN_PASSWORD.replace(' ', '+')}")
+                                   f"password={urllib.parse.quote_plus(ADMIN_PASSWORD)}")
     path = os.path.join(scratch, "gopher-backup.tar")
     with open(path, "wb") as f:
         f.write(tar)
