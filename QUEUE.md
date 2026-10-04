@@ -92,6 +92,15 @@ on your branch, unmerged, as planned.
      watchdog-status.txt`); whether it should alert anyone is Steve's
      question, not this item's.
 
+108. **`ops/deploy` after the cutover** (angry-gopher; soon). It builds the
+     zig server, ships it to prod and **restarts `gopher-server`**, which
+     must stay stopped while metal serves (CUTOVER.md: two hosts writing
+     two copies cannot be merged). Make it refuse to start the Linux server
+     while metal serves (the same "metal serves" state as 107), and say
+     what a deploy is now: the content trees and watchdog still ship to
+     prod; the program ships as a new gopher-metal image (README, "A
+     deploy"). A test that the refusal holds.
+
 100. **Throttle every bcrypt, not only sign-in.** `login_throttle` guards
      `/login/full`'s check, but three other paths still run a bcrypt with no
      bound: **creating an account** (`setUserPassword`, `login.zig:199,203`),
@@ -130,20 +139,20 @@ on your branch, unmerged, as planned.
 
 ## Box Claude
 
-- **Night (done):** the 4 h soaks on v14's code are green, cache off and on
-  (heap 59-65 MB of 71, flat; every stream got every frame). The 16 GiB
-  drill went GO through the switch and stopped at the first-day backup,
-  which needs Steve's password.
-- **This morning:** gating 95-99 + angry-gopher `ec49fe1e` under KVM (full
-  gates with FAT16, `test_backup.py`, the 16 GiB drill;
-  `/tmp/claude-1000/am/summary.txt`); then `backup.sh` against metal, and the
-  wire capture on the lost-frame bulk story (96's close counts).
-- **With Steve:** the drill with his password; fire drill 4; the cutover
-  image (v15); angry-gopher to lynrummy.com (both hosts on one commit); a
-  DigitalOcean snapshot of the volume before go-live; the cutover; the
-  20:00 UTC snapshot schedule.
-- **After the cutover:** delete the box's copies of prod's data; measure
-  102; lever 2; 77; 86; the SEAM subtraction.
+- **THE CUTOVER IS DONE (2026-10-04, about 11:40 UTC).** lynrummy.com is
+  served by gopher-metal v15 (gopher-metal `7b2f863`, angry-gopher
+  `2ea3f2d1`), on the volume `2C0E-D826` built from prod's data at the
+  freeze. Prod's Caddy proxies to `10.100.0.4:80` (`Caddyfile.linux` on prod
+  is the way back); prod's own server is stopped and stays stopped. Every
+  runbook step was GO; step 11's four differences were clock readings
+  ("Nm ago" read a moment apart, metal ~1 s behind), not data.
+- The box's copies of prod's data are deleted.
+- **Next:** the first day's watch (CUTOVER.md "The first day"); the first
+  backup and the 20:00 UTC volume snapshot as a `doctl` cron on the box
+  (Steve's choice) — needs a DigitalOcean token from Steve; 107 and 108.
+- **After the first day:** 102 measured; 104-106 merged as they gate;
+  Recent's skip of the self-DM (a one-line choice from the 2026-06-19 port,
+  never decided) if Steve wants it changed.
 
 ## Questions
 
