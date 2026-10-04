@@ -321,18 +321,19 @@ def drill(src, fat, gib, keep_writes):
         if a != b or b == 0:
             raise NoGo("the copy has a different file count" if a != b else "the copy is empty")
         window = os.path.join(copy, "data", "players", "unsigned-window")
-        before = int(open(window).read().strip()) if os.path.exists(window) else 0
+        # Absent is a real state: the window opens (for 30 days) the first time
+        # an unsigned cookie is asked about (uid_cookie.windowOpen), and prod
+        # may never have been asked. Either way, this step's write is what
+        # closes it, so the proof is the file holding exactly this step's `now`.
+        before = open(window).read().strip() if os.path.exists(window) else "absent (not yet opened)"
         now = int(time.time())
         with open(window, "w") as f:
             f.write(f"{now}\n")
         shut = int(open(window).read().strip())
-        # It must have MOVED from a future time to now-or-earlier, not merely be
-        # <= now (which a window already closed would pass without proving this
-        # step did it).
-        moved = shut <= now and before > now
+        moved = shut == now
         say("2. close the unsigned-cookie window", "GO" if moved else "NO-GO",
-            f"was {before} (a future time), now {shut}: re-signs an unsigned cookie once"
-            if moved else f"did not move from a future time to now (was {before}, now {shut})")
+            f"was {before}, now {shut}: re-signs an unsigned cookie once"
+            if moved else f"did not read back as {now} (was {before}, now {shut})")
         if not moved:
             raise NoGo("the unsigned-cookie window did not close")
 
