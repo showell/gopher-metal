@@ -15,6 +15,27 @@ droplet through our own BIOS loader.
 itself: the whole site, on a droplet with no Linux on it, with prod's real
 data. The cutover is in `CUTOVER.md`, with the way back.
 
+**The repos:** three, and they stay separate.
+- **angry-gopher** is the program: every route and app, written and tested
+  on Linux. `port.sh` reads its `zig-server/src` from a sibling checkout
+  (`GOPHER_SRC`) and swaps `std.Io` for this repo's `metal.io`.
+- **gopher-metal** (this repo) is the machine: the kernel, drivers, FAT,
+  TCP, the boot loader, the droplet tools, and the gates that judge metal
+  against angry-gopher's Linux build.
+- **metal-vmm** is test-only: our own KVM hypervisor, which `gates.sh` runs
+  (`METAL_VMM`).
+
+A release is a new boot image from this repo carrying both repos' commits
+(README, "A deploy", below). prod's old Linux droplet runs only Caddy, which
+proxies to metal, and the watchdog; its own server is stopped.
+
+**Backups are not set up yet** (2026-10-04). The plan, agreed with Steve, is
+in `CUTOVER.md` "Backups, after the cutover": a DigitalOcean volume snapshot
+every day at 20:00 UTC by a `doctl` cron on the dev box (it needs an API
+token from Steve), and the encrypted tar by hand with `droplet/backup.sh` on
+prod (`age` is installed there). Until then, chat's only copies are the live
+volume and prod's frozen pre-cutover data.
+
 **Three files to read, in order:**
 1. this README — what metal is, how it is built and tested, and how it
    compares with Linux.
