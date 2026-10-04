@@ -2131,24 +2131,31 @@ def admin_reset_failures(elf, linux_bin, content, pristine, work, mnt, gopher_ro
 
 
 def login_throttle_failures(elf, linux_bin, content, pristine, work, mnt, report) -> int:
-    """**BOTH HOSTS HELD TO THE LOGIN THROTTLE** (QUEUE.md item 97). On each
-    host: ten wrong sign-ins for a member are answered (the wrong-password page,
-    200); the eleventh, over the per-address bound, is refused (429); and a
-    CORRECT password over the bound is refused too (the refusal is before the
-    hash, so it cannot tell right from wrong). `/version`'s
-    `login_throttle.refused` counter climbing is the proof the refusal never
-    reached bcrypt. The throttle is in-memory and identical on both hosts, so
-    the eleventh is refused on both; this is its own boot, so the lockout it
-    leaves touches no other gate."""
+    """**BOTH HOSTS HELD TO THE LOGIN THROTTLE, ON ALL THREE BCRYPT PATHS**
+    (QUEUE.md items 97, 100). On each host, identically, the throttle refuses
+    before the hash:
+      - **sign-in:** ten wrong sign-ins answered (the 200 wrong-password page),
+        the 11th refused 429, and a CORRECT one over the bound refused too (the
+        refusal cannot tell right from wrong);
+      - **account creation:** five accounts made from one address, the sixth
+        refused 429;
+      - **the admin's re-entry** on `/admin/backup`: ten wrong (the 403 page),
+        the 11th refused 429 — so a stolen admin session cannot guess unbounded.
+    `/version`'s `login_throttle.refused` climbing is the proof it is before the
+    hash. The sign-in and admin paths both trip the per-address bound, so they
+    run in SEPARATE boots (one address each); creation uses its own table and
+    rides with sign-in. Each boot's lockout is this gate's alone."""
     failures = []
     expect = lambda ok, what: None if ok else failures.append(what)
     wrong = "name=apoorva&password=nope&action=login&next=%2Fchat"
     right = "name=apoorva&password=correct+horse+battery+staple&action=login&next=%2Fchat"
 
-    def post(port, body):
+    def post(port, path, body, cookie=None):
+        headers = {"Content-Type": "application/x-www-form-urlencoded"}
+        if cookie:
+            headers["Cookie"] = cookie
         conn = http.client.HTTPConnection("127.0.0.1", port, timeout=60)
-        conn.request("POST", "/login/full", body=body,
-                     headers={"Content-Type": "application/x-www-form-urlencoded"})
+        conn.request("POST", path, body=body, headers=headers)
         resp = conn.getresponse()
         resp.read()
         conn.close()
@@ -2162,44 +2169,67 @@ def login_throttle_failures(elf, linux_bin, content, pristine, work, mnt, report
         conn.close()
         return json.loads(body).get("login_throttle", {}).get("refused")
 
-    def drive(host, port):
+    def drive_create_and_signin(host, port):
+        # Account creation (its own table): five made, the sixth refused.
+        for i in range(5):  # login_throttle.create_max
+            reg = f"name=throttlemaker{i}&password=correct+horse+battery+staple&action=register&next=%2F"
+            expect(post(port, "/login/full", reg) != 429, f"{host}: account creation #{i + 1} was refused early")
+        reg6 = "name=throttlemaker5&password=correct+horse+battery+staple&action=register&next=%2F"
+        expect(post(port, "/login/full", reg6) == 429, f"{host}: the 6th account creation was not refused 429")
+        # Sign-in (the per-address fail bound): untouched by the creations above.
         for i in range(10):  # login_throttle.addr_fails
-            st = post(port, wrong)
+            st = post(port, "/login/full", wrong)
             expect(st == 200, f"{host}: wrong sign-in #{i + 1} was {st}, not the 200 wrong-password page")
-        expect(post(port, wrong) == 429, f"{host}: the 11th wrong sign-in was not refused 429")
-        expect(post(port, right) == 429, f"{host}: a correct sign-in over the bound was not refused 429 "
-                                         "(so the refusal is not before the hash)")
+        expect(post(port, "/login/full", wrong) == 429, f"{host}: the 11th wrong sign-in was not refused 429")
+        expect(post(port, "/login/full", right) == 429, f"{host}: a correct sign-in over the bound was not refused 429 "
+                                                        "(so the refusal is not before the hash)")
         n = refused_count(port)
-        expect(n is not None and n >= 2, f"{host}: /version login_throttle.refused is {n}, did not climb to >= 2")
+        expect(n is not None and n >= 3, f"{host}: /version login_throttle.refused is {n}, did not climb to >= 3")
 
-    # metal, its own boot (the lockout it leaves is this gate's alone)
-    scratch = tempfile.mkdtemp(dir=work)
-    image = os.path.join(scratch, "disk.img")
-    shutil.copy(pristine, image)
-    disk_write(image, mnt, "gopher-metal.conf", request_limit_text(image, 40))
-    qemu, port, serial = start_kernel(elf, image, scratch)
-    try:
-        drive("metal", port)
-    finally:
-        finish_kernel(qemu, serial)
-    shutil.rmtree(scratch, ignore_errors=True)
+    def drive_admin(host, port):
+        cookie = mint_session("1", int(time.time()))  # the admin's own session
+        for i in range(10):  # login_throttle.addr_fails, via /admin/backup's re-entry
+            st = post(port, "/admin/backup", "password=nope", cookie)
+            expect(st == 403, f"{host}: admin re-entry #{i + 1} was {st}, not the 403 wrong-password page")
+        expect(post(port, "/admin/backup", "password=nope", cookie) == 429,
+               f"{host}: the 11th admin re-entry was not refused 429")
+        n = refused_count(port)
+        expect(n is not None and n >= 1, f"{host}: /version login_throttle.refused did not climb for the admin re-entry")
 
-    # Linux, a fresh copy of the same data
-    root = tempfile.mkdtemp(dir=work)
-    shutil.rmtree(root)
-    shutil.copytree(content, root)
-    server = LinuxServer(linux_bin, root, os.path.join(root, "server.log"))
-    try:
-        drive("linux", server.port)
-    finally:
-        server.stop()
-    shutil.rmtree(root, ignore_errors=True)
+    def on_metal(fn):
+        scratch = tempfile.mkdtemp(dir=work)
+        image = os.path.join(scratch, "disk.img")
+        shutil.copy(pristine, image)
+        disk_write(image, mnt, "gopher-metal.conf", request_limit_text(image, 60))
+        qemu, port, serial = start_kernel(elf, image, scratch)
+        try:
+            fn("metal", port)
+        finally:
+            finish_kernel(qemu, serial)
+        shutil.rmtree(scratch, ignore_errors=True)
+
+    def on_linux(fn):
+        root = tempfile.mkdtemp(dir=work)
+        shutil.rmtree(root)
+        shutil.copytree(content, root)
+        server = LinuxServer(linux_bin, root, os.path.join(root, "server.log"))
+        try:
+            fn("linux", server.port)
+        finally:
+            server.stop()
+        shutil.rmtree(root, ignore_errors=True)
+
+    # Two boots per host: sign-in+creation trip the address bound in one, the
+    # admin re-entry in the other (a fresh address), so neither masks the other.
+    for drive in (drive_create_and_signin, drive_admin):
+        on_metal(drive)
+        on_linux(drive)
 
     for f in failures:
         report(f"FAIL  login throttle: {f}")
     if not failures:
-        report("ok    login throttle: ten wrong sign-ins answered, the 11th and a correct one over the bound "
-               "refused 429 before the hash (/version counter climbed), on metal and Linux")
+        report("ok    login throttle: sign-in, account creation and the admin's re-entry all refused before the "
+               "hash past their bounds (/version counter climbed), on metal and Linux")
     return len(failures)
 
 
