@@ -227,15 +227,19 @@ const request_heap_bytes = 32 * 1024 * 1024;
 /// pages as they are kept.
 var page_cache: metal.page_cache.PageCache = undefined;
 /// The largest file the cache keeps, when `page_cache_largest_kib` is absent:
-/// 4 MiB. It holds every transcript (prod's largest is 362 KB) and every
-/// picture people actually load (a phone photo or a screenshot is a few MB;
-/// chat's image cap is 10 MiB), so a picture read once is served from memory
-/// rather than read whole from the disk on every GET — the one stall item 90
-/// left (30-39 MB/s). A file past the cap is read from the disk as before, so
-/// no single big upload pushes the transcripts out. The box measures prod's
-/// file-size distribution under KVM after the cutover and sets the cap from it;
-/// `docs/designs/DESIGN-picture-cache.md` has the method and the budget cost.
-const page_cache_largest_kib_default = 4 << 10;
+/// the application's `whole_read_max` (4 MiB), the line above which a GET of an
+/// upload streams instead of reading the file whole. So by default what is kept
+/// and what is read whole are one number; a `page_cache_largest_kib` above it
+/// keeps no bigger upload, since an upload past the line streams past the cache.
+///
+/// 4 MiB holds every transcript (prod's largest is 362 KB) and every picture
+/// people actually load (a phone photo or a screenshot is a few MB; chat's image
+/// cap is 10 MiB), so a picture read once is served from memory rather than read
+/// whole from the disk on every GET — the one stall item 90 left (30-39 MB/s).
+/// A file past the cap is read from the disk as before, so no single big upload
+/// pushes the transcripts out. `docs/designs/DESIGN-picture-cache.md` has the
+/// method and the budget cost.
+const page_cache_largest_kib_default = router.whole_read_max >> 10;
 
 const config_path = "gopher-metal.conf";
 
