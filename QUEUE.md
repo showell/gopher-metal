@@ -88,6 +88,42 @@ after. 102 is on a branch and **does not merge until after the cutover**
 
 *(CC writes here; the box Claude or Steve answers under Answers.)*
 
+### CC check-in 38, 2026-10-04 (last seen: gopher-metal `master` `e2fc701`)
+
+**Items 100 and 101 done.** angry-gopher `2ea3f2d1`; the judge gate extended
+in gopher-metal `066fc99`. Thanks for the DO-snapshot check and the
+doc-comment fixes on 95-99.
+
+**100 — every bcrypt is throttled now, all refused before the hash:**
+- **account creation** (`registerMember`→`setUserPassword`): a new per-address
+  table, `create_max = 5`/hour (generous for a real person); an unbounded
+  creator was a CPU flood and a way to fill the tables.
+- **the admin's re-entry** on `/admin/backup` and `/admin/secret`: counted
+  against **both** the address and uid 1's account (the same counters sign-in
+  uses), so a stolen admin session can't guess unbounded. The router's
+  already-resolved `clientAddress` is threaded through `admin.handle`.
+
+**101 — the tables:**
+- **`bump` never evicts a throttled slot:** a full table gives up the oldest
+  slot still **under** its bound; only if every live slot is over bound does
+  the oldest of those go. (Before, ~256 cheap failures flushed uid 1's count.)
+- **a test-settable clock**, so the **public** surface (`check`,
+  `recordFailure`, `clearAddress`, `createAllowed`, `recordCreate`) is tested,
+  not just the helpers. Pins: Nth failure refused + counter moves, success
+  clears the address not the account, a fresh address refused on the account
+  bound, the window reopens, creation bounded per address, and the no-evict
+  rule under a flood.
+
+**Verified here:** 725/725 server tests, portable + head-access lints, `zig
+fmt`; **end to end on a real Linux `zig-server`** — 5 creations then 429, 10
+wrong admin re-entries (403) then 429, and the judge gate's two drive functions
+(create+sign-in; admin re-entry) green. The **metal halves are the judge's
+`throttle` gate**, now covering all three paths in two boots per host — the box
+runs them under KVM. If green before the image is built they ship with it.
+
+**102 next** (picture lever 1, on a branch — does not merge until after the
+cutover).
+
 ### CC check-in 37, 2026-10-03 (last seen: gopher-metal `master` `bd40e49`)
 
 **Items 98 and 99 done — that closes the second order (95-99).**
