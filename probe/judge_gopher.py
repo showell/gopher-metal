@@ -758,7 +758,7 @@ QUICK = bool(os.environ.get("JUDGE_QUICK"))
 # silently complete run.
 GATES = ["cases", "members", "uids", "caps", "lynrummy", "streams-linux", "streams-metal", "budget", "churn",
          "bulk", "uploads", "slow", "lagging", "concurrent", "timeouts",
-         "damaged", "endurance", "stamina", "admin-reset", "throttle"]
+         "damaged", "endurance", "stamina", "admin-reset", "throttle", "retire"]
 # The boots that exist to be long. The quick tier leaves them out; asking for
 # one by name still runs it.
 LONG = {"endurance", "stamina"}
@@ -2233,6 +2233,146 @@ def login_throttle_failures(elf, linux_bin, content, pristine, work, mnt, report
     return len(failures)
 
 
+def retire_failures(elf, linux_bin, content, pristine, work, mnt, gopher_root, report) -> int:
+    """**BOTH HOSTS RETIRE THE SAME TREE THE SAME WAY** (QUEUE.md item 104).
+    `/admin/retire` is the admin screen that removes old topics and users not
+    kept, through the Store's own paths — so it runs on metal, which has no
+    shell, as well as on Linux. This stages one tree on each host (an old topic
+    and a fresh one, a removed user's DM, a channel with the removed user, and a
+    kept user's pointer into the DM that will go), drives the screen as the
+    admin, and checks the two hosts agree:
+      - the dry run lists the same counts on both (never a body);
+      - a confirm removes exactly what the dry run listed;
+      - after it, every kept user's resume pages serve (no 404/500) on both;
+      - a second dry run would remove nothing (it is idempotent).
+    The admin session is minted here; the password is uid 1's."""
+    failures = []
+    expect = lambda ok, what: None if ok else failures.append(what)
+    PASSWORD = "correct+horse+battery+staple"
+    old_date = "2020-01-01T00:00:00Z"
+    new_date = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(time.time() - 2 * 86400))
+
+    def transcript(sid, date):
+        return f"MSG_{sid}_1\nfrom: Tester\ndate: {date}\n\nhello there"
+
+    def fixture(root):
+        """Stage the shared tree: keep Steve(1)+apoorva(2), remove Spammer(9)."""
+        stage(root, gopher_root)
+        write(root, "auth/9/name", "Spammer")
+        write(root, "auth/9/password", MEMBER_HASH)
+        # DM 1_2: an old topic (retired) and a fresh one (kept).
+        write(root, "data/chat/1_2/sessions/oldtopic.md", transcript("oldtopic", old_date))
+        write(root, "data/chat/1_2/sessions/oldtopic.uploads/pic.png", "img-bytes")
+        write(root, "data/chat/1_2/sessions/freshtopic.md", transcript("freshtopic", new_date))
+        # DM 1_9: the removed user's conversation — goes whole.
+        write(root, "data/chat/1_9/sessions/chat.md", transcript("chat", new_date))
+        # A channel the removed user is in: its line goes, the channel stays.
+        write(root, "data/chat/channels/general.channel", "1\n2\n9\n")
+        write(root, "data/chat/channels/general/sessions/oldchan.md", transcript("oldchan", old_date))
+        # The removed user everywhere else it lives.
+        for r in ("data/players/9", "data/users/9", "data/lynrummy/9"):
+            write(root, r + "/marker", "x")
+        write(root, "data/chat/users/9/last-conv", "1_9")
+        # Kept user 1's pointer INTO the DM that will go, and one that stays.
+        write(root, "data/chat/users/1/last-conv", "1_9")
+        write(root, "data/chat/users/1/last-sessions/1_9", "chat")
+        write(root, "data/chat/users/1/pinned-sessions/1_2", "freshtopic")
+
+    def req(port, method, path, cookie, body=None):
+        headers = {"Cookie": cookie}
+        if body is not None:
+            headers["Content-Type"] = "application/x-www-form-urlencoded"
+        conn = http.client.HTTPConnection("127.0.0.1", port, timeout=60)
+        conn.request(method, path, body=body, headers=headers)
+        resp = conn.getresponse()
+        data = resp.read().decode("latin-1", "replace")
+        conn.close()
+        return resp.status, data
+
+    def numbers(html_text):
+        """(total, members) from the result page's summary line."""
+        m = re.search(r"(?:Would remove|Removed) <strong>(\d+)</strong> thing\(s\) in all; "
+                      r"<strong>(\d+)</strong> account", html_text)
+        return (int(m.group(1)), int(m.group(2))) if m else (None, None)
+
+    def counts_table(html_text):
+        """{label: count} from the result page's by-kind table."""
+        return {lab: int(n) for lab, n in re.findall(r"<td>([^<]+)</td><td class=\"n\">(\d+)</td>", html_text)}
+
+    def drive(host, port):
+        admin = mint_session("1", int(time.time()))
+        body = f"days=30&keep=Steve%2Capoorva&password={PASSWORD}"
+        # Dry run: lists, removes nothing.
+        st, page = req(port, "POST", "/admin/retire", admin, body)
+        expect(st == 200, f"{host}: the preview was {st}, not 200")
+        total, members = numbers(page)
+        table = counts_table(page)
+        # The fixture is still whole after a dry run.
+        _, still = req(port, "GET", "/chat/c/1_2/oldtopic/raw", admin)
+        # Confirm: carries out exactly what the preview listed.
+        st2, page2 = req(port, "POST", "/admin/retire", admin, body + "&confirm=1")
+        expect(st2 == 200, f"{host}: the confirm was {st2}, not 200")
+        done_total, _ = numbers(page2)
+        expect(done_total == total, f"{host}: confirm removed {done_total}, preview listed {total}")
+        # Every kept user's resume pages serve — this is the 404 the sweep stops.
+        pages = {}
+        for uid in ("1", "2"):
+            who = mint_session(uid, int(time.time()))
+            for path in ("/chat", "/chat/default"):
+                ps, _ = req(port, "GET", path, who)
+                pages[f"{uid} {path}"] = ps
+                expect(ps < 400, f"{host}: {path} for uid {uid} was {ps} after retire")
+        # A second dry run finds nothing left.
+        _, again = req(port, "POST", "/admin/retire", admin, body)
+        again_total, _ = numbers(again)
+        expect(again_total == 0, f"{host}: a second dry run would remove {again_total}, not 0")
+        return {"total": total, "members": members, "table": table, "pages": pages}
+
+    def on_metal():
+        scratch = tempfile.mkdtemp(dir=work)
+        root = os.path.join(scratch, "content")
+        fixture(root)
+        image = os.path.join(scratch, "disk.img")
+        build_disk(image, root, os.path.join(scratch, "mnt"))
+        set_request_limit(image, 300, os.path.join(scratch, "mnt"), idle_timeout_ms=60000)
+        qemu, port, serial = start_kernel(elf, image, scratch)
+        try:
+            return drive("metal", port)
+        finally:
+            finish_kernel(qemu, serial)
+            shutil.rmtree(scratch, ignore_errors=True)
+
+    def on_linux():
+        root = tempfile.mkdtemp(dir=work)
+        shutil.rmtree(root)
+        os.makedirs(root)
+        fixture(root)
+        server = LinuxServer(linux_bin, root, os.path.join(root, "server.log"))
+        try:
+            return drive("linux", server.port)
+        finally:
+            server.stop()
+            shutil.rmtree(root, ignore_errors=True)
+
+    metal = on_metal()
+    linux = on_linux()
+    # The two hosts agree on what retirement does — counts, by-kind, and the
+    # pages that serve afterwards.
+    expect(metal == linux, f"metal and linux disagreed: {metal} vs {linux}")
+    # And the fixture actually exercised the interesting removals.
+    expect((metal["members"] or 0) >= 1, "no account was removed — the fixture did not exercise user retirement")
+    expect(metal["table"].get("old topic", 0) >= 2, "fewer than two old topics retired — the fixture did not exercise topic retirement")
+    expect(metal["table"].get("direct-message conversation", 0) >= 1, "the removed user's DM was not retired")
+    expect(metal["table"].get("stale last-conversation pointer", 0) >= 1, "the kept user's dangling last-conv was not swept")
+
+    for f in failures:
+        report(f"FAIL  retire: {f}")
+    if not failures:
+        report("ok    retire: both hosts retired the same tree identically (old topics, a removed user and its DM, "
+               "a channel line, a swept pointer), kept users' pages served, and a second run was a no-op")
+    return len(failures)
+
+
 def upload_failures(elf, linux_bin, content, pristine, work, mnt, report) -> int:
     """The same uploads to the machine and to Linux, and their answers compared.
     The stored file's name is random on both sides, so what is compared is the
@@ -3155,6 +3295,9 @@ def main() -> int:
     if running("throttle"):
         failures += login_throttle_failures(elf, linux_bin, content, pristine, work, mnt, print)
         lap("the login throttle")
+    if running("retire"):
+        failures += retire_failures(elf, linux_bin, content, pristine, work, mnt, gopher_root, print)
+        lap("retiring old topics and users")
     if running("slow"):
         failures += slow_reader_failures(elf, linux_bin, content, work, mnt, print)
         lap("slow readers")
