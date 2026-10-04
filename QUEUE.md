@@ -81,7 +81,14 @@ on your branch, unmerged, as planned.
      state (a file on the host, like `~/metal-url`): then prod's server
      being stopped is expected (OK, said so), metal is the subject, and
      `overall` follows metal and the host's own health. Tests in
-     `test_watchdog.py`. It is still read by hand (`ssh ... cat
+     `test_watchdog.py`. **And restarts must show** (fire drill 4,
+     2026-10-04): Steve restarted metal three times from the DigitalOcean
+     console; each was down only 13-17 s, and the watchdog's once-a-minute
+     "does /version answer now" missed every one. Give `/version` the
+     host's boot time (both hosts; `compare_hosts` already leaves
+     `/version` out), and have the watchdog report a changed boot time as
+     a restart (WARN, with when), and keep the last restart in the status
+     file. It is still read by hand (`ssh ... cat
      watchdog-status.txt`); whether it should alert anyone is Steve's
      question, not this item's.
 
