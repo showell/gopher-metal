@@ -33,8 +33,6 @@
 
 const std = @import("std");
 
-/// A ring over a buffer it is given. The buffer is separate so that the ring
-/// itself, a few words, can live in `.data` where the loader writes it,
 /// **THE REQUEST LOG WRITES THE PATH, NEVER THE QUERY** (QUEUE.md item 95,
 /// REVIEW-secrets.md finding 1). The redactor below takes a secret VALUE out of
 /// a query by its key; this takes the whole query off the request target before
@@ -53,6 +51,8 @@ test "the request log keeps the path and drops the query, secret or not" {
     try testing.expectEqualStrings("", withoutQuery("")); // nothing at all
 }
 
+/// A ring over a buffer it is given. The buffer is separate so that the ring
+/// itself, a few words, can live in `.data` where the loader writes it,
 /// while the buffer lives in `.bss` (see `serial.ring`).
 pub const Ring = struct {
     buf: []u8,

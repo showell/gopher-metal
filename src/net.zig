@@ -139,12 +139,12 @@ pub const Net = struct {
         return net;
     }
 
-    /// Hands one frame to the device and returns; the frame is copied, so the
-    /// caller's bytes are free at once. Waits only when every transmit buffer
-    /// is still the device's.
     /// The most a frame may carry: a buffer, less the virtio header in front.
     pub const max_frame: usize = buffer_size - @sizeOf(Header);
 
+    /// Hands one frame to the device and returns; the frame is copied, so the
+    /// caller's bytes are free at once. Waits only when every transmit buffer
+    /// is still the device's.
     pub fn send(self: *Net, frame: []const u8) void {
         // **A FRAME TOO LONG IS REFUSED, NOT TRUNCATED, NEVER OVERRUN**
         // (REVIEW-item90-step2.md finding 1). The copy below would otherwise
@@ -275,9 +275,4 @@ test "send refuses a frame too long for its buffer: counted, nothing sent, the r
     try testing.expectEqual(@as(u64, 0), n.sent); // it was not sent
     try testing.expectEqual(tx_buffers, n.free_len); // no buffer taken
     try testing.expectEqual(@as(u16, 7), mem.tx_ring.avail_idx); // the ring did not move
-
-    // The largest frame that DOES fit is not refused (it reaches the copy; the
-    // device is undefined, so we only check the boundary is inclusive by seeing
-    // `oversized` stay put for `max_frame` while stepping one past it did count).
-    try testing.expect(Net.max_frame > 0);
 }
