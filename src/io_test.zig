@@ -551,6 +551,66 @@ test "the page cache is the disk: every change interleaved with reads, under evi
     try testing.expect(pc.held <= pc.budget);
 }
 
+test "a picture read whole is kept; a range read keeps nothing; one past largest is never kept (QUEUE.md item 102)" {
+    const t = try Two.make(true);
+    defer t.deinit();
+    const largest = 4 * PageCache.page;
+    const pc = try testing.allocator.create(PageCache);
+    defer testing.allocator.destroy(pc);
+    pc.* = PageCache.init(testing.allocator, 64 * PageCache.page, largest);
+    io_mod.keepPages(pc);
+    defer io_mod.keepPages(null);
+
+    // A picture the application wrote: a write never brings a file in, so it is
+    // not kept yet (write-no-allocate, page_cache.zig).
+    var pic: [2 * PageCache.page]u8 = undefined;
+    for (&pic, 0..) |*b, i| b.* = @truncate(i *% 7 + 1);
+    try cwd.writeFile(io, .{ .sub_path = "data/chat/pic", .data = &pic });
+    try testing.expectEqual(@as(usize, 0), pc.count);
+
+    // A plain GET reads it whole (offset 0, a buffer that holds all of it): now
+    // it is kept, and the next read is a hit served from memory.
+    var buf: [8 * PageCache.page]u8 = undefined;
+    {
+        const f = try cwd.openFile(io, "data/chat/pic", .{});
+        const n = try f.readPositionalAll(io, &buf, 0);
+        try testing.expectEqualSlices(u8, &pic, buf[0..n]);
+    }
+    try testing.expectEqual(@as(usize, 1), pc.count);
+    const hits_before = pc.hits;
+    {
+        const f = try cwd.openFile(io, "data/chat/pic", .{});
+        const n = try f.readPositionalAll(io, &buf, 0);
+        try testing.expectEqualSlices(u8, &pic, buf[0..n]);
+    }
+    try testing.expectEqual(hits_before + 1, pc.hits);
+    try testing.expectEqual(@as(usize, 1), pc.count);
+
+    // A range read (offset past the start) of an uncached file keeps nothing:
+    // a video seek is not a file worth holding whole.
+    try cwd.writeFile(io, .{ .sub_path = "data/chat/clip", .data = &pic });
+    {
+        const f = try cwd.openFile(io, "data/chat/clip", .{});
+        _ = try f.readPositionalAll(io, buf[0..PageCache.page], PageCache.page);
+    }
+    try testing.expect(pc.get("data/chat/clip") == null);
+    try testing.expectEqual(@as(usize, 1), pc.count);
+
+    // A picture past `largest`, read whole, is read from the disk every time —
+    // never kept, so it cannot push the transcripts out.
+    var big: [5 * PageCache.page]u8 = undefined;
+    for (&big, 0..) |*b, i| b.* = @truncate(i *% 3 + 2);
+    try testing.expect(big.len > largest);
+    try cwd.writeFile(io, .{ .sub_path = "data/chat/huge", .data = &big });
+    {
+        const f = try cwd.openFile(io, "data/chat/huge", .{});
+        const n = try f.readPositionalAll(io, &buf, 0);
+        try testing.expectEqualSlices(u8, &big, buf[0..n]);
+    }
+    try testing.expect(pc.get("data/chat/huge") == null);
+    try testing.expectEqual(@as(usize, 1), pc.count);
+}
+
 // ── the admin's lost password (QUEUE.md item 89) ────────────────────────────
 
 const admin_reset = @import("admin_reset.zig");

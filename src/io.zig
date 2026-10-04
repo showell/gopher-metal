@@ -392,22 +392,37 @@ pub const File = struct {
 
     /// Reads until `buffer` is full or the file ends, starting at `offset`, and
     /// answers how many bytes that was — std's `File.readPositionalAll`, which
-    /// chat_upload calls to serve an HTTP Range request.
+    /// chat_upload calls to serve a picture whole (a plain GET) or a slice of a
+    /// video (a Range request).
     ///
     /// It re-opens by PATH rather than trusting the entry captured at open: an
     /// append since then has moved the size, and a read must see it.
+    ///
+    /// **A WHOLE-FILE READ BRINGS THE FILE IN** (QUEUE.md item 102, picture
+    /// lever 1), exactly as `readFileAlloc` does: a picture served by a plain
+    /// GET (offset 0, the buffer holding all of it) is kept, so the next GET of
+    /// it is served from memory, not read whole from the disk again — the one
+    /// stall item 90 left (a big picture at 30-39 MB/s on each request). A Range
+    /// read does not keep the file: it is a seek into a video (offset past the
+    /// start, or a buffer too small to have held the whole file), and a video is
+    /// past `largest` anyway. Keeping obeys `largest`, so a picture over the cap
+    /// is read from the disk as before.
     pub fn readPositionalAll(self: File, _: Self, buffer: []u8, offset: u64) Error!usize {
-        if (pagesFor(self.path[0..self.path_len])) |pc| if (pc.get(self.path[0..self.path_len])) |kept| {
+        const path = self.path[0..self.path_len];
+        const pc = pagesFor(path);
+        if (pc) |c| if (c.get(path)) |kept| {
             if (offset >= kept.len) return 0;
             const n = @min(buffer.len, kept.len - @as(usize, @intCast(offset)));
             @memcpy(buffer[0..n], kept[@intCast(offset)..][0..n]);
             return n;
         };
-        const v = try reading(self.path[0..self.path_len]);
-        const e = try openEntry(v, self.path[0..self.path_len]);
+        const v = try reading(path);
+        const e = try openEntry(v, path);
         if (e.isDirectory()) return Error.IsDir;
         if (offset >= e.size) return 0;
-        return v.readAt(e, @intCast(offset), buffer) catch return Error.ReadFailed;
+        const n = v.readAt(e, @intCast(offset), buffer) catch return Error.ReadFailed;
+        if (pc) |c| if (offset == 0 and n == e.size) c.put(path, buffer[0..n]);
+        return n;
     }
 
     /// **THE APPEND.** Every write the application makes that is not a whole

@@ -226,10 +226,16 @@ const request_heap_bytes = 32 * 1024 * 1024;
 /// its table of names is a megabyte, and the files' bytes are taken from the
 /// pages as they are kept.
 var page_cache: metal.page_cache.PageCache = undefined;
-/// The largest file it keeps: every transcript (prod's largest is 362 KB),
-/// and not most pictures, which are read from the disk as before rather
-/// than pushing transcripts out.
-const page_cache_largest = 2 << 20;
+/// The largest file the cache keeps, when `page_cache_largest_kib` is absent:
+/// 4 MiB. It holds every transcript (prod's largest is 362 KB) and every
+/// picture people actually load (a phone photo or a screenshot is a few MB;
+/// chat's image cap is 10 MiB), so a picture read once is served from memory
+/// rather than read whole from the disk on every GET — the one stall item 90
+/// left (30-39 MB/s). A file past the cap is read from the disk as before, so
+/// no single big upload pushes the transcripts out. The box measures prod's
+/// file-size distribution under KVM after the cutover and sets the cap from it;
+/// `docs/designs/DESIGN-picture-cache.md` has the method and the budget cost.
+const page_cache_largest_kib_default = 4 << 10;
 
 const config_path = "gopher-metal.conf";
 
@@ -324,7 +330,8 @@ pub fn kmain() noreturn {
     if (conf.page_cache_mib != 0) {
         const p = pages.stats();
         const budget = @min(@as(usize, conf.page_cache_mib) << 20, (p.bytes_total - p.bytes_taken) / 4);
-        page_cache = metal.page_cache.PageCache.init(pages.allocator, budget, page_cache_largest);
+        const largest = @as(usize, conf.page_cache_largest_kib) << 10;
+        page_cache = metal.page_cache.PageCache.init(pages.allocator, budget, largest);
         Io.keepPages(&page_cache);
         serial.put("  the data's files kept in memory: up to ");
         serial.putDec(budget >> 20);
@@ -336,8 +343,8 @@ pub fn kmain() noreturn {
             serial.put(" asked)");
         } else serial.put(" MiB");
         serial.put(", files of up to ");
-        serial.putDec(page_cache_largest >> 20);
-        serial.put(" MiB\n");
+        serial.putDec(largest >> 10);
+        serial.put(" KiB\n");
     } else serial.put("  the data's files kept in memory: none (page_cache_mib = 0)\n");
 
     // **THE ADMIN'S LOST PASSWORD** (QUEUE.md item 89): a reset the boot
@@ -1272,6 +1279,11 @@ fn logRequest(number: u64, what: []const u8, outcome: []const u8) void {
 ///     page_cache_mib = N      memory for the data's files read whole
 ///                             (`page_cache.zig`), 64 when absent; 0 keeps
 ///                             none, every read from the disk, as before
+///     page_cache_largest_kib = N
+///                             the largest file the cache keeps, in KiB; 4096
+///                             (4 MiB) when absent, at most 10240 (chat's image
+///                             cap). Raising it keeps bigger pictures in memory
+///                             at the cost of room for transcripts.
 ///     admin_password_reset = Steve $2b$10$…
 ///                             a new password hash for the admin, uid 1, if
 ///                             uid 1 is named so; applied once, at boot
@@ -1308,6 +1320,10 @@ const Config = struct {
     trusted_proxy: ?[4]u8 = null,
     /// Memory for the page cache, in MiB; 0 keeps none.
     page_cache_mib: u32 = 64,
+    /// The largest file the page cache keeps, in KiB (`page_cache.zig`'s
+    /// `largest`). Default 4 MiB; the box raises it toward chat's 10 MiB image
+    /// cap once prod's picture sizes are measured.
+    page_cache_largest_kib: u32 = page_cache_largest_kib_default,
     /// The admin's password reset, kept here because the text it was read
     /// from is freed: the name, and the 60-byte hash.
     reset_name: [64]u8 = undefined,
@@ -1384,12 +1400,17 @@ fn readConfig(io: Io, alloc: std.mem.Allocator) Config {
             conf.page_cache_mib = std.fmt.parseInt(u32, value, 10) catch
                 serial.fail(config_path ++ ": `page_cache_mib` is a number of MiB, 0 for none");
             if (conf.page_cache_mib > 1024) serial.fail(config_path ++ ": `page_cache_mib` past 1024 is more memory than a droplet has to spare");
+        } else if (std.mem.eql(u8, key, "page_cache_largest_kib")) {
+            conf.page_cache_largest_kib = std.fmt.parseInt(u32, value, 10) catch
+                serial.fail(config_path ++ ": `page_cache_largest_kib` is a number of KiB");
+            if (conf.page_cache_largest_kib == 0) serial.fail(config_path ++ ": `page_cache_largest_kib` is 0 — set `page_cache_mib = 0` to keep no files, not a zero cap");
+            if (conf.page_cache_largest_kib > 10 << 10) serial.fail(config_path ++ ": `page_cache_largest_kib` past 10240 (10 MiB) is more than chat's image cap, so no picture reaches it");
         } else if (std.mem.eql(u8, key, "trusted_proxy")) {
             const a = std.Io.net.Ip4Address.parse(value, 0) catch
                 serial.fail(config_path ++ ": `trusted_proxy` is an IPv4 address: 10.0.0.2");
             conf.trusted_proxy = a.bytes;
         } else {
-            serial.fail(config_path ++ ": the keys are `requests`, `idle_timeout_ms`, `streams`, `keepalive_ms`, `lose_one_sent_in`, `card`, `volume`, `trusted_proxy`, `page_cache_mib` and `admin_password_reset`");
+            serial.fail(config_path ++ ": the keys are `requests`, `idle_timeout_ms`, `streams`, `keepalive_ms`, `lose_one_sent_in`, `card`, `volume`, `trusted_proxy`, `page_cache_mib`, `page_cache_largest_kib` and `admin_password_reset`");
         }
     }
     if (!said_anything) serial.fail(config_path ++ " is present but says nothing");
@@ -1442,8 +1463,8 @@ fn metalFacts(io: Io, alloc: std.mem.Allocator) anyerror![]const router.host_sta
         kept.count, kept.used >> 10, @as(usize, Io.SiteCache.capacity) >> 10, kept.hits,
     });
     if (Io.pageCache()) |pc| {
-        try add(&facts, alloc, "data files in memory", "{d} kept, {d} MB of {d} MB; {d} reads answered from them, {d} from the disk; {d} pushed out", .{
-            pc.count, pc.held >> 20, pc.budget >> 20, pc.hits, pc.misses, pc.evicted,
+        try add(&facts, alloc, "data files in memory", "{d} kept, {d} MB of {d} MB, files up to {d} KiB; {d} reads answered from them, {d} from the disk; {d} pushed out", .{
+            pc.count, pc.held >> 20, pc.budget >> 20, pc.largest >> 10, pc.hits, pc.misses, pc.evicted,
         });
     } else try add(&facts, alloc, "data files in memory", "none (page_cache_mib = 0)", .{});
     const work = diskWork();
