@@ -193,7 +193,6 @@ SHAPES = {
     "data/chat/users/7/last-conv": b"1_2",
     "data/chat/users/7/last-sessions/1_2": b"general",
     "data/chat/users/7/pinned-sessions/Dev-Talk": b"general",
-    "data/chat/_session_secret": b"x" * 42,
     "data/users/7/last-seen": b"1790000000",
     "data/users/7/upload-bytes": b"76800",
     "data/users/1/admin": b"",
@@ -204,6 +203,9 @@ SHAPES = {
     "auth/7/password": b"$2a$10$" + b"x" * 53,
     "auth/7/api-key": b"0123456789abcdef",
     "auth/next-id.txt": b"8\n",
+    "auth/_session_secret": b"x" * 42,
+    "auth/_session_secret.previous": b"y" * 42,
+    "auth/_session_secret.previous-until": b"1790086400\n",
 }
 # FAT keeps 1980-01-01 to 2107-12-31, in even seconds.
 OLDEST = 315_532_800 + 2       # 1980-01-01T00:00:02Z

@@ -225,7 +225,7 @@ def self_test(binary: str = None) -> int:
             out = os.path.join(d, "out16")
             server = G.LinuxServer(binary, out, os.path.join(d, "serve.log"))
             try:
-                with open(os.path.join(out, "data/chat/_session_secret"), "rb") as f:
+                with open(os.path.join(out, "auth/_session_secret"), "rb") as f:
                     secret = f.read()
                 cookie = compare_hosts.mint_session(secret, "7", int(time.time()))
                 slug = build_volume.SLUG80

@@ -18,7 +18,7 @@ It reports both runs side by side: first-byte median, 90th percentile and
 worst; stream delivery median and worst; stalls; uploads made.
 
 Everything is done as `--uid` (default 1), with a session minted from the
-site's secret (`data/chat/_session_secret`, passed as SECRET_FILE), in the
+site's secret (`auth/_session_secret`, passed as SECRET_FILE), in the
 DM `--conv` (default 1_2), in a topic of its own, `load-<time>`, which it
 makes. Pictures are capped at 10 MiB, so an upload of 50-100 MB is a
 video: an MP4 header and zeros, which the upload's sniffing takes.

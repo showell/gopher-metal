@@ -108,7 +108,12 @@ APP_PATHS = [
     # puts it there by hand.
     (rf"data/chat/users/{ID}/links\.md", "a user's links page, placed by hand", False, False),
     (rf"data/chat/users/{ID}/(?:last|pinned)-sessions/(?:{CONV}|{CHANNEL})", "a user's chat state", False, True),
-    (r"data/chat/_session_secret", "the session secret", False, False),
+    # The session secret and its rotation's two files: in auth/ since v16, in
+    # data/chat/ on a tree written before (angry-gopher's roots.migrateSecret
+    # moves them once, at boot).
+    (r"auth/_session_secret(?:\.previous|\.previous-until)?", "the session secret", False, False),
+    (r"data/chat/_session_secret(?:\.previous|\.previous-until)?", "the session secret, before v16 moved it to auth/",
+     False, False),
     (rf"data/users/{ID}(?:/last-seen|/upload-bytes|/admin)?", "a user's record", False, False),
     # `signed`: the id's gopher_uid has been signed once, so its unsigned
     # spelling is refused (angry-gopher's uid_cookie.zig, QUEUE.md item 51).
