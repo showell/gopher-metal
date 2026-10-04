@@ -106,10 +106,16 @@ so nothing restarts it, and it will show `server FAIL` until step 12.
 
 On `<box>`:
 
-    rsync -a <prod>:AngryGopher/prod/data <prod>:AngryGopher/prod/auth copy/
+    rsync -a <prod>:AngryGopher/prod/ copy/data/
+    rsync -a <prod>:Auth/ copy/auth/
 
-- GO: rsync exits 0, and `find copy -type f | wc -l` is the same number as
-  on `<prod>`.
+On `<prod>` the data tree is `~/AngryGopher/prod` (gopher.conf's
+`data_dir`: `chat/`, `lynrummy/`, `players/`, `users/`) and the auth tree is
+`~/Auth`; the volume, and every tool here, holds them as `data/` and `auth/`
+side by side, so the copy takes that shape.
+
+- GO: both rsyncs exit 0, and `find copy -type f | wc -l` is the same
+  number as `find ~/AngryGopher/prod ~/Auth -type f | wc -l` on `<prod>`.
 
 Then **close the window for unsigned cookies** (QUEUE.md item 51: "until
 the cutover or 30 days, whichever is first"). angry-gopher re-signs an
@@ -229,10 +235,14 @@ On `<prod>`, serve the frozen data on loopback only, and compare. Copy
 `droplet/compare_hosts.py` there first; it is one file with nothing to
 install.
 
+    mkdir -p ~/cmp && ln -sfn ~/AngryGopher/prod ~/cmp/data && ln -sfn ~/Auth ~/cmp/auth
     cd /home/steve/angry-gopher
     GOPHER_BIND=127.0.0.1 GOPHER_PORT=9101 GOPHER_CONFIG=/home/steve/AngryGopher/gopher.conf ./zig-server &
-    droplet/compare_hosts.py AngryGopher/prod http://127.0.0.1:9101 http://<metal>
-    droplet/compare_hosts.py AngryGopher/prod http://127.0.0.1:9101 http://<metal> --writes
+    ~/compare_hosts.py ~/cmp http://127.0.0.1:9101 http://<metal>
+    ~/compare_hosts.py ~/cmp http://127.0.0.1:9101 http://<metal> --writes
+
+(`compare_hosts.py` wants one folder holding `data/` and `auth/`; `~/cmp`
+is two links to prod's real trees, and is removed afterwards.)
 
 `--writes` posts a message, a picture and a reaction to a new topic in
 uid 1's own DM on both hosts (no one else sees it), then compares again.
@@ -390,8 +400,13 @@ console restore of the volume, then step 10's boot checks.
 
      It writes every name in its stored case, every byte and every time,
      and checks the result against the volume.
-3. **Put it on prod.** Move prod's `data/` and `auth/` aside (keep them),
-   copy `back/data` and `back/auth` in, then `sudo systemctl start
+3. **Put it on prod, without moving prod's own trees.** Copy `back/` to
+   `<prod>` (say `~/AngryGopher/back`, holding `data/` and `auth/`), and
+   point `~/AngryGopher/gopher.conf` at it: `data_dir =
+   /home/steve/AngryGopher/back/data` and `auth_dir =
+   /home/steve/AngryGopher/back/auth` (the old `data_dir` line, and the
+   `~/Auth` default, stay as they are in a copy of the file you keep). The
+   frozen pre-cutover trees stay untouched beside it. Then `sudo systemctl start
    gopher-server`.
 4. **Compare before switching back.** Which comparison depends on how step 2
    took the data off:

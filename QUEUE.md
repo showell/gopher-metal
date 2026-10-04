@@ -59,6 +59,20 @@ on your branch, unmerged, as planned.
      kept file is sent from the cache; a file too big to keep is streamed).
      Tests, and the judge's `bulk` and `uploads` gates green on Linux.
 
+106. **The session secret moves into `auth/`** (angry-gopher; after the
+     cutover; Steve, 2026-10-04). One root holding `data/` and `auth/` side
+     by side is the layout everywhere (metal's volume already is; Linux is
+     just a host pointed at such a root). Today `_session_secret` lives in
+     `data/chat/` (`roots.zig`: `users.session_secret_dir`), mixed into chat
+     data. Move it to `auth/`, so **`auth/` holds every secret and `data/`
+     none**: hashes, API keys and the session secret on one side. Read it
+     from the new place, and on startup move an old-place secret over once
+     (so a volume or a prod tree written before this still serves, and no
+     session is lost); never two copies. Update what names the old path
+     (`compare_hosts.py`'s default `--secret`, the drill, `check_backup.py`,
+     SECRET-LEAK.md, the judge). Tests on both hosts; the judge holds them
+     to the same answer before and after the move.
+
 100. **Throttle every bcrypt, not only sign-in.** `login_throttle` guards
      `/login/full`'s check, but three other paths still run a bcrypt with no
      bound: **creating an account** (`setUserPassword`, `login.zig:199,203`),
