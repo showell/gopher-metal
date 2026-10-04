@@ -1977,9 +1977,11 @@ def named(answer: dict) -> dict:
     return dict(answer, body=STORED_NAME.sub(b"<NAME>", answer["body"]))
 
 
-# A picture, it read back, one sent after 100-continue, one not a picture,
-# and (not QUICK) one bigger than the heap keeps.
-UPLOAD_STORY_REQUESTS = 5
+# A picture, it read back, one sent after 100-continue, one not a picture, and
+# (not QUICK) a big picture posted + streamed back and one bigger than the heap
+# keeps. QUICK stops after the first four.
+UPLOAD_STORY_REQUESTS = 7
+UPLOAD_STORY_REQUESTS_QUICK = 4
 
 
 def upload_story(port: int, session: str) -> dict:
@@ -2028,6 +2030,25 @@ def upload_story(port: int, session: str) -> dict:
     out["one that waits to be told to send"] = named(post("two.png", small, expect_continue=True))
     out["not a picture"] = post("notes.txt", b"just words, not a picture at all")
     if not QUICK:
+        # **A PICTURE PAST THE WHOLE-READ CAP, STREAMED BACK** (QUEUE.md item
+        # 105): bigger than chat_upload's `whole_read_max` (4 MiB) and under the
+        # 10 MiB image cap, so the serve path streams it in pieces rather than
+        # holding it whole. It must still come back byte for byte, the same on
+        # both hosts — the proof the stream path is correct and composes with
+        # the cache (item 102).
+        big = picture(5 << 20)
+        big_stored = post("big.png", big)
+        out["a big picture streams back"] = {"status": 0, "body": b"not stored", "type": None}
+        if big_stored["status"] == 200:
+            try:
+                burl = json.loads(big_stored["body"])["url"]
+            except (ValueError, KeyError):
+                burl = None
+            if burl:
+                bgot = send("GET", burl)
+                out["a big picture streams back"] = {
+                    "status": bgot["status"], "type": bgot["type"],
+                    "body": b"the same bytes" if bgot["body"] == big else b"DIFFERENT bytes"}
         out["bigger than the heap it keeps"] = post("huge.png", picture(OVERSIZED_UPLOAD))
     return out
 
@@ -2384,7 +2405,7 @@ def upload_failures(elf, linux_bin, content, pristine, work, mnt, report) -> int
     # Exactly the story's requests, so the kernel stops on its last answer:
     # 30 left it waiting out finish_kernel's 60 s (QUICK: 62 s of a 152 s run).
     # A story that went wrong sends fewer, and then the 60 s is the wait.
-    set_request_limit(image, UPLOAD_STORY_REQUESTS - (1 if QUICK else 0), mnt)
+    set_request_limit(image, UPLOAD_STORY_REQUESTS_QUICK if QUICK else UPLOAD_STORY_REQUESTS, mnt)
     qemu, port, serial = start_kernel(elf, image, scratch)
     try:
         metal = upload_story(port, session)
@@ -2419,7 +2440,7 @@ def upload_failures(elf, linux_bin, content, pristine, work, mnt, report) -> int
             report(f"FAIL  uploads: {side} did not give the picture back: "
                    f"{got.get('status')} {abbrev(got.get('body', b''))}")
     if not failures:
-        sizes = "a 64 KB picture" + ("" if QUICK else f" and one of {OVERSIZED_UPLOAD >> 20} MB")
+        sizes = "a 64 KB picture" + ("" if QUICK else f", a 5 MB one streamed back in pieces, and one of {OVERSIZED_UPLOAD >> 20} MB")
         report(f"ok    uploads: {sizes}, stored, read back byte for byte, and refused as Linux refuses them")
     shutil.rmtree(scratch, ignore_errors=True)
     return failures
