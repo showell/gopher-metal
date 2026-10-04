@@ -14,7 +14,7 @@ file, and warm-up).
 The pages: /tutorial is embedded in the binary (no file); the others read a
 file from the boot disk (pages/home.txt, the resume, its PDF, the Safari
 page). Under TCG the times are slow and only comparable to each other;
-the box measures for real on a droplet with droplet/race.py.
+the box measures for real on the droplet.
 
 Exit 0 when it ran, 1 when the kernel did not answer.
 """

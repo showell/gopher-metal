@@ -21,7 +21,7 @@ FAT32 raises three limits, and leaves one where it is:
   The real ceiling is our own sector numbers (below): 2 TiB.
 - **A file:** still at most 4 GiB − 1. The directory entry's size field is
   32 bits in both formats. Caddy caps one upload at 110 MB
-  (`droplet/metal.lynrummy.com.caddy`), so files stay far below that, and
+  (angry-gopher's `deploy/Caddyfile`), so files stay far below that, and
   `writeInto`'s existing `reach > 0xFFFF_FFFF` check stays exactly as it is.
 
 What grows is the number and total size of files, not the size of any one

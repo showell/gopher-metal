@@ -11,11 +11,9 @@ droplet through our own BIOS loader.
 
 ## Start here
 
-**Where it stands:** it runs the whole site at
-https://metal.lynrummy.com, a test name proxied to a droplet with no Linux
-on it, serving a copy of prod's chat data. The cutover — replacing Linux at
-`lynrummy.com` with metal — is rehearsed and waiting on a few of Steve's
-steps and the day itself; see below, and `CUTOVER.md`.
+**Where it stands:** since 2026-10-04 it serves **https://lynrummy.com**
+itself: the whole site, on a droplet with no Linux on it, with prod's real
+data. The cutover is in `CUTOVER.md`, with the way back.
 
 **Three files to read, in order:**
 1. this README — what metal is, how it is built and tested, and how it
@@ -26,39 +24,29 @@ steps and the day itself; see below, and `CUTOVER.md`.
    share the work, and the live queue of what is open (done work is in
    `QUEUE-DONE.md`).
 
-## Where it runs: a TEST site, https://metal.lynrummy.com
-
-**It runs, and it runs well, but nothing on it is meant to last yet.**
+## Where it runs: https://lynrummy.com
 
 - **What:** angry-gopher's whole route table, so chat and every app
   (Lyn Rummy, Seattle Delivery, Safari, puzzles, chess). Steve's decision,
   2026-10-01: the apps are served from metal along with chat, not split off.
 - **Where:** a droplet in nyc2, booted from a custom image, with
   no Linux on it. It listens on its **private** network card only
-  (10.100.0.4). prod's Caddy (the lynrummy.com droplet) proxies the test name
-  to it, from `droplet/metal.lynrummy.com.caddy`, installed by hand in
-  `/etc/caddy/sites/`.
-- **Its data is on a DigitalOcean volume** (2 GiB, nyc2), since v5
-  (2026-10-02; v6 is live): chat's data (`data/`, `auth/`) on the volume, which a new
-  image does not touch (`src/scsi.zig`), and the site's own files (`pages/`,
-  `gallery/`, `gopher-metal.conf`) on the boot disk, where each new image
-  updates them. The kernel mounts both and sends each path to one by its first
-  directory (`src/io.zig`); it refuses, and logs, any write outside `data/` and
+  (10.100.0.4). prod's Caddy (the old Linux droplet) proxies lynrummy.com to
+  it (angry-gopher's `deploy/Caddyfile`); prod's own server is stopped.
+- **Its data is on a DigitalOcean volume** (FAT32, 16 GiB, nyc2): chat's
+  data (`data/`, `auth/`) on the volume, which a new image does not touch
+  (`src/scsi.zig`), and the site's own files (`pages/`, `gallery/`,
+  `gopher-metal.conf`) on the boot disk, where each new image updates them.
+  The kernel mounts both and sends each path to one by its first directory
+  (`src/io.zig`); it refuses, and logs, any write outside `data/` and
   `auth/`. **It serves one volume by name:** the boot image's
-  `gopher-metal.conf` says `volume = 92DE-8831` (the FAT serial `blkid`
-  shows; `droplet/volume-serial`), and the machine stops rather than serve
-  with that volume missing or another one attached, either of which would
-  answer as an empty site and lose what was written. A path with `.` or `..`
-  is refused. The volume image was written once, from DigitalOcean's recovery
-  console (`droplet/new_volume.py`).
-  **It survives a rebuild:** a marker message posted on v5 was read back on
-  v6 (2026-10-02), after the droplet was rebuilt from the new image. FAT16 limits a volume to
-  2 GB; prod's data is 215 MB (2026-10-01), and each user may upload 1 GiB
-  over their lifetime. **This machine now mounts FAT32 as well**
-  (`FAT32.md`, QUEUE item 17), decided by cluster count as the spec says.
-  That is judged under QEMU only, and is not yet on a real volume. The test
-  site's volume is still FAT16; the cutover plans a new FAT32 one
-  (`CUTOVER.md`).
+  `gopher-metal.conf` names the FAT serial `blkid` shows
+  (`droplet/volume-serial`), and the machine stops rather than serve with
+  that volume missing or another one attached, either of which would answer
+  as an empty site and lose what was written. A path with `.` or `..` is
+  refused. The volume was built from prod's data at the cutover
+  (`droplet/build_volume.py`) and written from DigitalOcean's recovery
+  console; a new image leaves it as it is.
 - **Each boot checks both disks** before serving (QUEUE item 13): files,
   folders, clusters in use, leaked clusters and problems, one line per disk
   in the log. A damaged disk is served from and reported, not refused.
@@ -75,14 +63,8 @@ steps and the day itself; see below, and `CUTOVER.md`.
     log to show yet.
 
   Each host hands its half over through angry-gopher's `host_status.provide`.
-  **Not yet on the droplet**, and not yet on lynrummy.com. The public
-  `/version` now names the real angry-gopher commit on metal too.
-- **Its data is test data.** The volume is the chat judge's test site, whose
-  accounts' password is in this repo, so anyone who reads the repo can log in
-  to them.
-- **lynrummy.com itself is unchanged:** still angry-gopher on Linux.
 
-How fast, measured with `droplet/race.py` (the same pages from both sites,
+How fast, measured before the cutover (the same pages from both sites,
 alternating, 40 rounds; first byte, median / 90th percentile; 2026-10-01, v4:
 interrupts and the idle halt):
 

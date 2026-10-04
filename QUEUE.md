@@ -3,7 +3,7 @@
 Shared by the cloud Claude (CC) and the box Claude; see `CLOUD.md`. Items are
 in order. The box Claude reorders on `master`, and CC proposes at the bottom.
 
-## Context, 2026-10-03 evening
+## Context, 2026-10-04
 
 - **THE CUTOVER IS PLANNED FOR 2026-10-04, late morning US time** (a goal,
   not a deadline). Steve has told the users there is slightly more risk of
@@ -11,9 +11,9 @@ in order. The box Claude reorders on `master`, and CC proposes at the bottom.
 - **Steve's risks, in order:** (1) **leaking passwords**, by far the
   biggest; (2) losing data (it is a chat app, not a bank or an archive);
   (3) the server stalling or dying now and then.
-- **metal.lynrummy.com is getting v14** (gopher-metal `a96ff67`, item 90
-  step 2) tonight, on the copy of prod's data; lynrummy.com (Linux) runs
-  angry-gopher `49f47903`, the same commit v14 carries.
+- **The cutover is done (2026-10-04):** lynrummy.com is served by
+  gopher-metal v15 (gopher-metal `7b2f863`, angry-gopher `2ea3f2d1`); prod's
+  Linux server is stopped. metal.lynrummy.com, the test name, is retired.
 - **Steve's direction:** the cutover is all at once, fully committed.
 
 **Done items, old check-ins and older answers are in [`QUEUE-DONE.md`](QUEUE-DONE.md)** (verbatim). What is below is the open work, the current order, the last two check-ins, and the live answers.

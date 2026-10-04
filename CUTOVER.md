@@ -258,7 +258,7 @@ server afterwards.
 ### 12. Switch Caddy
 
 On `<prod>`, point lynrummy.com at `<metal>`. Make the same change the
-test name has (`droplet/metal.lynrummy.com.caddy`), for the main site:
+test name had, for the main site:
 
     sudoedit /etc/caddy/Caddyfile        # reverse_proxy <metal>:80
     sudo caddy validate --config /etc/caddy/Caddyfile
@@ -279,8 +279,7 @@ Look at these every hour or two, then every day for a week:
   - the volume's free space;
   - the disk-check lines in the log section;
   - requests and connections.
-- **The site:** chat, a game, an upload. `droplet/race.py` compares
-  response times with what the README measured.
+- **The site:** chat, a game, an upload.
 - **A backup:** take one, as below, and keep it off the droplet.
 
 **Taking a backup of metal.** Do it on `<prod>`, over the private network,
