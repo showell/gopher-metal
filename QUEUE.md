@@ -73,6 +73,18 @@ on your branch, unmerged, as planned.
      SECRET-LEAK.md, the judge). Tests on both hosts; the judge holds them
      to the same answer before and after the move.
 
+107. **The watchdog after the cutover** (angry-gopher `deploy/watchdog.py`;
+     after the cutover). Today it treats prod's own server as the subject:
+     with prod's server stopped by design (CUTOVER.md step 1), `server` and
+     `process` FAIL every minute and `overall` is always FAIL, so a real
+     metal failure no longer changes the overall line. Add a "metal serves"
+     state (a file on the host, like `~/metal-url`): then prod's server
+     being stopped is expected (OK, said so), metal is the subject, and
+     `overall` follows metal and the host's own health. Tests in
+     `test_watchdog.py`. It is still read by hand (`ssh ... cat
+     watchdog-status.txt`); whether it should alert anyone is Steve's
+     question, not this item's.
+
 100. **Throttle every bcrypt, not only sign-in.** `login_throttle` guards
      `/login/full`'s check, but three other paths still run a bcrypt with no
      bound: **creating an account** (`setUserPassword`, `login.zig:199,203`),
