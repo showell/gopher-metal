@@ -314,17 +314,17 @@ UTC** (Steve is awake then; Apoorva is usually asleep, so a backup catches the
 quietest copy). The two are split because of where the admin password lives:
 
 - **The volume snapshot is automated** with a DigitalOcean API token, which is
-  not the admin password, so a cron can take it. **What DigitalOcean offers
-  for scheduling volume snapshots — confirm against its current docs before
-  relying on this** (its product pages are not reachable from the build
-  environment, and the feature set changes): as of this writing, DigitalOcean's
-  *scheduled* "backups" are a **Droplet** feature, while **block-storage volume
-  snapshots are on-demand** (the console, the API, or `doctl compute volume
-  snapshot <volume-id>`). So the daily snapshot is a cron on `<box>` or
-  `<prod>` running `doctl compute volume snapshot` at 20:00 UTC and deleting
-  snapshots older than the retention you keep (`doctl compute snapshot delete`).
-  If DigitalOcean has since added native scheduled volume snapshots, use that
-  instead and drop the cron.
+  not the admin password, so a cron can take it. **What DigitalOcean offers**
+  (checked by the box, 2026-10-04): scheduled "backups" are a **Droplet**
+  feature and do not include attached volumes; **volume snapshots are
+  on-demand only** (the console, the API, or `doctl compute volume snapshot
+  <volume-id>`). The one scheduler is **SnapShooter**, which DigitalOcean
+  documents (docs.digitalocean.com/products/snapshooter) and which takes a
+  frequency, a time and a time zone, with daily/weekly/monthly retention; it
+  connects to the whole DigitalOcean team by OAuth. The alternative is a cron
+  on `<box>` (never `<prod>`) running `doctl compute volume snapshot` at
+  20:00 UTC and deleting snapshots past the retention (`doctl compute
+  snapshot delete`), with a token on `<box>` only. Steve chooses between them.
 - **The tar is by hand**, because `/admin/backup` needs the admin password and
   **no admin password is stored on `<prod>`** (Steve agreed, 2026-10-03):
   `droplet/backup.sh` asks for it each run, so Steve runs it himself at 20:00
