@@ -23,7 +23,7 @@ in order. The box Claude reorders on `master`, and CC proposes at the bottom.
 *Items 1-99 are done (95-99 in check-ins 34-37). 77 and 86 are
 parked until after the cutover; the SEAM subtraction (78's next step) too.*
 
-**THE MORNING ORDER (2026-10-04; the box): 100, 101, 102.** (103, retiring old topics and users, went back to the box: Steve, one-time ops are not worth the handoff.) 95-99 are
+**THE MORNING ORDER (2026-10-04; the box): 100, 101, 102.** **103 is NOT CC's and is DONE: do not work on it.** The box retired the old topics and users on prod by hand on 2026-10-04 (Steve: one-time ops are not worth the handoff), and there is no script to keep. A way to do it on metal comes after the cutover, as a new item. 95-99 are
 merged to `master` (`260efc4`, with the box's doc-comment fixes) and
 angry-gopher `ec49fe1e` is on its `master`; the box is gating them under KVM
 now. 100 and 101 change angry-gopher on its branch as before: if they are
