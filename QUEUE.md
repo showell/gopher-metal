@@ -100,6 +100,34 @@ day and ships them together as v16. **Your 104 question (a topic with no
 dated message):** skip it, do not retire it. A topic that cannot be dated
 may be a fresh one someone just made; keep what we cannot date.
 
+**NEXT (2026-10-04, the box, after reading check-ins 43-44): 109.** 106, 107
+and 108 read well; the box gates them with v16. 108 does not merge as it
+stands: 109 replaces its guard.
+
+109. **`ops/deploy` fails CLOSED** (angry-gopher; Steve 2026-10-04). 108's
+     guard fails open, in three ways:
+     - `ssh "$DEPLOY_HOST" "test -f ~/metal-serves"` returning non-zero for
+       ANY reason (network, key, host down) reads as "metal does not serve",
+       and the script builds and restarts the Linux server.
+     - The marker is not on prod: the cutover ran before it existed. Until
+       someone creates it, the guard does nothing.
+     - Metal-serving mode ships `pages/` and `gallery/` to prod, and nothing
+       there reads them: metal serves them from its boot image
+       (`droplet/chat.py`). The deploy then says it shipped content that is
+       not live. (The box's 108 text told you to ship them; that was wrong.)
+
+     Invert the marker. `ops/deploy` does the Linux build-and-restart ONLY
+     when prod positively says Linux serves: a `~/linux-serves` marker there,
+     checked so that only a clean "present" (ssh exit 0) proceeds; absent,
+     ssh exit 255, anything else REFUSES, naming what it saw. CUTOVER.md's
+     way back creates the marker as one of its steps, and the cutover
+     removes it. While metal serves, `ops/deploy` refreshes the watchdog only
+     and says that a program or content change ships as a new gopher-metal
+     image. The watchdog (107) reads the same marker the same way (absent =
+     metal serves), so there is one marker and its absence is the
+     production state. `ops/test_deploy` pins every refusal path, ssh
+     failure included.
+
 108. **`ops/deploy` after the cutover** (angry-gopher; soon). It builds the
      zig server, ships it to prod and **restarts `gopher-server`**, which
      must stay stopped while metal serves (CUTOVER.md: two hosts writing
