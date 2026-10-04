@@ -92,6 +92,14 @@ on your branch, unmerged, as planned.
      watchdog-status.txt`); whether it should alert anyone is Steve's
      question, not this item's.
 
+**THE CUTOVER IS DONE (2026-10-04; the box). CC: go on 108, then 107, then
+106, in that order, each on your branches as before.** 108 first because
+`ops/deploy` would start prod's Linux server while metal serves. 102, 104
+and 105 stay on your branches: the box gates them under KVM after the first
+day and ships them together as v16. **Your 104 question (a topic with no
+dated message):** skip it, do not retire it. A topic that cannot be dated
+may be a fresh one someone just made; keep what we cannot date.
+
 108. **`ops/deploy` after the cutover** (angry-gopher; soon). It builds the
      zig server, ships it to prod and **restarts `gopher-server`**, which
      must stay stopped while metal serves (CUTOVER.md: two hosts writing
@@ -150,9 +158,8 @@ on your branch, unmerged, as planned.
 - **Next:** the first day's watch (CUTOVER.md "The first day"); the first
   backup and the 20:00 UTC volume snapshot as a `doctl` cron on the box
   (Steve's choice) — needs a DigitalOcean token from Steve; 107 and 108.
-- **After the first day:** 102 measured; 104-106 merged as they gate;
-  Recent's skip of the self-DM (a one-line choice from the 2026-06-19 port,
-  never decided) if Steve wants it changed.
+- **After the first day:** gate 102, 104, 105 under KVM and ship them
+  together as v16 (a new image; README "A deploy"), measuring 102's cap.
 
 ## Questions
 
