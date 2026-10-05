@@ -583,7 +583,12 @@ const Client = struct {
     /// A frame from the table.
     fn receive(self: *Client, sim: *Sim, frame: []const u8) void {
         if (self.reset_sent) return self.answerClosed(sim, frame);
-        if (self.gone or self.state == .closed) return;
+        if (self.gone) return;
+        // **A CLOSED CLIENT IS A HOST WITH NOTHING ON THAT PORT**, and answers
+        // with a reset (RFC 9293 §3.10.7.1). Its TIME-WAIT is short, so the
+        // table's backed-off FIN can arrive after it; silence there would
+        // leave the table to give up on a client that got everything.
+        if (self.state == .closed) return self.answerClosed(sim, frame);
         const pkt = proto.parseIpv4(frame) orelse return;
         const t = pkt.payload;
         if (pkt.protocol != proto.proto_tcp or t.len < tcp.header_len) return;
@@ -1141,6 +1146,10 @@ const regressions = [_]u64{
     // round ended on the 5 s backed-off timer, and Karn's rule threw away the
     // round's only sample. The client now holds segments past a hole.
     1332,
+    // The client's last ACK lost, and the table's backed-off FIN reaching it
+    // after its TIME-WAIT: a closed client said nothing, so the table gave
+    // up on a client that had the whole answer. It now answers with a reset.
+    23953,
 };
 
 test "the table against a simulated network and an RFC 9293 client, a handful of seeds" {
