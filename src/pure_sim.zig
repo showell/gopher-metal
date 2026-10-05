@@ -341,6 +341,8 @@ fn modelBackoff(count: u8) u32 {
 pub fn restartSeed(seed: u64) !void {
     var prng = std.Random.DefaultPrng.init(seed);
     const r = prng.random();
+    // One run in four is a long streak inside the hour, to its cap.
+    const streak = r.uintLessThan(u8, 4) == 0;
     var cmos: [restart.record_len]u8 = undefined;
     // CMOS as it powers up, or holding a record already.
     switch (r.uintLessThan(u8, 4)) {
@@ -351,13 +353,13 @@ pub fn restartSeed(seed: u64) !void {
     }
     var model: ?restart.Record = restart.Record.decode(cmos);
     var now: ?u32 = r.uintLessThan(u32, 3_000_000);
-    const restarts = r.intRangeAtMost(usize, 1, 400);
+    const restarts = if (streak) r.intRangeAtMost(usize, 260, 400) else r.intRangeAtMost(usize, 1, 400);
     for (0..restarts) |step| {
         const got = restart.Record.decode(cmos);
         if (!std.meta.eql(got, model)) return fail(seed, "restart: the record read back is not the one written", step);
         // The clock: a little later, the hour exactly, much later, earlier,
         // unknown, or known again.
-        switch (r.uintLessThan(u8, 10)) {
+        switch (if (streak) 0 else r.uintLessThan(u8, 10)) {
             0...4 => now = if (now) |n| n + r.uintLessThan(u32, 60) else r.uintLessThan(u32, 3_000_000),
             5 => now = if (now) |n| n + 60 else null,
             6 => now = if (now) |n| n + r.intRangeAtMost(u32, 61, 100_000) else null,
@@ -383,7 +385,7 @@ pub fn restartSeed(seed: u64) !void {
         model = rec;
 
         // Between restarts: CMOS lost, or one byte of it damaged.
-        switch (r.uintLessThan(u8, 12)) {
+        switch (if (streak) 2 else r.uintLessThan(u8, 12)) {
             0 => {
                 cmos = @splat(0);
                 model = null;
