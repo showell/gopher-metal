@@ -3,6 +3,9 @@
 //!
 //!   zig build properties                  TCP seeds 1..500, FAT seeds 1..100
 //!   zig build properties -Dseeds=5000 -Dfat-seeds=1000     more
+//!   zig build properties -Dcrowd-seeds=10000                as many crowds
+//!                                         (500 by default: tcp_sim.zig,
+//!                                         `crowd_red`)
 //!   zig build properties -Dsdk-jsonl=out/sdk.jsonl
 //!                                         also the JSONL, to a file
 //!   zig build properties -Dfloor=coverage/floor-sim.txt
@@ -48,6 +51,10 @@ test "the properties over a sweep of seeds" {
         const rough_ok = if (sim.runRoughSeed(seed)) true else |_| false;
         if (!rough_ok) failed_seeds += 1;
         at.always(@src(), rough_ok, "tcp_sim: every oracle holds for every rough seed", .{ .seed = seed });
+        if (seed > options.crowd_seeds) continue;
+        const crowd_ok = if (sim.runCrowdSeed(seed)) true else |_| false;
+        if (!crowd_ok) failed_seeds += 1;
+        at.always(@src(), crowd_ok, "tcp_sim: every oracle holds for every crowd seed", .{ .seed = seed });
     }
     for (1..options.fat_seeds + 1) |seed| {
         const ok = if (fat_sim.runSeed(seed)) true else |_| false;
@@ -64,7 +71,7 @@ test "the properties over a sweep of seeds" {
     var buf: [64 * 1024]u8 = undefined;
     var w: std.Io.Writer = .fixed(&buf);
     const failing = try at.report(&w);
-    std.debug.print("\n{d} TCP seeds, each plain and rough, and {d} FAT seeds; {d} runs failed an oracle\n{s}", .{ options.seeds, options.fat_seeds, failed_seeds, w.buffered() });
+    std.debug.print("\n{d} TCP seeds, each plain and rough, the first {d} crowded too, and {d} FAT seeds; {d} runs failed an oracle\n{s}", .{ options.seeds, @min(options.seeds, options.crowd_seeds), options.fat_seeds, failed_seeds, w.buffered() });
 
     if (options.sdk_jsonl.len > 0) {
         const io = std.testing.io;

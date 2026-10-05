@@ -43,6 +43,13 @@
 //!   whatever the client did. A connection still held then is held by
 //!   nothing.
 //!
+//! **AND A CROWD** (`Crowd`, `runCrowdSeed`): the same seed's network with
+//! 2 to 6 clients against a table of 1 to 8 slots, served one request at a
+//! time as gopher.zig serves them, one client perhaps asking twice on one
+//! connection and one perhaps holding a stream. Its oracle is every client
+//! that stayed got its whole answer and our FIN, the stream's to its end,
+//! and none was given up on.
+//!
 //! Frames are lost only before `lossy_until`. After that the path is clean,
 //! so a run that does not complete is a bug, not bad luck. A lossy phase can
 //! still, very rarely, lose one frame `max_retries` + 1 times running. A seed
@@ -91,6 +98,10 @@ const tx_bytes = 8192;
 const client_buffer: usize = 4096;
 /// The segment size the client says, and sends.
 const client_mss: u32 = 1000;
+/// A crowd's most slots and clients (`Crowd`). A plain seed's table has 2
+/// slots and one client.
+const max_slots = 8;
+const max_clients = 6;
 
 fn requestByte(k: usize) u8 {
     return @truncate(k *% 7 +% 1);
@@ -231,6 +242,60 @@ const Rough = struct {
     }
 };
 
+/// **SEVERAL CLIENTS, AND A TABLE SIZED BY THE SEED** (QUEUE.md item 33).
+/// gopher.zig holds 256 slots and serves one request at a time among them,
+/// keeps chat's streams open, and answers a keep-alive client's first
+/// request and closes. A crowd is that, small: 2 to 6 clients opening a gap
+/// apart, each with its own request and answer, one of them perhaps asking
+/// twice on one connection, one perhaps holding a stream; a table of 1 to 8
+/// slots, so a SYN can find no room and wait. Chosen by a third generator
+/// from the seed, over the plain scenario's network, so a plain seed is the
+/// run it always was; `runCrowdSeed` runs it.
+const Crowd = struct {
+    slots: usize,
+    clients: usize,
+    gap_ns: i96,
+    request_len: [max_clients]usize = @splat(0),
+    answer_len: [max_clients]usize = @splat(0),
+    asks: [max_clients]u8 = @splat(1),
+    /// The client whose answer is a stream: a head, then `stream_chunks`
+    /// chunks of `stream_chunk` bytes `stream_gap_ns` apart, its connection
+    /// held open and claimed meanwhile, then closed.
+    stream: ?usize = null,
+    stream_chunks: usize = 0,
+    stream_chunk: usize = 0,
+    stream_gap_ns: i96 = 0,
+
+    fn choose(rng: std.Random) Crowd {
+        const clients = rng.intRangeAtMost(usize, 2, max_clients);
+        var c: Crowd = .{
+            .slots = rng.intRangeAtMost(usize, 1, max_slots),
+            .clients = clients,
+            .gap_ns = randNs(rng, 300 * ns_per_ms),
+        };
+        for (0..clients) |i| {
+            // A request is a head: it fits the table's receive buffer, as a
+            // request gopher.zig serves is whole before its turn comes.
+            c.request_len[i] = rng.intRangeAtMost(usize, 1, 1500);
+            c.answer_len[i] = rng.intRangeAtMost(usize, 0, 20_000);
+            if (rng.uintLessThan(u8, 3) == 0) c.asks[i] = 2;
+        }
+        if (rng.boolean()) {
+            const k = rng.uintLessThan(usize, clients);
+            c.stream = k;
+            c.asks[k] = 1;
+            c.stream_chunks = rng.intRangeAtMost(usize, 1, 20);
+            c.stream_chunk = rng.intRangeAtMost(usize, 1, 1500);
+            c.stream_gap_ns = @intCast(rng.intRangeAtMost(u64, 10 * ns_per_ms, 250 * ns_per_ms));
+        }
+        return c;
+    }
+
+    fn streamLen(self: *const Crowd, i: usize) usize {
+        return if (self.stream == i) self.stream_chunks * self.stream_chunk else 0;
+    }
+};
+
 // ── the network ─────────────────────────────────────────────────────────────
 
 const Packet = struct {
@@ -314,6 +379,19 @@ const ClientState = enum { syn_sent, established, fin_wait_1, fin_wait_2, closin
 
 const Client = struct {
     state: ClientState = .syn_sent,
+    /// **WHO IT IS AND WHAT IT ASKS.** A plain seed's one client takes the
+    /// scenario's; a crowd's (`Crowd`) each have their own. With `asks` 2 it
+    /// sends a second request on the same connection once the first answer
+    /// is whole, as a keep-alive client does.
+    index: usize = 0,
+    port: u16 = client_port,
+    request_len: usize = 0,
+    answer_len: usize = 0,
+    asks: u8 = 1,
+    half_close: bool = false,
+    /// When it opens, and whether it has.
+    open_at: i96 = 0,
+    opened: bool = false,
     /// From `vanish_at` on it neither sends nor hears.
     gone: bool = false,
     /// It was reset, or reset the connection itself, before the end.
@@ -385,12 +463,26 @@ const Client = struct {
 
     /// Bytes of the request sent so far, at `snd_nxt`.
     fn requestSent(self: *const Client, sim: *const Sim) usize {
+        _ = sim;
         const n: usize = self.snd_nxt -% (self.iss +% 1);
-        return @min(n, sim.sc.request_len);
+        return @min(n, self.toSend());
+    }
+
+    /// Everything it will ever send: each of its requests.
+    fn toSend(self: *const Client) usize {
+        return self.request_len * self.asks;
+    }
+
+    /// What it may send by now: its first request, and the second once the
+    /// first answer is whole.
+    fn released(self: *const Client) usize {
+        if (self.asks > 1 and self.received >= self.answer_len) return self.toSend();
+        return self.request_len;
     }
 
     fn finSeq(self: *const Client, sim: *const Sim) u32 {
-        return self.iss +% 1 +% @as(u32, @intCast(sim.sc.request_len));
+        _ = sim;
+        return self.iss +% 1 +% @as(u32, @intCast(self.toSend()));
     }
 
     fn finSent(self: *const Client, sim: *const Sim) bool {
@@ -404,7 +496,7 @@ const Client = struct {
         const frame_len = proto.writeIpv4(&buf, client_mac, server_mac, client_ip, server_ip, proto.proto_tcp, len + data.len);
         const t = buf[tcp.segment_at..][0 .. len + data.len];
         const wnd = self.window();
-        @memcpy(t[0..2], &proto.be16(client_port));
+        @memcpy(t[0..2], &proto.be16(self.port));
         @memcpy(t[2..4], &proto.be16(80));
         @memcpy(t[4..8], &proto.be32(seq));
         @memcpy(t[8..12], &proto.be32(if (flags & tcp.flag_ack != 0) self.rcv_nxt else 0));
@@ -429,7 +521,8 @@ const Client = struct {
     }
 
     fn open(self: *Client, sim: *Sim) void {
-        self.fin_wanted = sim.sc.half_close;
+        self.fin_wanted = self.half_close;
+        self.opened = true;
         self.emit(sim, tcp.flag_syn, self.iss, "");
         self.snd_nxt = self.iss +% 1;
         self.snd_max = self.snd_nxt;
@@ -454,7 +547,7 @@ const Client = struct {
     fn output(self: *Client, sim: *Sim) void {
         if (self.state != .established and self.state != .close_wait and
             self.state != .fin_wait_1 and self.state != .last_ack and self.state != .closing) return;
-        const n_req = sim.sc.request_len;
+        const n_req = self.released();
         while (true) {
             if (self.finSent(sim)) return;
             const sent = self.requestSent(sim);
@@ -470,10 +563,14 @@ const Client = struct {
                 const n = @min(n_req - sent, self.snd_wnd - flight, client_mss);
                 var data: [client_mss]u8 = undefined;
                 for (data[0..n], sent..) |*b, k| b.* = requestByte(k);
+                if (sent >= self.request_len)
+                    props.reachable(@src(), "tcp_sim: a keep-alive client sends its second request", .{ .client = self.index });
                 self.emit(sim, tcp.flag_psh | tcp.flag_ack, self.snd_nxt, data[0..n]);
                 self.advance(sim, @intCast(n));
                 continue;
             }
+            // The FIN follows every request, never one still to be released.
+            if (sent < self.toSend()) return;
             if (!self.fin_wanted) return;
             self.emit(sim, tcp.flag_fin | tcp.flag_ack, self.snd_nxt, "");
             self.advance(sim, 1);
@@ -495,18 +592,20 @@ const Client = struct {
     /// One turn: its application reads, its timers run, it sends.
     fn turn(self: *Client, sim: *Sim) void {
         if (self.gone or self.state == .closed) return;
-        if (sim.sc.vanish_at) |at| if (sim.now >= at) {
+        // The scenario's and the rough peer's misbehaviour is the first
+        // client's alone: a crowd's others behave.
+        if (self.index == 0) if (sim.sc.vanish_at) |at| if (sim.now >= at) {
             self.gone = true;
             if (self.done_at == null) self.done_at = sim.now;
             return;
         };
-        if (sim.rough.vanish_after) |n| if (self.state != .syn_sent and self.received >= n) {
+        if (self.index == 0) if (sim.rough.vanish_after) |n| if (self.state != .syn_sent and self.received >= n) {
             props.reachable(@src(), "tcp_sim: the client vanishes part-way through the answer", .{ .received = self.received });
             self.gone = true;
             if (self.done_at == null) self.done_at = sim.now;
             return;
         };
-        if (sim.rough.reset_at) |at| if (sim.now >= at and self.state != .syn_sent) {
+        if (self.index == 0) if (sim.rough.reset_at) |at| if (sim.now >= at and self.state != .syn_sent) {
             props.reachable(@src(), "tcp_sim: the client resets the connection", .{ .off = sim.rough.reset_off });
             self.emit(sim, tcp.flag_rst, self.snd_nxt +% sim.rough.reset_off, "");
             self.reset_sent = true;
@@ -552,7 +651,7 @@ const Client = struct {
             // It is not counted as sent: if the table takes it, its
             // acknowledgement says so.
             const sent = self.requestSent(sim);
-            if (self.snd_wnd == 0 and sent < sim.sc.request_len and self.snd_nxt == self.snd_una) {
+            if (self.snd_wnd == 0 and sent < self.released() and self.snd_nxt == self.snd_una) {
                 self.probes += 1;
                 const probe = [1]u8{requestByte(sent)};
                 self.emit(sim, tcp.flag_psh | tcp.flag_ack, self.snd_nxt, &probe);
@@ -573,7 +672,7 @@ const Client = struct {
         const pkt = proto.parseIpv4(frame) orelse return;
         const t = pkt.payload;
         if (pkt.protocol != proto.proto_tcp or t.len < tcp.header_len) return;
-        if (proto.readBe16(t[2..4]) != client_port) return;
+        if (proto.readBe16(t[2..4]) != self.port) return;
         if (proto.pseudoChecksum(pkt.src_ip, pkt.dst_ip, proto.proto_tcp, t) != 0) return;
         const flags = t[13];
         if (flags & tcp.flag_rst != 0 or flags & tcp.flag_ack == 0) return;
@@ -592,7 +691,7 @@ const Client = struct {
         const pkt = proto.parseIpv4(frame) orelse return;
         const t = pkt.payload;
         if (pkt.protocol != proto.proto_tcp or t.len < tcp.header_len) return;
-        if (proto.readBe16(t[2..4]) != client_port) return;
+        if (proto.readBe16(t[2..4]) != self.port) return;
         if (proto.pseudoChecksum(pkt.src_ip, pkt.dst_ip, proto.proto_tcp, t) != 0) return;
         const seq = proto.readBe32(t[4..8]);
         const ack = proto.readBe32(t[8..12]);
@@ -717,7 +816,7 @@ const Client = struct {
             while (n < room and self.held_mask[n]) n += 1;
             if (n > 0) {
                 for (self.held[0..n], self.received..) |b, k| {
-                    if (k >= sim.sc.answer_len or b != answerByte(k)) {
+                    if (k >= self.answer_len or b != answerByte(k)) {
                         sim.fault("the client took a byte that is not the next byte of the answer");
                         return;
                     }
@@ -869,6 +968,243 @@ const Host = struct {
     }
 };
 
+// ── the host of a crowd, as gopher.zig ──────────────────────────────────────
+
+/// **MANY CONNECTIONS, ONE REQUEST AT A TIME** (gopher.zig's loop). Each turn
+/// it moves its held stream, then serves at most one thing: the oldest
+/// connection whose whole request has arrived, start to finish over as many
+/// turns as that takes, or else the oldest that has been quiet for `idle_ns`,
+/// which it lets go. Each serve reads one request and answers it and closes,
+/// as gopher.zig does a keep-alive client's; a stream's serve writes its
+/// head and leaves the connection held open, and its chunks go out on every
+/// turn after, among the other serves.
+const Server = struct {
+    /// The slot being served, and whose it is.
+    current: ?usize = null,
+    who: usize = 0,
+    consumed: [max_clients]usize = @splat(0),
+    queued: [max_clients]usize = @splat(0),
+    finished: [max_clients]bool = @splat(false),
+    let_go: [max_clients]bool = @splat(false),
+    stall_until: i96 = 0,
+    last_progress: i96 = 0,
+    seen_una: u32 = 0,
+    held: ?Held = null,
+
+    const Held = struct {
+        slot: usize,
+        who: usize,
+        next_at: i96,
+        last_progress: i96,
+        seen_una: u32,
+    };
+
+    /// Whose connection slot `k` holds, if a crowd client's.
+    fn owner(sim: *const Sim, k: usize) ?usize {
+        const c = &sim.table.conns[k];
+        if (!std.mem.eql(u8, &c.peer_ip, &client_ip)) return null;
+        if (c.peer_port < client_port or c.peer_port - client_port >= sim.n_clients) return null;
+        return c.peer_port - client_port;
+    }
+
+    fn idle(self: *const Server) bool {
+        return self.current == null and self.held == null;
+    }
+
+    fn turn(self: *Server, sim: *Sim) void {
+        self.moveStream(sim);
+        if (self.current == null) {
+            if (self.nextReady(sim)) |k| {
+                sim.table.claim(k);
+                self.current = k;
+                self.who = owner(sim, k).?;
+                self.last_progress = sim.now;
+                self.seen_una = sim.table.conns[k].una;
+            } else if (self.quiet(sim)) |k| {
+                // A client that said nothing for the idle time, let go.
+                if (owner(sim, k)) |w| self.let_go[w] = true;
+                sim.table.claim(k);
+                close(sim, k);
+                return;
+            } else return;
+        } else if (self.nextReady(sim) != null) {
+            props.reachable(@src(), "tcp_sim: a whole request waits while another is served", .{ .slot = self.current.? });
+        }
+        if (self.held != null) props.reachable(@src(), "tcp_sim: a held stream moves while another request is served", .{ .slot = self.current.? });
+        self.serve(sim);
+    }
+
+    /// The oldest connection, not claimed and established, whose request is
+    /// whole (or whose client has said all it will).
+    fn nextReady(self: *const Server, sim: *const Sim) ?usize {
+        _ = self;
+        var best: ?usize = null;
+        for (sim.table.conns, 0..) |*c, k| {
+            if (c.claimed or c.state != .established) continue;
+            const w = owner(sim, k) orelse continue;
+            if (c.pending().len < sim.clientAtConst(w).request_len and !c.peer_done) continue;
+            if (best == null or c.serial < sim.table.conns[best.?].serial) best = k;
+        }
+        return best;
+    }
+
+    fn quiet(self: *const Server, sim: *const Sim) ?usize {
+        _ = self;
+        var best: ?usize = null;
+        for (sim.table.conns, 0..) |*c, k| {
+            if (c.claimed or !c.open()) continue;
+            if (sim.now - c.heard_at < idle_ns) continue;
+            if (best == null or c.serial < sim.table.conns[best.?].serial) best = k;
+        }
+        return best;
+    }
+
+    /// One turn of the serve in progress: read the request, queue the
+    /// answer, close (or hold the stream).
+    fn serve(self: *Server, sim: *Sim) void {
+        const k = self.current.?;
+        const w = self.who;
+        const c = &sim.table.conns[k];
+        const client = sim.clientAtConst(w);
+        if (c.state == .closed) {
+            // Reset under us: this serve is over.
+            self.let_go[w] = true;
+            sim.table.release(k);
+            self.current = null;
+            return;
+        }
+        if (self.consumed[w] < client.request_len) {
+            if (sim.now < self.stall_until) return;
+            if (sim.rng.uintLessThan(u32, 2000) == 0) {
+                self.stall_until = sim.now + randNs(sim.rng, sim.sc.host_stall_ns);
+                return;
+            }
+            const pending = c.pending();
+            if (pending.len > 0) {
+                // One request, and not a byte of the next: a keep-alive
+                // client's second is left unread, as gopher.zig leaves it.
+                const most = @min(pending.len, client.request_len - self.consumed[w]);
+                const n = sim.rng.intRangeAtMost(usize, 1, @min(most, 3000));
+                for (pending[0..n], self.consumed[w]..) |b, j| {
+                    if (b != requestByte(j)) {
+                        sim.fault("the host read a byte that is not the next byte of the request");
+                        return;
+                    }
+                }
+                c.consume(n);
+                self.consumed[w] += n;
+                self.last_progress = sim.now;
+            } else if (c.peer_done or !c.open()) {
+                return self.end(sim, k, w);
+            } else if (sim.now - self.last_progress >= idle_ns) {
+                return self.giveUp(sim, k, w);
+            }
+            return;
+        }
+        const head = client.answer_len - sim.crowd.?.streamLen(w);
+        if (self.queued[w] < head) {
+            if (!self.queueSome(sim, k, w, head)) return self.giveUp(sim, k, w);
+            if (self.queued[w] < head) return;
+        }
+        if (sim.crowd.?.stream == w) {
+            // The head is out: the stream is held from here, claimed and
+            // open, and this host goes on to the next request.
+            self.held = .{ .slot = k, .who = w, .next_at = sim.now, .last_progress = sim.now, .seen_una = c.una };
+            self.current = null;
+            return;
+        }
+        self.end(sim, k, w);
+    }
+
+    /// Queues what fits of the answer up to `upto`. False when nothing has
+    /// moved for the idle time: the client is not taking it.
+    fn queueSome(self: *Server, sim: *Sim, k: usize, w: usize, upto: usize) bool {
+        const c = &sim.table.conns[k];
+        var chunk: [2048]u8 = undefined;
+        const want = @min(chunk.len, upto - self.queued[w]);
+        for (chunk[0..want], self.queued[w]..) |*b, j| b.* = answerByte(j);
+        const n = sim.table.queue(k, chunk[0..want]);
+        self.queued[w] += n;
+        if (n > 0 or c.una != self.seen_una) {
+            self.last_progress = sim.now;
+            self.seen_una = c.una;
+        } else if (sim.now - self.last_progress >= idle_ns) return false;
+        return true;
+    }
+
+    /// The held stream's next chunk, when it is due; its close after the
+    /// last; and the end of a stream whose client stopped taking it.
+    fn moveStream(self: *Server, sim: *Sim) void {
+        const h = &(self.held orelse return);
+        const c = &sim.table.conns[h.slot];
+        const crowd = sim.crowd.?;
+        const total = sim.clientAtConst(h.who).answer_len;
+        if (c.state == .closed) {
+            self.let_go[h.who] = true;
+            sim.table.release(h.slot);
+            self.held = null;
+            return;
+        }
+        if (c.una != h.seen_una) {
+            h.seen_una = c.una;
+            h.last_progress = sim.now;
+        }
+        if (self.queued[h.who] < total and sim.now >= h.next_at) {
+            const upto = @min(total, self.queued[h.who] + crowd.stream_chunk);
+            var chunk: [2048]u8 = undefined;
+            const want = @min(chunk.len, upto - self.queued[h.who]);
+            for (chunk[0..want], self.queued[h.who]..) |*b, j| b.* = answerByte(j);
+            const n = sim.table.queue(h.slot, chunk[0..want]);
+            self.queued[h.who] += n;
+            if (n > 0) h.last_progress = sim.now;
+            if (n == want) h.next_at = sim.now + crowd.stream_gap_ns;
+        }
+        if (self.queued[h.who] == total) {
+            const w = h.who;
+            const slot = h.slot;
+            self.held = null;
+            return self.endHeld(sim, slot, w);
+        }
+        if (sim.now - h.last_progress >= idle_ns) {
+            // A stream whose client stopped taking it is ended (gopher.zig).
+            const w = h.who;
+            const slot = h.slot;
+            self.held = null;
+            var wire = TableWire{ .sim = sim };
+            sim.table.abandon(&wire, slot);
+            sim.table.release(slot);
+            self.let_go[w] = true;
+        }
+    }
+
+    fn endHeld(self: *Server, sim: *Sim, k: usize, w: usize) void {
+        close(sim, k);
+        self.finished[w] = true;
+    }
+
+    fn end(self: *Server, sim: *Sim, k: usize, w: usize) void {
+        close(sim, k);
+        self.finished[w] = true;
+        self.current = null;
+    }
+
+    fn giveUp(self: *Server, sim: *Sim, k: usize, w: usize) void {
+        var wire = TableWire{ .sim = sim };
+        sim.table.abandon(&wire, k);
+        sim.table.release(k);
+        self.let_go[w] = true;
+        self.current = null;
+    }
+
+    /// As gopher.zig's `close`: the FIN is queued and nobody waits for it.
+    fn close(sim: *Sim, k: usize) void {
+        var wire = TableWire{ .sim = sim };
+        sim.table.finish(k);
+        if (sim.table.conns[k].state != .closing) sim.table.abandon(&wire, k);
+        sim.table.release(k);
+    }
+};
+
 // ── the run ─────────────────────────────────────────────────────────────────
 
 /// What the table sends goes into the network, toward the client.
@@ -894,13 +1230,25 @@ const Sim = struct {
     sc: Scenario,
     now: i96 = 0,
     net: Network = .{},
-    conns: [2]tcp.Conn,
-    rx: [2][rx_bytes]u8,
-    tx: [2][tx_bytes]u8,
+    conns: [max_slots]tcp.Conn,
+    rx: [max_slots][rx_bytes]u8,
+    tx: [max_slots][tx_bytes]u8,
+    /// How many of them the table has: 2 for a plain seed.
+    slots: usize = 2,
     out: [1600]u8,
     table: tcp.Table,
     host: Host = .{},
     client: Client,
+    /// A crowd's (`Crowd`) other clients, and its host.
+    others: [max_clients - 1]Client = undefined,
+    n_clients: usize = 1,
+    crowd: ?Crowd = null,
+    server: Server = .{},
+    /// The table's give-ups on each client's own connection.
+    given_up_on: [max_clients]u64 = @splat(0),
+    /// Each client's half-open connection given way to another's SYN (the
+    /// table's `oldestHalfOpen`): the class of item 24's red rough seeds.
+    given_way_on: [max_clients]u64 = @splat(0),
     rough: Rough = .{},
     flooded: u8 = 0,
     /// The table's give-ups on the client's own connection: with a flood,
@@ -945,10 +1293,55 @@ const Sim = struct {
         self.flooded = 0;
         self.client_given_up = 0;
         self.broken = null;
+        self.slots = 2;
+        self.n_clients = 1;
+        self.crowd = null;
+        self.server = .{};
+        self.given_up_on = @splat(0);
+        self.given_way_on = @splat(0);
         for (&self.conns, &self.rx, &self.tx) |*c, *r, *t| c.* = .{ .rx = r, .tx = t };
         sim_isn = self.rng.int(u32);
-        self.table = tcp.Table.init(server_ip, server_mac, 80, &self.conns, &self.out, simIsn);
+        self.table = tcp.Table.init(server_ip, server_mac, 80, self.conns[0..self.slots], &self.out, simIsn);
         self.client = Client.init(self.rng.int(u32));
+        self.client.request_len = self.sc.request_len;
+        self.client.answer_len = self.sc.answer_len;
+        self.client.half_close = self.sc.half_close;
+    }
+
+    /// Like `init`, with a crowd chosen from the same seed (`Crowd`): its
+    /// table's size, its clients and what each asks.
+    fn initCrowd(self: *Sim, seed: u64) void {
+        self.init(seed);
+        var third = std.Random.DefaultPrng.init(seed ^ 0x6372_6f77_6463_726f); // "crowdcro"
+        const r = third.random();
+        const crowd = Crowd.choose(r);
+        self.crowd = crowd;
+        self.slots = crowd.slots;
+        self.n_clients = crowd.clients;
+        self.table = tcp.Table.init(server_ip, server_mac, 80, self.conns[0..self.slots], &self.out, simIsn);
+        for (0..crowd.clients) |i| {
+            const c = self.clientAt(i);
+            if (i > 0) c.* = Client.init(r.int(u32));
+            c.index = i;
+            c.port = client_port + @as(u16, @intCast(i));
+            c.request_len = crowd.request_len[i];
+            c.answer_len = crowd.answer_len[i] + crowd.streamLen(i);
+            c.asks = crowd.asks[i];
+            c.half_close = i == 0 and self.sc.half_close and c.asks == 1 and crowd.stream != 0;
+            c.open_at = crowd.gap_ns * @as(i96, @intCast(i));
+        }
+        // What the first client asks is the scenario's, for the report.
+        self.sc.request_len = self.client.request_len;
+        self.sc.answer_len = self.client.answer_len;
+        self.sc.half_close = self.client.half_close;
+    }
+
+    pub fn clientAt(self: *Sim, i: usize) *Client {
+        return if (i == 0) &self.client else &self.others[i - 1];
+    }
+
+    fn clientAtConst(self: *const Sim, i: usize) *const Client {
+        return if (i == 0) &self.client else &self.others[i - 1];
     }
 
     fn fault(self: *Sim, what: []const u8) void {
@@ -989,10 +1382,11 @@ const Sim = struct {
         self.net.send(self.rng, &self.sc, self.now, true, buf[0..frame_len]);
     }
 
-    /// The slot holding the client's connection, if one does.
-    fn clientSlot(self: *const Sim) ?usize {
+    /// The slot holding client `i`'s connection, if one does.
+    fn slotOf(self: *const Sim, i: usize) ?usize {
+        const port = self.clientAtConst(i).port;
         for (self.table.conns, 0..) |c, k| {
-            if (c.state != .closed and c.peer_port == client_port and std.mem.eql(u8, &c.peer_ip, &client_ip)) return k;
+            if (c.state != .closed and c.peer_port == port and std.mem.eql(u8, &c.peer_ip, &client_ip)) return k;
         }
         return null;
     }
@@ -1003,8 +1397,15 @@ const Sim = struct {
     }
 
     fn over(self: *const Sim) bool {
-        const client_done = self.client.gone or self.client.state == .closed;
         if (self.flooded < self.rough.flood) return false;
+        if (self.crowd != null) {
+            for (0..self.n_clients) |i| {
+                const c = self.clientAtConst(i);
+                if (!c.opened or !(c.gone or c.state == .closed)) return false;
+            }
+            return self.server.idle() and self.quiescent() and self.net.count == 0;
+        }
+        const client_done = self.client.gone or self.client.state == .closed;
         return client_done and (self.host.finished or self.host.let_go or self.host.slot == null) and
             self.quiescent() and self.net.count == 0;
     }
@@ -1015,24 +1416,44 @@ const Sim = struct {
         while (self.now < horizon_ns and self.broken == null and !self.over()) {
             self.now += tick_ns;
             self.flood();
+            for (1..self.n_clients) |i| {
+                const c = self.clientAt(i);
+                if (!c.opened and self.now >= c.open_at) c.open(self);
+            }
             var wire = TableWire{ .sim = self };
+            const refused = self.table.refused;
             while (self.net.take(self.now, &buf)) |p| {
                 if (p.to_table) {
+                    const given_way = self.table.half_open_given_way;
+                    var half_open: [max_clients]?usize = @splat(null);
+                    for (0..self.n_clients) |i| if (self.slotOf(i)) |k| {
+                        if (self.table.conns[k].state == .syn_received) half_open[i] = k;
+                    };
                     _ = self.table.handle(&wire, p.frame, self.now);
+                    if (self.table.half_open_given_way != given_way) for (0..self.n_clients) |i| if (half_open[i]) |k| {
+                        if (self.table.conns[k].peer_port != self.clientAtConst(i).port) {
+                            self.given_way_on[i] += 1;
+                            props.reachable(@src(), "tcp_sim: a real client's half-open slot gives way to another's SYN", .{ .client = i });
+                        }
+                    };
                     self.checkTable(.after_handle);
-                } else self.client.receive(self, p.frame);
+                } else for (0..self.n_clients) |i| self.clientAt(i).receive(self, p.frame);
             }
-            self.client.turn(self);
-            self.host.turn(self);
+            if (self.crowd != null and self.table.refused != refused)
+                props.reachable(@src(), "tcp_sim: a crowd's SYN finds every slot taken", .{ .slots = self.slots });
+            for (0..self.n_clients) |i| self.clientAt(i).turn(self);
+            if (self.crowd != null) self.server.turn(self) else self.host.turn(self);
             self.checkTable(.after_handle);
-            // Give-ups happen only in `transmit`: one that closes the
-            // client's slot is a give-up on the client.
+            // Give-ups happen only in `transmit`: one that closes a client's
+            // slot is a give-up on that client.
             const given_up = self.table.given_up;
-            const mine = self.clientSlot();
+            var mine: [max_clients]?usize = @splat(null);
+            for (0..self.n_clients) |i| mine[i] = self.slotOf(i);
             self.table.transmit(&wire, self.now);
-            if (self.table.given_up != given_up) if (mine) |k| {
+            if (self.table.given_up != given_up) for (0..self.n_clients) |i| if (mine[i]) |k| {
                 if (self.table.conns[k].state == .closed) {
-                    self.client_given_up += 1;
+                    self.given_up_on[i] += 1;
+                    if (i == 0) self.client_given_up += 1;
                     props.reachable(@src(), "tcp_sim: the table alone gives up on a client that left", .{ .seed = self.seed });
                 }
             };
@@ -1041,13 +1462,47 @@ const Sim = struct {
         try self.judge();
     }
 
+    /// **EVERY CLIENT THAT STAYED GOT ITS WHOLE ANSWER**: a crowd's, each of
+    /// them, the held stream's to its end, and none given up on. The first
+    /// client's own is judged as a plain seed's is (`judge`), but for what
+    /// the host read, which a crowd's host counts per client.
+    fn judgeCrowd(self: *Sim) void {
+        var all = true;
+        for (0..self.n_clients) |i| {
+            if (self.broken != null) return;
+            const c = self.clientAtConst(i);
+            const left = i == 0 and (self.sc.vanish_at != null or c.gone or c.reset_sent);
+            if (left) {
+                all = false;
+                continue;
+            }
+            if (c.aborted and self.given_way_on[i] != 0) {
+                self.fault("a crowd's client was reset after its half-open slot gave way to another's SYN (item 24's class)");
+            } else if (c.aborted) {
+                self.fault("a crowd's client that stayed was reset");
+            } else if (c.received != c.answer_len or !c.peer_fin) {
+                self.fault("a crowd's client that stayed did not get its whole answer and our FIN");
+            } else if (self.server.consumed[i] != c.request_len) {
+                self.fault("the host did not read a crowd's client's whole request");
+            } else if (self.given_up_on[i] != 0 or self.server.let_go[i]) {
+                self.fault("the table or the host gave up on a crowd's client that stayed");
+            } else if (c.done_at == null or c.done_at.? > completion_bound_ns) {
+                self.fault("a crowd's client did not finish within the completion bound");
+            }
+        }
+        if (self.broken == null and all and self.crowd.?.stream != null)
+            props.reachable(@src(), "tcp_sim: a held stream's client got the whole stream among others", .{ .clients = self.n_clients });
+        if (self.broken == null and all)
+            props.reachable(@src(), "tcp_sim: every client of a crowd got its whole answer", .{ .clients = self.n_clients, .slots = self.slots });
+    }
+
     fn judge(self: *Sim) !void {
         if (self.broken == null and !self.quiescent())
             self.fault("the table still holds a connection at the horizon");
         // A client that left on purpose is owed no answer; a reset it was
         // dealt is still a fault, unless it left first.
         const stayed = self.sc.vanish_at == null and !self.client.gone and !self.client.reset_sent;
-        if (self.broken == null and stayed) {
+        if (self.broken == null and stayed and self.crowd == null) {
             const c = &self.client;
             if (c.aborted) {
                 self.fault("the connection was reset though the client stayed");
@@ -1061,6 +1516,7 @@ const Sim = struct {
                 self.fault("the exchange did not finish within the completion bound");
             }
         }
+        if (self.crowd != null) self.judgeCrowd();
         if (self.broken == null and stayed and self.rough.flood > 0)
             props.reachable(@src(), "tcp_sim: a client that stayed through a flood got its whole answer", .{ .given_way = self.table.half_open_given_way });
         const what = self.broken orelse return;
@@ -1132,6 +1588,32 @@ pub fn runRoughSeed(seed: u64) !void {
     try sim.run();
 }
 
+/// The same seed's network with a crowd (`Crowd`): several clients, a table
+/// sized by the seed, keep-alive and a held stream.
+pub fn runCrowdSeed(seed: u64) !void {
+    const sim = try std.testing.allocator.create(Sim);
+    defer std.testing.allocator.destroy(sim);
+    sim.initCrowd(seed);
+    sim.run() catch |e| {
+        const c = sim.crowd.?;
+        std.debug.print("  crowd: {d} clients {d} ms apart, {d} slots; requests {any}, answers {any}, asks {any}; stream {?d}: {d} chunks of {d} B every {d} ms\n", .{
+            c.clients,                             @divTrunc(c.gap_ns, ns_per_ms), c.slots,
+            c.request_len[0..c.clients],           c.answer_len[0..c.clients],     c.asks[0..c.clients],
+            c.stream,                              c.stream_chunks,                c.stream_chunk,
+            @divTrunc(c.stream_gap_ns, ns_per_ms),
+        });
+        for (0..sim.n_clients) |i| {
+            const cl = sim.clientAtConst(i);
+            std.debug.print("  client {d}: {s} (aborted {any}, gone {any}), received {d} of {d}, peer FIN {any}; host read {d}, queued {d}, finished {any}, let go {any}; given up {d}\n", .{
+                i,                    @tagName(cl.state),     cl.aborted,           cl.gone,
+                cl.received,          cl.answer_len,          cl.peer_fin,          sim.server.consumed[i],
+                sim.server.queued[i], sim.server.finished[i], sim.server.let_go[i], sim.given_up_on[i],
+            });
+        }
+        return e;
+    };
+}
+
 /// The seeds `zig build test` runs. A seed that once failed and was fixed
 /// stays here, named, as a regression test.
 const seeds = [_]u64{ 1, 2, 3, 4, 5, 6, 7, 8 } ++ regressions;
@@ -1163,6 +1645,30 @@ const rough_seeds = [_]u64{ 1, 2, 3, 4, 5, 6, 7, 8 };
 
 test "the same, with a peer that resets, vanishes part-way, or floods the table with SYNs" {
     for (rough_seeds) |seed| try runRoughSeed(seed);
+}
+
+/// The crowd seeds `zig build test` runs (`Crowd`); `zig build properties`
+/// sweeps hundreds.
+const crowd_seeds = [_]u64{ 1, 2, 3, 4, 5, 6, 7, 8 };
+
+test "several clients, a table sized by the seed, keep-alive and a held stream" {
+    for (crowd_seeds) |seed| try runCrowdSeed(seed);
+}
+
+/// **ITEM 24'S CLASS, IN A CROWD** (QUEUE.md, Questions). Each of these
+/// seeds fails one way: a real client's handshake, slowed past `min_rto_ns`
+/// by a lost SYN-ACK or ACK while every slot is taken, looks to the table
+/// like a flood's stuck half-open; another client's SYN takes its slot
+/// (`oldestHalfOpen`), and its next segment draws a reset. They are the
+/// failures of the first 10,000 crowd seeds, every one of this class. The
+/// rough seeds' 14 at 50,000 are the same thing with a flood's SYN. Red
+/// until Steve rules on the oracle; then this test loses its skip, or the
+/// oracle learns to excuse them.
+const crowd_red = [_]u64{ 640, 1281, 1452, 1733, 1872, 1961, 2305, 2870, 4362, 6307, 6606, 6918, 7374, 7546, 7968, 8003, 8575, 9366, 9728, 9769, 9951 };
+
+test "item 24's class in a crowd: a real client's half-open slot taken by another's SYN" {
+    if (true) return error.SkipZigTest; // red until the ruling
+    for (crowd_red) |seed| try runCrowdSeed(seed);
 }
 
 // **THE LOST-FRAME IncompleteRead, HUNTED** (QUEUE.md item 96). The bug was
