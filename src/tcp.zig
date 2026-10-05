@@ -92,6 +92,7 @@
 //! peer's SYN timer tries again).
 
 const proto = @import("proto.zig");
+const props = @import("antithesis.zig");
 
 pub const header_len: usize = 20;
 pub const segment_at: usize = proto.eth_header_len + proto.ip_header_len;
@@ -474,6 +475,7 @@ pub const Table = struct {
         const i = oldest orelse return null;
         self.conns[i].state = .closed;
         self.half_open_given_way += 1;
+        props.reachable(@src(), "tcp: a stuck half-open connection gives way to a new SYN", .{ .conn = i });
         return i;
     }
 
@@ -635,6 +637,7 @@ pub const Table = struct {
             if (!expired) return;
             if (!backoff(c, now)) return self.giveUp(wire, i);
             self.retransmits += 1;
+            props.reachable(@src(), "tcp: a lost SYN-ACK is sent again", .{ .conn = i });
             self.emit(wire, i, flag_syn | flag_ack, c.una, "");
             return;
         }
@@ -648,6 +651,7 @@ pub const Table = struct {
             if (c.fin == .sent) c.fin = .queued;
             c.timed_at = null; // Karn: no telling which copy is answered
             self.retransmits += 1;
+            props.reachable(@src(), "tcp: the timer goes back to the oldest unacknowledged byte", .{ .conn = i, .retries = c.retries });
             probe = true;
         }
 
@@ -662,6 +666,7 @@ pub const Table = struct {
                     break;
                 }
                 self.probes += 1;
+                props.reachable(@src(), "tcp: a shut window is probed", .{ .conn = i });
                 n = 1;
             }
             probe = false;
@@ -714,6 +719,7 @@ pub const Table = struct {
         }
         c.updates += 1;
         self.window_updates += 1;
+        props.reachable(@src(), "tcp: a reopened window is announced again", .{ .conn = i, .updates = c.updates });
         const wait = @min(c.rto_ns * (@as(u64, 1) << @intCast(c.updates)), max_rto_ns);
         // Set before the emit, which clears it if the window has shut again.
         c.update_at = now + wait;
@@ -733,6 +739,7 @@ pub const Table = struct {
         c.rto_at = now + c.rto_ns;
         self.retransmits += 1;
         self.fast_retransmits += 1;
+        props.reachable(@src(), "tcp: three duplicate ACKs resend at once", .{ .conn = i });
         self.transmitOne(wire, i, now);
     }
 
@@ -754,6 +761,8 @@ pub const Table = struct {
             c.srtt_ns = (7 * c.srtt_ns + rtt) / 8;
         }
         c.rto_ns = @min(@max(c.srtt_ns + 4 * c.rttvar_ns, min_rto_ns), max_rto_ns);
+        props.always(@src(), c.rto_ns >= min_rto_ns and c.rto_ns <= max_rto_ns, "tcp: a measured RTO is within its bounds", .{ .rto_ns = c.rto_ns });
+        props.sometimes(@src(), c.srtt_ns > rtt, "tcp: a round trip comes in faster than the estimate", null);
         self.samples += 1;
         self.measured_ns = c.srtt_ns;
     }
@@ -763,12 +772,15 @@ pub const Table = struct {
         if (c.retries >= max_retries) return false;
         c.retries += 1;
         c.rto_ns = @min(c.rto_ns * 2, max_rto_ns);
+        props.always(@src(), c.rto_ns <= max_rto_ns, "tcp: a backed-off RTO stays under the cap", .{ .rto_ns = c.rto_ns });
+        props.sometimes(@src(), c.rto_ns == max_rto_ns, "tcp: backoff reaches the RTO cap", null);
         c.rto_at = now + c.rto_ns;
         return true;
     }
 
     fn giveUp(self: *Table, wire: anytype, i: usize) void {
         self.given_up += 1;
+        props.reachable(@src(), "tcp: a silent peer is given up on", .{ .conn = i });
         self.abandon(wire, i);
     }
 
@@ -828,6 +840,7 @@ pub const Table = struct {
         // A segment damaged on the way is not a segment.
         if (proto.pseudoChecksum(pkt.src_ip, pkt.dst_ip, proto.proto_tcp, t) != 0) {
             self.damaged += 1;
+            props.reachable(@src(), "tcp: a damaged segment is dropped", null);
             return .{ .event = .nothing };
         }
 
@@ -849,6 +862,8 @@ pub const Table = struct {
             // with an exact reset; anything else is ignored.
             const i = found orelse return .{ .event = .nothing };
             const c = &self.conns[i];
+            props.sometimes(@src(), seq == c.rcv_nxt, "tcp: an exact reset closes a connection", null);
+            props.sometimes(@src(), seq != c.rcv_nxt and c.ahead(seq), "tcp: an inexact reset in the window draws a challenge ACK", null);
             if (seq == c.rcv_nxt) return self.close(i);
             if (c.ahead(seq)) self.emit(wire, i, flag_ack, c.highest(), "");
             return .{ .event = .nothing };
@@ -858,6 +873,7 @@ pub const Table = struct {
         // slot for it. Anything else for no connection is refused.
         const i = found orelse {
             if (flags & flag_syn == 0 or flags & flag_ack != 0) {
+                props.reachable(@src(), "tcp: a segment for no connection is refused", null);
                 self.refuse(wire, .{ .mac = pkt.src_mac, .ip = pkt.src_ip, .port = src_port }, seq, number, flags, data.len);
                 return .{ .event = .nothing };
             }
@@ -916,7 +932,9 @@ pub const Table = struct {
         // otherwise wait on a timer for nothing. (The window rule keeps an old
         // segment from setting the window.)
         const early = c.ahead(seq);
+        props.sometimes(@src(), early, "tcp: a segment arrives ahead of the next expected byte", null);
         if (seq != c.rcv_nxt and !early) {
+            props.reachable(@src(), "tcp: a segment from behind is answered, not taken", .{ .conn = i });
             // **ONLY FROM BEHIND.** A segment numbered past the window we
             // advertise is not one the peer can have sent yet: taking its
             // acknowledgement would let a forged or wildly reordered segment
@@ -999,6 +1017,7 @@ pub const Table = struct {
             // that sent past the window will send the rest again, once the
             // reader has made room.
             const n = @min(c.room(), data.len);
+            props.sometimes(@src(), n < data.len, "tcp: a peer sends past the window and only what fits is taken", .{ .room = c.room(), .len = data.len });
             @memcpy(c.rx[c.end..][0..n], data[0..n]);
             c.end += n;
             c.rcv_nxt +%= @intCast(n);

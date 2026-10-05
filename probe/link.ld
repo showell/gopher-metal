@@ -30,6 +30,10 @@ SECTIONS {
        so that run.sh can read it from the file. */
     .rodata   : { KEEP(*(.rodata.gopher_metal_build)) *(.rodata*) } :text
     .data     : { *(.data*) } :text
+    /* Every test property's site (src/antithesis.zig), walked from
+       __start_antithesis_catalog to __stop_. KEPT: nothing names a site but
+       the walk. */
+    antithesis_catalog : { KEEP(*(antithesis_catalog)) } :text
 
     /* .bss is NOBITS: the loader does not write it, so nothing here may be
        assumed zero. The page tables live in .data for exactly that reason. */

@@ -957,6 +957,21 @@ def disk_check_differences(log: str, damaged: bool = False) -> list:
     return out
 
 
+def keep_antithesis_lines(text: str):
+    """**A KERNEL BUILT WITH -Dantithesis** writes its test properties to the
+    port behind "antithesis: " (src/antithesis.zig). With ANTITHESIS_OUTPUT_DIR
+    set, every boot's lines are appended to sdk.jsonl there, as Antithesis
+    reads them; tools/antithesis_report.py judges the file."""
+    out = os.environ.get("ANTITHESIS_OUTPUT_DIR")
+    if not out:
+        return
+    os.makedirs(out, exist_ok=True)
+    with open(os.path.join(out, "sdk.jsonl"), "a") as f:
+        for l in text.splitlines():
+            if l.startswith("antithesis: "):
+                f.write(l[len("antithesis: "):].rstrip("\r") + "\n")
+
+
 def finish_kernel(qemu, serial: str, damaged: bool = False):
     try:
         code = qemu.wait(timeout=60)
@@ -974,6 +989,7 @@ def finish_kernel(qemu, serial: str, damaged: bool = False):
             raise RuntimeError(f"a droplet boot that did not serve from the volume: {serial}")
         loader_boots += 1
     text = open(serial, "rb").read().decode("latin-1", "replace")
+    keep_antithesis_lines(text)
     lines = "\n".join(l for l in text.splitlines()
                       if l.strip() and "SeaBIOS" not in l and "\x1b" not in l)
     for d in disk_check_differences(lines, damaged):

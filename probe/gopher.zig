@@ -251,10 +251,24 @@ const data_dir = "data";
 const auth_dir = "auth";
 const data_dirs = [_][]const u8{ data_dir, auth_dir };
 
+/// **AN ASSERTION LINE, ON THE PORT ONLY** (-Dantithesis): not into the ring,
+/// which is the log /admin/host shows, and after whatever the console still
+/// owes, so no line lands inside another. tools/antithesis_jsonl.sh takes
+/// each back out by its prefix.
+fn antithesisLine(line: []const u8) void {
+    serial.flushPending();
+    serial.putPort("antithesis: ");
+    serial.putPort(line);
+}
+
 pub fn kmain() noreturn {
     serial.init();
     interrupts.install();
     serial.put("gopher-metal: angry-gopher's route table, with no Linux under it\n");
+    if (gm_build.antithesis) {
+        metal.antithesis.sink = antithesisLine;
+        metal.antithesis.declare();
+    }
 
     // ── the machine's memory ────────────────────────────────────────────────
     // What RAM there is, where it is, and which of it this kernel is sitting
