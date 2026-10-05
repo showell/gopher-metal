@@ -68,3 +68,25 @@ page_sim: an append grows a kept copy into more pages
 page_sim: a rename carries a kept copy to its new name
 page_sim: a file is pushed out to make room
 page_sim: some run pushes a file out
+
+# The other pure modules (pure_sim.zig), at its default 200 seeds.
+log_ring: one write is longer than the ring, and its tail is kept
+log_ring: a line goes in in pieces
+log_ring: the ring wraps
+log_ring: a read after a loss starts at a whole line
+log_ring: a short read gets the newest bytes
+log_ring: secrets split across writes are taken out
+kept_log: a boot finds the sealed boot before it
+kept_log: the boot before's log had wrapped
+kept_log: a boot ends unsealed, and the next finds the one before it
+kept_log: the power is cut and the region is cold
+kept_log: a sealed header is damaged and not trusted
+restart: a clock that went backwards starts the count again
+restart: a restart past the hour starts the count again
+restart: a restart at the hour exactly is still in a row
+restart: with no clock the restarts count as in a row
+restart: the count stops at 255
+restart: the back-off reaches 15 minutes
+restart: one damaged byte reads as no record
+request_heap: a request meets the limit of what backs it
+request_heap: a reset gives back what grew past what it keeps

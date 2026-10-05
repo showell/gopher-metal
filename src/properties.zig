@@ -1,6 +1,6 @@
 //! **THE COVERAGE PROPERTIES, OVER MANY SEEDS** (COVERAGE.md): the TCP
 //! table's in tcp_sim.zig, the FAT's in fat_sim.zig, the page cache's in
-//! page_sim.zig.
+//! page_sim.zig, and the other pure modules' in pure_sim.zig.
 //!
 //!   zig build properties                  TCP seeds 1..100, FAT 1..20, pages 1..100
 //!   zig build properties -Dseeds=5000 -Dfat-seeds=1000     more
@@ -30,6 +30,7 @@ const at = @import("coverage");
 const sim = @import("tcp_sim.zig");
 const fat_sim = @import("fat_sim.zig");
 const page_sim = @import("page_sim.zig");
+const pure_sim = @import("pure_sim.zig");
 const options = @import("tcp_properties_options");
 
 var jsonl: std.ArrayList(u8) = .empty;
@@ -68,6 +69,11 @@ test "the properties over a sweep of seeds" {
         if (!ok) failed_seeds += 1;
         at.always(@src(), ok, "page_sim: every oracle holds for every seed", .{ .seed = seed });
     }
+    for (1..options.pure_seeds + 1) |seed| {
+        const ok = if (pure_sim.runSeed(seed)) true else |_| false;
+        if (!ok) failed_seeds += 1;
+        at.always(@src(), ok, "pure_sim: every oracle holds for every seed", .{ .seed = seed });
+    }
     // Every sweep, whatever its size: they are the regression tests.
     for (fat_sim.regressions) |seed| {
         const ok = if (fat_sim.runSeed(seed)) true else |_| false;
@@ -78,7 +84,7 @@ test "the properties over a sweep of seeds" {
     var buf: [64 * 1024]u8 = undefined;
     var w: std.Io.Writer = .fixed(&buf);
     const failing = try at.report(&w);
-    std.debug.print("\n{d} TCP seeds, each plain and rough, the first {d} crowded too, {d} FAT seeds and {d} page cache seeds; {d} runs failed an oracle\n{s}", .{ options.seeds, @min(options.seeds, options.crowd_seeds), options.fat_seeds, options.page_seeds, failed_seeds, w.buffered() });
+    std.debug.print("\n{d} TCP seeds, each plain and rough, the first {d} crowded too, {d} FAT seeds, {d} page cache seeds and {d} pure module seeds; {d} runs failed an oracle\n{s}", .{ options.seeds, @min(options.seeds, options.crowd_seeds), options.fat_seeds, options.page_seeds, options.pure_seeds, failed_seeds, w.buffered() });
 
     if (options.sdk_jsonl.len > 0) {
         const io = std.testing.io;
