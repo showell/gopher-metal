@@ -246,8 +246,8 @@ The FAT16 work earned its trust from two judges that have never seen our code:
 FAT32 gets the same judges, plus cases FAT16 cannot have.
 
 **Every FAT probe runs on both kinds.** `probe/run.sh` builds its images with
-`mkfs.vfat -F 16 … 32768`. Add a FAT32 image to each FAT probe: `fat16`,
-`fat16write`, `vfat`, `append`, `replace` and `restore`.
+`mkfs.vfat -F 16 … 32768`. Add a FAT32 image to each FAT probe: `vfat`,
+`append`, `replace` and `restore`.
 
 - **A FAT32 image is cheap.** FAT32 needs at least 65,525 clusters, so with
   512-byte clusters (`-F 32 -s 1`) a 40 MiB image is enough.

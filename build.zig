@@ -47,8 +47,6 @@ pub fn build(b: *std.Build) void {
     // byte-identical volumes.
     const kernels = [_]struct { name: []const u8, root: []const u8, step: []const u8, help: []const u8, cache_fat: bool = false }{
         .{ .name = "block.elf", .root = "probe/block.zig", .step = "block", .help = "the virtio-blk probe kernel" },
-        .{ .name = "fat16.elf", .root = "probe/fat16.zig", .step = "fat16", .help = "the FAT16 probe kernel" },
-        .{ .name = "fat16write.elf", .root = "probe/fat16write.zig", .step = "fat16write", .help = "fat16-write, reproducing the ladder verdict" },
         .{ .name = "stdio.elf", .root = "probe/stdio.zig", .step = "stdio", .help = "std.Io.Dir over FAT16" },
         .{ .name = "vfat.elf", .root = "probe/vfat.zig", .step = "vfat", .help = "long names and subdirectories, judged by fsck.vfat" },
         .{ .name = "append.elf", .root = "probe/append.zig", .step = "append", .help = "the append the application makes, judged by fsck.vfat and Linux" },

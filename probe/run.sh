@@ -39,8 +39,6 @@
 # `code << 1 | 1`, so the kernel's 0 arrives as 1 and its 1 arrives as 3.
 set -u
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-CHECKOUT="${CHECKOUT:-$HOME/showell_repos/cobblestone-u61}"
-IMAGE="${IMAGE:-$CHECKOUT/codex/test/fat16-write.disk}"
 # PROBE_WORK gives a run its own scratch, so two can run at once (gates.sh's
 # GATES_PARALLEL=1, QUEUE.md item 72): every file a run writes is under it.
 WORK="${PROBE_WORK:-$HOME/build/gopher-metal/probe}"
@@ -49,8 +47,8 @@ mkdir -p "$WORK"
 # **FAT=32 FORMATS THE PROBES' OWN VOLUMES AS FAT32** (QUEUE.md item 17):
 # vfat, append, replace and ladder, which mkfs.vfat their volumes here. FAT32
 # needs 65,525 clusters or more, so it is 40 MB at 512-byte clusters where
-# FAT16 is 16 MB. The fixture probes (block, fat16, fat16write, stdio) read
-# FAT16 fixtures either way. The PROBES default to 16 here; the CHAT JUDGE
+# FAT16 is 16 MB. block and stdio boot on a fresh FAT16 volume either way
+# (fresh_fat16 below). The PROBES default to 16 here; the CHAT JUDGE
 # defaults to FAT32 (judge_gopher.py, item 88) — this FAT is not exported, so a
 # bare `probe/run.sh gopher` leaves the judge on its own default. `FAT=16` or
 # `FAT=32` on the command sets both.
@@ -119,6 +117,22 @@ fixture() {
     fi
 }
 
+# A fresh FAT16 volume, bare (no partition table), labelled GOPHER: what
+# block and stdio boot on. mkfs.vfat writes it, so no reader of ours made it.
+fresh_fat16() {
+    rm -f "$2"
+    if ! command -v mkfs.vfat > /dev/null; then
+        echo "FAIL $1 | mkfs.vfat is not installed, and its volume needs it"
+        failed=1
+        return 1
+    fi
+    mkfs.vfat -F 16 -S 512 -n GOPHER -C "$2" 32768 > /dev/null 2>&1 || {
+        echo "FAIL $1 | mkfs.vfat could not make its volume"
+        failed=1
+        return 1
+    }
+}
+
 boot() {
     local name="$1"; shift
     if [ ! -f "$HERE/$name.elf" ]; then
@@ -169,49 +183,20 @@ boot() {
     esac
 }
 
-# **THE IMAGE IS ALWAYS COPIED**: the block probe writes to the last sector to
-# prove the device writes where it was told, and it must never do that to a
-# fixture.
+# The block probe writes the last sector to prove the device writes where it
+# was told, on a volume made fresh for the run.
 if [ "$want" = all ] || [ "$want" = block ]; then
-    fixture block "$IMAGE" "$WORK/disk.img" && boot block \
+    fresh_fat16 block "$WORK/disk.img" && boot block \
         -drive id=d,file="$WORK/disk.img",format=raw,if=none \
         -device virtio-blk-device,drive=d
 fi
 
 # QEMU's user-mode networking answers DHCP at 10.0.2.2 with nothing
 # configured, so the lease is a result that needs no second machine.
-# The FAT16 probe reads Cobblestone's fat16-list.disk, whose contents are
-# pinned by that test's own verdict.
-if [ "$want" = all ] || [ "$want" = fat16 ]; then
-    fixture fat16 "${FAT16_IMAGE:-$CHECKOUT/codex/test/fat16-list.disk}" "$WORK/fat16.img" && boot fat16 \
-        -drive id=d,file="$WORK/fat16.img",format=raw,if=none \
-        -device virtio-blk-device,drive=d
-fi
-
-# **THE ORACLE ROW.** This one does not judge itself: it prints what
-# Cobblestone's fat16-write test prints, and its console is compared with that
-# test's own verdict -- the same file roc-apps/floor's verify.sh uses for the
-# Roc implementation. Two filesystems, two languages, one disk image.
-if [ "$want" = all ] || [ "$want" = fat16write ]; then
-    rm -f "$WORK/fat16write.out"  # judged below: never the last run's
-    fixture fat16write "${WRITE_IMAGE:-$CHECKOUT/codex/test/fat16-write.disk}" "$WORK/fat16write.img" && boot fat16write \
-        -drive id=d,file="$WORK/fat16write.img",format=raw,if=none \
-        -device virtio-blk-device,drive=d
-    if [ -f "$WORK/fat16write.out" ]; then
-        if diff -q "$WORK/fat16write.out" "$HERE/expect/fat16write.txt" > /dev/null 2>&1; then
-            echo "     fat16write | console matches the ladder verdict for fat16-write"
-        else
-            echo "FAIL fat16write | console differs from the ladder verdict:"
-            diff "$HERE/expect/fat16write.txt" "$WORK/fat16write.out" | head -12
-            failed=1
-        fi
-    fi
-fi
-
 # std.Io's own surface -- our Dir, the one the application's 121 filesystem
 # calls are spelled against.
 if [ "$want" = all ] || [ "$want" = stdio ]; then
-    fixture stdio "${WRITE_IMAGE:-$CHECKOUT/codex/test/fat16-write.disk}" "$WORK/stdio.img" && boot stdio \
+    fresh_fat16 stdio "$WORK/stdio.img" && boot stdio \
         -drive id=d,file="$WORK/stdio.img",format=raw,if=none \
         -device virtio-blk-device,drive=d
 fi

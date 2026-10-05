@@ -195,8 +195,8 @@ droplet, booted from a custom image
 | TCP | **works** — 256 connections; the peer's window and segment size respected, lost segments sent again, silent peers given up on; received in order only |
 | HTTP, ours | **works** — `curl` gets a 200 from it |
 | **`std.http.Server`, unmodified** | **works** — see below |
-| GPT and FAT16, read side | **works** — against Cobblestone's own fixtures |
-| FAT16 write | **works** — reproduces the ladder verdict byte for byte |
+| GPT and FAT16, read side | **works** — volumes from `mkfs.vfat`, and from the FAT spec (`src/test_disk.zig`) |
+| FAT16 write | **works** — `fsck.vfat` and Linux read back what we wrote |
 | long names and subdirectories | **works** — `fsck.vfat` finds no error |
 | the backup story, both ways | **works** — Linux mounts it; we read what Linux wrote |
 | entropy | **works** — virtio-rng and RDRAND, mixed |
@@ -251,10 +251,7 @@ once: it is slow enough that the loop fell behind its own timers, which
 exposed the SYN-ACK bug described under "the send side".
 
 ```
-PASS block |   wrote and read back sector 32767: 512 bytes match
-PASS fat16 |   read 355840 bytes; first two: 4d5a
-PASS fat16write | bin 1 2 3 254
-     fat16write | console matches the ladder verdict for fat16-write
+PASS block |   wrote and read back sector 65535: 512 bytes match
 PASS stdio |   mutex: locked and unlocked twice, no contention possible
 PASS vfat |   auth/damian: . .. api-key _session_secret
      vfat | fsck.vfat finds no error in what we wrote
@@ -403,31 +400,6 @@ subdirectory's cluster edge is someone else's data. Our own reader agreed with
 both; `fsck.vfat` and Linux did not. `probe/replace.zig` forces both shapes and
 its judge checks, from the raw image, that it did.
 
-## The oracle row
-
-`probe/fat16write.zig` does not judge itself. It writes HELLO.TXT and BIN.DAT
-to a FAT16 volume and prints the seven lines Cobblestone's `fat16-write` test
-prints, and `run.sh` compares that console with **the test's own verdict** —
-`probe/expect/fat16write.txt`, copied from the ladder, the same file
-`roc-apps/floor`'s verify.sh uses to check the Roc implementation.
-
-```
-wrote True
-exists True
-readback Hello, disk!
-size 12
-wrote-bin True
-bin 1 2 3 254
-absent False
-```
-
-Two filesystems, in two languages, on one disk image, agreeing line for line.
-
-The image they leave behind was also read back from outside, with neither
-implementation involved: both copies of the FAT are identical, HELLO.TXT is at
-cluster 4891 holding `Hello, disk!`, and BIN.DAT is at 4892 holding
-`01 02 03 fe`. Agreeing with our own reader would have proved much less.
-
 ## The real server
 
 `port.sh` copies angry-gopher's sources and changes one line in each file that
@@ -506,8 +478,8 @@ operations the application actually asks for.
 gopher-metal std.Io probe
   readFileAlloc("HELLO.TXT") -> 12 bytes: Hello, disk!
   statFile -> 12 bytes, kind file
-  clock advanced 547220635 ns over a spin
-  iterate -> EFI/ CODEX.CDX HELLO.TXT
+  clock advanced 1008639 ns over a spin
+  iterate -> HELLO.TXT
   mutex: locked and unlocked twice, no contention possible
 ```
 
@@ -771,8 +743,8 @@ Revisit zfat if FAT32, long names, or robust crash-safe writing become
 necessary. `disk-image-step` is worth remembering regardless: making fixtures
 without mtools or loop mounts is a real convenience.
 
-**What the fixtures taught us immediately:** sector 0 is not the filesystem.
-Cobblestone's images are GPT disks with a protective MBR and one "EFI System"
+**What the first fixtures taught us immediately:** sector 0 is not the
+filesystem. They were Cobblestone's images, GPT disks with a protective MBR and one "EFI System"
 partition at LBA 2048, which is why its `Fat16` cites a `Gpt` chapter — and why
 a reader that mounts sector 0 finds a boot sector of zeros and concludes,
 correctly and uselessly, that the volume is not FAT16.

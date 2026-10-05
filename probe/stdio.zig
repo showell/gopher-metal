@@ -57,8 +57,9 @@ pub fn kmain() noreturn {
     const base = virtio.find(virtio.device_id_block) orelse
         serial.fail("no virtio-blk device on the PCI bus or in any mmio slot");
     var blk = blk_mem.bring(base) catch serial.fail("the block device would not come up");
-    const part = gpt.dataPartition(&blk, &scratch) catch serial.fail("no partition table");
-    const vol = fat16.Volume.mount(&blk, &scratch, part.first_lba) catch serial.fail("the volume would not mount");
+    // A partitioned disk or a bare volume, as vfat.zig reads either.
+    const start: u32 = if (gpt.dataPartition(&blk, &scratch) catch null) |p| p.first_lba else 0;
+    const vol = fat16.Volume.mount(&blk, &scratch, start) catch serial.fail("the volume would not mount");
 
     Io.mount(vol);
     Io.startClock(metal.pit.calibrate() catch serial.fail("the PIT would not calibrate the TSC"));
