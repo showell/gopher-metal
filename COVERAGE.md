@@ -66,8 +66,9 @@ any serial log, such as a droplet's.
     SEEDS=50000 ./long.sh
     ./long.sh sim | metal  # one half
 
-- **The simulator** at 10,000 seeds, plain and rough, against
-  `coverage/floor-sim.txt` (`zig build properties -Dfloor=...`).
+- **The simulators** (ReleaseSafe): 10,000 TCP seeds, plain and rough, and
+  300 FAT seeds, against `coverage/floor-sim.txt` (`zig build properties
+  -Dfloor=...`).
 - **The real kernel**, gopher.elf built `-Dcoverage`, on metal-vmm's
   PC-shaped machine (`TRANSPORT=pci`: halting between frames and woken by
   interrupts, as on a droplet), over a 5 ms wire. For each of three routes
