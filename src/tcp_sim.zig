@@ -53,6 +53,7 @@ const std = @import("std");
 const proto = @import("proto.zig");
 const tcp = @import("tcp.zig");
 const invariants = @import("tcp_check.zig");
+const props = @import("antithesis.zig");
 
 const ns_per_ms: i96 = 1_000_000;
 const ns_per_s: i96 = 1_000_000_000;
@@ -183,6 +184,45 @@ const Scenario = struct {
     }
 };
 
+/// **A ROUGHER PEER** (ANTITHESIS.md): what a plain seed's client never
+/// does, and so what the table's code for it was never run against under
+/// loss and reordering. Chosen by a second generator from the seed, so a
+/// plain seed runs exactly as it always has and its regressions still
+/// reproduce; `runRoughSeed` runs the same seed with these added.
+const Rough = struct {
+    /// The client resets the connection at this time, if it is still open:
+    /// at SND.NXT, or `reset_off` past it (inside the table's window, so it
+    /// must be challenged, not obeyed). From then on it is a closed port,
+    /// and answers whatever reaches it with a reset (RFC 9293 §3.10.7.1).
+    reset_at: ?i96 = null,
+    reset_off: u32 = 0,
+    /// The client vanishes once it has this much of the answer: often after
+    /// the host has queued it all and gone, so the table alone is left to
+    /// give up on it.
+    vanish_after: ?usize = null,
+    /// SYNs from addresses that never finish the handshake, `flood_gap`
+    /// apart from `flood_at`: more half-open connections than the table has
+    /// slots, so a new SYN has to take one's place.
+    flood: u8 = 0,
+    flood_at: i96 = 0,
+    flood_gap: i96 = 0,
+
+    fn choose(rng: std.Random, sc: *const Scenario) Rough {
+        var r: Rough = .{};
+        if (rng.uintLessThan(u8, 3) == 0) {
+            r.reset_at = randNs(rng, 2 * ns_per_s);
+            r.reset_off = if (rng.boolean()) 0 else rng.intRangeAtMost(u32, 1, 2000);
+        }
+        if (rng.uintLessThan(u8, 3) == 0) r.vanish_after = rng.uintLessThan(usize, sc.answer_len + 1);
+        if (rng.uintLessThan(u8, 3) == 0) {
+            r.flood = rng.intRangeAtMost(u8, 1, 8);
+            r.flood_at = randNs(rng, 500 * ns_per_ms);
+            r.flood_gap = @intCast(rng.intRangeAtMost(u64, 10 * ns_per_ms, 400 * ns_per_ms));
+        }
+        return r;
+    }
+};
+
 // ── the network ─────────────────────────────────────────────────────────────
 
 const Packet = struct {
@@ -270,6 +310,9 @@ const Client = struct {
     gone: bool = false,
     /// It was reset, or reset the connection itself, before the end.
     aborted: bool = false,
+    /// It reset the connection on purpose (`Rough.reset_at`), and is now a
+    /// closed port.
+    reset_sent: bool = false,
 
     iss: u32,
     snd_una: u32,
@@ -449,6 +492,19 @@ const Client = struct {
             if (self.done_at == null) self.done_at = sim.now;
             return;
         };
+        if (sim.rough.vanish_after) |n| if (self.state != .syn_sent and self.received >= n) {
+            props.reachable(@src(), "tcp_sim: the client vanishes part-way through the answer", .{ .received = self.received });
+            self.gone = true;
+            if (self.done_at == null) self.done_at = sim.now;
+            return;
+        };
+        if (sim.rough.reset_at) |at| if (sim.now >= at and self.state != .syn_sent) {
+            props.reachable(@src(), "tcp_sim: the client resets the connection", .{ .off = sim.rough.reset_off });
+            self.emit(sim, tcp.flag_rst, self.snd_nxt +% sim.rough.reset_off, "");
+            self.reset_sent = true;
+            self.aborted = true;
+            return self.finish(sim);
+        };
 
         // Its application reads what has arrived, at its own pace.
         if (self.unread > 0 and sim.now >= self.stall_until) {
@@ -501,8 +557,24 @@ const Client = struct {
         self.output(sim);
     }
 
+    /// **A CLOSED PORT** answers a segment with a reset, numbered by its
+    /// acknowledgement (RFC 9293 §3.10.7.1): which names exactly the byte
+    /// the table expects next, and so is the exact reset that answers its
+    /// challenge.
+    fn answerClosed(self: *Client, sim: *Sim, frame: []const u8) void {
+        const pkt = proto.parseIpv4(frame) orelse return;
+        const t = pkt.payload;
+        if (pkt.protocol != proto.proto_tcp or t.len < tcp.header_len) return;
+        if (proto.readBe16(t[2..4]) != client_port) return;
+        if (proto.pseudoChecksum(pkt.src_ip, pkt.dst_ip, proto.proto_tcp, t) != 0) return;
+        const flags = t[13];
+        if (flags & tcp.flag_rst != 0 or flags & tcp.flag_ack == 0) return;
+        self.emit(sim, tcp.flag_rst, proto.readBe32(t[8..12]), "");
+    }
+
     /// A frame from the table.
     fn receive(self: *Client, sim: *Sim, frame: []const u8) void {
+        if (self.reset_sent) return self.answerClosed(sim, frame);
         if (self.gone or self.state == .closed) return;
         const pkt = proto.parseIpv4(frame) orelse return;
         const t = pkt.payload;
@@ -816,6 +888,12 @@ const Sim = struct {
     table: tcp.Table,
     host: Host = .{},
     client: Client,
+    rough: Rough = .{},
+    flooded: u8 = 0,
+    /// The table's give-ups on the client's own connection: with a flood,
+    /// `table.given_up` also counts the flood's half-open ones, which it
+    /// is right to give up on.
+    client_given_up: u64 = 0,
     /// The first oracle that failed, if any.
     broken: ?[]const u8 = null,
 
@@ -839,10 +917,20 @@ const Sim = struct {
         self.build();
     }
 
+    /// Like `init`, with a rougher peer chosen from the same seed.
+    fn initRough(self: *Sim, seed: u64) void {
+        self.init(seed);
+        var second = std.Random.DefaultPrng.init(seed ^ 0x726f_7567_6870_6565); // "roughpee"
+        self.rough = Rough.choose(second.random(), &self.sc);
+    }
+
     fn build(self: *Sim) void {
         self.now = 0;
         self.net = .{};
         self.host = .{};
+        self.rough = .{};
+        self.flooded = 0;
+        self.client_given_up = 0;
         self.broken = null;
         for (&self.conns, &self.rx, &self.tx) |*c, *r, *t| c.* = .{ .rx = r, .tx = t };
         sim_isn = self.rng.int(u32);
@@ -863,6 +951,39 @@ const Sim = struct {
         }
     }
 
+    /// The next flood SYN, when it is due: from an address and port of its
+    /// own, which the client's port filter ignores the answers to.
+    fn flood(self: *Sim) void {
+        if (self.flooded >= self.rough.flood) return;
+        if (self.now < self.rough.flood_at + self.rough.flood_gap * self.flooded) return;
+        const k = self.flooded;
+        self.flooded += 1;
+        props.reachable(@src(), "tcp_sim: a flood SYN is sent", .{ .k = k });
+        var buf: [1600]u8 = undefined;
+        const ip = [4]u8{ 10, 0, 3, 10 + k };
+        const len = tcp.header_len;
+        const frame_len = proto.writeIpv4(&buf, client_mac, server_mac, ip, server_ip, proto.proto_tcp, len);
+        const t = buf[tcp.segment_at..][0..len];
+        @memcpy(t[0..2], &proto.be16(50_000 + @as(u16, k)));
+        @memcpy(t[2..4], &proto.be16(80));
+        @memcpy(t[4..8], &proto.be32(self.rng.int(u32)));
+        @memcpy(t[8..12], &proto.be32(0));
+        t[12] = @intCast((len / 4) << 4);
+        t[13] = tcp.flag_syn;
+        @memcpy(t[14..16], &proto.be16(0xFFFF));
+        @memcpy(t[16..20], &[_]u8{ 0, 0, 0, 0 });
+        @memcpy(t[16..18], &proto.be16(proto.pseudoChecksum(ip, server_ip, proto.proto_tcp, t)));
+        self.net.send(self.rng, &self.sc, self.now, true, buf[0..frame_len]);
+    }
+
+    /// The slot holding the client's connection, if one does.
+    fn clientSlot(self: *const Sim) ?usize {
+        for (self.table.conns, 0..) |c, k| {
+            if (c.state != .closed and c.peer_port == client_port and std.mem.eql(u8, &c.peer_ip, &client_ip)) return k;
+        }
+        return null;
+    }
+
     fn quiescent(self: *const Sim) bool {
         for (self.table.conns) |c| if (c.state != .closed) return false;
         return true;
@@ -870,6 +991,7 @@ const Sim = struct {
 
     fn over(self: *const Sim) bool {
         const client_done = self.client.gone or self.client.state == .closed;
+        if (self.flooded < self.rough.flood) return false;
         return client_done and (self.host.finished or self.host.let_go or self.host.slot == null) and
             self.quiescent() and self.net.count == 0;
     }
@@ -879,6 +1001,7 @@ const Sim = struct {
         var buf: [1600]u8 = undefined;
         while (self.now < horizon_ns and self.broken == null and !self.over()) {
             self.now += tick_ns;
+            self.flood();
             var wire = TableWire{ .sim = self };
             while (self.net.take(self.now, &buf)) |p| {
                 if (p.to_table) {
@@ -889,7 +1012,17 @@ const Sim = struct {
             self.client.turn(self);
             self.host.turn(self);
             self.checkTable(.after_handle);
+            // Give-ups happen only in `transmit`: one that closes the
+            // client's slot is a give-up on the client.
+            const given_up = self.table.given_up;
+            const mine = self.clientSlot();
             self.table.transmit(&wire, self.now);
+            if (self.table.given_up != given_up) if (mine) |k| {
+                if (self.table.conns[k].state == .closed) {
+                    self.client_given_up += 1;
+                    props.reachable(@src(), "tcp_sim: the table alone gives up on a client that left", .{ .seed = self.seed });
+                }
+            };
             self.checkTable(.after_transmit);
         }
         try self.judge();
@@ -898,7 +1031,10 @@ const Sim = struct {
     fn judge(self: *Sim) !void {
         if (self.broken == null and !self.quiescent())
             self.fault("the table still holds a connection at the horizon");
-        if (self.broken == null and self.sc.vanish_at == null) {
+        // A client that left on purpose is owed no answer; a reset it was
+        // dealt is still a fault, unless it left first.
+        const stayed = self.sc.vanish_at == null and !self.client.gone and !self.client.reset_sent;
+        if (self.broken == null and stayed) {
             const c = &self.client;
             if (c.aborted) {
                 self.fault("the connection was reset though the client stayed");
@@ -906,12 +1042,14 @@ const Sim = struct {
                 self.fault("the client did not get the whole answer and our FIN");
             } else if (self.host.consumed != self.sc.request_len) {
                 self.fault("the host did not read the whole request");
-            } else if (self.table.given_up != 0) {
+            } else if (self.client_given_up != 0) {
                 self.fault("the table gave up on a client that stayed");
             } else if (c.done_at == null or c.done_at.? > completion_bound_ns) {
                 self.fault("the exchange did not finish within the completion bound");
             }
         }
+        if (self.broken == null and stayed and self.rough.flood > 0)
+            props.reachable(@src(), "tcp_sim: a client that stayed through a flood got its whole answer", .{ .given_way = self.table.half_open_given_way });
         const what = self.broken orelse return;
         const sc = self.sc;
         std.debug.print(
@@ -950,6 +1088,17 @@ const Sim = struct {
             self.net.duplicated,            self.net.corrupted,
             self.net.overflowed,
         });
+        const r = self.rough;
+        std.debug.print(
+            \\  rough: reset at {?d} ms (+{d}, sent {any}), vanish after {?d} B, flood {d} SYNs from {d} ms every {d} ms; given way {d}, refused {d}
+            \\
+        , .{
+            if (r.reset_at) |at| @divTrunc(at, ns_per_ms) else null, r.reset_off,
+            self.client.reset_sent,                                  r.vanish_after,
+            r.flood,                                                 @divTrunc(r.flood_at, ns_per_ms),
+            @divTrunc(r.flood_gap, ns_per_ms),                       self.table.half_open_given_way,
+            self.table.refused,
+        });
         return error.SimulationFailed;
     }
 };
@@ -959,6 +1108,14 @@ pub fn runSeed(seed: u64) !void {
     const sim = try std.testing.allocator.create(Sim);
     defer std.testing.allocator.destroy(sim);
     sim.init(seed);
+    try sim.run();
+}
+
+/// The same seed with a rougher peer (`Rough`).
+pub fn runRoughSeed(seed: u64) !void {
+    const sim = try std.testing.allocator.create(Sim);
+    defer std.testing.allocator.destroy(sim);
+    sim.initRough(seed);
     try sim.run();
 }
 
@@ -980,6 +1137,15 @@ const regressions = [_]u64{
 
 test "the table against a simulated network and an RFC 9293 client, a handful of seeds" {
     for (seeds) |seed| try runSeed(seed);
+}
+
+/// The rough seeds `zig build test` runs (`Rough`): the plain eight again,
+/// each with a peer that resets, vanishes part-way or floods. `zig build
+/// properties` sweeps hundreds.
+const rough_seeds = [_]u64{ 1, 2, 3, 4, 5, 6, 7, 8 };
+
+test "the same, with a peer that resets, vanishes part-way, or floods the table with SYNs" {
+    for (rough_seeds) |seed| try runRoughSeed(seed);
 }
 
 // **THE LOST-FRAME IncompleteRead, HUNTED** (QUEUE.md item 96). The bug was

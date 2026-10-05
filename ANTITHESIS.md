@@ -69,30 +69,43 @@ a `reachable` or an `always` never reached. Antithesis fails both; here only
 a FAIL fails the step, because a MISS says the runs were short of the case,
 not that the code is wrong.
 
-## What the first runs said
+## What the runs have said
 
 18 properties in `tcp.zig` (retransmission, probing, window updates, resets,
-RTO bounds). No FAIL anywhere.
+RTO bounds), and a few in `tcp_sim.zig` that say its scenarios happened. No
+FAIL anywhere.
 
-**500 simulator seeds never reached four of the table's paths:**
-- an exact reset closing a connection;
-- an inexact in-window reset drawing a challenge ACK;
-- giving up on a silent peer (`giveUp`);
-- a stuck half-open connection giving way to a new SYN.
+**Day one: 500 plain seeds never reached four of the table's paths** — an
+exact reset closing a connection; an inexact in-window reset drawing a
+challenge ACK; giving up on a silent peer; a stuck half-open connection
+giving way to a new SYN. Each had a unit test in `tcp_test.zig`, none a run
+under loss and reordering: the simulator's client reset only when it gave up
+itself, and nothing ever competed for the table's two slots.
 
-So `tcp_sim.zig` does not test them, whatever `tcp_test.zig` does case by
-case. The simulator's client resets only when it gives up itself
-(`Client.abort`, after `max_retries`), which no passing seed does; and its
-table has two slots and one client.
+**So `tcp_sim.zig` has rough seeds** (`Rough`, `runRoughSeed`): the same
+seed, with a peer that, each by its own chance, resets mid-exchange (exactly,
+or off by up to 2000 and so challenged) and then answers as a closed port;
+vanishes part-way through the answer; or floods the table with SYNs from
+addresses that never finish. A second generator chooses them, so a plain
+seed runs exactly as before and its regressions still reproduce. The
+give-up oracle now counts the client's own connection only, since the
+table is right to give up on the flood's.
+
+After that: 5,000 seeds, each plain and rough (about a minute), every oracle
+held and every property was reached. The table alone gave up on a client
+that left in 45 of the first 500 rough runs; a client that stayed through a
+flood got its whole answer every time (60 of them in those 500). `zig build test` runs rough seeds 1–8
+beside the plain ones.
 
 One judge gate on metal (`uploads`, QEMU) reached 3 of the 18: a clean
-virtual network exercises none of the recovery paths, as expected.
+virtual network exercises none of the recovery paths.
 
 ## Next, if it earns it
 
-- Scenarios in `tcp_sim.zig` for the four MISSes, and a lossy judge run on
-  metal (QEMU's netdev can drop and delay) so the recovery paths are reached
-  on the machine, not only in the simulator.
+- A lossy run of the real kernel (QEMU, or metal-vmm's `WIRE_EAT`), so the
+  recovery paths are reached on the machine, not only in the simulator.
+- A long-tier script: thousands of seeds plus a floor list of `sometimes`
+  that a pre-deploy run must reach.
 - Properties in the rest of the metal layer: FAT (`fat16.zig`: the cached
   and on-disk FAT agree; a write past `data/`/`auth/` never happens), the
   page cache, the request heap, restart.

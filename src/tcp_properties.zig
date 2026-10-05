@@ -39,12 +39,15 @@ test "tcp: the table's properties over a sweep of seeds" {
         const ok = if (sim.runSeed(seed)) true else |_| false;
         if (!ok) failed_seeds += 1;
         at.always(@src(), ok, "tcp_sim: every oracle holds for every seed", .{ .seed = seed });
+        const rough_ok = if (sim.runRoughSeed(seed)) true else |_| false;
+        if (!rough_ok) failed_seeds += 1;
+        at.always(@src(), rough_ok, "tcp_sim: every oracle holds for every rough seed", .{ .seed = seed });
     }
 
     var buf: [64 * 1024]u8 = undefined;
     var w: std.Io.Writer = .fixed(&buf);
     const failing = try at.report(&w);
-    std.debug.print("\n{d} seeds, {d} failed an oracle\n{s}", .{ options.seeds, failed_seeds, w.buffered() });
+    std.debug.print("\n{d} seeds, each plain and rough; {d} runs failed an oracle\n{s}", .{ options.seeds, failed_seeds, w.buffered() });
 
     if (options.sdk_jsonl.len > 0) {
         const io = std.testing.io;
