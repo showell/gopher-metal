@@ -8,7 +8,8 @@
 #
 # Host tests, the probes, the chat judge on QEMU's microvm and on the
 # droplet-shaped machine (chat's data on a SCSI volume), the droplet boot
-# checks, and metal-vmm's two checks.
+# checks, and metal-vmm's three checks (the microvm-shaped machine against
+# QEMU, its repeatability, and the PC-shaped machine's rests).
 #
 # **gopher.elf IS REBUILT HERE.** `probe/run.sh gopher` judges whatever
 # gopher.elf is on disk, and `zig build kernels` does not build it, so a gate
@@ -155,10 +156,16 @@ lap "droplet hello"
 droplet/screen.sh 2>&1 | tail -1
 [ "${PIPESTATUS[0]}" = 0 ] || failed+=(screen)
 lap "screen"
+# **metal-vmm IS BUILT HERE**, for the reason gopher.elf is above: its scripts
+# run whatever binary is on disk. `rest.sh all` is the PC-shaped machine
+# (TRANSPORT=pci): every route with the server halting between frames and
+# woken by MSI-X and the APIC timer, the path a droplet runs.
 VMM="${METAL_VMM:-$HOME/showell_repos/metal-vmm}"
+(cd "$VMM" && zig build 2>&1 | tail -5; exit "${PIPESTATUS[0]}") || failed+=(vmm-build)
 (cd "$VMM" && ./check.sh 2>&1 | tail -2; exit "${PIPESTATUS[0]}") || failed+=(vmm-check)
 (cd "$VMM" && ./same.sh 2>&1 | tail -2; exit "${PIPESTATUS[0]}") || failed+=(vmm-same)
-lap "metal-vmm check and same"
+(cd "$VMM" && ./rest.sh all 2>&1 | tail -2; exit "${PIPESTATUS[0]}") || failed+=(vmm-rest)
+lap "metal-vmm check, same and rest"
 
 if [ ${#failed[@]} = 0 ]; then
     echo "GATES: PASS"
