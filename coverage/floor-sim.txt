@@ -54,3 +54,17 @@ fat_sim: an append finds no room
 fat_sim: a rename finds no room
 fat_sim: the volume is mounted again
 fat_sim: some run finds the volume full
+
+# The page cache's simulator (page_sim.zig), at its default 100 seeds.
+page_sim: a read is answered from the cache
+page_sim: another spelling of a kept file finds it
+page_sim: memory that cannot be had leaves a file uncached
+page_sim: a file as large as the largest is kept
+page_sim: a file a byte past the largest is not kept
+page_sim: a whole-file write replaces a kept copy
+page_sim: a tree removed takes a kept file under it
+page_sim: an append past the largest drops a kept copy
+page_sim: an append grows a kept copy into more pages
+page_sim: a rename carries a kept copy to its new name
+page_sim: a file is pushed out to make room
+page_sim: some run pushes a file out
