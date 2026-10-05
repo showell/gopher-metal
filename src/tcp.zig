@@ -94,6 +94,14 @@
 const proto = @import("proto.zig");
 const props = @import("coverage");
 
+// Every property in this file, in the catalog, called or not (COVERAGE.md).
+comptime {
+    props.catalogFile(@import("coverage_catalog"), here());
+}
+fn here() std.builtin.SourceLocation {
+    return @src();
+}
+
 pub const header_len: usize = 20;
 pub const segment_at: usize = proto.eth_header_len + proto.ip_header_len;
 

@@ -55,6 +55,14 @@ const tcp = @import("tcp.zig");
 const invariants = @import("tcp_check.zig");
 const props = @import("coverage");
 
+// Every property in this file, in the catalog, called or not (COVERAGE.md).
+comptime {
+    props.catalogFile(@import("coverage_catalog"), here());
+}
+fn here() std.builtin.SourceLocation {
+    return @src();
+}
+
 const ns_per_ms: i96 = 1_000_000;
 const ns_per_s: i96 = 1_000_000_000;
 

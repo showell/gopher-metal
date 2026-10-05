@@ -40,19 +40,24 @@ pub fn build(b: *std.Build) void {
     // there. src/interrupts.zig takes interrupts only inside `rest`, but a
     // kernel that takes them at all must not be compiled to assume nothing
     // writes below its stack.
-    // **THE COVERAGE SDK, A SIBLING CHECKOUT** (github.com/showell/zig-coverage-sdk):
-    // `always`/`sometimes` properties of a whole run (COVERAGE.md). No red
-    // zone, as for the kernel's own code: it runs inside the kernel too.
-    const coverage_sdk = b.option([]const u8, "coverage-sdk", "the zig-coverage-sdk checkout") orelse
-        b.pathFromRoot("../zig-coverage-sdk");
-    const coverage = b.createModule(.{
-        .root_source_file = .{ .cwd_relative = b.fmt("{s}/src/coverage.zig", .{coverage_sdk}) },
-        .red_zone = false,
-    });
+    // **THE COVERAGE SDK** (github.com/showell/zig-coverage-sdk; a sibling
+    // checkout, build.zig.zon): `always`/`sometimes` properties of a whole run
+    // (COVERAGE.md). No red zone, as for the kernel's own code: it runs inside
+    // the kernel too. **THE CATALOG** is its scanner's reading of the files
+    // below, so an assertion in code nothing calls is still reported; every
+    // module that compiles one of them imports both.
+    const sdk = b.dependency("zig_coverage_sdk", .{});
+    const coverage = sdk.module("coverage");
+    coverage.red_zone = false;
+    const coverage_catalog = @import("zig_coverage_sdk").addCatalog(b, sdk.artifact("coverage-scan"), coverage, b.path("src"), &.{ "tcp.zig", "tcp_sim.zig" });
+    const with_coverage = [_]std.Build.Module.Import{
+        .{ .name = "coverage", .module = coverage },
+        .{ .name = "coverage_catalog", .module = coverage_catalog },
+    };
     const metal = b.createModule(.{
         .root_source_file = b.path("src/metal.zig"),
         .red_zone = false,
-        .imports = &.{.{ .name = "coverage", .module = coverage }},
+        .imports = &with_coverage,
     });
 
     // `cache_fat` builds the same probe with the FAT held in memory, so one
@@ -210,7 +215,7 @@ pub fn build(b: *std.Build) void {
     const netcore = b.createModule(.{
         .root_source_file = b.path("src/netcore.zig"),
         .target = b.graph.host,
-        .imports = &.{.{ .name = "coverage", .module = coverage }},
+        .imports = &with_coverage,
     });
     const serve = b.addExecutable(.{
         .name = "gm-serve",
@@ -254,6 +259,7 @@ pub fn build(b: *std.Build) void {
             .imports = &.{
                 .{ .name = "kernel_partition", .module = kernel_partition },
                 .{ .name = "coverage", .module = coverage },
+                .{ .name = "coverage_catalog", .module = coverage_catalog },
             },
         }) });
         test_step.dependOn(&b.addRunArtifact(unit).step);
@@ -278,6 +284,7 @@ pub fn build(b: *std.Build) void {
             .imports = &.{
                 .{ .name = "tcp_properties_options", .module = props_opts.createModule() },
                 .{ .name = "coverage", .module = coverage },
+                .{ .name = "coverage_catalog", .module = coverage_catalog },
             },
         }),
     });
@@ -354,6 +361,7 @@ pub fn build(b: *std.Build) void {
                 .imports = &.{
                     .{ .name = "tcp_test_start", .module = options.createModule() },
                     .{ .name = "coverage", .module = coverage },
+                    .{ .name = "coverage_catalog", .module = coverage_catalog },
                 },
             }),
         });

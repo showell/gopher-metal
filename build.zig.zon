@@ -1,0 +1,12 @@
+.{
+    .name = .gopher_metal,
+    .version = "0.0.0",
+    .fingerprint = 0xeda551192a183794,
+    .minimum_zig_version = "0.16.0",
+    .dependencies = .{
+        // Coverage properties (COVERAGE.md): a sibling checkout, as
+        // angry-gopher and metal-vmm are.
+        .zig_coverage_sdk = .{ .path = "../zig-coverage-sdk" },
+    },
+    .paths = .{""},
+}
