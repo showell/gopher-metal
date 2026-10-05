@@ -270,9 +270,9 @@ pub fn build(b: *std.Build) void {
     // is a proof of concept (a `sometimes` never met is a gap, not a bug).
     const props_opts = b.addOptions();
     props_opts.addOption(u64, "seeds", b.option(u64, "seeds", "how many tcp_sim seeds `properties` sweeps") orelse 100);
-    // A crowd's seeds stop at 500 unless asked for more: past that some fail
-    // in item 24's class, which waits on a ruling (tcp_sim.zig, `crowd_red`).
-    props_opts.addOption(u64, "crowd_seeds", b.option(u64, "crowd-seeds", "how many of the tcp_sim seeds `properties` also runs as a crowd") orelse 500);
+    // Every seed runs as a crowd too, unless asked for fewer: revival
+    // (tcp.zig) made item 24's crowd seeds green (tcp_sim.zig, `crowd_red`).
+    props_opts.addOption(u64, "crowd_seeds", b.option(u64, "crowd-seeds", "how many of the tcp_sim seeds `properties` also runs as a crowd") orelse std.math.maxInt(u64));
     props_opts.addOption(u64, "fat_seeds", b.option(u64, "fat-seeds", "how many fat_sim seeds `properties` sweeps") orelse 20);
     props_opts.addOption(u64, "page_seeds", b.option(u64, "page-seeds", "how many page_sim seeds `properties` sweeps") orelse 100);
     props_opts.addOption(u64, "pure_seeds", b.option(u64, "pure-seeds", "how many pure_sim seeds `properties` sweeps") orelse 200);

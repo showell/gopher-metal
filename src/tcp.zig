@@ -388,6 +388,28 @@ pub const Event = enum {
     closed,
 };
 
+/// How many given-way half-opens are kept to be revived: 256 covers a
+/// 1024-SYN flood at 1 ms apart with room to spare (REVIEW-flood.md).
+pub const revival_slots = 256;
+
+/// One given-way half-open, as much of it as its handshake's last ACK needs.
+pub const Revivable = struct {
+    used: bool = false,
+    ip: [4]u8 = @splat(0),
+    mac: [6]u8 = @splat(0),
+    port: u16 = 0,
+    /// Our ISS, and the peer's ISN + 1: the ACK must name ISS + 1, the one
+    /// acknowledgement `syn_received` would not have answered with a reset.
+    iss: u32 = 0,
+    rcv_nxt: u32 = 0,
+    wl1: u32 = 0,
+    mss: u16 = 0,
+    wnd: u32 = 0,
+    /// The window the SYN-ACK told the peer, which the revived connection
+    /// told it too.
+    told_wnd: u16 = 0,
+};
+
 pub const Table = struct {
     local_ip: [4]u8,
     local_mac: [6]u8,
@@ -407,6 +429,20 @@ pub const Table = struct {
     /// Half-open connections given way to a new SYN when the table was full
     /// (a SYN flood's, as a rule): see `handle`.
     half_open_given_way: u64 = 0,
+    /// **THE RECENTLY GIVEN WAY, KEPT TO BE REVIVED** (REVIEW-flood.md
+    /// option 4): what a completed handshake needs of each half-open that
+    /// gave way, newest over oldest. A real client whose ACK was lost
+    /// answers the repeated SYN-ACK after its slot went to a flood's SYN;
+    /// that answer finds its entry here and the connection is rebuilt.
+    revivable: [revival_slots]Revivable = @splat(.{}),
+    /// How many of `revivable` are used, at most: all of them in the kernel,
+    /// fewer where a simulator measures a smaller ring.
+    revival_cap: u16 = revival_slots,
+    revival_next: u16 = 0,
+    /// Half-opens revived by their client's ACK, and ACKs that matched one
+    /// but found no slot to revive it in (dropped, not reset).
+    revived: u64 = 0,
+    revival_no_room: u64 = 0,
     /// Segments sent again, whether a timer or the peer's duplicate
     /// acknowledgements asked for it.
     retransmits: u64 = 0,
@@ -481,6 +517,7 @@ pub const Table = struct {
             if (oldest == null or c.opened_at < self.conns[oldest.?].opened_at) oldest = i;
         }
         const i = oldest orelse return null;
+        self.keepRevivable(&self.conns[i]);
         self.conns[i].state = .closed;
         self.half_open_given_way += 1;
         props.reachable(@src(), "tcp: a stuck half-open connection gives way to a new SYN", .{ .conn = i });
@@ -508,6 +545,69 @@ pub const Table = struct {
             .ip = c.peer_ip,
             .port = c.peer_port,
         }, flags, seq, c.rcv_nxt, w, payload);
+    }
+
+    /// The half-open `c`, about to give way, kept in the ring.
+    fn keepRevivable(self: *Table, c: *const Conn) void {
+        const cap = @min(self.revival_cap, revival_slots);
+        if (cap == 0) return;
+        const at = self.revival_next % cap;
+        self.revivable[at] = .{
+            .used = true,
+            .ip = c.peer_ip,
+            .mac = c.peer_mac,
+            .port = c.peer_port,
+            .iss = c.una,
+            .rcv_nxt = c.rcv_nxt,
+            .wl1 = c.wl1,
+            .mss = c.mss,
+            .wnd = c.wnd,
+            .told_wnd = c.told_wnd,
+        };
+        self.revival_next = (at + 1) % cap;
+    }
+
+    /// **A SEGMENT FOR NO CONNECTION THAT A GIVEN-WAY HALF-OPEN WOULD NOT
+    /// HAVE RESET**: from its address and port, its ACK naming that
+    /// half-open's ISS + 1. `syn_received` takes such a segment at the next
+    /// byte and acknowledges it anywhere else (a request in several
+    /// segments, the first lost, or a whole window of it), so the revived
+    /// half-open does the same. A blind sender must still guess the 32-bit
+    /// ISS, as before. A reset or a SYN never revives (both are handled
+    /// before this is asked).
+    fn revivableFor(self: *Table, ip: [4]u8, port: u16, number: u32) ?*Revivable {
+        for (&self.revivable) |*e| {
+            if (!e.used or e.port != port or !eql(&e.ip, &ip)) continue;
+            if (number != e.iss +% 1) continue;
+            return e;
+        }
+        return null;
+    }
+
+    /// The half-open `e` rebuilt in a slot, `syn_received` as it was: a
+    /// free slot, else another stuck half-open, which by now is almost
+    /// certainly a flood's. An ACK proves its sender is real; a half-open
+    /// proves nothing. With neither, null.
+    fn revive(self: *Table, e: Revivable, now: i96) ?usize {
+        const slot = self.free() orelse self.oldestHalfOpen(now) orelse return null;
+        const c = &self.conns[slot];
+        c.reset();
+        c.peer_ip = e.ip;
+        c.peer_mac = e.mac;
+        c.peer_port = e.port;
+        c.rcv_nxt = e.rcv_nxt;
+        c.wl1 = e.wl1;
+        c.una = e.iss;
+        c.mss = e.mss;
+        c.wnd = e.wnd;
+        c.told_wnd = e.told_wnd;
+        c.state = .syn_received;
+        c.opened_at = now;
+        c.heard_at = now;
+        c.rto_at = now + c.rto_ns;
+        self.arrivals += 1;
+        c.serial = self.arrivals;
+        return slot;
     }
 
     const Peer = struct { mac: [6]u8, ip: [4]u8, port: u16 };
@@ -861,7 +961,7 @@ pub const Table = struct {
         if (offset < header_len or offset > t.len) return .{ .event = .nothing };
         const data = t[offset..];
 
-        const found = self.find(pkt.src_ip, src_port);
+        var found = self.find(pkt.src_ip, src_port);
 
         if (flags & flag_rst != 0) {
             // **A RESET MUST NAME THE NEXT BYTE WE EXPECT** (RFC 9293, after
@@ -875,6 +975,30 @@ pub const Table = struct {
             if (seq == c.rcv_nxt) return self.close(i);
             if (c.ahead(seq)) self.emit(wire, i, flag_ack, c.highest(), "");
             return .{ .event = .nothing };
+        }
+
+        // **REVIVED BY ITS CLIENT'S ACK** (REVIEW-flood.md option 4): an ACK
+        // for no connection, exactly what a given-way half-open would have
+        // taken, rebuilds it, and the segment is handled as if nothing had
+        // happened. No room for it: dropped without a word, so the client
+        // sends again and may find room then.
+        if (found == null and flags & flag_ack != 0 and flags & flag_syn == 0) {
+            if (self.revivableFor(pkt.src_ip, src_port, number)) |e| {
+                // The entry leaves the ring first, since a revival into a
+                // stuck half-open's slot keeps that one in the ring, maybe
+                // where this one was; dropped for want of room, nothing gave
+                // way, and it goes back, for its client to try again.
+                const kept = e.*;
+                e.used = false;
+                found = self.revive(kept, now) orelse {
+                    e.* = kept;
+                    self.revival_no_room += 1;
+                    props.reachable(@src(), "tcp: a revival finds no slot, and the ACK is dropped", null);
+                    return .{ .event = .nothing };
+                };
+                self.revived += 1;
+                props.reachable(@src(), "tcp: a given-way half-open is revived by its client's ACK", .{ .conn = found.? });
+            }
         }
 
         // A SYN for no connection we know is the start of one — if there is a
