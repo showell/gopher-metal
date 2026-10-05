@@ -301,6 +301,22 @@ fn rdmsr(msr: u32) u64 {
     return (@as(u64, hi) << 32) | lo;
 }
 
+/// **THE DEADLINE CARRIES A MARK FOR METAL-VMM**, as `tsc.read` does, and for
+/// the same reason: the write has to reach that machine's own APIC. KVM's
+/// fast path for IA32_TSC_DEADLINE (on a host with the VMX preemption timer)
+/// takes the write before any MSR filter sees it, so metal-vmm rewrites this
+/// `wrmsr`, after `mov $"mvmd", %esi` (`BE 6D 76 6D 64`), into a port write it
+/// answers. Elsewhere it is an ordinary `wrmsr`, and the `mov` costs a
+/// register.
+fn wrmsrDeadline(value: u64) void {
+    asm volatile ("movl $0x646d766d, %%esi\n\twrmsr"
+        :
+        : [msr] "{ecx}" (msr_tsc_deadline),
+          [lo] "{eax}" (@as(u32, @truncate(value))),
+          [hi] "{edx}" (@as(u32, @truncate(value >> 32))),
+        : .{ .esi = true });
+}
+
 fn wrmsr(msr: u32, value: u64) void {
     asm volatile ("wrmsr"
         :
@@ -396,7 +412,7 @@ pub fn rest() void {
         asm volatile ("pause");
         return;
     }
-    wrmsr(msr_tsc_deadline, tsc.read() +% slice_ticks);
+    wrmsrDeadline(tsc.read() +% slice_ticks);
     asm volatile (
         \\sti
         \\hlt
