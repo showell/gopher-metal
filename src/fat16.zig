@@ -420,10 +420,16 @@ pub const Volume = struct {
     /// it is used to compute an offset, because a sector of zeros or of someone
     /// else's filesystem would otherwise send reads anywhere.
     pub fn mount(blk: *virtio.Block, scratch: *[sector_size]u8, start_lba: u32) Error!Volume {
-        if (blk.read(start_lba, @intFromPtr(scratch)) != virtio.blk_s_ok) return Error.ReadFailed;
+        if (blk.read(start_lba, @intFromPtr(scratch)) != virtio.blk_s_ok) {
+            props.reachable(@src(), "fat: a mount cannot read the boot sector", null);
+            return Error.ReadFailed;
+        }
         const b = scratch.*;
 
-        if (b[510] != 0x55 or b[511] != 0xAA) return Error.BadBootSector;
+        if (b[510] != 0x55 or b[511] != 0xAA) {
+            props.reachable(@src(), "fat: a mount refuses a sector without the boot signature", null);
+            return Error.BadBootSector;
+        }
 
         const bytes_per_sector = le16(b[11..13]);
         const sectors_per_cluster: u32 = b[13];
@@ -435,23 +441,44 @@ pub const Volume = struct {
         var total: u32 = le16(b[19..21]);
         if (total == 0) total = le32(b[32..36]);
 
-        if (bytes_per_sector != sector_size) return Error.NotFat16;
-        if (sectors_per_cluster == 0 or sectors_per_cluster > 128) return Error.BadBootSector;
-        if (reserved == 0 or num_fats == 0 or num_fats > 2) return Error.BadBootSector;
-        if (sectors_per_fat == 0) return Error.BadBootSector;
+        if (bytes_per_sector != sector_size) {
+            props.reachable(@src(), "fat: a mount refuses sectors that are not 512 bytes", null);
+            return Error.NotFat16;
+        }
+        if (sectors_per_cluster == 0 or sectors_per_cluster > 128) {
+            props.reachable(@src(), "fat: a mount refuses a cluster size no volume has", null);
+            return Error.BadBootSector;
+        }
+        if (reserved == 0 or num_fats == 0 or num_fats > 2) {
+            props.reachable(@src(), "fat: a mount refuses no reserved sectors, or a count of FATs it does not keep", null);
+            return Error.BadBootSector;
+        }
+        if (sectors_per_fat == 0) {
+            props.reachable(@src(), "fat: a mount refuses a FAT of no sectors", null);
+            return Error.BadBootSector;
+        }
         // Sector numbers here are 32 bits, the volume's own and the disk's.
-        if (@as(u64, start_lba) + total > 0xFFFF_FFFF) return Error.VolumeTooLarge;
+        if (@as(u64, start_lba) + total > 0xFFFF_FFFF) {
+            props.reachable(@src(), "fat: a mount refuses a volume past 32-bit sectors", null);
+            return Error.VolumeTooLarge;
+        }
 
         const root_start = std.math.add(u32, reserved, std.math.mul(u32, num_fats, sectors_per_fat) catch
             return Error.BadBootSector) catch return Error.BadBootSector;
         const root_sectors = (root_entries * dirent_size + sector_size - 1) / sector_size;
         const data_start = root_start + root_sectors;
-        if (total == 0 or data_start >= total) return Error.BadBootSector;
+        if (total == 0 or data_start >= total) {
+            props.reachable(@src(), "fat: a mount refuses a volume with no data region", null);
+            return Error.BadBootSector;
+        }
 
         // The kind is how many clusters the data region holds, not anything
         // the boot sector says about itself.
         const clusters = (total - data_start) / sectors_per_cluster;
-        if (clusters < 4085) return Error.NotFat16;
+        if (clusters < 4085) {
+            props.reachable(@src(), "fat: a mount refuses a volume too small for FAT16", null);
+            return Error.NotFat16;
+        }
         const kind: Kind = if (clusters < 65525) .fat16 else .fat32;
         // **FAT32'S CLUSTER NUMBERS ARE 28 BITS**, and from 0x0FFFFFF7 up they
         // are marks (a bad cluster, the end of a chain). A volume with more
@@ -461,20 +488,38 @@ pub const Volume = struct {
         if (kind == .fat32 and clusters > 0x0FFF_FFF5) return Error.TooManyClusters;
         var root_cluster: Cluster = 0;
         switch (kind) {
-            .fat16 => if (root_entries == 0) return Error.BadBootSector,
+            .fat16 => if (root_entries == 0) {
+                props.reachable(@src(), "fat: a mount refuses a FAT16 root of no entries", null);
+                return Error.BadBootSector;
+            },
             .fat32 => {
                 // FAT32's own fields, checked like every other (FAT32.md §3).
-                if (root_entries != 0 or fat16_sectors != 0) return Error.BadBootSector;
-                if (le16(b[40..42]) & 0x80 != 0) return Error.NotMirrored;
-                if (le16(b[42..44]) != 0) return Error.FatVersion;
+                if (root_entries != 0 or fat16_sectors != 0) {
+                    props.reachable(@src(), "fat: a mount refuses FAT32 with FAT16's fields set", null);
+                    return Error.BadBootSector;
+                }
+                if (le16(b[40..42]) & 0x80 != 0) {
+                    props.reachable(@src(), "fat: a mount refuses a FAT32 volume that is not mirrored", null);
+                    return Error.NotMirrored;
+                }
+                if (le16(b[42..44]) != 0) {
+                    props.reachable(@src(), "fat: a mount refuses a FAT32 version it does not know", null);
+                    return Error.FatVersion;
+                }
                 root_cluster = le32(b[44..48]);
-                if (root_cluster < 2 or root_cluster > clusters + 1) return Error.BadRoot;
+                if (root_cluster < 2 or root_cluster > clusters + 1) {
+                    props.reachable(@src(), "fat: a mount refuses a FAT32 root outside the data", null);
+                    return Error.BadRoot;
+                }
             },
         }
         // A FAT too short for the clusters it describes would have `fatGet`
         // read past its end, into the next copy or the root.
         const entry_bytes: u32 = if (kind == .fat32) 4 else 2;
-        if (@as(u64, sectors_per_fat) * (sector_size / entry_bytes) < @as(u64, clusters) + 2) return Error.BadBootSector;
+        if (@as(u64, sectors_per_fat) * (sector_size / entry_bytes) < @as(u64, clusters) + 2) {
+            props.reachable(@src(), "fat: a mount refuses a FAT too short for its clusters", null);
+            return Error.BadBootSector;
+        }
 
         var vol: Volume = .{
             .blk = blk,
@@ -573,12 +618,18 @@ pub const Volume = struct {
     /// cluster.
     fn entryFrom(self: *const Volume, e: []const u8) Entry {
         var entry = decode(e);
-        if (self.kind == .fat32) entry.first_cluster |= @as(Cluster, le16(e[20..22])) << 16;
+        if (self.kind == .fat32) {
+            entry.first_cluster |= @as(Cluster, le16(e[20..22])) << 16;
+            if (entry.first_cluster > 0xFFFF) props.reachable(@src(), "fat: a FAT32 entry's first cluster is past 65535", null);
+        }
         return entry;
     }
 
     fn readSector(self: *Volume, lba: u32, into: *[sector_size]u8) Error!void {
-        if (self.blk.read(self.start_lba + lba, @intFromPtr(into)) != virtio.blk_s_ok) return Error.ReadFailed;
+        if (self.blk.read(self.start_lba + lba, @intFromPtr(into)) != virtio.blk_s_ok) {
+            props.reachable(@src(), "fat: a sector read fails", null);
+            return Error.ReadFailed;
+        }
     }
 
     /// `count` whole sectors straight into `into`, in as few requests as the
@@ -589,7 +640,10 @@ pub const Volume = struct {
         while (done < count) {
             const n = @min(count - done, virtio.Block.max_sectors);
             const status = self.blk.readMany(self.start_lba + lba + done, @intFromPtr(into + done * sector_size), n);
-            if (status != virtio.blk_s_ok) return Error.ReadFailed;
+            if (status != virtio.blk_s_ok) {
+                props.reachable(@src(), "fat: a run of sectors fails to read", null);
+                return Error.ReadFailed;
+            }
             done += n;
         }
     }
@@ -610,7 +664,10 @@ pub const Volume = struct {
     fn nextCluster(self: *Volume, cluster: Cluster) Error!?Cluster {
         const v = try self.fatGet(cluster);
         if (v >= self.chainEndValue()) return null;
-        if (!self.inData(v)) return Error.BadChain;
+        if (!self.inData(v)) {
+            props.reachable(@src(), "fat: a chain leads outside the data area", null);
+            return Error.BadChain;
+        }
         return v;
     }
 
@@ -636,7 +693,10 @@ pub const Volume = struct {
         steps: u32 = 0,
 
         fn pass(self: *Loop, cluster: Cluster) Error!void {
-            if (cluster == self.seen) return Error.BadChain;
+            if (cluster == self.seen) {
+                props.reachable(@src(), "fat: a chain that loops is refused", null);
+                return Error.BadChain;
+            }
             self.steps += 1;
             if (self.steps == self.power) {
                 self.seen = cluster;
@@ -846,7 +906,10 @@ pub const Volume = struct {
                 // **NOT THROUGH A FILE.** `a/b` with `a` a file read a's bytes
                 // as directory entries, and could find in them whatever they
                 // spelled. A path through a file names nothing.
-                if (result) |r| if (!r.isDirectory()) return Error.NotFound;
+                if (result) |r| if (!r.isDirectory()) {
+                    props.reachable(@src(), "fat: a path through a file names nothing", null);
+                    return Error.NotFound;
+                };
                 const e = (try self.find(cluster, path[at..end])) orelse return Error.NotFound;
                 result = e;
                 cluster = e.first_cluster;
@@ -857,7 +920,10 @@ pub const Volume = struct {
     }
 
     fn writeSector(self: *Volume, lba: u32, from: *[sector_size]u8) Error!void {
-        if (self.blk.write(self.start_lba + lba, @intFromPtr(from)) != virtio.blk_s_ok) return Error.WriteFailed;
+        if (self.blk.write(self.start_lba + lba, @intFromPtr(from)) != virtio.blk_s_ok) {
+            props.reachable(@src(), "fat: a sector write fails", null);
+            return Error.WriteFailed;
+        }
     }
 
     /// `count` whole sectors straight from `from`, as one request. `from` is
@@ -869,8 +935,10 @@ pub const Volume = struct {
     /// reach. Asking for more is an error instead.
     fn writeSectors(self: *Volume, lba: u32, count: u32, from: [*]const u8) Error!void {
         if (count > virtio.Block.max_sectors) return Error.TooBig;
-        if (self.blk.writeMany(self.start_lba + lba, @intFromPtr(from), count) != virtio.blk_s_ok)
+        if (self.blk.writeMany(self.start_lba + lba, @intFromPtr(from), count) != virtio.blk_s_ok) {
+            props.reachable(@src(), "fat: a run of sectors fails to write", null);
             return Error.WriteFailed;
+        }
     }
 
     /// How many bytes the data region holds, and how many of them no file
@@ -977,6 +1045,7 @@ pub const Volume = struct {
             std.mem.writeInt(u32, self.scratch[492..496], 0xFFFF_FFFF, .little);
             try self.writeSector(lba, self.scratch);
         }
+        props.reachable(@src(), "fat: a FAT32 volume's FSInfo count is let go", null);
         self.fsinfo_unknown = true;
     }
 
@@ -1419,6 +1488,7 @@ pub const Volume = struct {
 
             if (!(try self.aliasTaken(dir_cluster, short))) return short;
         }
+        props.reachable(@src(), "fat: no 8.3 alias is left for a name", null);
         return Error.BadName;
     }
 
@@ -1447,9 +1517,15 @@ pub const Volume = struct {
     /// entry would orphan everything in it, and say nothing; Linux refuses
     /// the same write (EISDIR, std's `IsDir`), and so does this.
     pub fn writeFileIn(self: *Volume, dir_cluster: Cluster, given: []const u8, bytes: []const u8) Error!void {
-        if (given.len == 0 or given.len > max_name) return Error.BadName;
+        if (given.len == 0 or given.len > max_name) {
+            props.reachable(@src(), "fat: a write's name is empty or too long", null);
+            return Error.BadName;
+        }
         const old = try self.find(dir_cluster, given);
-        if (old) |*e| if (e.isDirectory()) return Error.IsDirectory;
+        if (old) |*e| if (e.isDirectory()) {
+            props.reachable(@src(), "fat: a write onto a directory is refused", null);
+            return Error.IsDirectory;
+        };
         const kept = old != null;
         const name = if (kept) old.?.text() else given;
         try self.removeEntry(dir_cluster, given);
@@ -1484,6 +1560,7 @@ pub const Volume = struct {
     pub fn makeDirIn(self: *Volume, dir_cluster: Cluster, name: []const u8) Error!Cluster {
         if ((try self.find(dir_cluster, name))) |e| {
             if (e.isDirectory()) return e.first_cluster;
+            props.reachable(@src(), "fat: a directory to be made is a file's name", null);
             return Error.BadName;
         }
 
@@ -1572,8 +1649,14 @@ pub const Volume = struct {
     pub fn writeInto(self: *Volume, path: []const u8, offset: u32, bytes: []const u8) Error!void {
         if (bytes.len == 0) return;
         const entry = try self.open(path);
-        if (entry.isDirectory()) return Error.BadName;
-        if (offset > entry.size) return Error.BadChain; // would leave a hole
+        if (entry.isDirectory()) {
+            props.reachable(@src(), "fat: an overwrite of a directory is refused", null);
+            return Error.BadName;
+        }
+        if (offset > entry.size) { // would leave a hole
+            props.reachable(@src(), "fat: an overwrite past a file's end is refused", null);
+            return Error.BadChain;
+        }
 
         const cluster_bytes: u32 = self.sectors_per_cluster * sector_size;
         const old_size: u32 = entry.size;
@@ -1764,7 +1847,10 @@ pub const Volume = struct {
         if (cut == null) return .{ .cluster = 0, .name = trimmed };
         const at = cut.?;
         const dir = try self.open(trimmed[0..at]);
-        if (!dir.isDirectory()) return Error.NotFat16;
+        if (!dir.isDirectory()) {
+            props.reachable(@src(), "fat: a path whose parent is a file is refused", null);
+            return Error.NotFat16;
+        }
         return .{ .cluster = dir.first_cluster, .name = trimmed[at + 1 ..] };
     }
 
@@ -1791,13 +1877,22 @@ pub const Volume = struct {
     pub fn rename(self: *Volume, from: []const u8, to: []const u8) Error!void {
         const a = try self.parentOf(from);
         const b = try self.parentOf(to);
-        if (a.cluster != b.cluster) return Error.BadName;
+        if (a.cluster != b.cluster) {
+            props.reachable(@src(), "fat: a rename across directories is refused", null);
+            return Error.BadName;
+        }
         if (b.name.len == 0 or b.name.len > max_name) return Error.BadName;
         const src = (try self.find(a.cluster, a.name)) orelse return Error.NotFound;
-        if (src.isDirectory()) return Error.BadName;
+        if (src.isDirectory()) {
+            props.reachable(@src(), "fat: a rename of a directory is refused", null);
+            return Error.BadName;
+        }
         if (eqlFold(src.text(), b.name)) return; // the same file
         const dst = try self.find(b.cluster, b.name);
-        if (dst) |d| if (d.isDirectory()) return Error.IsDirectory;
+        if (dst) |d| if (d.isDirectory()) {
+            props.reachable(@src(), "fat: a rename onto a directory is refused", null);
+            return Error.IsDirectory;
+        };
 
         // **A NEW `to` HAS ITS ROOM BEFORE `from` IS UNLINKED.** Unlinked
         // first, a directory with no room left (a full FAT16 root) returned
@@ -1877,7 +1972,10 @@ pub const Volume = struct {
     }
 
     fn removeTreeAt(self: *Volume, dir_cluster: Cluster, depth: u32) Error!void {
-        if (depth >= max_tree_depth) return Error.BadChain;
+        if (depth >= max_tree_depth) {
+            props.reachable(@src(), "fat: a tree too deep to remove is refused", null);
+            return Error.BadChain;
+        }
 
         const First = struct {
             name: [max_name]u8 = undefined,

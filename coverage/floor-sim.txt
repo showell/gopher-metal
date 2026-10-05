@@ -3,8 +3,8 @@
 # that a long run never reaches fails it (a MISS on the floor); a line that
 # names no property fails it too, as a floor gone stale.
 #
-# Today that is every property in tcp.zig and tcp_sim.zig (500 seeds, plain
-# and rough, reach them all, 2026-10-05) and all but one of fat16.zig's and
+# Today that is every property in tcp.zig and tcp_sim.zig (500 seeds, plain,
+# rough and crowded, reach them all, 2026-10-05) and all but one of fat16.zig's and
 # fat_sim.zig's. A scenario change that stops reaching one is a gap opening
 # in what the simulators test.
 tcp: a stuck half-open connection gives way to a new SYN
@@ -30,6 +30,12 @@ tcp_sim: the client resets the connection
 tcp_sim: a flood SYN is sent
 tcp_sim: the table alone gives up on a client that left
 tcp_sim: a client that stayed through a flood got its whole answer
+tcp_sim: a crowd's SYN finds every slot taken
+tcp_sim: a whole request waits while another is served
+tcp_sim: a held stream moves while another request is served
+tcp_sim: a keep-alive client sends its second request
+tcp_sim: a held stream's client got the whole stream among others
+tcp_sim: every client of a crowd got its whole answer
 
 # The FAT simulator (fat_sim.zig). Not "a directory reaches FAT's most
 # entries": 65,536 entries is more files than a run can make in a minute.
@@ -48,3 +54,74 @@ fat_sim: an append finds no room
 fat_sim: a rename finds no room
 fat_sim: the volume is mounted again
 fat_sim: some run finds the volume full
+
+# The page cache's simulator (page_sim.zig), at its default 100 seeds.
+page_sim: a read is answered from the cache
+page_sim: another spelling of a kept file finds it
+page_sim: memory that cannot be had leaves a file uncached
+page_sim: a file as large as the largest is kept
+page_sim: a file a byte past the largest is not kept
+page_sim: a whole-file write replaces a kept copy
+page_sim: a tree removed takes a kept file under it
+page_sim: an append past the largest drops a kept copy
+page_sim: an append grows a kept copy into more pages
+page_sim: a rename carries a kept copy to its new name
+page_sim: a file is pushed out to make room
+page_sim: some run pushes a file out
+
+# The other pure modules (pure_sim.zig), at its default 200 seeds.
+log_ring: one write is longer than the ring, and its tail is kept
+log_ring: a line goes in in pieces
+log_ring: the ring wraps
+log_ring: a read after a loss starts at a whole line
+log_ring: a short read gets the newest bytes
+log_ring: secrets split across writes are taken out
+kept_log: a boot finds the sealed boot before it
+kept_log: the boot before's log had wrapped
+kept_log: a boot ends unsealed, and the next finds the one before it
+kept_log: the power is cut and the region is cold
+kept_log: a sealed header is damaged and not trusted
+restart: a clock that went backwards starts the count again
+restart: a restart past the hour starts the count again
+restart: a restart at the hour exactly is still in a row
+restart: with no clock the restarts count as in a row
+restart: the count stops at 255
+restart: the back-off reaches 15 minutes
+restart: one damaged byte reads as no record
+request_heap: a request meets the limit of what backs it
+request_heap: a reset gives back what grew past what it keeps
+
+# fat16.zig's refusals and FAT32 paths, reached by fat_sim's probes (runProbeSeed).
+fat: a FAT32 entry's first cluster is past 65535
+fat: a FAT32 volume's FSInfo count is let go
+fat: a chain leads outside the data area
+fat: a chain that loops is refused
+fat: a directory to be made is a file's name
+fat: a mount cannot read the boot sector
+fat: a mount refuses FAT32 with FAT16's fields set
+fat: a mount refuses a FAT of no sectors
+fat: a mount refuses a FAT too short for its clusters
+fat: a mount refuses a FAT16 root of no entries
+fat: a mount refuses a FAT32 root outside the data
+fat: a mount refuses a FAT32 version it does not know
+fat: a mount refuses a FAT32 volume that is not mirrored
+fat: a mount refuses a cluster size no volume has
+fat: a mount refuses a sector without the boot signature
+fat: a mount refuses a volume past 32-bit sectors
+fat: a mount refuses a volume too small for FAT16
+fat: a mount refuses a volume with no data region
+fat: a mount refuses no reserved sectors, or a count of FATs it does not keep
+fat: a mount refuses sectors that are not 512 bytes
+fat: a path through a file names nothing
+fat: a path whose parent is a file is refused
+fat: a rename across directories is refused
+fat: a rename of a directory is refused
+fat: a rename onto a directory is refused
+fat: a run of sectors fails to read
+fat: a sector read fails
+fat: a sector write fails
+fat: a write onto a directory is refused
+fat: a write's name is empty or too long
+fat: an overwrite of a directory is refused
+fat: an overwrite past a file's end is refused
+fat_sim: the disk stops answering part-way through an operation
