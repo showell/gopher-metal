@@ -1598,13 +1598,26 @@ pub const Volume = struct {
 
     /// Walks a slash-separated path, making each directory that is missing, and
     /// answers the cluster of the last one.
+    ///
+    /// **NO DEEPER THAN THE CHECK WALKS** (`max_path_depth`): a directory
+    /// past it is one `check` calls `too_deep`, so this code would make a
+    /// volume its own check cannot vouch for. Refused as a name too long,
+    /// which is what Linux says of a path past its limit.
     pub fn makePath(self: *Volume, path: []const u8) Error!Cluster {
         var cluster: Cluster = 0;
         var at: usize = 0;
+        var depth: u32 = 0;
         while (at < path.len) {
             var end = at;
             while (end < path.len and path[end] != '/') end += 1;
-            if (end > at) cluster = try self.makeDirIn(cluster, path[at..end]);
+            if (end > at) {
+                depth += 1;
+                if (depth > max_path_depth) {
+                    props.reachable(@src(), "fat: a directory deeper than the check walks is refused", null);
+                    return Error.BadName;
+                }
+                cluster = try self.makeDirIn(cluster, path[at..end]);
+            }
             at = end + 1;
         }
         return cluster;
@@ -1943,6 +1956,12 @@ pub const Volume = struct {
     /// is a CAP rather than a guess because the recursion runs on a kernel
     /// stack with no guard page under it.
     const max_tree_depth: u32 = 16;
+
+    /// The deepest directory `makePath` makes, counted from the root: `check`
+    /// walks the root at depth 0 and calls a directory at `max_tree_depth`
+    /// too deep, so the last it walks is one above that. `removeTree` counts
+    /// from the directory it removes, so it takes any tree this allows.
+    const max_path_depth: u32 = max_tree_depth - 1;
 
     /// Deletes a directory and everything under it. A missing path is not an
     /// error: every caller in the application spells this `catch {}`, because
@@ -2356,10 +2375,19 @@ pub const Volume = struct {
         const cluster_bytes: u32 = self.sectors_per_cluster * sector_size;
         var cluster = entry.first_cluster;
         if (!self.inData(cluster)) return Error.BadChain; // a non-empty file has a chain
+        // **A CHAIN THAT LOOPS IS REFUSED**, as a directory walk and an append
+        // refuse one. The read stops at the file's size, so without this a
+        // looped chain answers its earlier clusters' bytes again as the
+        // file's, with no error, to whoever asked for the file. `Loop` finds
+        // a loop within about two laps of it, so a file that ends inside
+        // those can still answer a repeated cluster: narrower, not closed.
+        var loop = Loop{};
+        try loop.pass(cluster);
         var skip = offset / cluster_bytes;
         while (skip > 0) : (skip -= 1) {
             cluster = (try self.nextCluster(cluster)) orelse return Error.BadChain;
             if (cluster < 2) return Error.BadChain;
+            try loop.pass(cluster);
         }
 
         // **A FILE IS READ AS RUNS.** A run is a cluster and every cluster
@@ -2386,6 +2414,7 @@ pub const Volume = struct {
                     break;
                 }
                 last = next.?;
+                try loop.pass(last);
                 run += 1;
             }
 
@@ -2420,6 +2449,7 @@ pub const Volume = struct {
             if (got >= want) break;
             cluster = after orelse return Error.BadChain;
             if (cluster < 2) return Error.BadChain;
+            try loop.pass(cluster);
             sector_in_cluster = 0;
         }
         return got;

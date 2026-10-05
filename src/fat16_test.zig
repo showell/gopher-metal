@@ -605,11 +605,13 @@ test "the check says where it stopped going deeper, and does not call what is be
     for (configs) |cfg| {
         const shape, const cached = .{ cfg.shape, cfg.cached };
         // A healthy volume (tools/fat16_read.py checks it clean), deeper than
-        // the check walks.
+        // the check walks. makePath stops where the check does, so the last
+        // level is made by hand, as another program with no such limit would.
         const d = try Disk.make("limit-check-deep", shape, cached);
         defer d.deinit();
-        const deep = "d/" ** 16 ++ "f";
-        try d.vol.writeFile(deep, "x");
+        const fifteen = try d.vol.makePath("d/" ** 14 ++ "d");
+        const sixteen = try d.vol.makeDirIn(fifteen, "d");
+        try d.vol.writeFileIn(sixteen, "f", "x");
         const r = try d.check();
         try r.expect(&.{
             .{ .problem = .too_deep, .path = "/d" ** 16, .cluster = (try d.vol.open("d/" ** 15 ++ "d")).first_cluster },

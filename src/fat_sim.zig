@@ -687,7 +687,10 @@ const Sim = struct {
             defer testing.allocator.free(got);
             if (!loop) return s.fault("a file whose chain leads outside the data read without an error");
             if (!std.mem.eql(u8, got, bytes)) props.reachable(@src(), "fat_sim: a file whose chain loops reads as other bytes, without an error", null);
-        } else |e| if (e != E.BadChain) return s.fault(@errorName(e));
+        } else |e| {
+            if (e != E.BadChain) return s.fault(@errorName(e));
+            if (loop) props.reachable(@src(), "fat_sim: a file whose chain loops is refused on read", null);
+        }
         if (loop) {
             if (s.disk.vol.writeInto(path, @intCast(bytes.len), "never")) return s.fault("an append to a file whose chain loops succeeded") else |e| if (e != E.BadChain) return s.fault(@errorName(e));
         }
@@ -826,29 +829,29 @@ pub const regressions = [_]u64{
     45,
 };
 
-// **FOUND: A TREE `makePath` MAKES THAT `check` AND `removeTree` REFUSE**
-// (metal-vmm QUEUE.md, Questions). makePath, and so writeFile, makes
-// directories at any depth; `check` reports a tree past `max_tree_depth`
-// (16) as `too_deep`, and `removeTree` refuses it with `BadChain`. So a
-// volume this code made is one its own check calls broken, and its tree
-// one it cannot remove (io.zig's deleteTree answers WriteFailed for good).
-// A probe found it on the first seed it was tried on; failing until the
-// box decides which side moves.
-test "fat16: a tree makePath makes is one check and removeTree take" {
-    if (true) return error.SkipZigTest; // red until the box decides which side moves (metal-vmm QUEUE)
+// **THE DEEPEST TREE `makePath` MAKES IS ONE `check` AND `removeTree` TAKE**
+// (found by a fat_sim probe: makePath once made directories at any depth,
+// which `check` called `too_deep` and `removeTree` refused). Fifteen levels
+// are made, checked clean and removed; a sixteenth is refused as a name too
+// long, and leaves the volume as it was.
+test "fat16: the deepest tree makePath makes is one check and removeTree take" {
     const d = try test_disk.Disk.make("limit-deep", test_disk.small, false);
     defer d.deinit();
     var path: [64]u8 = undefined;
     @memcpy(path[0..4], "deep");
     var n: usize = 4;
-    for (0..17) |_| {
+    for (0..14) |_| {
         @memcpy(path[n..][0..2], "/d");
         n += 2;
     }
-    _ = try d.vol.makePath(path[0..n]);
+    _ = try d.vol.makePath(path[0..n]); // fifteen levels
+    @memcpy(path[n..][0..2], "/d");
+    try testing.expectError(fat16.Error.BadName, d.vol.makePath(path[0 .. n + 2]));
     const r = try d.check();
     try testing.expect(r.health.clean());
     try d.vol.removeTree("deep");
+    const after = try d.check();
+    try testing.expect(after.health.clean());
 }
 
 test "the same, with probes of what the volume must refuse, a handful of seeds" {
