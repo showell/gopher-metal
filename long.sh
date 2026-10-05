@@ -21,8 +21,15 @@
 #    run's coverage lines go to one sdk.jsonl, judged by zig-coverage-sdk's
 #    report.py against `coverage/floor-metal.txt`.
 #
+# 3. **The real kernel, with a peer that misbehaves**: one run each for a
+#    reset (exact and not), a peer that vanishes, a window it shuts, a
+#    damaged segment, a SYN flood that fills the table, and a request
+#    segment lost so the next arrives ahead (the table in the script).
+#    Their coverage joins the same sdk.jsonl.
+#
 # Needs: metal-vmm and zig-coverage-sdk as sibling checkouts (METAL_VMM,
-# COVERAGE_SDK), and the judge's site volume (probe/run.sh gopher builds it).
+# COVERAGE_SDK), the judge's site volume (probe/run.sh gopher builds it), and
+# mtools (mcopy) for a copy of it that asks for two requests.
 # gopher.elf is rebuilt without -Dcoverage at the end, as gates.sh expects.
 #
 # **ITS EXIT CODE IS THE VERDICT**, and the last line names what failed.
@@ -107,6 +114,66 @@ if [ "$want" != sim ]; then
         fi
     done
     lap "lossy sweep"
+
+    # **THE PEER MISBEHAVES**, one run per way (metal-vmm's README, "And the
+    # peer can misbehave"). A client that stays (`page`) must still get the
+    # page an unhurt run gets; one that hurts itself (`end`: a reset, a
+    # vanish) is owed nothing, and the run may end with the guest idle,
+    # waiting on a request that never comes. Either way metal-vmm must end
+    # the run itself: no panic, no timeout, no guest that never rests.
+    # `two` is the site volume asking for two requests, so the guest stays up
+    # after the first and its table gives up on a silent peer. A `page` run
+    # is on `one`: an idle end prints no page. The shut window lasts 1.5 s,
+    # inside the 2 s a guest that has served its last request gives its
+    # connections before it stops; a longer one is cut by that stop, which
+    # only a request limit causes (the site has none).
+    cp "$SITE" "$OUT/two.img"
+    printf 'requests = 2\nidle_timeout_ms = 10000\n' > "$OUT/two.conf"
+    mcopy -o -i "$OUT/two.img@@1M" "$OUT/two.conf" ::/gopher-metal.conf || { echo "mcopy (mtools) could not write the two-request volume"; exit 2; }
+    printf 'GET / HTTP/1.1\r\nHost: lynrummy.com\r\nX-Pad: %s\r\nConnection: close\r\n\r\n' "$(head -c 900 /dev/zero | tr '\0' a)" > "$OUT/req1k"
+    for route in / /steve-resume.pdf; do
+        run 9999 "$route"
+        cp "$OUT/page" "$OUT/unhurt$(echo "$route" | tr / _).page"
+    done
+    rough_bad=""
+    while read -r name volume route must knobs; do
+        [ -z "$name" ] && continue
+        img="$SITE"
+        [ "$volume" = two ] && img="$OUT/two.img"
+        cp "$img" "$OUT/run.img"
+        # shellcheck disable=SC2086 # knobs are words on purpose
+        env TRANSPORT=pci WIRE_LATENCY_US="$LATENCY_US" PATIENCE_S=60 PEER_BODY="$OUT/page" $knobs \
+            timeout 300 "$VMM/zig-out/bin/metal-vmm" probe/gopher.elf "$OUT/run.img" "" "$route" \
+            > "$OUT/run.out" 2> "$OUT/run.err"
+        code=$?
+        grep -a '^coverage: ' "$OUT/run.out" | sed -e 's/^coverage: //' -e 's/\r$//' >> "$OUT/sdk.jsonl"
+        ok=yes
+        case "$code" in
+            0) ;;
+            1) grep -q '^error: GuestIdle$' "$OUT/run.err" || ok=no ;;
+            *) ok=no ;;
+        esac
+        if [ "$must" = page ] && ! cmp -s "$OUT/page" "$OUT/unhurt$(echo "$route" | tr / _).page"; then ok=no; fi
+        if [ $ok = yes ]; then
+            if [ "$code" = 0 ]; then echo "  rough $name: answered $(sed -n 's/^peer: \([0-9]*\).*/\1/p' "$OUT/run.out" | head -1)"
+            else echo "  rough $name: no answer owed; the guest ended idle"; fi
+        else
+            rough_bad="$rough_bad $name"
+            cp "$OUT/run.err" "$OUT/rough-$name.err"
+            cp "$OUT/run.out" "$OUT/rough-$name.out"
+            echo "  rough $name: FAILED (exit $code; logs in $OUT/rough-$name.*)"
+        fi
+    done <<EOF
+reset          one /steve-resume.pdf end  PEER_RESET_AT=30000
+reset-inexact  one /steve-resume.pdf end  PEER_RESET_AT=30000 PEER_RESET_OFF=100
+vanish         two /steve-resume.pdf end  PEER_VANISH_AFTER=3000
+shut-window    one /steve-resume.pdf page PEER_SHUT_AFTER=5000 PEER_SHUT_FOR_US=1500000
+damaged        one /                 page PEER_DAMAGE=3
+flood          one /                 page PEER_FLOOD=1000 PEER_FLOOD_GAP_US=100
+ahead          one /                 page PEER_REQUEST=$OUT/req1k PEER_MSS=100 PEER_EAT=6
+EOF
+    [ -z "$rough_bad" ] || failed+=("metal rough:$rough_bad")
+    lap "rough peer"
     python3 "$SDK/tools/report.py" "$OUT/sdk.jsonl" --floor coverage/floor-metal.txt > "$OUT/report" 2>&1
     code=$?
     grep -E '^(FAIL|FLOOR|STALE)|^[0-9]+ runs|under the floor' "$OUT/report"

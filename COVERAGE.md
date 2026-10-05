@@ -127,8 +127,10 @@ simulator's floor holds them.
 
 ## Next
 
-- metal-vmm's misbehaving peer (its QUEUE.md item 7), then the metal floor
-  raised to what it reaches.
+- The last three of tcp.zig's eighteen on the real kernel: a peer sending
+  past the window, a segment from behind (both wait on metal-vmm's QUEUE.md
+  item 39), and a reopened window announced again (a large upload, the
+  box's). The metal floor holds the other fifteen.
 - Properties in FAT (`fat16.zig`), the page cache, and restart.
 - An explorer: metal-vmm choosing faults, scored by which properties a run
   reaches. That's the long-term aim, and it isn't urgent.
