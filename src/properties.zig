@@ -63,6 +63,9 @@ test "the properties over a sweep of seeds" {
         const ok = if (fat_sim.runSeed(seed)) true else |_| false;
         if (!ok) failed_seeds += 1;
         at.always(@src(), ok, "fat_sim: every oracle holds for every seed, both FAT paths", .{ .seed = seed });
+        const probed = if (fat_sim.runProbeSeed(seed)) true else |_| false;
+        if (!probed) failed_seeds += 1;
+        at.always(@src(), probed, "fat_sim: every oracle holds for every seed with probes", .{ .seed = seed });
     }
     for (1..options.page_seeds + 1) |seed| {
         const ok = if (page_sim.runSeed(seed)) true else |_| false;

@@ -182,6 +182,14 @@ const Sim = struct {
     /// The last operation, and what it said, for the report.
     last: Op = .remount,
     last_said: []const u8 = "ok",
+    /// **PROBES** (`runProbeSeed`): what the volume must refuse, tried
+    /// between the operations from dice of their own, so a seed's
+    /// operations are the ones it always had.
+    probes: ?std.Random.DefaultPrng = null,
+    /// A probe made the disk fail, which ends the run.
+    failed_disk: bool = false,
+    /// The last probe, for the report.
+    last_probe: []const u8 = "none",
 
     fn init(seed: u64, cached: bool) !Sim {
         var prng = std.Random.DefaultPrng.init(seed);
@@ -203,7 +211,7 @@ const Sim = struct {
         testing.allocator.free(s.bytes);
         // test_disk checks a disk left healthy on the way out; a run that
         // failed has already said why, so it is not asked again.
-        if (s.broken != null) s.disk.blk.fail_after = 0;
+        if (s.broken != null or s.failed_disk) s.disk.blk.fail_after = 0;
         s.disk.deinit();
     }
 
@@ -256,6 +264,10 @@ const Sim = struct {
         while (s.step < s.sc.ops and s.broken == null) : (s.step += 1) {
             const full = s.full;
             try s.turn();
+            if (s.probes) |*p| if (s.broken == null and p.random().uintLessThan(u8, 3) == 0) {
+                try s.probe(p.random());
+                if (s.failed_disk) break;
+            };
             // After an operation that found no room, at once, but only for the
             // first twenty: a full directory refuses nearly everything after,
             // and the leaks this has found showed on the first refusals.
@@ -269,6 +281,7 @@ const Sim = struct {
                 s.step, @tagName(s.last),                                          s.last_said,
                 what,
             });
+            if (s.probes != null) std.debug.print("  the last probe: {s}\n", .{s.last_probe});
             return error.SimulationFailed;
         }
     }
@@ -384,6 +397,322 @@ const Sim = struct {
         }
     }
 
+    /// **ONE PROBE**: something the volume must refuse, with the error it
+    /// must refuse it with, leaving everything as it was (the next `verify`
+    /// says so). Last in a run, now and then, the disk stops answering part
+    /// way through an operation, which must end in `ReadFailed` or
+    /// `WriteFailed` and nothing worse.
+    fn probe(s: *Sim, r: std.Random) !void {
+        const vol = &s.disk.vol;
+        const E = fat16.Error;
+        const Kind = enum { boot, unreadable, bad_name, onto_dir, overwrite_dir, hole, through_open, through_write, through_remove, rename_across, rename_dir, rename_onto_dir, chain_out, chain_loop, failing };
+        var kind = std.enums.values(Kind)[r.uintLessThan(usize, std.enums.values(Kind).len - 1)];
+        if (s.step + 1 == s.sc.ops and r.uintLessThan(u8, 2) == 0) kind = .failing;
+        var buf: [300]u8 = undefined;
+        var buf2: [300]u8 = undefined;
+        s.last_probe = @tagName(kind);
+        switch (kind) {
+            .boot => try s.probeBoot(r),
+            .unreadable => {
+                var scratch: [fat16.sector_size]u8 align(16) = undefined;
+                s.disk.blk.fail_after = s.disk.blk.requests;
+                const got = fat16.Volume.mount(&s.disk.blk, &scratch, 0);
+                s.disk.blk.fail_after = null;
+                if (got) |_| return s.fault("a mount of a disk that does not answer succeeded") else |e| if (e != E.ReadFailed) return s.fault(@errorName(e));
+            },
+            .bad_name => {
+                // A name past the longest FAT keeps, or none at all.
+                // In a directory that is there: making one could find no room.
+                const dir = (if (r.boolean()) s.someDir(r) else null) orelse "";
+                const name = if (r.boolean()) "x" ** (fat16.max_name + 1) else "";
+                const path = join(dir, name, &buf);
+                if (vol.writeFile(path, "never")) return s.fault("a write with no name, or too long a one, succeeded") else |e| if (e != E.BadName) return s.fault(@errorName(e));
+            },
+            .onto_dir => {
+                const dir = s.someDir(r) orelse return;
+                if (vol.writeFile(dir, "never")) return s.fault("a write onto a directory succeeded") else |e| if (e != E.IsDirectory) return s.fault(@errorName(e));
+            },
+            .overwrite_dir => {
+                const dir = s.someDir(r) orelse return;
+                if (vol.writeInto(dir, 0, "never")) return s.fault("an overwrite of a directory succeeded") else |e| if (e != E.BadName) return s.fault(@errorName(e));
+            },
+            .hole => {
+                const f = s.someFile(r) orelse return;
+                const past: u32 = @intCast(f.bytes.len + 1 + r.uintLessThan(usize, 5000));
+                if (vol.writeInto(f.path, past, "never")) return s.fault("an overwrite past a file's end succeeded") else |e| if (e != E.BadChain) return s.fault(@errorName(e));
+            },
+            .through_open => {
+                const f = s.someFile(r) orelse return;
+                const path = join(f.path, "inside", &buf);
+                if (vol.open(path)) |_| return s.fault("a path through a file opened") else |e| if (e != E.NotFound) return s.fault(@errorName(e));
+            },
+            .through_write => {
+                const f = s.someFile(r) orelse return;
+                const path = join(f.path, "inside", &buf);
+                // The directory it would make is a file's name.
+                if (vol.writeFile(path, "never")) return s.fault("a write under a file succeeded") else |e| if (e != E.BadName) return s.fault(@errorName(e));
+            },
+            .through_remove => {
+                const f = s.someFile(r) orelse return;
+                const path = join(f.path, "inside", &buf);
+                if (vol.remove(path)) |_| return s.fault("a remove under a file succeeded") else |e| if (e != E.NotFat16) return s.fault(@errorName(e));
+            },
+            .rename_across => {
+                const f = s.someFile(r) orelse return;
+                const parent = if (std.mem.lastIndexOfScalar(u8, f.path, '/')) |i| f.path[0..i] else "";
+                const dir = s.someDir(r) orelse return;
+                if (std.mem.eql(u8, dir, parent)) return;
+                const to = join(dir, "moved", &buf2);
+                if (vol.rename(f.path, to)) return s.fault("a rename across directories succeeded") else |e| if (e != E.BadName) return s.fault(@errorName(e));
+            },
+            .rename_dir => {
+                const dir = s.someDir(r) orelse return;
+                const parent = if (std.mem.lastIndexOfScalar(u8, dir, '/')) |i| dir[0..i] else "";
+                const to = join(parent, "renamed dir", &buf);
+                if (vol.rename(dir, to)) return s.fault("a rename of a directory succeeded") else |e| if (e != E.BadName) return s.fault(@errorName(e));
+            },
+            .rename_onto_dir => {
+                const dir = s.someDir(r) orelse return;
+                const parent = if (std.mem.lastIndexOfScalar(u8, dir, '/')) |i| dir[0..i] else "";
+                const from = join(parent, "a file beside it", &buf);
+                if (s.model.files.contains(from) or s.model.dirs.contains(from)) return;
+                vol.writeFile(from, "beside") catch |e| {
+                    if (roomless(e)) return; // no room to set it up
+                    return s.fault(@errorName(e));
+                };
+                try s.model.setFile(from, "beside");
+                if (vol.rename(from, dir)) return s.fault("a rename onto a directory succeeded") else |e| if (e != E.IsDirectory) return s.fault(@errorName(e));
+            },
+            .chain_out, .chain_loop => try s.probeChain(r, kind == .chain_loop),
+            .failing => {
+                // The disk stops answering a few requests into an operation.
+                s.disk.blk.fail_after = s.disk.blk.requests + r.uintLessThan(u64, if (r.boolean()) 12 else 80);
+                s.failed_disk = true;
+                const k = r.uintLessThan(usize, dirs.len + 1);
+                const path = join(if (k == dirs.len) "" else dirs[k], names[r.uintLessThan(usize, names.len)], &buf);
+                var failed: ?anyerror = null;
+                const appended = if (r.boolean()) s.someFile(r) else null;
+                if (appended) |f| {
+                    // An append, which writes its runs of sectors whole: the
+                    // disk stops at one of its writes rather than a request.
+                    s.disk.blk.fail_after = null;
+                    s.disk.blk.fail_after_writes = s.disk.blk.writes + r.uintLessThan(u64, if (r.boolean()) 8 else 600);
+                    vol.writeInto(f.path, @intCast(f.bytes.len), s.content(@max(1, @min(s.sc.max_bytes, r.uintLessThan(usize, 200_000))))) catch |e| {
+                        failed = e;
+                    };
+                } else if (r.boolean()) {
+                    vol.writeFile(path, s.content(@min(s.sc.max_bytes, r.uintLessThan(usize, 200_000)))) catch |e| {
+                        failed = e;
+                    };
+                } else if (s.disk.read(path)) |got| {
+                    testing.allocator.free(got);
+                } else |e| failed = e;
+                if (failed) |e| if (e != E.ReadFailed and e != E.WriteFailed and e != E.NotFound and !roomless(e))
+                    return s.fault(@errorName(e));
+                props.reachable(@src(), "fat_sim: the disk stops answering part-way through an operation", null);
+            },
+        }
+    }
+
+    /// **A BOOT SECTOR THAT LIES**, one field at a time: the mount must
+    /// refuse it with its own error, and the volume, restored, is untouched.
+    fn probeBoot(s: *Sim, r: std.Random) !void {
+        const E = fat16.Error;
+        const disk = s.disk.bytes;
+        const fat32 = s.sc.shape.kind == .fat32;
+        var saved: [2 * test_disk.sector]u8 = undefined;
+        @memcpy(&saved, disk[0..saved.len]);
+        defer @memcpy(disk[0..saved.len], &saved);
+        const b = disk[0..test_disk.sector];
+        const le16 = struct {
+            fn f(at: []u8, v: u16) void {
+                std.mem.writeInt(u16, at[0..2], v, .little);
+            }
+        }.f;
+        const le32 = struct {
+            fn f(at: []u8, v: u32) void {
+                std.mem.writeInt(u32, at[0..4], v, .little);
+            }
+        }.f;
+        var start: u32 = 0;
+        const want: anyerror = switch (r.uintLessThan(u8, if (fat32) 15 else 11)) {
+            0 => w: {
+                b[510 + r.uintLessThan(usize, 2)] ^= 0xFF;
+                break :w E.BadBootSector;
+            },
+            1 => w: {
+                le16(b[11..13], if (r.boolean()) 1024 else 4096);
+                break :w E.NotFat16;
+            },
+            2 => w: {
+                b[13] = if (r.boolean()) 0 else r.intRangeAtMost(u8, 129, 255);
+                break :w E.BadBootSector;
+            },
+            3 => w: {
+                if (r.boolean()) le16(b[14..16], 0) else b[16] = if (r.boolean()) 0 else r.intRangeAtMost(u8, 3, 255);
+                break :w E.BadBootSector;
+            },
+            4 => w: {
+                le16(b[22..24], 0);
+                le32(b[36..40], 0);
+                break :w E.BadBootSector;
+            },
+            5 => w: {
+                // No data region: fewer sectors than the FATs and the root.
+                le16(b[19..21], 1);
+                break :w E.BadBootSector;
+            },
+            6 => w: {
+                // Too few clusters for FAT16: the data region cut to 100.
+                const reserved: u32 = std.mem.readInt(u16, b[14..16], .little);
+                const fats: u32 = b[16];
+                const spf: u32 = if (std.mem.readInt(u16, b[22..24], .little) != 0) std.mem.readInt(u16, b[22..24], .little) else std.mem.readInt(u32, b[36..40], .little);
+                const root: u32 = (@as(u32, std.mem.readInt(u16, b[17..19], .little)) * 32 + 511) / 512;
+                const data = reserved + fats * spf + root;
+                const total = data + 100 * @as(u32, b[13]);
+                if (total > 0xFFFF) {
+                    le16(b[19..21], 0);
+                    le32(b[32..36], total);
+                } else le16(b[19..21], @intCast(total));
+                break :w E.NotFat16;
+            },
+            7 => w: {
+                // A FAT of one sector, far too short for the clusters.
+                if (fat32) le32(b[36..40], 1) else le16(b[22..24], 1);
+                break :w E.BadBootSector;
+            },
+            8 => w: {
+                // A volume past 32-bit sectors, from where it starts: the
+                // boot sector copied one sector on, and the mount told to
+                // start there.
+                le16(b[19..21], 0);
+                le32(b[32..36], 0xFFFF_FFFF);
+                @memcpy(disk[test_disk.sector..][0..test_disk.sector], b);
+                start = 1;
+                break :w E.VolumeTooLarge;
+            },
+            9, 10 => w: {
+                if (fat32) {
+                    // A FAT32 volume with FAT16's FAT size set: a FAT of
+                    // one sector by FAT16's field, the clusters still too
+                    // many for FAT16.
+                    le16(b[22..24], 1);
+                    break :w E.BadBootSector;
+                }
+                le16(b[17..19], 0);
+                break :w E.BadBootSector;
+            },
+            11 => w: {
+                le16(b[40..42], std.mem.readInt(u16, b[40..42], .little) | 0x80);
+                break :w E.NotMirrored;
+            },
+            12 => w: {
+                le16(b[42..44], r.intRangeAtMost(u16, 1, 0xFFFF));
+                break :w E.FatVersion;
+            },
+            13 => w: {
+                le32(b[44..48], if (r.boolean()) r.uintLessThan(u32, 2) else 0x0FFF_FFF0);
+                break :w E.BadRoot;
+            },
+            else => w: {
+                // FAT32 with root entries, as FAT16 has them.
+                le16(b[17..19], 512);
+                break :w E.BadBootSector;
+            },
+        };
+        var scratch: [fat16.sector_size]u8 align(16) = undefined;
+        if (fat16.Volume.mount(&s.disk.blk, &scratch, start)) |_| {
+            return s.fault("a mount of a boot sector that lies succeeded");
+        } else |e| if (e != want) {
+            std.debug.print("  the boot sector probe wanted {s}\n", .{@errorName(want)});
+            return s.fault(@errorName(e));
+        }
+    }
+
+    /// **A FILE'S CHAIN DAMAGED, AND PUT BACK**: its first link pointed
+    /// outside the data, or its second back at its first (a loop). In every
+    /// copy of the FAT, and in the one held in memory. A read must not
+    /// answer with bytes the file does not hold as if they were its own, and
+    /// an append must refuse the loop; then the FAT is restored, and the
+    /// next `verify` finds everything as it was.
+    fn probeChain(s: *Sim, r: std.Random, loop: bool) !void {
+        const E = fat16.Error;
+        const disk = s.disk.bytes;
+        const l = test_disk.Layout.of(disk);
+        const cluster_bytes = @as(usize, disk[13]) * test_disk.sector;
+        // A file of at least two clusters.
+        var it = s.model.files.iterator();
+        var k = r.uintLessThan(usize, @max(s.model.files.count(), 1));
+        var pick: ?[]const u8 = null;
+        var bytes: []const u8 = "";
+        while (it.next()) |e| {
+            if (e.value_ptr.len > cluster_bytes) {
+                pick = e.key_ptr.*;
+                bytes = e.value_ptr.*;
+                if (k == 0) break;
+            }
+            k -|= 1;
+        }
+        const path = pick orelse return;
+        const entry = s.disk.vol.open(path) catch |e| return s.fault(@errorName(e));
+        const first: usize = entry.first_cluster;
+        const second: usize = l.get(disk, 0, first);
+        const at: usize = if (loop) second else first;
+        const width: usize = if (l.kind == .fat32) 4 else 2;
+        var saved: [2]u32 = undefined;
+        var cached_saved: u32 = 0;
+        const raw = struct {
+            fn get(b: []const u8, w: usize) u32 {
+                return if (w == 4) std.mem.readInt(u32, b[0..4], .little) else std.mem.readInt(u16, b[0..2], .little);
+            }
+            fn set(b: []u8, w: usize, v: u32) void {
+                if (w == 4) std.mem.writeInt(u32, b[0..4], v, .little) else std.mem.writeInt(u16, b[0..2], @intCast(v), .little);
+            }
+        };
+        const to: u32 = if (loop) @intCast(first) else 1;
+        for (0..2) |copy| {
+            const off = l.fat_start + copy * l.fat_bytes + at * width;
+            saved[copy] = raw.get(disk[off..], width);
+            raw.set(disk[off..], width, (saved[copy] & ~@as(u32, if (width == 4) 0x0FFF_FFFF else 0xFFFF)) | to);
+        }
+        if (s.disk.fat_cache) |c| {
+            cached_saved = raw.get(c[at * width ..], width);
+            raw.set(c[at * width ..], width, (cached_saved & ~@as(u32, if (width == 4) 0x0FFF_FFFF else 0xFFFF)) | to);
+        }
+        defer {
+            for (0..2) |copy| raw.set(disk[l.fat_start + copy * l.fat_bytes + at * width ..], width, saved[copy]);
+            if (s.disk.fat_cache) |c| raw.set(c[at * width ..], width, cached_saved);
+        }
+        if (s.disk.read(path)) |got| {
+            defer testing.allocator.free(got);
+            if (!loop) return s.fault("a file whose chain leads outside the data read without an error");
+            if (!std.mem.eql(u8, got, bytes)) props.reachable(@src(), "fat_sim: a file whose chain loops reads as other bytes, without an error", null);
+        } else |e| if (e != E.BadChain) return s.fault(@errorName(e));
+        if (loop) {
+            if (s.disk.vol.writeInto(path, @intCast(bytes.len), "never")) return s.fault("an append to a file whose chain loops succeeded") else |e| if (e != E.BadChain) return s.fault(@errorName(e));
+        }
+    }
+
+    /// A file the model holds, by the probe's dice, or none.
+    fn someFile(s: *Sim, r: std.Random) ?struct { path: []const u8, bytes: []const u8 } {
+        const n = s.model.files.count();
+        if (n == 0) return null;
+        var k = r.uintLessThan(usize, n);
+        var it = s.model.files.iterator();
+        while (it.next()) |e| : (k -|= 1) if (k == 0) return .{ .path = e.key_ptr.*, .bytes = e.value_ptr.* };
+        return null;
+    }
+
+    /// A directory the model holds, by the probe's dice, or none.
+    fn someDir(s: *Sim, r: std.Random) ?[]const u8 {
+        const n = s.model.dirs.count();
+        if (n == 0) return null;
+        var k = r.uintLessThan(usize, n);
+        var it = s.model.dirs.keyIterator();
+        while (it.next()) |d| : (k -|= 1) if (k == 0) return d.*;
+        return null;
+    }
+
     /// After an operation that found no room: `path` holds one of the two
     /// states it may (`before`, or `after` if the operation went through), and
     /// the model follows what the disk says.
@@ -440,6 +769,27 @@ const Sim = struct {
 
 /// Runs one seed with the FAT on the disk and with it held in memory; an
 /// error, with the operation that failed printed, if any oracle fails.
+/// The same seed with probes between its operations (`Sim.probe`): what
+/// the volume must refuse, from dice of their own. A run whose disk was made
+/// to fail is not compared across the two paths: the FAT held in memory asks
+/// the disk for less, and so fails at another point.
+pub fn runProbeSeed(seed: u64) !void {
+    var hashes: [2]u64 = undefined;
+    var failed = false;
+    for ([_]bool{ false, true }, 0..) |cached, i| {
+        var s = try Sim.init(seed, cached);
+        s.probes = std.Random.DefaultPrng.init(seed ^ 0x7072_6f62_6573_6661); // "probesfa"
+        defer s.deinit();
+        try s.run();
+        hashes[i] = std.hash.Wyhash.hash(0, s.disk.bytes);
+        failed = failed or s.failed_disk;
+    }
+    if (!failed and hashes[0] != hashes[1]) {
+        std.debug.print("fat_sim probe seed {d}: the FAT on the disk and the FAT held in memory left different volumes\n", .{seed});
+        return error.SimulationFailed;
+    }
+}
+
 pub fn runSeed(seed: u64) !void {
     var hashes: [2]u64 = undefined;
     var full: [2]usize = undefined;
@@ -475,6 +825,34 @@ pub const regressions = [_]u64{
     33,
     45,
 };
+
+// **FOUND: A TREE `makePath` MAKES THAT `check` AND `removeTree` REFUSE**
+// (metal-vmm QUEUE.md, Questions). makePath, and so writeFile, makes
+// directories at any depth; `check` reports a tree past `max_tree_depth`
+// (16) as `too_deep`, and `removeTree` refuses it with `BadChain`. So a
+// volume this code made is one its own check calls broken, and its tree
+// one it cannot remove (io.zig's deleteTree answers WriteFailed for good).
+// A probe found it on the first seed it was tried on; failing until the
+// box decides which side moves.
+test "fat16: a tree makePath makes is one check and removeTree take" {
+    const d = try test_disk.Disk.make("limit-deep", test_disk.small, false);
+    defer d.deinit();
+    var path: [64]u8 = undefined;
+    @memcpy(path[0..4], "deep");
+    var n: usize = 4;
+    for (0..17) |_| {
+        @memcpy(path[n..][0..2], "/d");
+        n += 2;
+    }
+    _ = try d.vol.makePath(path[0..n]);
+    const r = try d.check();
+    try testing.expect(r.health.clean());
+    try d.vol.removeTree("deep");
+}
+
+test "the same, with probes of what the volume must refuse, a handful of seeds" {
+    for (1..9) |seed| try runProbeSeed(seed);
+}
 
 test "FAT16 and FAT32 against a random workload, a handful of seeds, both FAT paths" {
     for (seeds) |seed| try runSeed(seed);

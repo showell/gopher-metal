@@ -90,3 +90,38 @@ restart: the back-off reaches 15 minutes
 restart: one damaged byte reads as no record
 request_heap: a request meets the limit of what backs it
 request_heap: a reset gives back what grew past what it keeps
+
+# fat16.zig's refusals and FAT32 paths, reached by fat_sim's probes (runProbeSeed).
+fat: a FAT32 entry's first cluster is past 65535
+fat: a FAT32 volume's FSInfo count is let go
+fat: a chain leads outside the data area
+fat: a chain that loops is refused
+fat: a directory to be made is a file's name
+fat: a mount cannot read the boot sector
+fat: a mount refuses FAT32 with FAT16's fields set
+fat: a mount refuses a FAT of no sectors
+fat: a mount refuses a FAT too short for its clusters
+fat: a mount refuses a FAT16 root of no entries
+fat: a mount refuses a FAT32 root outside the data
+fat: a mount refuses a FAT32 version it does not know
+fat: a mount refuses a FAT32 volume that is not mirrored
+fat: a mount refuses a cluster size no volume has
+fat: a mount refuses a sector without the boot signature
+fat: a mount refuses a volume past 32-bit sectors
+fat: a mount refuses a volume too small for FAT16
+fat: a mount refuses a volume with no data region
+fat: a mount refuses no reserved sectors, or a count of FATs it does not keep
+fat: a mount refuses sectors that are not 512 bytes
+fat: a path through a file names nothing
+fat: a path whose parent is a file is refused
+fat: a rename across directories is refused
+fat: a rename of a directory is refused
+fat: a rename onto a directory is refused
+fat: a run of sectors fails to read
+fat: a sector read fails
+fat: a sector write fails
+fat: a write onto a directory is refused
+fat: a write's name is empty or too long
+fat: an overwrite of a directory is refused
+fat: an overwrite past a file's end is refused
+fat_sim: the disk stops answering part-way through an operation
