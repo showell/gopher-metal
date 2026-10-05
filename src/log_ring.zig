@@ -90,7 +90,7 @@ pub const Ring = struct {
 
     /// What is held, oldest first, as at most two pieces of the ring.
     pub fn parts(self: *const Ring) [2][]const u8 {
-        if (self.total <= self.buf.len) return .{ self.buf[0..self.head], self.buf[0..0] };
+        if (self.total < self.buf.len) return .{ self.buf[0..self.head], self.buf[0..0] };
         return .{ self.buf[self.head..], self.buf[0..self.head] };
     }
 
