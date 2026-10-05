@@ -4,6 +4,9 @@
 //!   zig build properties -Dseeds=5000     more
 //!   zig build properties -Dsdk-jsonl=out/sdk.jsonl
 //!                                         also the JSONL, to a file
+//!   zig build properties -Dfloor=coverage/floor-sim.txt
+//!                                         and a MISS on the floor fails it
+//!                                         (the long tier: long.sh)
 //!
 //! tcp_sim.zig runs each seed as it does under `zig build test`, but a seed
 //! whose oracle fails is a broken `always` here, named with its seed, and the
@@ -63,5 +66,16 @@ test "tcp: the table's properties over a sweep of seeds" {
         if (s.broken()) broken += 1;
     }
     std.debug.print("{d} properties not satisfied, {d} of them broken invariants\n", .{ failing, broken });
+
+    var under: usize = 0;
+    if (options.floor.len > 0) {
+        const io = std.testing.io;
+        const text = try std.Io.Dir.cwd().readFileAlloc(io, options.floor, std.testing.allocator, .unlimited);
+        defer std.testing.allocator.free(text);
+        w = .fixed(&buf);
+        under = try at.checkFloor(text, &w);
+        std.debug.print("{s}floor {s}: {d} under it\n", .{ w.buffered(), options.floor, under });
+    }
     try std.testing.expectEqual(@as(usize, 0), broken);
+    try std.testing.expectEqual(@as(usize, 0), under);
 }

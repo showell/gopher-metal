@@ -272,6 +272,10 @@ pub fn build(b: *std.Build) void {
     const props_opts = b.addOptions();
     props_opts.addOption(u64, "seeds", b.option(u64, "seeds", "how many tcp_sim seeds `properties` sweeps") orelse 500);
     props_opts.addOption([]const u8, "sdk_jsonl", b.option([]const u8, "sdk-jsonl", "where `properties` writes its JSONL") orelse "");
+    // The floor (coverage/floor-sim.txt, COVERAGE.md): what the long tier
+    // must reach. Unset, a MISS is reported and never fails the step.
+    const floor = b.option([]const u8, "floor", "a coverage floor `properties` must reach (long.sh)");
+    props_opts.addOption([]const u8, "floor", if (floor) |f| b.pathFromRoot(f) else "");
     const props = b.addTest(.{
         .name = "tcp_properties",
         // Only the sweep: the files it imports carry tests of their own,

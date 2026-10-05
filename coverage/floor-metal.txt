@@ -1,0 +1,15 @@
+# **THE REAL KERNEL'S FLOOR** (COVERAGE.md): what long.sh's lossy sweep of
+# gopher.elf on metal-vmm must reach, one property per line (the SDK's
+# tools/report.py reads it). A line here never reached fails the long tier.
+#
+# The sweep loses each of the GUEST's frames in turn, so it reaches the
+# table's recovery from its own losses (2026-10-05, 103 runs). It cannot yet
+# reach what needs the PEER to misbehave: resets, floods, a peer that stops
+# reading or goes silent, segments lost on their way in. Those wait on
+# metal-vmm's peer (its QUEUE.md); the simulator's floor holds them meanwhile.
+tcp: a lost SYN-ACK is sent again
+tcp: the timer goes back to the oldest unacknowledged byte
+tcp: three duplicate ACKs resend at once
+tcp: a backed-off RTO stays under the cap
+tcp: a measured RTO is within its bounds
+tcp: a round trip comes in faster than the estimate

@@ -14,9 +14,13 @@ that compiles either imports `"coverage"` and `"coverage_catalog"`.
 
 - **A FAIL fails every tier.** A FAIL is a broken `always`, or an
   `unreachable` that was reached. **A MISS** (a property the run never got
-  to) **is reported, never gated on, until a long tier exists with a list
-  of what it must reach.** Antithesis treats the two alike; we don't, on
-  purpose (the SDK's README).
+  to) **fails only the long tier, and only for a property on its floor**
+  (`coverage/`). Antithesis treats the two alike; we don't, on purpose
+  (the SDK's README).
+- **Three tiers, one set of properties.** `zig build test` runs eight plain
+  and eight rough seeds; `zig build properties` 500 of each in about a
+  second; `./long.sh` 10,000 and the real kernel's lossy sweep. Each reads
+  the same properties with a bigger budget.
 - **QEMU stays mostly on the happy path.** The judge checks that metal
   answers as Linux does, on a clean network. **The budget for covering
   every scenario goes to metal-vmm**, where every frame, disk request and
@@ -49,6 +53,24 @@ The kernel writes each line to the serial port behind `coverage: `: the port
 only, not the log ring. The judge appends every boot's lines to
 `$COVERAGE_OUTPUT_DIR/sdk.jsonl`. `tools/coverage_jsonl.sh` does the same for
 any serial log, such as a droplet's.
+
+**The long tier, for bug hunting and before a deploy:**
+
+    ./long.sh              # about 6 minutes
+    SEEDS=50000 ./long.sh
+    ./long.sh sim | metal  # one half
+
+- **The simulator** at 10,000 seeds, plain and rough, against
+  `coverage/floor-sim.txt` (`zig build properties -Dfloor=...`).
+- **The real kernel**, gopher.elf built `-Dcoverage`, on metal-vmm's
+  PC-shaped machine (`TRANSPORT=pci`: halting between frames and woken by
+  interrupts, as on a droplet), over a 5 ms wire. For each of three routes
+  the wire eats the guest's 1st frame, then its 2nd, through every frame the
+  route sends, one deterministic run each, and **every run must still serve
+  the page an unhurt run serves.** The runs' properties are judged against
+  `coverage/floor-metal.txt` by the SDK's `tools/report.py --floor`.
+
+A floor line naming no property fails too: a floor goes stale loudly.
 
 ## What the runs have said
 
@@ -87,13 +109,19 @@ clients that stayed through a flood got their whole answer.
 One judge gate on metal (`uploads`, under QEMU) reached 3 of the 18
 properties, as expected on a clean network.
 
+**The first lossy sweep of the real kernel** (2026-10-05): `/` in 32 frames,
+`/steve-resume.pdf` in 57, `/login/full` in 11. Each frame was lost in turn,
+100 runs, and every one served the same page. It reached 6 of the 18: the
+table's recovery from its own losses (a lost SYN-ACK, the timer going back,
+three duplicate ACKs resending at once, the RTO bounds). The rest need the
+PEER to misbehave (reset, flood, stop reading, lose what it sends), which
+metal-vmm's peer cannot yet do: its QUEUE.md item 7. Until then the
+simulator's floor holds them.
+
 ## Next
 
-- **metal-vmm runs today's kernel.** It was built when the kernel took no
-  interrupts; since v4 it takes them, at `sti; hlt` only. After that,
-  metal-vmm is where the recovery paths get reached on the machine.
-- A long-tier script: thousands of seeds, plus a list of `sometimes` that a
-  pre-deploy run must reach.
+- metal-vmm's misbehaving peer (its QUEUE.md item 7), then the metal floor
+  raised to what it reaches.
 - Properties in FAT (`fat16.zig`), the page cache, and restart.
 - An explorer: metal-vmm choosing faults, scored by which properties a run
   reaches. That's the long-term aim, and it isn't urgent.

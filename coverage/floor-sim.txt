@@ -1,0 +1,31 @@
+# **THE SIMULATOR'S FLOOR** (COVERAGE.md): every property `zig build properties`
+# must reach in the long tier (long.sh), one message per line. A property here
+# that a long run never reaches fails it (a MISS on the floor); a line that
+# names no property fails it too, as a floor gone stale.
+#
+# Today that is every property in tcp.zig and tcp_sim.zig: 500 seeds, plain
+# and rough, reach them all (2026-10-05). A scenario change that stops
+# reaching one is a gap opening in what the simulator tests.
+tcp: a stuck half-open connection gives way to a new SYN
+tcp: a lost SYN-ACK is sent again
+tcp: the timer goes back to the oldest unacknowledged byte
+tcp: a shut window is probed
+tcp: a reopened window is announced again
+tcp: three duplicate ACKs resend at once
+tcp: a measured RTO is within its bounds
+tcp: a round trip comes in faster than the estimate
+tcp: a backed-off RTO stays under the cap
+tcp: backoff reaches the RTO cap
+tcp: a silent peer is given up on
+tcp: a damaged segment is dropped
+tcp: an exact reset closes a connection
+tcp: an inexact reset in the window draws a challenge ACK
+tcp: a segment for no connection is refused
+tcp: a segment arrives ahead of the next expected byte
+tcp: a segment from behind is answered, not taken
+tcp: a peer sends past the window and only what fits is taken
+tcp_sim: the client vanishes part-way through the answer
+tcp_sim: the client resets the connection
+tcp_sim: a flood SYN is sent
+tcp_sim: the table alone gives up on a client that left
+tcp_sim: a client that stayed through a flood got its whole answer
