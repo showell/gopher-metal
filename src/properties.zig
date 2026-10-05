@@ -1,17 +1,19 @@
-//! **THE TCP TABLE'S COVERAGE PROPERTIES, OVER MANY SEEDS** (COVERAGE.md).
+//! **THE COVERAGE PROPERTIES, OVER MANY SEEDS** (COVERAGE.md): the TCP
+//! table's in tcp_sim.zig, the FAT's in fat_sim.zig.
 //!
-//!   zig build properties                  seeds 1..500
-//!   zig build properties -Dseeds=5000     more
+//!   zig build properties                  TCP seeds 1..500, FAT seeds 1..100
+//!   zig build properties -Dseeds=5000 -Dfat-seeds=1000     more
 //!   zig build properties -Dsdk-jsonl=out/sdk.jsonl
 //!                                         also the JSONL, to a file
 //!   zig build properties -Dfloor=coverage/floor-sim.txt
 //!                                         and a MISS on the floor fails it
 //!                                         (the long tier: long.sh)
 //!
-//! tcp_sim.zig runs each seed as it does under `zig build test`, but a seed
-//! whose oracle fails is a broken `always` here, named with its seed, and the
-//! sweep goes on. At the end the catalog is judged: every assertion in
-//! tcp.zig and here, with the ones never satisfied first.
+//! Each simulator runs each seed as it does under `zig build test`, but a
+//! seed whose oracle fails is a broken `always` here, named with its seed,
+//! and the sweep goes on. At the end the catalog is judged: every assertion in
+//! tcp.zig, fat16.zig, the simulators and here, the ones never satisfied
+//! first.
 //!
 //! **A FAILING `sometimes` IS NOT A TCP BUG.** It says no seed reached that
 //! case: the simulator's scenarios do not cover it, and the table's code
@@ -22,6 +24,7 @@
 const std = @import("std");
 const at = @import("coverage");
 const sim = @import("tcp_sim.zig");
+const fat_sim = @import("fat_sim.zig");
 const options = @import("tcp_properties_options");
 
 var jsonl: std.ArrayList(u8) = .empty;
@@ -30,7 +33,7 @@ fn keep(line: []const u8) void {
     jsonl.appendSlice(std.testing.allocator, line) catch @panic("out of memory for the JSONL");
 }
 
-test "tcp: the table's properties over a sweep of seeds" {
+test "the properties over a sweep of seeds" {
     at.reset();
     defer jsonl.deinit(std.testing.allocator);
     if (options.sdk_jsonl.len > 0) at.sink = keep;
@@ -46,11 +49,16 @@ test "tcp: the table's properties over a sweep of seeds" {
         if (!rough_ok) failed_seeds += 1;
         at.always(@src(), rough_ok, "tcp_sim: every oracle holds for every rough seed", .{ .seed = seed });
     }
+    for (1..options.fat_seeds + 1) |seed| {
+        const ok = if (fat_sim.runSeed(seed)) true else |_| false;
+        if (!ok) failed_seeds += 1;
+        at.always(@src(), ok, "fat_sim: every oracle holds for every seed, both FAT paths", .{ .seed = seed });
+    }
 
     var buf: [64 * 1024]u8 = undefined;
     var w: std.Io.Writer = .fixed(&buf);
     const failing = try at.report(&w);
-    std.debug.print("\n{d} seeds, each plain and rough; {d} runs failed an oracle\n{s}", .{ options.seeds, failed_seeds, w.buffered() });
+    std.debug.print("\n{d} TCP seeds, each plain and rough, and {d} FAT seeds; {d} runs failed an oracle\n{s}", .{ options.seeds, options.fat_seeds, failed_seeds, w.buffered() });
 
     if (options.sdk_jsonl.len > 0) {
         const io = std.testing.io;

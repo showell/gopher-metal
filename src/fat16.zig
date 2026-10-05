@@ -32,6 +32,15 @@
 
 const std = @import("std");
 const virtio = @import("virtio.zig");
+const props = @import("coverage");
+
+// Every property in this file, in the catalog, called or not (COVERAGE.md).
+comptime {
+    props.catalogFile(@import("coverage_catalog"), here());
+}
+fn here() std.builtin.SourceLocation {
+    return @src();
+}
 const civil = @import("civil.zig");
 
 pub const sector_size: u32 = 512;
@@ -975,6 +984,7 @@ pub const Volume = struct {
     /// Saturating: a count that went wrong must not stop the machine; the
     /// host tests compare it with a fresh one after every operation.
     fn keepCount(self: *Volume, old: Cluster, new: Cluster) void {
+        if (old == 0 and new != 0) props.always(@src(), self.free_clusters > 0, "fat: the kept free count never runs below zero", null);
         if (old == 0 and new != 0) self.free_clusters -|= 1;
         if (old != 0 and new == 0) self.free_clusters += 1;
     }
@@ -998,9 +1008,16 @@ pub const Volume = struct {
         const clusters: u32 = self.max_cluster - 1;
 
         while (taken < count) {
-            if (candidate > self.max_cluster) candidate = 2;
+            if (candidate > self.max_cluster) {
+                props.reachable(@src(), "fat: the allocation cursor wraps around the volume", null);
+                candidate = 2;
+            }
             if (looked == clusters) {
-                if (first != 0) self.freeChain(first) catch {};
+                props.reachable(@src(), "fat: an allocation finds the volume full", .{ .count = count, .taken = taken });
+                if (first != 0) {
+                    props.reachable(@src(), "fat: a volume full part-way through an allocation gives back what it took", .{ .taken = taken });
+                    self.freeChain(first) catch {};
+                }
                 return Error.Full;
             }
             looked += 1;
@@ -1023,6 +1040,7 @@ pub const Volume = struct {
         var cluster = first;
         while (self.inData(cluster)) {
             const next = try self.fatGet(cluster);
+            props.always(@src(), next != 0, "fat: every cluster freed was in use", .{ .cluster = cluster });
             try self.fatSet(cluster, 0);
             if (cluster < self.next_free) self.next_free = cluster;
             cluster = next;
@@ -1092,7 +1110,10 @@ pub const Volume = struct {
                     parts_len = 0;
                     run.slots[run.len] = .{ .lba = walk.lba, .at = at };
                     run.len += 1;
-                    if (run.len == needed) return run;
+                    if (run.len == needed) {
+                        props.sometimes(@src(), run.slots[0].lba != run.slots[run.len - 1].lba, "fat: a name's run of entries straddles a sector", .{ .needed = needed });
+                        return run;
+                    }
                 } else {
                     run.len = 0;
                     if (self.scratch[at + 11] == attr_long_name) {
@@ -1113,7 +1134,10 @@ pub const Volume = struct {
         // **THE ROOT DIRECTORY CANNOT GROW.** On FAT16 it is a fixed run of
         // sectors sized when the volume was made, which is the one hard limit
         // this filesystem has that a caller can hit in normal use.
-        if (dir_cluster == 0 and self.kind == .fat16) return Error.DirectoryFull;
+        if (dir_cluster == 0 and self.kind == .fat16) {
+            props.reachable(@src(), "fat: a FAT16 root directory is full", .{ .needed = needed });
+            return Error.DirectoryFull;
+        }
         try self.grow(dir_cluster);
         return self.findRun(dir_cluster, needed);
     }
@@ -1127,7 +1151,11 @@ pub const Volume = struct {
         // directory stops growing there, and the write that needed the room
         // is refused as a full directory, as a full root is.
         const per_cluster = self.sectors_per_cluster * (sector_size / dirent_size);
-        if ((end.clusters + 1) * per_cluster > max_dir_entries) return Error.DirectoryFull;
+        if ((end.clusters + 1) * per_cluster > max_dir_entries) {
+            props.reachable(@src(), "fat: a directory reaches FAT's most entries", null);
+            return Error.DirectoryFull;
+        }
+        props.reachable(@src(), "fat: a directory grows by a cluster", .{ .clusters = end.clusters });
         const last = end.last;
 
         const fresh = try self.allocChain(1);
@@ -1446,13 +1474,28 @@ pub const Volume = struct {
     /// which every directory but the root has and which `fsck` checks for.
     /// The entry goes last, so a machine stopped before it leaves no
     /// directory and a leaked cluster.
+    ///
+    /// **ROOM FOR THE ENTRY IS FOUND BEFORE THE CLUSTER IS TAKEN.** Taken
+    /// first, a parent with no room left (a full FAT16 root: `DirectoryFull`)
+    /// returned the error with the cluster still allocated and nothing
+    /// pointing at it, a leak on every try (fat_sim, 2026-10-05). The run
+    /// stays free while the cluster is taken and written: neither touches
+    /// the parent's sectors.
     pub fn makeDirIn(self: *Volume, dir_cluster: Cluster, name: []const u8) Error!Cluster {
         if ((try self.find(dir_cluster, name))) |e| {
             if (e.isDirectory()) return e.first_cluster;
             return Error.BadName;
         }
 
+        const short = try self.aliasFor(dir_cluster, name);
+        const needs_long = needsLongName(name);
+        const parts: u32 = if (needs_long) longParts(name) else 0;
+        const run = try self.findRun(dir_cluster, parts + 1);
+
         const cluster = try self.allocChain(1);
+        // A write refused from here gives the cluster back; a machine that
+        // stops leaves it leaked, which the check reports.
+        errdefer self.freeChain(cluster) catch {};
         @memset(self.scratch, 0);
         var s: u32 = 0;
         while (s < self.sectors_per_cluster) : (s += 1) {
@@ -1472,10 +1515,6 @@ pub const Volume = struct {
         putCluster(dotdot, dir_cluster);
         try self.writeSector(self.clusterSector(cluster), self.scratch);
 
-        const short = try self.aliasFor(dir_cluster, name);
-        const needs_long = needsLongName(name);
-        const parts: u32 = if (needs_long) longParts(name) else 0;
-        const run = try self.findRun(dir_cluster, parts + 1);
         try self.writeEntry(run, if (needs_long) name else name[0..0], short, attr_directory, cluster, 0);
         return cluster;
     }
@@ -1565,6 +1604,7 @@ pub const Volume = struct {
         } else {
             const end = try self.chainEnd(first);
             if (need > end.clusters) {
+                props.reachable(@src(), "fat: an append links clusters onto a file", .{ .need = need, .have = end.clusters });
                 const extra = try self.allocChain(need - end.clusters);
                 try self.fatSet(end.last, extra);
             }
@@ -1759,9 +1799,22 @@ pub const Volume = struct {
         const dst = try self.find(b.cluster, b.name);
         if (dst) |d| if (d.isDirectory()) return Error.IsDirectory;
 
+        // **A NEW `to` HAS ITS ROOM BEFORE `from` IS UNLINKED.** Unlinked
+        // first, a directory with no room left (a full FAT16 root) returned
+        // `DirectoryFull` with `from` gone and its chain leaked: a lost file,
+        // on an error, not a stop (fat_sim, 2026-10-05). So a rename that
+        // would fit only in the slots `from` frees is refused as full.
+        var room: ?struct { short: [11]u8, run: Run } = null;
+        if (dst == null) {
+            const short = try self.aliasFor(b.cluster, b.name);
+            const parts: u32 = if (needsLongName(b.name)) longParts(b.name) else 0;
+            room = .{ .short = short, .run = try self.findRun(b.cluster, parts + 1) };
+        }
+
         try self.unlinkEntry(a.cluster, a.name, false);
 
         if (dst) |d| {
+            props.reachable(@src(), "fat: a rename replaces a file", null);
             try self.readSector(d.lba, self.scratch);
             const e = self.scratch[d.slot..][0..dirent_size];
             putCluster(e, src.first_cluster);
@@ -1777,11 +1830,8 @@ pub const Volume = struct {
             return;
         }
 
-        const short = try self.aliasFor(b.cluster, b.name);
-        const needs_long = needsLongName(b.name);
-        const parts: u32 = if (needs_long) longParts(b.name) else 0;
-        const run = try self.findRun(b.cluster, parts + 1);
-        try self.writeEntry(run, if (needs_long) b.name else b.name[0..0], short, 0x20, src.first_cluster, src.size);
+        const r = room.?;
+        try self.writeEntry(r.run, if (needsLongName(b.name)) b.name else b.name[0..0], r.short, 0x20, src.first_cluster, src.size);
     }
 
     /// Deletes one file, or one directory that is already empty. removeEntry

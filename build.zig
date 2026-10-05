@@ -49,7 +49,7 @@ pub fn build(b: *std.Build) void {
     const sdk = b.dependency("zig_coverage_sdk", .{});
     const coverage = sdk.module("coverage");
     coverage.red_zone = false;
-    const coverage_catalog = @import("zig_coverage_sdk").addCatalog(b, sdk.artifact("coverage-scan"), coverage, b.path("src"), &.{ "tcp.zig", "tcp_sim.zig" });
+    const coverage_catalog = @import("zig_coverage_sdk").addCatalog(b, sdk.artifact("coverage-scan"), coverage, b.path("src"), &.{ "tcp.zig", "tcp_sim.zig", "fat16.zig", "fat_sim.zig" });
     const with_coverage = [_]std.Build.Module.Import{
         .{ .name = "coverage", .module = coverage },
         .{ .name = "coverage_catalog", .module = coverage_catalog },
@@ -252,7 +252,7 @@ pub fn build(b: *std.Build) void {
     // the formatter writes it. It was let slip once (three files, QUEUE.md
     // item 10), and a separate step nobody runs would let it slip again.
     test_step.dependOn(&b.addFmt(.{ .paths = &.{"src"}, .check = true }).step);
-    for ([_][]const u8{ "src/rtc.zig", "src/pit.zig", "src/stack.zig", "src/civil.zig", "src/fat16.zig", "src/pvh.zig", "src/pages.zig", "src/tcp.zig", "src/tcp_check.zig", "src/tcp_sim.zig", "src/io_test.zig", "src/log_ring.zig", "src/restart.zig", "src/kept_log.zig", "src/ready.zig", "src/request_heap.zig", "src/page_cache.zig", "src/admin_reset.zig", "droplet/image.zig", "src/dhcp.zig", "src/screen.zig", "src/serial_gate.zig", "src/net.zig" }) |path| {
+    for ([_][]const u8{ "src/rtc.zig", "src/pit.zig", "src/stack.zig", "src/civil.zig", "src/fat16.zig", "src/pvh.zig", "src/pages.zig", "src/tcp.zig", "src/tcp_check.zig", "src/tcp_sim.zig", "src/fat_sim.zig", "src/io_test.zig", "src/log_ring.zig", "src/restart.zig", "src/kept_log.zig", "src/ready.zig", "src/request_heap.zig", "src/page_cache.zig", "src/admin_reset.zig", "droplet/image.zig", "src/dhcp.zig", "src/screen.zig", "src/serial_gate.zig", "src/net.zig" }) |path| {
         const unit = b.addTest(.{ .root_module = b.createModule(.{
             .root_source_file = b.path(path),
             .target = b.graph.host,
@@ -265,24 +265,24 @@ pub fn build(b: *std.Build) void {
         test_step.dependOn(&b.addRunArtifact(unit).step);
     }
 
-    // **COVERAGE PROPERTIES** (COVERAGE.md): the TCP
-    // simulator over a sweep of seeds, then every assertion in tcp.zig
-    // judged. Not part of `test`: its report is read, not gated on, while it
+    // **COVERAGE PROPERTIES** (COVERAGE.md): the TCP and FAT simulators over
+    // a sweep of seeds, then every assertion they reach judged. Not part of `test`: its report is read, not gated on, while it
     // is a proof of concept (a `sometimes` never met is a gap, not a bug).
     const props_opts = b.addOptions();
     props_opts.addOption(u64, "seeds", b.option(u64, "seeds", "how many tcp_sim seeds `properties` sweeps") orelse 500);
+    props_opts.addOption(u64, "fat_seeds", b.option(u64, "fat-seeds", "how many fat_sim seeds `properties` sweeps") orelse 100);
     props_opts.addOption([]const u8, "sdk_jsonl", b.option([]const u8, "sdk-jsonl", "where `properties` writes its JSONL") orelse "");
     // The floor (coverage/floor-sim.txt, COVERAGE.md): what the long tier
     // must reach. Unset, a MISS is reported and never fails the step.
     const floor = b.option([]const u8, "floor", "a coverage floor `properties` must reach (long.sh)");
     props_opts.addOption([]const u8, "floor", if (floor) |f| b.pathFromRoot(f) else "");
     const props = b.addTest(.{
-        .name = "tcp_properties",
+        .name = "properties",
         // Only the sweep: the files it imports carry tests of their own,
         // whose sites would join its catalog and its verdict.
-        .filters = &.{"tcp: the table's properties"},
+        .filters = &.{"the properties over a sweep of seeds"},
         .root_module = b.createModule(.{
-            .root_source_file = b.path("src/tcp_properties.zig"),
+            .root_source_file = b.path("src/properties.zig"),
             .target = b.graph.host,
             .optimize = .ReleaseSafe,
             .imports = &.{
@@ -294,7 +294,7 @@ pub fn build(b: *std.Build) void {
     });
     const props_run = b.addRunArtifact(props);
     props_run.has_side_effects = true;
-    b.step("properties", "the TCP table's test properties over a sweep of tcp_sim seeds").dependOn(&props_run.step);
+    b.step("properties", "the coverage properties over a sweep of tcp_sim and fat_sim seeds").dependOn(&props_run.step);
 
     // **THE TCP TABLE'S TESTS, AT AWKWARD SEQUENCE NUMBERS** (TCP_TESTING.md
     // §6). Every number on the wire is modulo 2^32, and a `<` where `after()`
@@ -319,7 +319,11 @@ pub fn build(b: *std.Build) void {
             .root_source_file = b.path("src/fat16_test.zig"),
             .target = b.graph.host,
             .optimize = .ReleaseSafe,
-            .imports = &.{.{ .name = "fat16_test_options", .module = fat16_opts.createModule() }},
+            .imports = &.{
+                .{ .name = "fat16_test_options", .module = fat16_opts.createModule() },
+                .{ .name = "coverage", .module = coverage },
+                .{ .name = "coverage_catalog", .module = coverage_catalog },
+            },
         }),
     });
     test_step.dependOn(&b.addRunArtifact(fat16_unit).step);
@@ -339,7 +343,11 @@ pub fn build(b: *std.Build) void {
                 .root_source_file = b.path("src/fat16_faults_test.zig"),
                 .target = b.graph.host,
                 .optimize = .ReleaseSafe,
-                .imports = &.{.{ .name = "fat16_test_options", .module = fat16_faults_opts }},
+                .imports = &.{
+                    .{ .name = "fat16_test_options", .module = fat16_faults_opts },
+                    .{ .name = "coverage", .module = coverage },
+                    .{ .name = "coverage_catalog", .module = coverage_catalog },
+                },
             }),
         });
         test_step.dependOn(&b.addRunArtifact(unit).step);
