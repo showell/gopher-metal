@@ -1,9 +1,9 @@
-//! **THE TCP TABLE'S TEST PROPERTIES, OVER MANY SEEDS** (src/antithesis.zig).
+//! **THE TCP TABLE'S COVERAGE PROPERTIES, OVER MANY SEEDS** (COVERAGE.md).
 //!
 //!   zig build properties                  seeds 1..500
 //!   zig build properties -Dseeds=5000     more
 //!   zig build properties -Dsdk-jsonl=out/sdk.jsonl
-//!                                         also the Antithesis wire, to a file
+//!                                         also the JSONL, to a file
 //!
 //! tcp_sim.zig runs each seed as it does under `zig build test`, but a seed
 //! whose oracle fails is a broken `always` here, named with its seed, and the
@@ -17,7 +17,7 @@
 //! an `unreachable` reached.
 
 const std = @import("std");
-const at = @import("antithesis.zig");
+const at = @import("coverage");
 const sim = @import("tcp_sim.zig");
 const options = @import("tcp_properties_options");
 

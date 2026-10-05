@@ -92,7 +92,7 @@
 //! peer's SYN timer tries again).
 
 const proto = @import("proto.zig");
-const props = @import("antithesis.zig");
+const props = @import("coverage");
 
 pub const header_len: usize = 20;
 pub const segment_at: usize = proto.eth_header_len + proto.ip_header_len;

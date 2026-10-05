@@ -53,7 +53,7 @@ const std = @import("std");
 const proto = @import("proto.zig");
 const tcp = @import("tcp.zig");
 const invariants = @import("tcp_check.zig");
-const props = @import("antithesis.zig");
+const props = @import("coverage");
 
 const ns_per_ms: i96 = 1_000_000;
 const ns_per_s: i96 = 1_000_000_000;
@@ -184,7 +184,7 @@ const Scenario = struct {
     }
 };
 
-/// **A ROUGHER PEER** (ANTITHESIS.md): what a plain seed's client never
+/// **A ROUGHER PEER** (COVERAGE.md): what a plain seed's client never
 /// does, and so what the table's code for it was never run against under
 /// loss and reordering. Chosen by a second generator from the seed, so a
 /// plain seed runs exactly as it always has and its regressions still
