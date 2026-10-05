@@ -54,6 +54,12 @@ test "the properties over a sweep of seeds" {
         if (!ok) failed_seeds += 1;
         at.always(@src(), ok, "fat_sim: every oracle holds for every seed, both FAT paths", .{ .seed = seed });
     }
+    // Every sweep, whatever its size: they are the regression tests.
+    for (fat_sim.regressions) |seed| {
+        const ok = if (fat_sim.runSeed(seed)) true else |_| false;
+        if (!ok) failed_seeds += 1;
+        at.always(@src(), ok, "fat_sim: every regression seed holds", .{ .seed = seed });
+    }
 
     var buf: [64 * 1024]u8 = undefined;
     var w: std.Io.Writer = .fixed(&buf);

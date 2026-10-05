@@ -269,8 +269,8 @@ pub fn build(b: *std.Build) void {
     // a sweep of seeds, then every assertion they reach judged. Not part of `test`: its report is read, not gated on, while it
     // is a proof of concept (a `sometimes` never met is a gap, not a bug).
     const props_opts = b.addOptions();
-    props_opts.addOption(u64, "seeds", b.option(u64, "seeds", "how many tcp_sim seeds `properties` sweeps") orelse 500);
-    props_opts.addOption(u64, "fat_seeds", b.option(u64, "fat-seeds", "how many fat_sim seeds `properties` sweeps") orelse 100);
+    props_opts.addOption(u64, "seeds", b.option(u64, "seeds", "how many tcp_sim seeds `properties` sweeps") orelse 100);
+    props_opts.addOption(u64, "fat_seeds", b.option(u64, "fat-seeds", "how many fat_sim seeds `properties` sweeps") orelse 20);
     props_opts.addOption([]const u8, "sdk_jsonl", b.option([]const u8, "sdk-jsonl", "where `properties` writes its JSONL") orelse "");
     // The floor (coverage/floor-sim.txt, COVERAGE.md): what the long tier
     // must reach. Unset, a MISS is reported and never fails the step.
@@ -284,7 +284,11 @@ pub fn build(b: *std.Build) void {
         .root_module = b.createModule(.{
             .root_source_file = b.path("src/properties.zig"),
             .target = b.graph.host,
-            .optimize = .ReleaseSafe,
+            // **DEBUG, AS EVERY HOST TEST IS** (Steve, 2026-10-05): test code
+            // is iterated on, and Debug builds in a fraction of the time. A
+            // sweep is nearly all running, though, about three times slower in
+            // Debug: long.sh asks for ReleaseSafe for its 10,000 seeds.
+            .optimize = b.option(std.builtin.OptimizeMode, "sweep-optimize", "how `properties` is built (Debug; long.sh: ReleaseSafe)") orelse .Debug,
             .imports = &.{
                 .{ .name = "tcp_properties_options", .module = props_opts.createModule() },
                 .{ .name = "coverage", .module = coverage },

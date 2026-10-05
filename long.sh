@@ -7,9 +7,9 @@
 #   SEEDS=50000 ./long.sh     more seeds
 #   ./long.sh sim | metal     one half
 #
-# 1. **The simulator** (`zig build properties`), plain and rough seeds, with
-#    `coverage/floor-sim.txt` as its floor: every property on it must be
-#    reached, and none broken.
+# 1. **The simulators** (`zig build properties`, ReleaseSafe): TCP's plain and
+#    rough seeds and FAT's, with `coverage/floor-sim.txt` as their floor:
+#    every property on it must be reached, and none broken.
 #
 # 2. **The real kernel, losing each of its frames in turn.** gopher.elf, built
 #    with -Dcoverage, on metal-vmm's PC-shaped machine (TRANSPORT=pci: it
@@ -33,6 +33,7 @@ VMM="${METAL_VMM:-$HOME/showell_repos/metal-vmm}"
 SDK="${COVERAGE_SDK:-$HOME/showell_repos/zig-coverage-sdk}"
 SITE="${SITE:-$HOME/build/gopher-metal/probe/gopher/pristine.img}"
 SEEDS="${SEEDS:-10000}"
+FAT_SEEDS="${FAT_SEEDS:-300}"
 LATENCY_US="${LATENCY_US:-5000}"
 # A page, a large one (many frames), and a form.
 ROUTES="${ROUTES:-/ /steve-resume.pdf /login/full}"
@@ -45,8 +46,10 @@ began=$(date +%s)
 lap() { echo "time: $1 $(( $(date +%s) - began )) s"; began=$(date +%s); }
 
 if [ "$want" != metal ]; then
-    echo "── the simulator: $SEEDS seeds, plain and rough, against coverage/floor-sim.txt"
-    zig build properties -Dseeds="$SEEDS" -Dfloor=coverage/floor-sim.txt > "$OUT.sim" 2>&1
+    echo "── the simulators: $SEEDS TCP seeds, plain and rough, and $FAT_SEEDS FAT seeds, against coverage/floor-sim.txt"
+    # ReleaseSafe: a sweep this long is nearly all running (build.zig).
+    zig build properties -Dseeds="$SEEDS" -Dfat-seeds="$FAT_SEEDS" -Dsweep-optimize=ReleaseSafe \
+        -Dfloor=coverage/floor-sim.txt > "$OUT.sim" 2>&1
     code=$?
     grep -E 'runs failed|not satisfied|^ *(FAIL|FLOOR|STALE)|floor .*under' "$OUT.sim" | sed 's/^ *//'
     [ $code = 0 ] || failed+=(sim)

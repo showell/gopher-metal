@@ -457,12 +457,14 @@ pub fn runSeed(seed: u64) !void {
     }
 }
 
-/// The seeds `zig build test` runs. A seed that once failed and was fixed
-/// stays here, named, as a regression test.
-const seeds = [_]u64{ 1, 2, 3, 4, 5, 6, 7, 8 } ++ regressions;
+/// The seeds `zig build test` runs.
+const seeds = [_]u64{ 1, 2, 3, 4, 5, 6, 7, 8 };
 
-/// Seeds that once failed, each under what it found.
-const regressions = [_]u64{
+/// **SEEDS THAT ONCE FAILED**, each under what it found. Run by
+/// `zig build properties` (src/properties.zig) on every sweep, not by
+/// `zig build test`: each is a crowded run of a thousand operations, most of
+/// a minute in Debug, and the quick tests stay quick.
+pub const regressions = [_]u64{
     // A full FAT16 root: a rename to a new name unlinked `from` before
     // finding room for `to`, and a lost file's chain leaked (fat16.zig's
     // rename).

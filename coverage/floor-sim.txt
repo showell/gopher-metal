@@ -3,9 +3,10 @@
 # that a long run never reaches fails it (a MISS on the floor); a line that
 # names no property fails it too, as a floor gone stale.
 #
-# Today that is every property in tcp.zig and tcp_sim.zig: 500 seeds, plain
-# and rough, reach them all (2026-10-05). A scenario change that stops
-# reaching one is a gap opening in what the simulator tests.
+# Today that is every property in tcp.zig and tcp_sim.zig (500 seeds, plain
+# and rough, reach them all, 2026-10-05) and all but one of fat16.zig's and
+# fat_sim.zig's. A scenario change that stops reaching one is a gap opening
+# in what the simulators test.
 tcp: a stuck half-open connection gives way to a new SYN
 tcp: a lost SYN-ACK is sent again
 tcp: the timer goes back to the oldest unacknowledged byte
@@ -29,3 +30,21 @@ tcp_sim: the client resets the connection
 tcp_sim: a flood SYN is sent
 tcp_sim: the table alone gives up on a client that left
 tcp_sim: a client that stayed through a flood got its whole answer
+
+# The FAT simulator (fat_sim.zig). Not "a directory reaches FAT's most
+# entries": 65,536 entries is more files than a run can make in a minute.
+fat: the kept free count never runs below zero
+fat: the allocation cursor wraps around the volume
+fat: an allocation finds the volume full
+fat: a volume full part-way through an allocation gives back what it took
+fat: every cluster freed was in use
+fat: a name's run of entries straddles a sector
+fat: a FAT16 root directory is full
+fat: a directory grows by a cluster
+fat: an append links clusters onto a file
+fat: a rename replaces a file
+fat_sim: a write finds no room
+fat_sim: an append finds no room
+fat_sim: a rename finds no room
+fat_sim: the volume is mounted again
+fat_sim: some run finds the volume full

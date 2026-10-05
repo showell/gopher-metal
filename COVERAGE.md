@@ -17,10 +17,16 @@ that compiles either imports `"coverage"` and `"coverage_catalog"`.
   to) **fails only the long tier, and only for a property on its floor**
   (`coverage/`). Antithesis treats the two alike; we don't, on purpose
   (the SDK's README).
-- **Three tiers, one set of properties.** `zig build test` runs eight plain
-  and eight rough seeds; `zig build properties` 500 of each in about a
-  second; `./long.sh` 10,000 and the real kernel's lossy sweep. Each reads
-  the same properties with a bigger budget.
+- **Three tiers, one set of properties.** `zig build test` runs eight
+  plain and eight rough TCP seeds and eight FAT seeds; `zig build
+  properties` 100 of each kind of TCP seed, 20 FAT seeds and the FAT
+  regression seeds, in about a minute; `./long.sh` 10,000 TCP and 300 FAT
+  seeds and the real kernel's lossy sweep, in about ten. Each reads the same
+  properties with a bigger budget.
+- **Debug for test code** (Steve, 2026-10-05): it builds in a fraction of
+  the time. A sweep is nearly all running, about three times slower in
+  Debug, so `long.sh` builds its with `-Dsweep-optimize=ReleaseSafe`.
+  Shipping kernels are ReleaseSafe, as they always were.
 - **QEMU stays mostly on the happy path.** The judge checks that metal
   answers as Linux does, on a clean network. **The budget for covering
   every scenario goes to metal-vmm**, where every frame, disk request and
@@ -32,10 +38,10 @@ that compiles either imports `"coverage"` and `"coverage_catalog"`.
 
 ## Running it
 
-**On Linux, against the TCP simulator** (`src/tcp_properties.zig`):
+**On Linux, against the TCP and FAT simulators** (`src/properties.zig`):
 
-    zig build properties                 # 500 seeds, each plain and rough
-    zig build properties -Dseeds=5000    # about a minute
+    zig build properties                 # 100 TCP seeds, plain and rough; 20 FAT
+    zig build properties -Dseeds=5000 -Dfat-seeds=300 -Dsweep-optimize=ReleaseSafe
     zig build properties -Dsdk-jsonl=out/sdk.jsonl
 
 A seed whose oracle fails is a false `always` with its seed in the details,
@@ -56,7 +62,7 @@ any serial log, such as a droplet's.
 
 **The long tier, for bug hunting and before a deploy:**
 
-    ./long.sh              # about 6 minutes
+    ./long.sh              # about 10 minutes
     SEEDS=50000 ./long.sh
     ./long.sh sim | metal  # one half
 
