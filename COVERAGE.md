@@ -1,116 +1,98 @@
-# Test properties, the Antithesis way
+# Coverage properties
 
-A proof of concept (2026-10-05): the **assertion** half of Antithesis's SDK
-(https://antithesis.com/docs/properties_assertions/), in Zig, cribbed from
-their Go and Rust SDKs, aimed at the metal layer first. No randomness, no
-lifecycle calls, no guidance assertions yet.
+`always` and `sometimes` properties of a whole run, from
+[zig-coverage-sdk](https://github.com/showell/zig-coverage-sdk). Its README
+covers the API, the catalog, and where it differs from Antithesis. This file
+covers what gopher-metal does with it. Started 2026-10-05.
 
-## What it is
+**The SDK is a sibling checkout:** `../zig-coverage-sdk`, or
+`-Dcoverage-sdk=<dir>`. Every module that compiles `tcp.zig` imports it as
+`"coverage"`.
 
-`src/antithesis.zig`. An assertion is a property of the whole run, not a
-check that stops it:
+## Decisions
 
-| call | holds when |
-|---|---|
-| `always(@src(), cond, "msg", details)` | reached, and true every time |
-| `alwaysOrUnreachable(...)` | true every time it is reached, if ever |
-| `sometimes(@src(), cond, "msg", details)` | true at least once |
-| `reachable(@src(), "msg", details)` | reached at least once |
-| `@"unreachable"(@src(), "msg", details)` | never reached |
-
-`details` is anything `std.json` can write, or `null`. The message is the
-property's name and id, and must be comptime.
-
-**The catalog.** Every call site is known before it runs, so a `sometimes`
-that never ran is reported as failing — the point of the thing. As in Rust's
-SDK (linkme), each site is a static in a linker section,
-`antithesis_catalog`, bounded by `__start_`/`__stop_`. Three things found
-getting there, each now commented where it lives:
-
-- zig's own linker (Debug) leaves slack between statics, with old bytes in
-  it, so the section is not an array: each Site is 64 bytes, aligned and
-  tagged, and the walk takes only what carries the tag;
-- ReleaseSafe's optimizer drops a site whose branch it proves dead — the one
-  most worth reporting — unless the site is exported (hidden, unique name);
-- a site is in the catalog when its function is *compiled*, and Zig compiles
-  only what is referenced: an unreferenced function's assertions are absent.
-
-**The wire** is Antithesis's own JSONL, as both SDKs write it: an
-`antithesis_sdk` line and every site's declaration on the first event, then
-the first pass and the first failure of each site. It goes to `sink`, a
-function pointer; none is set by default, and the counters alone still
-answer `report`.
+- **A FAIL fails every tier.** A FAIL is a broken `always`, or an
+  `unreachable` that was reached. **A MISS** (a property the run never got
+  to) **is reported, never gated on, until a long tier exists with a list
+  of what it must reach.** Antithesis treats the two alike; we don't, on
+  purpose (the SDK's README).
+- **QEMU stays mostly on the happy path.** The judge checks that metal
+  answers as Linux does, on a clean network. **The budget for covering
+  every scenario goes to metal-vmm**, where every frame, disk request and
+  clock tick is ours to choose and a run repeats exactly. On Linux the
+  same work is done by `tcp_sim.zig`.
+- **Nothing deployed writes the lines.** `-Dcoverage` is off by default:
+  the declarations alone would fill the log ring `/admin/host` shows. The
+  counters are still kept, at the cost of one add per site reached.
 
 ## Running it
 
 **On Linux, against the TCP simulator** (`src/tcp_properties.zig`):
 
-    zig build properties                 # seeds 1..500, ~25 s cold, ~1 s warm
-    zig build properties -Dseeds=5000
+    zig build properties                 # 500 seeds, each plain and rough
+    zig build properties -Dseeds=5000    # about a minute
     zig build properties -Dsdk-jsonl=out/sdk.jsonl
 
-Each seed is `tcp_sim.zig`'s run; a seed whose oracle fails is a false
-`always` with its seed in the details, and the sweep goes on.
+A seed whose oracle fails is a false `always` with its seed in the details,
+and the sweep goes on. Only a FAIL fails the step. (zig's build runner prints
+"failed command" for any test that writes to stderr, so read the summary
+line instead.)
 
-**On metal** (`-Dantithesis`, off by default and in anything deployed):
+**On metal:**
 
-    zig build gopher -Dantithesis
-    ANTITHESIS_OUTPUT_DIR=out probe/run.sh gopher uploads
-    tools/antithesis_report.py out/sdk.jsonl
+    zig build gopher -Dcoverage
+    COVERAGE_OUTPUT_DIR=out probe/run.sh gopher uploads
+    ../zig-coverage-sdk/tools/report.py out/sdk.jsonl
 
-The kernel writes each line to the serial port behind `antithesis: ` — the
-port only, not the ring `/admin/host` shows. The judge appends every boot's
-lines to `$ANTITHESIS_OUTPUT_DIR/sdk.jsonl`; `tools/antithesis_jsonl.sh`
-does the same for any serial log (a droplet's).
-
-**Reading a report.** `FAIL` is a property broken: an `always` seen false, an
-`unreachable` reached. `MISS` is one never got to: a `sometimes` never true,
-a `reachable` or an `always` never reached. Antithesis fails both; here only
-a FAIL fails the step, because a MISS says the runs were short of the case,
-not that the code is wrong.
+The kernel writes each line to the serial port behind `coverage: `: the port
+only, not the log ring. The judge appends every boot's lines to
+`$COVERAGE_OUTPUT_DIR/sdk.jsonl`. `tools/coverage_jsonl.sh` does the same for
+any serial log, such as a droplet's.
 
 ## What the runs have said
 
-18 properties in `tcp.zig` (retransmission, probing, window updates, resets,
-RTO bounds), and a few in `tcp_sim.zig` that say its scenarios happened. No
-FAIL anywhere.
+There are 18 properties in `tcp.zig` (retransmission, probing, window
+updates, resets, RTO bounds), and a few in `tcp_sim.zig` that confirm its
+scenarios actually happened. There has been no FAIL anywhere.
 
-**Day one: 500 plain seeds never reached four of the table's paths** — an
-exact reset closing a connection; an inexact in-window reset drawing a
-challenge ACK; giving up on a silent peer; a stuck half-open connection
-giving way to a new SYN. Each had a unit test in `tcp_test.zig`, none a run
-under loss and reordering: the simulator's client reset only when it gave up
-itself, and nothing ever competed for the table's two slots.
+**On day one, 500 plain seeds never reached four of the table's paths:**
+- an exact reset closing a connection;
+- an inexact in-window reset drawing a challenge ACK;
+- giving up on a silent peer;
+- a stuck half-open connection giving way to a new SYN.
 
-**So `tcp_sim.zig` has rough seeds** (`Rough`, `runRoughSeed`): the same
-seed, with a peer that, each by its own chance, resets mid-exchange (exactly,
-or off by up to 2000 and so challenged) and then answers as a closed port;
-vanishes part-way through the answer; or floods the table with SYNs from
-addresses that never finish. A second generator chooses them, so a plain
-seed runs exactly as before and its regressions still reproduce. The
-give-up oracle now counts the client's own connection only, since the
-table is right to give up on the flood's.
+Each had a unit test in `tcp_test.zig`, but none was ever run under loss
+and reordering. The simulator's client reset only when it gave up itself,
+and nothing ever competed for the table's two slots.
 
-After that: 5,000 seeds, each plain and rough (about a minute), every oracle
-held and every property was reached. The table alone gave up on a client
-that left in 45 of the first 500 rough runs; a client that stayed through a
-flood got its whole answer every time (60 of them in those 500). `zig build test` runs rough seeds 1–8
-beside the plain ones.
+**So `tcp_sim.zig` has rough seeds** (`Rough`, `runRoughSeed`). A rough
+seed is a plain seed whose peer, each by its own chance:
+- resets mid-exchange, either exactly or off by up to 2000 (and so is
+  challenged), then answers as a closed port;
+- vanishes part-way through the answer;
+- or floods the table with SYNs from addresses that never finish.
 
-One judge gate on metal (`uploads`, QEMU) reached 3 of the 18: a clean
-virtual network exercises none of the recovery paths.
+A second random generator, derived from the seed, makes those choices. So a
+plain seed runs exactly as it did before, and its regression seeds still
+reproduce. The give-up oracle now counts only the client's own connection:
+under a flood, the table is right to give up on the spoofed ones.
 
-## Next, if it earns it
+**After that:** 5,000 seeds, each run plain and rough, took about a minute.
+Every oracle held and every property was reached. In the first 500 rough
+runs, the table alone gave up on a client that had left 45 times, and all 60
+clients that stayed through a flood got their whole answer.
+`zig build test` runs rough seeds 1–8 alongside the plain ones.
 
-- A lossy run of the real kernel (QEMU, or metal-vmm's `WIRE_EAT`), so the
-  recovery paths are reached on the machine, not only in the simulator.
-- A long-tier script: thousands of seeds plus a floor list of `sometimes`
-  that a pre-deploy run must reach.
-- Properties in the rest of the metal layer: FAT (`fat16.zig`: the cached
-  and on-disk FAT agree; a write past `data/`/`auth/` never happens), the
-  page cache, the request heap, restart.
-- The application layer: angry-gopher's server runs on Linux, where the sink
-  is a file at `$ANTITHESIS_OUTPUT_DIR/sdk.jsonl`.
-- The rest of the SDK, if Antithesis itself is the target: `random` (from the
-  hypervisor, so it can steer runs), `setup_complete`, the guidance
-  assertions (`always_greater_than`, `sometimes_all`).
+One judge gate on metal (`uploads`, under QEMU) reached 3 of the 18
+properties, as expected on a clean network.
+
+## Next
+
+- **metal-vmm runs today's kernel.** It was built when the kernel took no
+  interrupts; since v4 it takes them, at `sti; hlt` only. After that,
+  metal-vmm is where the recovery paths get reached on the machine.
+- A long-tier script: thousands of seeds, plus a list of `sometimes` that a
+  pre-deploy run must reach.
+- Properties in FAT (`fat16.zig`), the page cache, and restart.
+- An explorer: metal-vmm choosing faults, scored by which properties a run
+  reaches. That's the long-term aim, and it isn't urgent.
