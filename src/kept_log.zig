@@ -27,6 +27,14 @@
 //! one.
 
 const std = @import("std");
+const props = @import("coverage");
+
+comptime {
+    props.catalogFile(@import("coverage_catalog"), here());
+}
+fn here() std.builtin.SourceLocation {
+    return @src();
+}
 const log_ring = @import("log_ring.zig");
 
 pub const slot_bytes = 64 * 1024;
@@ -110,8 +118,15 @@ pub fn open(region: []u8) Kept {
     var best: ?u1 = null;
     for ([_]u1{ 0, 1 }) |s| {
         const h = headerAt(region, s).*;
-        if (!h.valid()) continue;
+        if (!h.valid()) {
+            if (h.magic == magic)
+                props.reachable(@src(), "kept log: a header with the magic but a bad check or shape is not trusted", null)
+            else
+                props.reachable(@src(), "kept log: a slot with no header holds no log", null);
+            continue;
+        }
         if (best) |b| {
+            props.reachable(@src(), "kept log: both slots are sealed, and the later boot is the previous", null);
             if (h.boot > headerAt(region, b).boot) best = s;
         } else best = s;
     }
@@ -120,6 +135,8 @@ pub fn open(region: []u8) Kept {
         break :blk .{ .boot = h.boot, .ring = .{ .buf = slotBytes(region, b), .head = @intCast(h.head), .total = h.total } };
     } else null;
     const slot: u1 = if (best) |b| ~b else 0;
+    if (best == null) props.reachable(@src(), "kept log: no boot before this one is found", null);
+    if (best) |b| props.always(@src(), slot != b, "kept log: a boot never writes over the log of the boot before it", null);
     // Until this boot seals, its slot says nothing (see the file's comment).
     headerAt(region, slot).magic = 0;
     return .{

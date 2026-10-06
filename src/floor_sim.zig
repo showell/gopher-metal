@@ -16,12 +16,17 @@
 //!   in a hundred, since it costs 16 MB), a write past a kept file's end,
 //!   and no memory to grow a copy. Oracle: the copy concerned is gone, the
 //!   rest are as they were, and the count stays within the slots.
+//! - **The log ring's redactor** (`redactSeed`): a line built part by part,
+//!   a key naming a secret, `=` or `:`, perhaps a space, a quote or none,
+//!   and a value that may be empty. Oracle: a non-empty value never comes
+//!   out, and a line with an empty quoted value comes out as it went in.
 
 const std = @import("std");
 const virtio = @import("virtio.zig");
 const gpt = @import("gpt.zig");
 const kernel_partition = @import("kernel_partition.zig");
 const PageCache = @import("page_cache.zig").PageCache;
+const log_ring = @import("log_ring.zig");
 const props = @import("coverage");
 
 comptime {
@@ -179,9 +184,52 @@ pub fn pageSeed(seed: u64) Failure!void {
     if (!std.mem.eql(u8, b, "kept")) return fail(seed, "another file's copy changed", .{});
 }
 
+// ── the log ring's redactor ─────────────────────────────────────────────────
+
+pub fn redactSeed(seed: u64) Failure!void {
+    var prng = std.Random.DefaultPrng.init(seed ^ 0x7265_6461_6374); // "redact"
+    const r = prng.random();
+    const keys = log_ring.Redactor.value_keys;
+    var line: [128]u8 = undefined;
+    var n: usize = 0;
+    const put = struct {
+        fn s(buf: []u8, at: *usize, text: []const u8) void {
+            @memcpy(buf[at.*..][0..text.len], text);
+            at.* += text.len;
+        }
+    };
+    put.s(&line, &n, "GET /x?");
+    put.s(&line, &n, keys[r.uintLessThan(usize, keys.len)]);
+    put.s(&line, &n, if (r.boolean()) "=" else ":");
+    if (r.boolean()) put.s(&line, &n, " ");
+    const quote: ?u8 = switch (r.uintLessThan(u8, 3)) {
+        0 => '"',
+        1 => '\'',
+        else => null,
+    };
+    const empty = quote != null and r.boolean();
+    var secret: [12]u8 = undefined;
+    for (&secret) |*c| c.* = "QWXZJ"[r.uintLessThan(usize, 5)];
+    if (quote) |q| put.s(&line, &n, &.{q});
+    if (!empty) put.s(&line, &n, &secret);
+    if (quote) |q| put.s(&line, &n, &.{q});
+    put.s(&line, &n, " done\n");
+    var buf: [256]u8 = undefined;
+    var ring = log_ring.Ring.init(&buf);
+    ring.write(line[0..n]);
+    var out: [256]u8 = undefined;
+    const got = ring.read(&out);
+    if (empty) {
+        if (!std.mem.eql(u8, got, line[0..n])) return fail(seed, "an empty quoted value changed the line: {s} became {s}", .{ line[0..n], got });
+    } else if (std.mem.indexOf(u8, got, &secret) != null) {
+        return fail(seed, "a secret came out: {s}", .{got});
+    }
+}
+
 pub fn runSeed(seed: u64) Failure!void {
     try gptSeed(seed);
     try pageSeed(seed);
+    try redactSeed(seed);
 }
 
 test "floor_sim: GPT, built field by field with one field wrong, a handful of seeds" {

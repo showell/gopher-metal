@@ -32,6 +32,14 @@
 //! have interrupted a write part-way.
 
 const std = @import("std");
+const props = @import("coverage");
+
+comptime {
+    props.catalogFile(@import("coverage_catalog"), here());
+}
+fn here() std.builtin.SourceLocation {
+    return @src();
+}
 
 /// **THE REQUEST LOG WRITES THE PATH, NEVER THE QUERY** (QUEUE.md item 95,
 /// REVIEW-secrets.md finding 1). The redactor below takes a secret VALUE out of
@@ -70,6 +78,9 @@ pub const Ring = struct {
     /// than the ring keeps its tail.
     pub fn write(self: *Ring, bytes: []const u8) void {
         for (bytes) |b| self.redactor.feed(b, self, store);
+        // Once a write, not once a byte: this is the kernel's logging path.
+        props.alwaysLessThan(@src(), self.head, self.buf.len, "log ring: the next byte's place is inside the ring", null);
+        props.alwaysLessThanOrEqualTo(@src(), self.len(), self.buf.len, "log ring: it holds no more than its capacity", null);
     }
 
     fn store(self: *Ring, b: u8) void {
@@ -110,9 +121,14 @@ pub const Ring = struct {
             }
             // A newline as the very last byte leaves nothing whole after it.
             if (skip == self.len()) skip = 0;
+            if (skip > 0)
+                props.reachable(@src(), "log ring: once bytes are lost, a read starts at the first whole line", null)
+            else
+                props.reachable(@src(), "log ring: bytes lost and no whole line held, so a read answers what is held", null);
         }
         const held = self.len() - skip;
         const n = @min(held, out.len);
+        if (n < held) props.reachable(@src(), "log ring: a reader with less room gets the newest bytes", .{ .room = out.len, .held = held });
         // The newest `n` of the held bytes: begin `held - n` past `skip`.
         var from = skip + (held - n);
         var at: usize = 0;
@@ -186,6 +202,7 @@ pub const Redactor = struct {
                 '"', '\'' => {
                     if (self.quote != 0) {
                         // An empty quoted value: `""`.
+                        props.reachable(@src(), "log ring: an empty quoted value has nothing to take out", null);
                         self.quote = 0;
                         self.state = .plain;
                     } else {
@@ -198,6 +215,7 @@ pub const Redactor = struct {
                     self.state = .plain;
                 },
                 else => {
+                    props.reachable(@src(), "log ring: a value after a key naming a secret is taken out", null);
                     for (mark) |m| put(sink, m);
                     self.state = .in_value;
                     return;
@@ -228,6 +246,7 @@ pub const Redactor = struct {
         if (b == '\n') self.window = @splat(0);
         for (line_keys) |k| {
             if (std.mem.endsWith(u8, &self.window, k)) {
+                props.reachable(@src(), "log ring: the rest of a cookie or authorization line is taken out", null);
                 for (" " ++ mark) |m| put(sink, m);
                 self.state = .in_line;
                 return;
@@ -235,6 +254,7 @@ pub const Redactor = struct {
         }
         for (segment_keys) |k| {
             if (std.mem.endsWith(u8, &self.window, k)) {
+                props.reachable(@src(), "log ring: an upload's id is taken out of its path", null);
                 for (mark) |m| put(sink, m);
                 self.state = .in_segment;
                 return;
