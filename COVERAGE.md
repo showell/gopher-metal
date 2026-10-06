@@ -157,7 +157,25 @@ under "For the box" below.)*
 | `request_heap` | 4 (the memory it keeps missing, the pages running out, a block that cannot grow in place, a reset) | 4 | `pure_sim`; `floor_sim` for a growth only the last block can make | none: the allocator answers null and the caller decides |
 | `stream` | 7 (a read finding the peer gone or idle; a write, or draining a spill, finding the connection gone or idle; a spill too full) | 0 here | under metal-vmm (below): `stream.zig` imports `io.zig`, the driver and interrupts, so no simulator can drive it. The seam that would let one is under Proposed in QUEUE.md | `WriteFailed`, and null for a read |
 | `store` (`store_model`, `store_fat`, `store_linux`) | 12 in `store_sim` | 12 | `store_sim`: the model, the FAT store on a disk in memory (FAT16, and FAT32 one seed in four) and the strict Linux store in a temporary directory, given the same operations from a pool of paths that differ in case, nest, and break the rules; a cut on the FAT side one write in 4 to 20, plain or torn. 1000 seeds | the Store's own (`store.zig`): `NotFound`, `IsDirectory`, `BadName`, `TooBig`, `NoSpace`, `Damaged`, `Io` |
-| `virtio` (`Block.flush`) | 1 | 0 here | under metal-vmm | a SCSI status, as a virtio-blk status byte |
+| `pvh` | 4 (3 refusals of the loader's header, and the region chosen within the RAM) | 4 | `floor_sim`: a start info built in memory, one field wrong | `NoStartInfo`, `NotPvh`, `NoMemoryMap` |
+| `restart` | 6 in `restart.zig` (3 ways CMOS holds no record, 3 clocks that say no time), and `pure_sim`'s 7 | 13 | `pure_sim`; `floor_sim` for a count of zero and an unknown clock | none: no record is null |
+| `pages` | 5 (nothing, more than the heap, an alignment past it, no run free, an address not its own) | 5 | `floor_sim`: a heap over memory a test owns. A free of an address not its own panics, by design; resize meets the refusal | none: null to the allocator's caller, and a panic for a foreign free |
+| `rtc` | 10 (6 of decoding, 4 of the chip) | 6 | `floor_sim` for the decoding (registers built field by field, BCD or binary, 12 or 24 hours); the chip's 4 are for the box | `NoChip`, `NeverSettled`, `Stuck`, `NoEdge`, `BadBcd`, `OutOfRange` |
+| `pit` | 6 (3 of settling samples, 3 of the timer) | 3 | `floor_sim` for settling; the timer's 3 are for the box | `NoTimer`, `Implausible` |
+| `admin_reset` | 4 (2 of parsing the line, 2 of the boot disk) | 2 | `floor_sim` for parsing; the disk's 2 go through `io.zig`, met by `admin_reset.zig`'s own host tests, which `properties` does not run | an `Outcome`: `failed`, `no_admin` and the rest |
+| `ready` | 1 (a head std cannot parse is served, for the handler to refuse), and `ready_sim`'s 7 | 8 | `ready_sim` | none: `.ready`, `.waiting`, `.abandoned` |
+| `scsi` | 6 (no disk, no capacity twice, sizes, MODE SENSE twice) | 0 here | under metal-vmm (below) | `NoDisk`, `UnexpectedSizes`, `NoCapacity`, and a SCSI status |
+| `pci` | 3 (a BAR past the sixth, an I/O BAR, a 64-bit BAR in the last slot) | 0 here | for the box: no knob makes any of them | none: null for a BAR it will not map |
+| `rng` | 1 (a virtio-rng that will not come up is left alone) | 0 here | for the box: no knob | none: RDRAND may still answer |
+| `civil` | 0 | | nothing to name: pure calendar arithmetic with no refusal; `rtc` and `restart` check the ranges it is handed | none |
+| `wallclock` | 0 | | nothing to name: one call that brings `pit`, `rtc` and `tsc` up, whose refusals are theirs | none of its own |
+| `dhcp` | 0 | | not named here: its refusals are the box's (B18, lies in the peer's DHCP replies) | `NoOffer`, `NoAck` |
+| `net`, `interrupts`, `boot`, `port`, `tsc`, `serial`, `serial_gate`, `screen`, `stack`, `reset`, `restarting`, `kernel_partition` | 0 | | nothing to name: drivers and the boot path with no refusal of their own (`net`'s `poll` answers null for no frame, which is not one); everything they do is reached only under a VMM | none |
+| `metal`, `netcore` | 0 | | nothing to name: each is the list of files one build compiles | none |
+| `tcp`, `tcp_check` | 23, and `tcp_check`'s rules | 23 | `tcp_sim` (named before item 76: COVERAGE.md above, "What the runs have said"); `tcp_check` is the invariants, run by every simulator and, under B15, by a `-Dcoverage` kernel | none: `tcp` refuses a segment by dropping it |
+| the simulators and tests (`tcp_sim`, `fat_sim`, `page_sim`, `pure_sim`, `ready_sim`, `durable_sim`, `floor_sim`, `store_sim`, `properties`, `test_disk`, `tcp_test`, `fat16_test`, `fat16_faults_test`, `io_test`, `store_test`) | their own | | they are what reaches the rows above; a simulator's own properties are on the floor beside the module it drives | none |
+| `store_model`, `store_fat`, `store_linux` | | | in the `store` row above | |
+| `virtio` (`Block.flush`, the rings, negotiation) | 7 | 0 here | under metal-vmm (below) | a SCSI status, as a virtio-blk status byte |
 | `io` (`durable`) | 1 | 0 here | under metal-vmm | none: a failed flush is logged, counted, and the response goes out |
 
 **What `fat16` leaves unreached in `properties`, and why:**
@@ -250,4 +268,18 @@ metal-vmm run in `long.sh`; once a run reaches it, it goes on
 | stream: draining a spill finds the connection gone; and waits idle_ns and gives up | `stream.zig` | the two above, together (unverified) |
 | tcp: the table's invariants hold | `stream.zig` (B15) | any run of a `-Dcoverage` gopher.elf; every rough-peer run in `long.sh` |
 | fat: after a request, a volume has no damage beyond what a stop leaves | `probe/gopher.zig` (B15) | any run of a `-Dcoverage` gopher.elf that serves a request; with `VOLUME_CUT_AFTER` or `DISK_CUT_AFTER` and a remount, it judges what a cut left |
+| scsi: a controller with no disk on it | `scsi.zig` | `VOLUME=<copy> VOLUME_GONE_AT=1`: INQUIRY answers BAD_TARGET (unverified) |
+| scsi: a disk that will not say how big it is | `scsi.zig` | `VOLUME_GONE_AT=<READ CAPACITY's command number>`, about 2 or 3 after a UNIT ATTENTION (unverified) |
+| scsi: a disk that does not answer MODE SENSE is taken to cache | `scsi.zig` | `VOLUME_GONE_AT=<MODE SENSE's command number>`, one after READ CAPACITY (unverified) |
+| scsi: a MODE SENSE answer without the caching page is taken to cache | `scsi.zig` | **no knob**: a proposal, `VOLUME_MODE_PAGES=none` |
+| scsi: a controller whose CDB or sense size is not the default | `scsi.zig` | **no knob**: a proposal, metal-vmm's virtio-scsi config with other sizes |
+| scsi: a disk whose sectors are not 512 bytes, or too many to count | `scsi.zig` | **no knob**: a proposal, `VOLUME_SECTOR=4096` |
+| virtio: an mmio or a pci queue smaller than this driver needs, or none | `virtio.zig` | **no knob**: a proposal, a device whose `queue_num_max` is small |
+| virtio: a device without VIRTIO_F_VERSION_1, or without a feature this driver needs, is refused | `virtio.zig` | **no knob**: a proposal, a device that offers fewer features |
+| virtio: a device that will not keep FEATURES_OK; that fails at DRIVER_OK | `virtio.zig` | **no knob**: a proposal, a device that clears or fails a status bit |
+| rtc: no chip answers; two readings never agreed; updating for half a second; the seconds never changed | `rtc.zig` | **no knob** for any: metal-vmm's RTC (`clock.zig`) always answers. Proposals: `RTC_ABSENT=1`, `RTC_STUCK=1` |
+| pit: the count never moves; it wrapped; no round settled | `pit.zig` | **no knob**: metal-vmm's PIT always counts. A proposal: `PIT_FROZEN=1` |
+| pci: a BAR past the sixth; an I/O BAR; a 64-bit BAR in the last slot | `pci.zig` | **no knob**: a proposal, metal-vmm's PCI devices with such BARs |
+| rng: a virtio-rng device that will not come up is left alone | `rng.zig` | **no knob**: a proposal, an entropy device that refuses negotiation |
+| admin reset: the boot disk has no admin to reset; a step on the boot disk failed | `admin_reset.zig` | a boot disk with `data/admin-reset` and no admin, and `DISK_REFUSE` during the reset; `admin_reset.zig`'s own host tests meet both |
 | io: a flush failed, and the response goes out anyway | `io.zig` | the same, for the volume. **No knob fails a flush of the boot disk**: it is virtio-blk and writes through (virtio 1.2 §5.2.5.1), so nothing is sent; a knob would need metal-vmm's `DISK_CACHE` to offer FLUSH and fail it (a proposal) |

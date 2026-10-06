@@ -30,6 +30,14 @@
 //! than a second way to fail.
 
 const std = @import("std");
+const props = @import("coverage");
+
+comptime {
+    props.catalogFile(@import("coverage_catalog"), here());
+}
+fn here() std.builtin.SourceLocation {
+    return @src();
+}
 const pvh = @import("pvh.zig");
 
 const Alignment = std.mem.Alignment;
@@ -118,11 +126,16 @@ pub const Pages = struct {
         return (len + page_size - 1) / page_size;
     }
 
+    fn notOurs() ?usize {
+        props.reachable(@src(), "pages: an address below the heap, or not on a page, is not one of its pages", null);
+        return null;
+    }
+
     fn indexOf(self: *const Pages, ptr: [*]u8) ?usize {
         const addr = @intFromPtr(ptr);
-        if (addr < self.base) return null;
+        if (addr < self.base) return notOurs();
         const off = addr - self.base;
-        if (off % page_size != 0) return null;
+        if (off % page_size != 0) return notOurs();
         const i = off / page_size;
         return if (i < self.count) i else null;
     }
@@ -168,12 +181,18 @@ pub const Pages = struct {
     /// the first version could exhaust its budget on candidates too near the
     /// end to hold `n` pages and report that a mostly empty heap was full.
     fn find(self: *Pages, n: usize, alignment: Alignment) ?usize {
-        if (n == 0 or n > self.count) return null;
+        if (n == 0 or n > self.count) {
+            props.reachable(@src(), "pages: an allocation of more pages than the heap has", null);
+            return null;
+        }
         const want = @max(page_size, alignment.toByteUnits());
         const step = want / page_size;
         const first_addr = std.mem.alignForward(usize, self.base, want);
         const first = (first_addr - self.base) / page_size;
-        if (first >= self.count) return null;
+        if (first >= self.count) {
+            props.reachable(@src(), "pages: an alignment whose first page is past the heap", null);
+            return null;
+        }
 
         const candidates = (self.count - first + step - 1) / step;
         const from = if (self.cursor <= first) 0 else (self.cursor - first + step - 1) / step;
@@ -182,6 +201,7 @@ pub const Pages = struct {
             const i = first + ((from + c) % candidates) * step;
             if (i + n <= self.count and self.freeRun(i, n)) return i;
         }
+        props.reachable(@src(), "pages: no run of free pages long enough", .{ .pages = n });
         return null;
     }
 };
@@ -229,7 +249,10 @@ const vtable = std.mem.Allocator.VTable{
 
 fn alloc(ctx: *anyopaque, len: usize, alignment: Alignment, _: usize) ?[*]u8 {
     const self: *Pages = @ptrCast(@alignCast(ctx));
-    if (len == 0) return null;
+    if (len == 0) {
+        props.reachable(@src(), "pages: an allocation of nothing is refused", null);
+        return null;
+    }
     const n = Pages.pagesFor(len);
     const i = self.find(n, alignment) orelse return null;
     self.claim(i, n);

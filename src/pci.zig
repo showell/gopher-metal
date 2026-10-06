@@ -13,6 +13,7 @@
 //! Configuration mechanism #1 of the PCI Local Bus Specification 3.0, §3.2.2.3.2;
 //! bus 0 only, because a droplet has one bus and no bridges.
 
+const props = @import("coverage");
 const port = @import("port.zig");
 
 const address_port: u16 = 0xCF8;
@@ -69,13 +70,22 @@ pub const Function = struct {
     /// The physical address a BAR was given, or null for an I/O-port BAR or
     /// an empty one. A 64-bit BAR takes the next register for its top half.
     pub fn bar(self: Function, index: u8) ?u64 {
-        if (index > 5) return null;
+        if (index > 5) {
+            props.reachable(@src(), "pci: a BAR past the sixth", null);
+            return null;
+        }
         const register = 0x10 + index * 4;
         const low = self.read32(register);
-        if (low & 1 != 0) return null; // I/O space
+        if (low & 1 != 0) {
+            props.reachable(@src(), "pci: an I/O-space BAR, which this driver does not map", null);
+            return null; // I/O space
+        }
         var at: u64 = low & 0xFFFF_FFF0;
         if ((low >> 1) & 3 == 2) {
-            if (index == 5) return null;
+            if (index == 5) {
+                props.reachable(@src(), "pci: a 64-bit BAR in the last slot, with no register for its top half", null);
+                return null;
+            }
             at |= @as(u64, self.read32(register + 4)) << 32;
         }
         return if (at == 0) null else at;

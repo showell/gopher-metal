@@ -29,6 +29,14 @@
 //! real one.
 
 const std = @import("std");
+const props = @import("coverage");
+
+comptime {
+    props.catalogFile(@import("coverage_catalog"), here());
+}
+fn here() std.builtin.SourceLocation {
+    return @src();
+}
 const virtio = @import("virtio.zig");
 const serial = @import("serial.zig");
 
@@ -48,11 +56,15 @@ var device: ?struct { device: virtio.Device, q: Q, mem: *Memory } = null;
 
 /// Brings virtio-rng up if the machine has one. A machine without one is not an
 /// error here; RDRAND may still answer.
+fn refused() void {
+    props.reachable(@src(), "rng: a virtio-rng device that will not come up is left alone", null);
+}
+
 pub fn attach(mem: *Memory) void {
     const found = virtio.find(device_id_entropy) orelse return;
-    const st = virtio.negotiate(found, 0) catch return;
-    const q = Q.setup(found, 0, &mem.ring) catch return;
-    virtio.driverOk(found, st) catch return;
+    const st = virtio.negotiate(found, 0) catch return refused();
+    const q = Q.setup(found, 0, &mem.ring) catch return refused();
+    virtio.driverOk(found, st) catch return refused();
     device = .{ .device = found, .q = q, .mem = mem };
 }
 

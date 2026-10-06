@@ -20,6 +20,14 @@
 //! 0x5D) use.
 
 const std = @import("std");
+const props = @import("coverage");
+
+comptime {
+    props.catalogFile(@import("coverage_catalog"), here());
+}
+fn here() std.builtin.SourceLocation {
+    return @src();
+}
 
 pub const cmos_record: u8 = 0x70;
 pub const record_len = 8;
@@ -66,7 +74,18 @@ pub const Record = struct {
     /// holding zeros or anything else, a checksum that does not hold, or a
     /// count of zero, which no restart writes.
     pub fn decode(b: [record_len]u8) ?Record {
-        if (b[0] != magic or b[7] != checksum(b[0..7]) or b[1] == 0) return null;
+        if (b[0] != magic) {
+            props.reachable(@src(), "restart: CMOS holds no record, or another's", null);
+            return null;
+        }
+        if (b[7] != checksum(b[0..7])) {
+            props.reachable(@src(), "restart: a record whose checksum does not hold is no record", null);
+            return null;
+        }
+        if (b[1] == 0) {
+            props.reachable(@src(), "restart: a record with a count of zero is no record", null);
+            return null;
+        }
         const at = std.mem.readInt(u32, b[2..6], .little);
         return .{ .count = b[1], .at = if (at == unknown_time) null else at, .reason = @enumFromInt(b[6]) };
     }
@@ -82,10 +101,20 @@ fn checksum(b: []const u8) u8 {
 /// Minutes since 2020 for a Unix time, or null for one before it or past
 /// what fits.
 pub fn minutesSince2020(unix: ?i64) ?u32 {
-    const t = unix orelse return null;
-    if (t < epoch_2020) return null;
+    const t = unix orelse {
+        props.reachable(@src(), "restart: the clock is unknown, so the time is too", null);
+        return null;
+    };
+    if (t < epoch_2020) {
+        props.reachable(@src(), "restart: a clock before 2020 says no time", null);
+        return null;
+    }
     const m = @divFloor(t - epoch_2020, 60);
-    return if (m >= unknown_time) null else @intCast(m);
+    if (m >= unknown_time) {
+        props.reachable(@src(), "restart: a clock past what the record holds says no time", null);
+        return null;
+    }
+    return @intCast(m);
 }
 
 /// **A RESTART MORE THAN AN HOUR AFTER THE LAST STARTS THE COUNT AGAIN.**

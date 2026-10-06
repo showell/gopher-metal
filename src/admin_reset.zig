@@ -28,6 +28,14 @@
 //! it again, to the same end.
 
 const std = @import("std");
+const props = @import("coverage");
+
+comptime {
+    props.catalogFile(@import("coverage_catalog"), here());
+}
+fn here() std.builtin.SourceLocation {
+    return @src();
+}
 const io_mod = @import("io.zig");
 
 /// What the conf line says.
@@ -38,11 +46,27 @@ pub const Reset = struct {
 
 /// `Steve $2b$10$…`: a name (which may hold spaces), then a hash. Null if it
 /// is not that.
+fn failed() Outcome {
+    props.reachable(@src(), "admin reset: a step on the boot disk failed", null);
+    return .failed;
+}
+
+fn noAdmin() Outcome {
+    props.reachable(@src(), "admin reset: the boot disk has no admin to reset", null);
+    return .no_admin;
+}
+
 pub fn parse(value: []const u8) ?Reset {
-    const at = std.mem.lastIndexOfScalar(u8, value, ' ') orelse return null;
+    const at = std.mem.lastIndexOfScalar(u8, value, ' ') orelse {
+        props.reachable(@src(), "admin reset: a value with no space between a name and a hash", null);
+        return null;
+    };
     const name = std.mem.trim(u8, value[0..at], " \t");
     const hash = value[at + 1 ..];
-    if (name.len == 0 or !validHash(hash)) return null;
+    if (name.len == 0 or !validHash(hash)) {
+        props.reachable(@src(), "admin reset: an empty name, or not a bcrypt hash this server writes", null);
+        return null;
+    }
     return .{ .name = name, .hash = hash };
 }
 
@@ -95,13 +119,13 @@ pub fn apply(alloc: std.mem.Allocator, r: Reset) Outcome {
         }
     }.f;
 
-    const name = (read(alloc, name_path) catch return .failed) orelse return .no_admin;
+    const name = (read(alloc, name_path) catch return failed()) orelse return noAdmin();
     defer alloc.free(name);
-    const old = (read(alloc, password_path) catch return .failed) orelse return .no_admin;
+    const old = (read(alloc, password_path) catch return failed()) orelse return noAdmin();
     defer alloc.free(old);
     if (!std.mem.eql(u8, std.mem.trim(u8, name, " \t\r\n"), r.name)) return .other_name;
 
-    if (read(alloc, marker_path) catch return .failed) |done| {
+    if (read(alloc, marker_path) catch return failed()) |done| {
         defer alloc.free(done);
         if (std.mem.eql(u8, std.mem.trim(u8, done, " \t\r\n"), r.hash)) return .already;
     }
@@ -109,11 +133,11 @@ pub fn apply(alloc: std.mem.Allocator, r: Reset) Outcome {
     // The hash it replaces, aside, unless that is this same hash (a stop
     // after the rename and before the marker: keep the one from before).
     if (!std.mem.eql(u8, std.mem.trim(u8, old, " \t\r\n"), r.hash)) {
-        cwd.writeFile(io, .{ .sub_path = before_path, .data = old }) catch return .failed;
+        cwd.writeFile(io, .{ .sub_path = before_path, .data = old }) catch return failed();
     }
-    cwd.writeFile(io, .{ .sub_path = new_path, .data = r.hash }) catch return .failed;
-    cwd.rename(new_path, cwd, password_path, io) catch return .failed;
-    cwd.writeFile(io, .{ .sub_path = marker_path, .data = r.hash }) catch return .failed;
+    cwd.writeFile(io, .{ .sub_path = new_path, .data = r.hash }) catch return failed();
+    cwd.rename(new_path, cwd, password_path, io) catch return failed();
+    cwd.writeFile(io, .{ .sub_path = marker_path, .data = r.hash }) catch return failed();
     return .applied;
 }
 

@@ -19,6 +19,14 @@
 //! reports the RAM, not what is in it.
 
 const std = @import("std");
+const props = @import("coverage");
+
+comptime {
+    props.catalogFile(@import("coverage_catalog"), here());
+}
+fn here() std.builtin.SourceLocation {
+    return @src();
+}
 
 pub const magic: u32 = 0x336ec578; // "xEn3"
 
@@ -73,6 +81,7 @@ pub fn largestFree(entries: []const MemmapEntry, reserve: Region) Region {
             if (piece.len > best.len) best = piece;
         }
     }
+    props.alwaysLessThanOrEqualTo(@src(), best.len, totalRam(entries), "pvh: the region chosen is no larger than the RAM reported", null);
     return best;
 }
 
@@ -109,11 +118,19 @@ pub fn cut(region: Region, hole: Region) [2]Region {
 
 /// Reads the header the loader left, checking every field it is about to use.
 pub fn read(start_info: u64) Error![]const MemmapEntry {
-    if (start_info == 0) return Error.NoStartInfo;
+    if (start_info == 0) {
+        props.reachable(@src(), "pvh: the loader left no start info", null);
+        return Error.NoStartInfo;
+    }
     const info: *const StartInfo = @ptrFromInt(@as(usize, @intCast(start_info)));
-    if (info.magic != magic) return Error.NotPvh;
-    if (info.version < 1 or info.memmap_paddr == 0 or info.memmap_entries == 0)
+    if (info.magic != magic) {
+        props.reachable(@src(), "pvh: the start info has another magic, so not PVH", null);
+        return Error.NotPvh;
+    }
+    if (info.version < 1 or info.memmap_paddr == 0 or info.memmap_entries == 0) {
+        props.reachable(@src(), "pvh: a start info of version 0, or with no memory map", null);
         return Error.NoMemoryMap;
+    }
     const table: [*]const MemmapEntry = @ptrFromInt(@as(usize, @intCast(info.memmap_paddr)));
     return table[0..info.memmap_entries];
 }

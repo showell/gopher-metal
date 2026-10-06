@@ -38,6 +38,25 @@
 //!   asked to grow in place, which an arena can only do for its last.
 //!   Oracle: it answers no, the block keeps its bytes, and what the request
 //!   asked for (`used`) is unchanged.
+//! - **The PVH start info** (`pvhSeed`, item 80): the header a loader
+//!   leaves, built field by field in memory with a memory map, then one
+//!   field wrong (none at all, the magic, the version, the map's address or
+//!   its length). Oracle: the error that field calls for, and the map given
+//!   back whole when nothing is wrong.
+//! - **The restart record** (`restartSeed`, item 80): a record encoded as a
+//!   restart writes it, then one field wrong (the magic, a byte under the
+//!   checksum, a count of zero with its checksum made right), and the clock
+//!   it is stamped from unknown, before 2020, or past what fits. Oracle: a
+//!   good record decodes as written; each wrong one reads as no record; each
+//!   such clock as no time.
+//! - **The rest of the floor's pure parts** (item 80): the page heap over
+//!   memory a test owns (`pagesSeed`: more than it has, an alignment past
+//!   it, nothing, until full, and a free of an address not its own); the
+//!   RTC's registers decoded field by field, one made wrong (`rtcSeed`);
+//!   the PIT's settling of samples that agree or do not (`pitSeed`); and an
+//!   admin reset's `name hash` line, one part wrong (`adminSeed`). Oracle,
+//!   each time: the answer the wrong part calls for, and the right one when
+//!   nothing is wrong.
 
 const std = @import("std");
 const virtio = @import("virtio.zig");
@@ -50,6 +69,12 @@ const test_disk = @import("test_disk.zig");
 const proto = @import("proto.zig");
 const arp = @import("arp.zig");
 const RequestHeap = @import("request_heap.zig").RequestHeap;
+const pvh = @import("pvh.zig");
+const restart = @import("restart.zig");
+const pages_mod = @import("pages.zig");
+const rtc = @import("rtc.zig");
+const pit = @import("pit.zig");
+const admin_reset = @import("admin_reset.zig");
 const props = @import("coverage");
 
 comptime {
@@ -565,6 +590,210 @@ pub fn heapSeed(seed: u64) Failure!void {
     heap.reset();
 }
 
+// ── the PVH start info ──────────────────────────────────────────────────────
+
+const PvhWrong = enum { nothing, no_info, magic, version, no_map, no_entries };
+
+pub fn pvhSeed(seed: u64) Failure!void {
+    var prng = std.Random.DefaultPrng.init(seed ^ 0x7076_68); // "pvh"
+    const r = prng.random();
+    const wrong = r.enumValue(PvhWrong);
+    var map: [8]pvh.MemmapEntry = undefined;
+    const n = r.intRangeAtMost(u32, 1, map.len);
+    for (map[0..n]) |*e| e.* = .{ .addr = r.int(u32), .size = r.int(u32), .type = if (r.boolean()) pvh.MemmapEntry.ram else 2, .reserved = 0 };
+    var info = std.mem.zeroes(pvh.StartInfo);
+    info.magic = if (wrong == .magic) pvh.magic ^ r.intRangeAtMost(u32, 1, 0xFFFF) else pvh.magic;
+    info.version = if (wrong == .version) 0 else r.intRangeAtMost(u32, 1, 3);
+    info.memmap_paddr = if (wrong == .no_map) 0 else @intFromPtr(&map);
+    info.memmap_entries = if (wrong == .no_entries) 0 else n;
+    const at: u64 = if (wrong == .no_info) 0 else @intFromPtr(&info);
+    const got = pvh.read(at);
+    const want: ?pvh.Error = switch (wrong) {
+        .nothing => null,
+        .no_info => error.NoStartInfo,
+        .magic => error.NotPvh,
+        .version, .no_map, .no_entries => error.NoMemoryMap,
+    };
+    if (want) |w| {
+        if (got) |_| return fail(seed, "{s}: a start info with it wrong was read", .{@tagName(wrong)}) else |e| if (e != w)
+            return fail(seed, "{s}: wanted {s}, got {s}", .{ @tagName(wrong), @errorName(w), @errorName(e) });
+    } else {
+        const entries = got catch |e| return fail(seed, "a good start info was refused: {s}", .{@errorName(e)});
+        if (entries.len != n or entries.ptr != &map) return fail(seed, "a good start info's map came back changed", .{});
+        _ = pvh.largestFree(entries, .{ .start = 0, .len = r.int(u16) });
+    }
+}
+
+// ── the restart record ──────────────────────────────────────────────────────
+
+pub fn restartSeed(seed: u64) Failure!void {
+    var prng = std.Random.DefaultPrng.init(seed ^ 0x7265_7374); // "rest"
+    const r = prng.random();
+    const good = restart.Record{ .count = r.intRangeAtMost(u8, 1, 255), .at = if (r.boolean()) r.int(u31) else null, .reason = r.enumValue(restart.Reason) };
+    var b = good.encode();
+    switch (r.uintLessThan(u8, 4)) {
+        0 => {
+            const back = restart.Record.decode(b) orelse return fail(seed, "a good restart record read as none", .{});
+            if (back.count != good.count or back.at != good.at or back.reason != good.reason) return fail(seed, "a restart record came back changed", .{});
+        },
+        1 => {
+            b[0] ^= r.intRangeAtMost(u8, 1, 255);
+            if (restart.Record.decode(b) != null) return fail(seed, "a record of another magic was read", .{});
+        },
+        2 => {
+            b[r.intRangeAtMost(usize, 1, 6)] ^= r.intRangeAtMost(u8, 1, 255);
+            if (restart.Record.decode(b) != null) return fail(seed, "a record whose checksum does not hold was read", .{});
+        },
+        else => {
+            const zero = restart.Record{ .count = 0, .at = good.at, .reason = good.reason };
+            if (restart.Record.decode(zero.encode()) != null) return fail(seed, "a record with a count of zero was read", .{});
+        },
+    }
+    const epoch_2020: i64 = 1_577_836_800;
+    const clock: ?i64 = switch (r.uintLessThan(u8, 4)) {
+        0 => null,
+        1 => epoch_2020 - r.intRangeAtMost(i64, 1, 1 << 40),
+        2 => epoch_2020 + 60 * @as(i64, 0xFFFF_FFFF) + r.intRangeAtMost(i64, 0, 1 << 30),
+        else => epoch_2020 + r.intRangeAtMost(i64, 0, 60 * 1_000_000),
+    };
+    const m = restart.minutesSince2020(clock);
+    const fits = clock != null and clock.? >= epoch_2020 and @divFloor(clock.? - epoch_2020, 60) < 0xFFFF_FFFF;
+    if ((m != null) != fits) return fail(seed, "a clock of {any} says {any}", .{ clock, m });
+}
+
+// ── the rest of the floor's pure parts ──────────────────────────────────────
+
+pub fn pagesSeed(seed: u64) Failure!void {
+    var prng = std.Random.DefaultPrng.init(seed ^ 0x7061_6773); // "pags"
+    const r = prng.random();
+    const page = 4096;
+    const count = r.intRangeAtMost(usize, 2, 16);
+    const mem = std.testing.allocator.alignedAlloc(u8, .fromByteUnits(page), count * page) catch return fail(seed, "no memory", .{});
+    defer std.testing.allocator.free(mem);
+    var heap = pages_mod.Pages.init(.{ .start = @intFromPtr(mem.ptr), .len = mem.len });
+    const a = heap.allocator();
+    if (a.rawAlloc(0, .@"1", 0) != null) return fail(seed, "an allocation of nothing was given memory", .{});
+    // The heap's own bitmap comes out of the region: `count` is what is left.
+    const count_left = heap.count;
+    if (a.rawAlloc((count_left + 1) * page, .fromByteUnits(page), 0) != null) return fail(seed, "more pages than the heap has were given", .{});
+    if (a.rawAlloc(page, .fromByteUnits(page * 64), 0) != null) return fail(seed, "an alignment past the heap was given", .{});
+    var taken: usize = 0;
+    while (a.rawAlloc(page, .fromByteUnits(page), 0)) |p| {
+        const at = @intFromPtr(p);
+        if (at < @intFromPtr(mem.ptr) or at + page > @intFromPtr(mem.ptr) + mem.len) return fail(seed, "a page outside the heap", .{});
+        taken += 1;
+        if (taken > count_left) return fail(seed, "more pages handed out than the heap has", .{});
+    }
+    if (taken != count_left) return fail(seed, "{d} of {d} pages handed out before the heap said full", .{ taken, count_left });
+    // An address that is not one of its pages cannot be grown; a free of
+    // one panics, by design, so it is not tried here.
+    if (a.rawResize(mem[1..2], .@"1", 2 * page, 0)) return fail(seed, "an address not one of its pages was grown", .{});
+}
+
+const RtcWrong = enum { nothing, bcd, hour12, year, month, day, minute };
+
+pub fn rtcSeed(seed: u64) Failure!void {
+    var prng = std.Random.DefaultPrng.init(seed ^ 0x7274_63); // "rtc"
+    const r = prng.random();
+    const wrong = r.enumValue(RtcWrong);
+    const binary = r.boolean();
+    const hour24 = r.boolean() or wrong == .year;
+    const enc = struct {
+        fn f(b: bool, v: u8) u8 {
+            return if (b) v else (v / 10) << 4 | (v % 10);
+        }
+    }.f;
+    const year = r.uintLessThan(u8, 100);
+    const month = r.intRangeAtMost(u8, 1, 12);
+    const day = r.intRangeAtMost(u8, 1, 28);
+    const hour = r.uintLessThan(u8, 24);
+    var raw = rtc.Raw{
+        .seconds = enc(binary, r.uintLessThan(u8, 60)),
+        .minutes = enc(binary, r.uintLessThan(u8, 60)),
+        .hours = if (hour24) enc(binary, hour) else (enc(binary, if (hour % 12 == 0) 12 else hour % 12) | (if (hour >= 12) @as(u8, 0x80) else 0)),
+        .day = enc(binary, day),
+        .month = enc(binary, month),
+        .year = enc(binary, year),
+        .century = enc(binary, 20),
+        .status_b = (if (binary) @as(u8, 0x04) else 0) | (if (hour24) @as(u8, 0x02) else 0),
+    };
+    switch (wrong) {
+        .nothing => {},
+        .bcd => if (binary) {
+            raw.month = 13;
+        } else {
+            raw.minutes = 0x1A;
+        },
+        .hour12 => if (hour24) {
+            raw.hours = enc(binary, 24);
+        } else {
+            raw.hours = 0x80 | enc(binary, 13);
+        },
+        .year => if (binary) {
+            raw.year = r.intRangeAtMost(u8, 100, 255);
+        } else {
+            raw.year = 0xA0;
+        },
+        .month => raw.month = enc(binary, if (r.boolean()) 0 else 13),
+        .day => raw.day = enc(binary, if (r.boolean()) 0 else 32),
+        .minute => raw.minutes = enc(binary, 60),
+    }
+    const got = rtc.decode(raw);
+    if (wrong == .nothing) {
+        const c = got catch |e| return fail(seed, "good registers refused: {s}", .{@errorName(e)});
+        if (c.year != 2000 + @as(i32, year) or c.month != month or c.day != day or c.hour != hour)
+            return fail(seed, "good registers decoded wrong", .{});
+    } else {
+        _ = got catch return;
+        return fail(seed, "{s}: registers with it wrong decoded", .{@tagName(wrong)});
+    }
+}
+
+pub fn pitSeed(seed: u64) Failure!void {
+    var prng = std.Random.DefaultPrng.init(seed ^ 0x7069_74); // "pit"
+    const r = prng.random();
+    var samples: [8]u64 = undefined;
+    const hz = r.intRangeAtMost(u64, 100_000_000, 5_000_000_000);
+    const n = r.uintLessThan(usize, samples.len + 1);
+    const kind = r.uintLessThan(u8, 3);
+    for (samples[0..n]) |*s| s.* = switch (kind) {
+        0 => hz + r.uintLessThan(u64, hz / 1000),
+        1 => hz / 2 + r.uintLessThan(u64, hz),
+        else => r.uintLessThan(u64, 1_000_000),
+    };
+    const got = pit.settle(samples[0..n]);
+    if (n < 3 and got != null) return fail(seed, "fewer than three samples settled", .{});
+    if (got) |g| {
+        if (!pit.plausible(g)) return fail(seed, "a rate that is no CPU's settled", .{});
+    } else if (n >= 3 and kind == 0) return fail(seed, "samples within 0.1% did not settle", .{});
+}
+
+pub fn adminSeed(seed: u64) Failure!void {
+    var prng = std.Random.DefaultPrng.init(seed ^ 0x6164_6d6e); // "admn"
+    const r = prng.random();
+    var hash: [60]u8 = undefined;
+    @memcpy(hash[0..7], "$2b$10$");
+    for (hash[7..]) |*c| c.* = "./ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789"[r.uintLessThan(usize, 64)];
+    var line_buf: [100]u8 = undefined;
+    const wrong = r.uintLessThan(u8, 5);
+    switch (wrong) {
+        1 => hash[5] = '9', // cost 19 is fine; make it weaker below
+        2 => hash[2] = 'x',
+        else => {},
+    }
+    if (wrong == 1) hash[4] = '0'; // cost 09: weaker than any this server writes
+    const line = switch (wrong) {
+        3 => std.fmt.bufPrint(&line_buf, "{s}", .{&hash}) catch unreachable, // no name at all
+        4 => std.fmt.bufPrint(&line_buf, "  {s}", .{&hash}) catch unreachable, // an empty name
+        else => std.fmt.bufPrint(&line_buf, "Steve Howell {s}", .{&hash}) catch unreachable,
+    };
+    const got = admin_reset.parse(line);
+    if (wrong == 0) {
+        const p = got orelse return fail(seed, "a good admin reset line was refused", .{});
+        if (!std.mem.eql(u8, p.name, "Steve Howell") or !std.mem.eql(u8, p.hash, &hash)) return fail(seed, "an admin reset line came back changed", .{});
+    } else if (got != null) return fail(seed, "admin reset line {d} with a part wrong was taken", .{wrong});
+}
+
 pub fn runSeed(seed: u64) Failure!void {
     try gptSeed(seed);
     try pageSeed(seed);
@@ -573,6 +802,12 @@ pub fn runSeed(seed: u64) Failure!void {
     try protoSeed(seed);
     try arpSeed(seed);
     try heapSeed(seed);
+    try pvhSeed(seed);
+    try restartSeed(seed);
+    try pagesSeed(seed);
+    try rtcSeed(seed);
+    try pitSeed(seed);
+    try adminSeed(seed);
 }
 
 test "floor_sim: GPT, built field by field with one field wrong, a handful of seeds" {

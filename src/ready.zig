@@ -31,6 +31,14 @@
 //! probe/fuzz_requests.py).
 
 const std = @import("std");
+const props = @import("coverage");
+
+comptime {
+    props.catalogFile(@import("coverage_catalog"), here());
+}
+fn here() std.builtin.SourceLocation {
+    return @src();
+}
 const tcp = @import("tcp.zig");
 
 pub const Readiness = enum {
@@ -57,7 +65,10 @@ pub fn check(pending: []const u8, peer_done: bool, capacity: usize) Readiness {
 
     // A head std cannot parse is served: the handler rejects it there, with
     // the same words Linux uses.
-    const head = std.http.Server.Request.Head.parse(pending[0..head_len]) catch return .ready;
+    const head = std.http.Server.Request.Head.parse(pending[0..head_len]) catch {
+        props.reachable(@src(), "ready: a head std cannot parse is served, for the handler to refuse", null);
+        return .ready;
+    };
     // What std will read is decided by the method first: for one that takes no
     // body it reads nothing, whatever the headers say.
     if (!head.method.requestHasBody()) return .ready;

@@ -157,7 +157,10 @@ pub var last_miss: Miss = .{};
 /// readings agree. An update can begin between the check and the reads, and
 /// the only defence the chip offers is to read again.
 pub fn read() DeviceError!Raw {
-    if (!present()) return error.NoChip;
+    if (!present()) {
+        props.reachable(@src(), "rtc: no chip answers", null);
+        return error.NoChip;
+    }
     const until = deadline(1000);
     while (!past(until)) {
         try waitNotUpdating();
@@ -166,6 +169,7 @@ pub fn read() DeviceError!Raw {
         const b = snapshot();
         if (a.eql(b)) return a;
     }
+    props.reachable(@src(), "rtc: two readings never agreed within a second", null);
     return error.NeverSettled;
 }
 
@@ -174,7 +178,10 @@ pub fn read() DeviceError!Raw {
 fn waitNotUpdating() DeviceError!void {
     const until = deadline(500);
     while (updating()) {
-        if (past(until)) return error.Stuck;
+        if (past(until)) {
+            props.reachable(@src(), "rtc: the chip says it is updating for half a second", null);
+            return error.Stuck;
+        }
         nap(poll_us);
     }
 }
@@ -204,6 +211,7 @@ pub fn readAtEdge(context: anytype, comptime onEdge: fn (@TypeOf(context)) void)
         nap(poll_us);
     }
     last_miss = miss;
+    props.reachable(@src(), "rtc: the seconds never changed in two and a half seconds", null);
     return error.NoEdge;
 }
 
@@ -241,7 +249,10 @@ pub const DecodeError = error{ BadBcd, OutOfRange };
 fn fromBcd(v: u8) DecodeError!u8 {
     const hi = v >> 4;
     const lo = v & 0x0F;
-    if (hi > 9 or lo > 9) return error.BadBcd;
+    if (hi > 9 or lo > 9) {
+        props.reachable(@src(), "rtc: a register that is not BCD", null);
+        return error.BadBcd;
+    }
     return hi * 10 + lo;
 }
 
@@ -261,7 +272,10 @@ pub fn decode(raw: Raw) DecodeError!Civil {
     var hour = try conv(binary, if (hour24) raw.hours else raw.hours & ~pm_bit);
     if (!hour24) {
         // 12-hour clocks count 12, 1, 2 … 11; midnight is 12 AM and noon 12 PM.
-        if (hour < 1 or hour > 12) return error.OutOfRange;
+        if (hour < 1 or hour > 12) {
+            props.reachable(@src(), "rtc: a 12-hour clock's hour outside 1 to 12", null);
+            return error.OutOfRange;
+        }
         if (pm and hour != 12) hour += 12;
         if (!pm and hour == 12) hour = 0;
     }
@@ -283,10 +297,22 @@ pub fn decode(raw: Raw) DecodeError!Civil {
         .minute = try conv(binary, raw.minutes),
         .second = try conv(binary, raw.seconds),
     };
-    if (yy > 99) return error.OutOfRange;
-    if (civil.month < 1 or civil.month > 12) return error.OutOfRange;
-    if (civil.day < 1 or civil.day > daysInMonth(civil.year, civil.month)) return error.OutOfRange;
-    if (civil.hour > 23 or civil.minute > 59 or civil.second > 59) return error.OutOfRange;
+    if (yy > 99) {
+        props.reachable(@src(), "rtc: a binary year past 99", null);
+        return error.OutOfRange;
+    }
+    if (civil.month < 1 or civil.month > 12) {
+        props.reachable(@src(), "rtc: a month outside 1 to 12", null);
+        return error.OutOfRange;
+    }
+    if (civil.day < 1 or civil.day > daysInMonth(civil.year, civil.month)) {
+        props.reachable(@src(), "rtc: a day its month does not have", null);
+        return error.OutOfRange;
+    }
+    if (civil.hour > 23 or civil.minute > 59 or civil.second > 59) {
+        props.reachable(@src(), "rtc: an hour, minute or second out of range", null);
+        return error.OutOfRange;
+    }
     return civil;
 }
 
@@ -297,6 +323,14 @@ pub fn decode(raw: Raw) DecodeError!Civil {
 // this code.
 
 const std = @import("std");
+const props = @import("coverage");
+
+comptime {
+    props.catalogFile(@import("coverage_catalog"), here());
+}
+fn here() std.builtin.SourceLocation {
+    return @src();
+}
 const testing = std.testing;
 
 /// A raw reading in BCD, 24-hour — what QEMU's chip reports by default.

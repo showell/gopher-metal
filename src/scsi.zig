@@ -21,6 +21,7 @@
 //! the sense data, SCSI Block Commands (SBC-3) for the rest. The numbers below
 //! are theirs.
 
+const props = @import("coverage");
 const virtio = @import("virtio.zig");
 const tsc = @import("tsc.zig");
 
@@ -207,10 +208,16 @@ pub fn synchronize(b: *virtio.Block, at: Address) u8 {
 fn writeCache(b: *virtio.Block, at: Address, scratch: u64, page: []const u8) ?bool {
     const want: u16 = 8 + 20; // the mode parameter header, then the page
     const cdb = [10]u8{ 0x5A, 0x08, 0x08, 0, 0, 0, 0, @truncate(want >> 8), @truncate(want), 0 };
-    if (!good(commandSettled(b, at, &cdb, .from_disk, scratch, want))) return null;
+    if (!good(commandSettled(b, at, &cdb, .from_disk, scratch, want))) {
+        props.reachable(@src(), "scsi: a disk that does not answer MODE SENSE is taken to cache", null);
+        return null;
+    }
     const descriptors = (@as(usize, page[6]) << 8) | page[7];
     const p = 8 + descriptors;
-    if (p + 3 > want or page[p] & 0x3F != 0x08) return null;
+    if (p + 3 > want or page[p] & 0x3F != 0x08) {
+        props.reachable(@src(), "scsi: a MODE SENSE answer without the caching page is taken to cache", null);
+        return null;
+    }
     return page[p + 2] & 0x04 != 0;
 }
 
@@ -233,8 +240,10 @@ pub const Error = virtio.Error || error{
 /// either way.
 pub fn bring(device: virtio.Device, mem: *virtio.BlockMemory) Error!virtio.Block {
     const st = try virtio.negotiate(device, 0);
-    if (virtio.configRead32(device, 24) != cdb_size or virtio.configRead32(device, 20) != sense_size)
+    if (virtio.configRead32(device, 24) != cdb_size or virtio.configRead32(device, 20) != sense_size) {
+        props.reachable(@src(), "scsi: a controller whose CDB or sense size is not the default", null);
         return Error.UnexpectedSizes;
+    }
     // The control and event queues are set up because the device has them;
     // nothing is ever sent on either, and an event with no buffer waiting is
     // simply dropped, which the spec allows.
@@ -269,14 +278,21 @@ pub fn bring(device: virtio.Device, mem: *virtio.BlockMemory) Error!virtio.Block
             if (mem.scsi.scratch[0] != 0x00) continue;
 
             const capacity = [10]u8{ 0x25, 0, 0, 0, 0, 0, 0, 0, 0, 0 };
-            if (!good(commandSettled(&b, at, &capacity, .from_disk, scratch, 8))) return Error.NoCapacity;
+            if (!good(commandSettled(&b, at, &capacity, .from_disk, scratch, 8))) {
+                props.reachable(@src(), "scsi: a disk that will not say how big it is", null);
+                return Error.NoCapacity;
+            }
             const last = be32(mem.scsi.scratch[0..4]);
-            if (be32(mem.scsi.scratch[4..8]) != 512 or last == 0xFFFF_FFFF) return Error.NoCapacity;
+            if (be32(mem.scsi.scratch[4..8]) != 512 or last == 0xFFFF_FFFF) {
+                props.reachable(@src(), "scsi: a disk whose sectors are not 512 bytes, or too many to count", null);
+                return Error.NoCapacity;
+            }
             b.capacity = @as(u64, last) + 1;
             b.address = at;
             b.write_cache = writeCache(&b, at, scratch, &mem.scsi.scratch);
             return b;
         }
     }
+    props.reachable(@src(), "scsi: a controller with no disk on it", null);
     return Error.NoDisk;
 }

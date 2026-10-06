@@ -257,3 +257,32 @@ store_sim: all three refuse a name, for the same reason
 store_sim: all three refuse a read into too little room
 store_sim: the three stores answer every operation alike
 store_sim: the three trees are the same after every operation
+
+# The rest of the floor (metal-vmm QUEUE item 80): pvh, restart, pages, rtc, pit, admin_reset, ready.
+admin reset: a value with no space between a name and a hash
+admin reset: an empty name, or not a bcrypt hash this server writes
+pages: an address below the heap, or not on a page, is not one of its pages
+pages: an alignment whose first page is past the heap
+pages: an allocation of more pages than the heap has
+pages: an allocation of nothing is refused
+pages: no run of free pages long enough
+pit: a settled rate that is no CPU's
+pit: the closest three measurements differ by more than 1%
+pit: too few measurements to settle
+pvh: a start info of version 0, or with no memory map
+pvh: the loader left no start info
+pvh: the region chosen is no larger than the RAM reported
+pvh: the start info has another magic, so not PVH
+ready: a head std cannot parse is served, for the handler to refuse
+restart: CMOS holds no record, or another's
+restart: a clock before 2020 says no time
+restart: a clock past what the record holds says no time
+restart: a record whose checksum does not hold is no record
+restart: a record with a count of zero is no record
+restart: the clock is unknown, so the time is too
+rtc: a 12-hour clock's hour outside 1 to 12
+rtc: a binary year past 99
+rtc: a day its month does not have
+rtc: a month outside 1 to 12
+rtc: a register that is not BCD
+rtc: an hour, minute or second out of range

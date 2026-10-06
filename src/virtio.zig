@@ -426,7 +426,10 @@ pub fn Queue(comptime size: u16) type {
             switch (device) {
                 .mmio => |base| {
                     mmioWrite(base, .queue_sel, index);
-                    if (mmioRead(base, .queue_num_max) < size) return Error.QueueTooSmall;
+                    if (mmioRead(base, .queue_num_max) < size) {
+                        props.reachable(@src(), "virtio: an mmio queue smaller than this driver needs, or none", null);
+                        return Error.QueueTooSmall;
+                    }
                     mmioWrite(base, .queue_num, size);
                     mmioWrite(base, .queue_desc_lo, @truncate(ring_addr));
                     mmioWrite(base, .queue_desc_hi, @truncate(ring_addr >> 32));
@@ -441,7 +444,10 @@ pub fn Queue(comptime size: u16) type {
                     write16(p.common + common_queue_select, index);
                     // Zero is "no such queue"; otherwise the device's maximum.
                     const max = read16(p.common + common_queue_size);
-                    if (max < size) return Error.QueueTooSmall;
+                    if (max < size) {
+                        props.reachable(@src(), "virtio: a pci queue smaller than this driver needs, or none", null);
+                        return Error.QueueTooSmall;
+                    }
                     write16(p.common + common_queue_size, size);
                     write64(p.common + common_queue_desc, ring_addr);
                     write64(p.common + common_queue_driver, avail_addr);
@@ -540,11 +546,13 @@ pub fn negotiate(d: Device, want_low: u32) Error!u32 {
 
     const hi = deviceFeatures(d, 1);
     if (hi & (@as(u32, 1) << (feature_version_1 - 32)) == 0) {
+        props.reachable(@src(), "virtio: a device without VIRTIO_F_VERSION_1 is refused", null);
         setStatus(d, status_failed);
         return Error.DeviceRefused;
     }
     const lo = deviceFeatures(d, 0);
     if (lo & want_low != want_low) {
+        props.reachable(@src(), "virtio: a device without a feature this driver needs is refused", null);
         setStatus(d, status_failed);
         return Error.DeviceRefused;
     }
@@ -555,6 +563,7 @@ pub fn negotiate(d: Device, want_low: u32) Error!u32 {
     st |= status_features_ok;
     setStatus(d, st);
     if (getStatus(d) & status_features_ok == 0) {
+        props.reachable(@src(), "virtio: a device that will not keep FEATURES_OK is refused", null);
         setStatus(d, status_failed);
         return Error.DeviceRefused;
     }
@@ -563,7 +572,10 @@ pub fn negotiate(d: Device, want_low: u32) Error!u32 {
 
 pub fn driverOk(d: Device, st: u32) Error!void {
     setStatus(d, st | status_driver_ok);
-    if (getStatus(d) & status_failed != 0) return Error.DeviceRefused;
+    if (getStatus(d) & status_failed != 0) {
+        props.reachable(@src(), "virtio: a device that fails at DRIVER_OK", null);
+        return Error.DeviceRefused;
+    }
 }
 
 /// The interrupt this device raised, acknowledged. Polling drivers still have

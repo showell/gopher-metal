@@ -17,6 +17,14 @@
 //! interrupt is never delivered.
 
 const std = @import("std");
+const props = @import("coverage");
+
+comptime {
+    props.catalogFile(@import("coverage_catalog"), here());
+}
+fn here() std.builtin.SourceLocation {
+    return @src();
+}
 const port = @import("port.zig");
 const tsc = @import("tsc.zig");
 
@@ -64,14 +72,20 @@ fn measure() Error!u64 {
     var polls: u32 = 0;
     var c0 = first;
     while (c0 == first) : (polls += 1) {
-        if (polls > 100_000) return error.NoTimer;
+        if (polls > 100_000) {
+            props.reachable(@src(), "pit: the count never moves, so no timer", null);
+            return error.NoTimer;
+        }
         c0 = count();
     }
     const t0 = tsc.read();
 
     while (true) {
         const c = count();
-        if (c > c0) return error.Implausible; // wrapped: the span was too long
+        if (c > c0) {
+            props.reachable(@src(), "pit: the count wrapped during a measurement", null);
+            return error.Implausible; // wrapped: the span was too long
+        }
         if (c0 - c >= span) {
             const t1 = tsc.read();
             return (t1 - t0) * input_hz / (c0 - c);
@@ -119,6 +133,7 @@ pub fn calibrate() Error!u64 {
         }
         if (settle(got[0..n])) |hz| return hz;
     }
+    props.reachable(@src(), "pit: no round of measurements settled", null);
     return error.Implausible;
 }
 
@@ -126,7 +141,10 @@ pub fn calibrate() Error!u64 {
 /// of rate) that agree most closely, their median, if they agree within 1%
 /// and it is a CPU's; null otherwise. Sorts `samples` in place.
 pub fn settle(samples: []u64) ?u64 {
-    if (samples.len < 3) return null;
+    if (samples.len < 3) {
+        props.reachable(@src(), "pit: too few measurements to settle", null);
+        return null;
+    }
     std.mem.sort(u64, samples, {}, std.sort.asc(u64));
     var best: ?usize = null;
     var i: usize = 0;
@@ -136,8 +154,14 @@ pub fn settle(samples: []u64) ?u64 {
     }
     const at = best.?;
     const median = samples[at + 1];
-    if (!plausible(median)) return null;
-    if (samples[at + 2] - samples[at] > median / 100) return null;
+    if (!plausible(median)) {
+        props.reachable(@src(), "pit: a settled rate that is no CPU's", null);
+        return null;
+    }
+    if (samples[at + 2] - samples[at] > median / 100) {
+        props.reachable(@src(), "pit: the closest three measurements differ by more than 1%", null);
+        return null;
+    }
     return median;
 }
 
