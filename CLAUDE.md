@@ -3,7 +3,10 @@
 The README is the orientation. Work happens on the dev box, with Steve.
 
 If you are a Claude Code **cloud** session ("CC"): you work here on the
-**simulators and properties only** (since 2026-10-05). Your charter, the
+**simulators and properties only** (since 2026-10-05), plus, since
+2026-10-06, **the Store** (QUEUE items 76-81: its interface, model, FAT and
+strict Linux implementations, and `store_sim`, all new files, none of them
+in the image). Your charter, the
 branch map and the one shared queue live in metal-vmm, not here: read
 metal-vmm's `CLOUD_WORK.md` ("gopher-metal: the simulators") and its
 `QUEUE.md` on branch `interrupts` (github.com/showell/metal-vmm). Branch

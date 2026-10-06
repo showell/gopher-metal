@@ -49,7 +49,7 @@ pub fn build(b: *std.Build) void {
     const sdk = b.dependency("zig_coverage_sdk", .{});
     const coverage = sdk.module("coverage");
     coverage.red_zone = false;
-    const coverage_catalog = @import("zig_coverage_sdk").addCatalog(b, sdk.artifact("coverage-scan"), coverage, b.path("src"), &.{ "tcp.zig", "tcp_sim.zig", "fat16.zig", "fat_sim.zig", "page_sim.zig", "pure_sim.zig" });
+    const coverage_catalog = @import("zig_coverage_sdk").addCatalog(b, sdk.artifact("coverage-scan"), coverage, b.path("src"), &.{ "tcp.zig", "tcp_sim.zig", "fat16.zig", "fat_sim.zig", "page_sim.zig", "pure_sim.zig", "ready_sim.zig" });
     const with_coverage = [_]std.Build.Module.Import{
         .{ .name = "coverage", .module = coverage },
         .{ .name = "coverage_catalog", .module = coverage_catalog },
@@ -252,7 +252,7 @@ pub fn build(b: *std.Build) void {
     // the formatter writes it. It was let slip once (three files, QUEUE.md
     // item 10), and a separate step nobody runs would let it slip again.
     test_step.dependOn(&b.addFmt(.{ .paths = &.{"src"}, .check = true }).step);
-    for ([_][]const u8{ "src/rtc.zig", "src/pit.zig", "src/stack.zig", "src/civil.zig", "src/fat16.zig", "src/pvh.zig", "src/pages.zig", "src/tcp.zig", "src/tcp_check.zig", "src/tcp_sim.zig", "src/fat_sim.zig", "src/page_sim.zig", "src/pure_sim.zig", "src/io_test.zig", "src/log_ring.zig", "src/restart.zig", "src/kept_log.zig", "src/ready.zig", "src/request_heap.zig", "src/page_cache.zig", "src/admin_reset.zig", "droplet/image.zig", "src/dhcp.zig", "src/screen.zig", "src/serial_gate.zig", "src/net.zig" }) |path| {
+    for ([_][]const u8{ "src/rtc.zig", "src/pit.zig", "src/stack.zig", "src/civil.zig", "src/fat16.zig", "src/pvh.zig", "src/pages.zig", "src/tcp.zig", "src/tcp_check.zig", "src/tcp_sim.zig", "src/fat_sim.zig", "src/page_sim.zig", "src/pure_sim.zig", "src/ready_sim.zig", "src/io_test.zig", "src/log_ring.zig", "src/restart.zig", "src/kept_log.zig", "src/ready.zig", "src/request_heap.zig", "src/page_cache.zig", "src/admin_reset.zig", "droplet/image.zig", "src/dhcp.zig", "src/screen.zig", "src/serial_gate.zig", "src/net.zig" }) |path| {
         const unit = b.addTest(.{ .root_module = b.createModule(.{
             .root_source_file = b.path(path),
             .target = b.graph.host,
@@ -276,6 +276,7 @@ pub fn build(b: *std.Build) void {
     props_opts.addOption(u64, "fat_seeds", b.option(u64, "fat-seeds", "how many fat_sim seeds `properties` sweeps") orelse 20);
     props_opts.addOption(u64, "page_seeds", b.option(u64, "page-seeds", "how many page_sim seeds `properties` sweeps") orelse 100);
     props_opts.addOption(u64, "pure_seeds", b.option(u64, "pure-seeds", "how many pure_sim seeds `properties` sweeps") orelse 200);
+    props_opts.addOption(u64, "ready_seeds", b.option(u64, "ready-seeds", "how many ready_sim seeds `properties` sweeps") orelse 300);
     props_opts.addOption([]const u8, "sdk_jsonl", b.option([]const u8, "sdk-jsonl", "where `properties` writes its JSONL") orelse "");
     // The floor (coverage/floor-sim.txt, COVERAGE.md): what the long tier
     // must reach. Unset, a MISS is reported and never fails the step.

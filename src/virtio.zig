@@ -783,6 +783,8 @@ pub const Block = struct {
             .header = &mem.header,
             .status = &mem.status,
             .capacity = configRead64(device, 0),
+            // No features negotiated, so no VIRTIO_BLK_F_FLUSH: write-through.
+            .write_cache = false,
         };
     }
 
