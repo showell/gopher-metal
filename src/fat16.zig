@@ -249,6 +249,18 @@ pub const Problem = enum {
     /// check, not damage: nothing under it was checked, and since what it
     /// holds would look leaked, leaks were not looked for at all.
     too_deep,
+
+    /// **DAMAGE, OR WHAT A STOP LEAVES.** A machine stopped part-way may
+    /// leave clusters leaked (a write's), a chain long (an append's), the
+    /// FAT's copies apart (`cacheFat` mends them at the next mount), or
+    /// FSInfo's count stale; and `too_deep` is the check's limit. The rest
+    /// is damage no stop of this driver leaves.
+    pub fn damage(p: Problem) bool {
+        return switch (p) {
+            .broken, .crossed, .short, .bad_dot => true,
+            .leaked, .long, .fats_differ, .fsinfo, .too_deep => false,
+        };
+    }
 };
 
 pub const Finding = struct {

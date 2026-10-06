@@ -27,6 +27,17 @@
 //!   file's or directory's first cluster on the disk, its size, a link in
 //!   its chain, or a buffer or path handed in. Oracle: the operation answers
 //!   exactly the error that thing calls for, and nothing panics.
+//! - **The parsers** (`protoSeed`, `arpSeed`), metal-vmm item 78: a UDP
+//!   datagram and an ARP request, each built field by field as a sender
+//!   writes it, then one field made wrong, with the IP header's checksum
+//!   made right again where the field is in it, so each wrong field meets
+//!   the check meant for it and not the checksum's. Oracle: the parser
+//!   refuses exactly when a field is wrong, and gives back every field when
+//!   none is.
+//! - **The request heap's growth** (`heapSeed`): two blocks, and the first
+//!   asked to grow in place, which an arena can only do for its last.
+//!   Oracle: it answers no, the block keeps its bytes, and what the request
+//!   asked for (`used`) is unchanged.
 
 const std = @import("std");
 const virtio = @import("virtio.zig");
@@ -36,6 +47,9 @@ const PageCache = @import("page_cache.zig").PageCache;
 const log_ring = @import("log_ring.zig");
 const fat16 = @import("fat16.zig");
 const test_disk = @import("test_disk.zig");
+const proto = @import("proto.zig");
+const arp = @import("arp.zig");
+const RequestHeap = @import("request_heap.zig").RequestHeap;
 const props = @import("coverage");
 
 comptime {
@@ -408,11 +422,157 @@ pub fn fatSeed(seed: u64) Failure!void {
     }
 }
 
+// ── the parsers ─────────────────────────────────────────────────────────────
+
+const UdpWrong = enum { nothing, short_frame, ethertype, version, options, fragment_offset, more_fragments, total_short, checksum, total_long, not_udp, udp_short, udp_len_short, udp_len_long };
+
+fn ipChecksum(ip: []u8) void {
+    ip[10] = 0;
+    ip[11] = 0;
+    std.mem.writeInt(u16, ip[10..12], proto.checksum(ip[0..20]), .big);
+}
+
+pub fn protoSeed(seed: u64) Failure!void {
+    var prng = std.Random.DefaultPrng.init(seed ^ 0x7072_6f74_6f); // "proto"
+    const r = prng.random();
+    const wrong = r.enumValue(UdpWrong);
+    var frame: [1600]u8 = undefined;
+    const payload_len = r.intRangeAtMost(usize, 0, 200);
+    r.bytes(frame[proto.udp_payload_at..][0..payload_len]);
+    var src_mac: [6]u8 = undefined;
+    r.bytes(&src_mac);
+    const src_ip = [4]u8{ 10, 0, 2, r.int(u8) };
+    const dst_ip = [4]u8{ 10, 0, 2, 15 };
+    const sport = r.int(u16);
+    const dport = r.int(u16);
+    var len = proto.writeUdp(&frame, src_mac, .{ 2, 0, 0, 0, 0, 1 }, src_ip, dst_ip, sport, dport, payload_len);
+    // Ethernet pads a short frame: a few bytes past the datagram are fine.
+    const pad = r.uintLessThan(usize, 8);
+    @memset(frame[len..][0..pad], 0);
+    len += pad;
+    const ip = frame[proto.eth_header_len..][0..20];
+    const udp = frame[proto.eth_header_len + 20 ..][0..8];
+    const total = std.mem.readInt(u16, ip[2..4], .big);
+    switch (wrong) {
+        .nothing => {},
+        .short_frame => len = r.uintLessThan(usize, proto.eth_header_len + 20),
+        .ethertype => std.mem.writeInt(u16, frame[12..14], 0x86DD, .big),
+        .version => {
+            ip[0] = (([_]u8{ 0, 6, 15 })[r.uintLessThan(usize, 3)] << 4) | 5;
+            ipChecksum(ip);
+        },
+        .options => {
+            ip[0] = 0x40 | ([_]u8{ 4, 6, 15 })[r.uintLessThan(usize, 3)];
+            ipChecksum(ip);
+        },
+        .fragment_offset => {
+            std.mem.writeInt(u16, ip[6..8], 0x4000 | r.intRangeAtMost(u16, 1, 0x1FFF), .big);
+            ipChecksum(ip);
+        },
+        .more_fragments => {
+            std.mem.writeInt(u16, ip[6..8], 0x2000, .big);
+            ipChecksum(ip);
+        },
+        .total_short => {
+            std.mem.writeInt(u16, ip[2..4], r.uintLessThan(u16, 20), .big);
+            ipChecksum(ip);
+        },
+        .checksum => ip[10] ^= r.intRangeAtMost(u8, 1, 255),
+        .total_long => {
+            std.mem.writeInt(u16, ip[2..4], @intCast(len - proto.eth_header_len + r.intRangeAtMost(usize, 1, 100)), .big);
+            ipChecksum(ip);
+        },
+        .not_udp => {
+            ip[9] = ([_]u8{ proto.proto_tcp, 1, 99 })[r.uintLessThan(usize, 3)];
+            ipChecksum(ip);
+        },
+        .udp_short => {
+            std.mem.writeInt(u16, ip[2..4], 20 + r.uintLessThan(u16, 8), .big);
+            ipChecksum(ip);
+        },
+        .udp_len_short => std.mem.writeInt(u16, udp[4..6], r.uintLessThan(u16, 8), .big),
+        .udp_len_long => std.mem.writeInt(u16, udp[4..6], @intCast(total - 20 + r.intRangeAtMost(usize, 1, 100)), .big),
+    }
+    const got = proto.parseUdp(frame[0..len]);
+    if (wrong == .nothing) {
+        const d = got orelse return fail(seed, "a good datagram was refused", .{});
+        if (d.src_port != sport or d.dst_port != dport or !std.mem.eql(u8, &d.src_ip, &src_ip) or d.payload.len != payload_len)
+            return fail(seed, "a good datagram came back changed", .{});
+    } else if (got != null) return fail(seed, "{s}: a datagram with it wrong was taken", .{@tagName(wrong)});
+}
+
+const ArpWrong = enum { nothing, short_frame, ethertype, hardware, protocol, lengths, reply };
+
+pub fn arpSeed(seed: u64) Failure!void {
+    var prng = std.Random.DefaultPrng.init(seed ^ 0x6172_70); // "arp"
+    const r = prng.random();
+    const wrong = r.enumValue(ArpWrong);
+    var frame: [64]u8 = @splat(0);
+    var sender_mac: [6]u8 = undefined;
+    r.bytes(&sender_mac);
+    const sender_ip = [4]u8{ 10, 0, 2, r.int(u8) };
+    const target_ip = [4]u8{ 10, 0, 2, 15 };
+    proto.writeEth(&frame, .{ 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF }, sender_mac, proto.ethertype_arp);
+    const a = frame[proto.eth_header_len..];
+    std.mem.writeInt(u16, a[0..2], 1, .big);
+    std.mem.writeInt(u16, a[2..4], proto.ethertype_ipv4, .big);
+    a[4] = 6;
+    a[5] = 4;
+    std.mem.writeInt(u16, a[6..8], 1, .big);
+    @memcpy(a[8..14], &sender_mac);
+    @memcpy(a[14..18], &sender_ip);
+    @memcpy(a[24..28], &target_ip);
+    var len: usize = proto.eth_header_len + 28 + r.uintLessThan(usize, 18);
+    switch (wrong) {
+        .nothing => {},
+        .short_frame => len = r.uintLessThan(usize, proto.eth_header_len + 28),
+        .ethertype => std.mem.writeInt(u16, frame[12..14], proto.ethertype_ipv4, .big),
+        .hardware => std.mem.writeInt(u16, a[0..2], r.intRangeAtMost(u16, 2, 40), .big),
+        .protocol => std.mem.writeInt(u16, a[2..4], 0x86DD, .big),
+        .lengths => if (r.boolean()) {
+            a[4] = r.intRangeAtMost(u8, 7, 20);
+        } else {
+            a[5] = 16;
+        },
+        .reply => std.mem.writeInt(u16, a[6..8], ([_]u16{ 2, 3, 4 })[r.uintLessThan(usize, 3)], .big),
+    }
+    const got = arp.parseRequest(frame[0..len]);
+    if (wrong == .nothing) {
+        const q = got orelse return fail(seed, "a good ARP request was refused", .{});
+        if (!std.mem.eql(u8, &q.sender_mac, &sender_mac) or !std.mem.eql(u8, &q.sender_ip, &sender_ip) or !std.mem.eql(u8, &q.target_ip, &target_ip))
+            return fail(seed, "a good ARP request came back changed", .{});
+    } else if (got != null) return fail(seed, "{s}: an ARP packet with it wrong was taken as a request", .{@tagName(wrong)});
+}
+
+// ── the request heap ────────────────────────────────────────────────────────
+
+pub fn heapSeed(seed: u64) Failure!void {
+    var prng = std.Random.DefaultPrng.init(seed ^ 0x6865_6170); // "heap"
+    const r = prng.random();
+    var heap = RequestHeap.init(std.testing.allocator, r.uintLessThan(usize, 4096));
+    defer heap.deinit();
+    const a_alloc = heap.allocator();
+    const a = a_alloc.alloc(u8, r.intRangeAtMost(usize, 1, 500)) catch return fail(seed, "no memory", .{});
+    r.bytes(a);
+    var before: [500]u8 = undefined;
+    @memcpy(before[0..a.len], a);
+    _ = a_alloc.alloc(u8, r.intRangeAtMost(usize, 1, 500)) catch return fail(seed, "no memory", .{});
+    const used = heap.used;
+    if (a_alloc.remap(a, a.len + r.intRangeAtMost(usize, 1, 4096)) != null)
+        return fail(seed, "the first of two blocks grew in place", .{});
+    if (!std.mem.eql(u8, a, before[0..a.len])) return fail(seed, "a block that could not grow lost its bytes", .{});
+    if (heap.used != used) return fail(seed, "a growth that did not happen was counted", .{});
+    heap.reset();
+}
+
 pub fn runSeed(seed: u64) Failure!void {
     try gptSeed(seed);
     try pageSeed(seed);
     try redactSeed(seed);
     try fatSeed(seed);
+    try protoSeed(seed);
+    try arpSeed(seed);
+    try heapSeed(seed);
 }
 
 test "floor_sim: GPT, built field by field with one field wrong, a handful of seeds" {

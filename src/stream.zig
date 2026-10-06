@@ -50,12 +50,30 @@
 //!   peer sends. Bounded by: the table's window news (tcp.zig).
 
 const std = @import("std");
+const props = @import("coverage");
 const io = @import("io.zig");
 const net = @import("net.zig");
 const tcp = @import("tcp.zig");
 const arp = @import("arp.zig");
 const proto = @import("proto.zig");
 const interrupts = @import("interrupts.zig");
+const tcp_check = @import("tcp_check.zig");
+
+/// **B15: THE TABLE'S INVARIANTS, ON THE REAL KERNEL** (metal-vmm QUEUE item
+/// 78). A kernel whose root says `coverage_checks = true` (gopher.elf built
+/// `-Dcoverage`) checks `tcp_check`'s rules after every `handle` and every
+/// `transmit`, as the simulators do, as one coverage property. Decided at
+/// comptime: any other build has no check, not even a branch.
+const coverage_checks = @hasDecl(@import("root"), "coverage_checks") and @import("root").coverage_checks;
+
+pub fn checkTable(table: *const tcp.Table, now: i96, phase: tcp_check.Phase) void {
+    const v = tcp_check.check(table, now, phase);
+    props.always(@src(), v == null, "tcp: the table's invariants hold", .{
+        .phase = @tagName(phase),
+        .conn = if (v) |x| x.conn else 0,
+        .rule = if (v) |x| x.rule.says() else "",
+    });
+}
 
 const Reader = std.Io.Reader;
 const Writer = std.Io.Writer;
@@ -149,10 +167,12 @@ pub fn pump(wire: *Wire, table: *tcp.Table, ip: [4]u8) ?tcp.Result {
             continue;
         }
         const r = table.handle(wire, got.frame, now);
+        if (coverage_checks) checkTable(table, now, .after_handle);
         if (r.event != .nothing) last = r;
     }
     if (after_arrivals) |turn| turn();
     table.transmit(wire, now);
+    if (coverage_checks) checkTable(table, now, .after_transmit);
     return last;
 }
 
@@ -281,8 +301,12 @@ pub const Stream = struct {
             const c = self.conn();
             if (c.pending().len > 0) return c.pending();
             // Closed, or the peer has said it is done: nothing more is coming.
-            if (!c.open() or c.peer_done) return null;
+            if (!c.open() or c.peer_done) {
+                props.reachable(@src(), "stream: a read finds the peer closed or done, so nothing more is coming", null);
+                return null;
+            }
             if (self.clock() - started >= self.idle_ns) {
+                props.reachable(@src(), "stream: a read waits idle_ns for a byte, and gives up", null);
                 self.timed_out = true;
                 return null;
             }
@@ -316,7 +340,10 @@ pub const Stream = struct {
             // Bytes go straight to the send queue only while nothing waits
             // ahead of them in the spill: order is the peer's to rely on.
             if (sp.pending().len == 0) {
-                if (self.conn().state != .established) return error.WriteFailed;
+                if (self.conn().state != .established) {
+                    props.reachable(@src(), "stream: a write finds the connection gone, with a spill", null);
+                    return error.WriteFailed;
+                }
                 at = self.table.queue(self.index, bytes);
             }
             const rest = bytes[at..];
@@ -328,13 +355,17 @@ pub const Stream = struct {
                 } else |_| {}
             }
             // Too much to keep: what is kept goes first, waiting as before.
+            props.reachable(@src(), "stream: a spill too full to keep more is drained first", .{ .bytes = rest.len });
             try self.drainSpill(sp);
         }
         var since = self.clock();
         var una = self.conn().una;
         while (at < bytes.len) {
             const c = self.conn();
-            if (c.state != .established) return error.WriteFailed;
+            if (c.state != .established) {
+                props.reachable(@src(), "stream: a write finds the connection gone", null);
+                return error.WriteFailed;
+            }
             const n = self.table.queue(self.index, bytes[at..]);
             at += n;
             if (n > 0 or c.una != una) {
@@ -343,6 +374,7 @@ pub const Stream = struct {
             }
             if (at == bytes.len) break;
             if (self.clock() - since >= self.idle_ns) {
+                props.reachable(@src(), "stream: a write waits idle_ns with nothing taken, and gives up", null);
                 self.timed_out = true;
                 return error.WriteFailed;
             }
@@ -358,13 +390,17 @@ pub const Stream = struct {
         var una = self.conn().una;
         while (sp.pending().len > 0) {
             const c = self.conn();
-            if (c.state != .established) return error.WriteFailed;
+            if (c.state != .established) {
+                props.reachable(@src(), "stream: draining a spill finds the connection gone", null);
+                return error.WriteFailed;
+            }
             if (sp.push(self.table, self.index) > 0 or c.una != una) {
                 since = self.clock();
                 una = c.una;
             }
             if (sp.pending().len == 0) break;
             if (self.clock() - since >= self.idle_ns) {
+                props.reachable(@src(), "stream: draining a spill waits idle_ns with nothing taken, and gives up", null);
                 self.timed_out = true;
                 return error.WriteFailed;
             }

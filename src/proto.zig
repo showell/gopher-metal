@@ -11,6 +11,16 @@
 //! thing that can carry DHCP, which is the first thing a machine needs. TCP
 //! attaches here when it arrives.
 
+const std = @import("std");
+const props = @import("coverage");
+
+comptime {
+    props.catalogFile(@import("coverage_catalog"), here());
+}
+fn here() std.builtin.SourceLocation {
+    return @src();
+}
+
 pub const mac_broadcast = [6]u8{ 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF };
 pub const ip_any = [4]u8{ 0, 0, 0, 0 };
 pub const ip_broadcast = [4]u8{ 255, 255, 255, 255 };
@@ -171,21 +181,46 @@ pub const Packet = struct {
 /// wire most frames are not for us and a driver that complains about each one
 /// is unusable.
 pub fn parseIpv4(frame: []const u8) ?Packet {
-    if (frame.len < eth_header_len + ip_header_len) return null;
-    if (readBe16(frame[12..14]) != ethertype_ipv4) return null;
+    if (frame.len < eth_header_len + ip_header_len) {
+        props.reachable(@src(), "proto: a frame too short for an IPv4 header", null);
+        return null;
+    }
+    if (readBe16(frame[12..14]) != ethertype_ipv4) {
+        props.reachable(@src(), "proto: a frame of another ethertype is not IPv4", null);
+        return null;
+    }
 
     const ip = frame[eth_header_len..];
-    if (ip[0] >> 4 != 4) return null;
+    if (ip[0] >> 4 != 4) {
+        props.reachable(@src(), "proto: a header of another IP version", null);
+        return null;
+    }
     const ihl = @as(usize, ip[0] & 0x0F) * 4;
-    if (ihl != ip_header_len) return null; // no options here
+    if (ihl != ip_header_len) { // no options here
+        props.reachable(@src(), "proto: a header with options, or shorter than 20 bytes", null);
+        return null;
+    }
     // A fragment is not a packet: the more-fragments bit, or a nonzero offset.
-    if (readBe16(ip[6..8]) & 0x1FFF != 0 or ip[6] & 0x20 != 0) return null;
+    if (readBe16(ip[6..8]) & 0x1FFF != 0 or ip[6] & 0x20 != 0) {
+        props.reachable(@src(), "proto: a fragment is not a packet", null);
+        return null;
+    }
 
     const total = readBe16(ip[2..4]);
-    if (total < ihl) return null;
+    if (total < ihl) {
+        props.reachable(@src(), "proto: a total length shorter than the header", null);
+        return null;
+    }
     // A header damaged on the way describes nothing.
-    if (checksum(ip[0..ihl]) != 0) return null;
-    if (eth_header_len + total > frame.len) return null;
+    if (checksum(ip[0..ihl]) != 0) {
+        props.reachable(@src(), "proto: a header whose checksum is wrong", null);
+        return null;
+    }
+    if (eth_header_len + total > frame.len) {
+        props.reachable(@src(), "proto: a total length past the frame", null);
+        return null;
+    }
+    props.alwaysLessThanOrEqualTo(@src(), eth_header_len + total, frame.len, "proto: a packet's payload lies within its frame", null);
 
     return .{
         .src_mac = frame[6..12].*,
@@ -203,12 +238,21 @@ pub fn parseIpv4(frame: []const u8) ?Packet {
 /// is unusable.
 pub fn parseUdp(frame: []const u8) ?Datagram {
     const pkt = parseIpv4(frame) orelse return null;
-    if (pkt.protocol != proto_udp) return null;
-    if (pkt.payload.len < udp_header_len) return null;
+    if (pkt.protocol != proto_udp) {
+        props.reachable(@src(), "proto: a packet of another protocol is not UDP", null);
+        return null;
+    }
+    if (pkt.payload.len < udp_header_len) {
+        props.reachable(@src(), "proto: a packet too short for a UDP header", null);
+        return null;
+    }
 
     const udp = pkt.payload;
     const udp_len = readBe16(udp[4..6]);
-    if (udp_len < udp_header_len or udp_len > udp.len) return null;
+    if (udp_len < udp_header_len or udp_len > udp.len) {
+        props.reachable(@src(), "proto: a UDP length shorter than its header, or past the packet", null);
+        return null;
+    }
 
     return .{
         .src_ip = pkt.src_ip,

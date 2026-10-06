@@ -152,6 +152,10 @@ under "For the box" below.)*
 | `log_ring` | 9 (2 limits on the ring, the 3 redactions, an empty quoted value, and how a read starts) | 9 | `pure_sim`; `floor_sim` for an empty quoted value | none: it keeps what fits and takes secrets out |
 | `kept_log` | 5 (3 ways a slot is read, no boot before, and never writing over the boot before) | 5 | `pure_sim` | none: a header that fails its check reads as no log |
 | `fat16` | 84 (11 of them `unreachable`: guards behind other checks) | 61 of the 73 others in `properties`; the 12 missed are listed below | `fat_sim`; `floor_sim` for damaged volumes (a boot sector field, a first cluster or size on the disk, a link in a chain, a loop) and buffers or paths handed in | see "Errors under the Store" |
+| `proto` | 12 (11 refusals in `parseIpv4` and `parseUdp`, and a packet lies within its frame) | 12 | `floor_sim`: a UDP datagram built field by field, one field wrong, the header's checksum made right again; `tcp_sim` too | none: a frame it cannot use is a silent null, by design |
+| `arp` | 6 | 6 | `floor_sim`: an ARP request built field by field, one field wrong | none: a silent null |
+| `request_heap` | 4 (the memory it keeps missing, the pages running out, a block that cannot grow in place, a reset) | 4 | `pure_sim`; `floor_sim` for a growth only the last block can make | none: the allocator answers null and the caller decides |
+| `stream` | 7 (a read finding the peer gone or idle; a write, or draining a spill, finding the connection gone or idle; a spill too full) | 0 here | under metal-vmm (below): `stream.zig` imports `io.zig`, the driver and interrupts, so no simulator can drive it. The seam that would let one is under Proposed in QUEUE.md | `WriteFailed`, and null for a read |
 | `virtio` (`Block.flush`) | 1 | 0 here | under metal-vmm | a SCSI status, as a virtio-blk status byte |
 | `io` (`durable`) | 1 | 0 here | under metal-vmm | none: a failed flush is logged, counted, and the response goes out |
 
@@ -178,6 +182,18 @@ under "For the box" below.)*
 - Two met only at the long tier's 300 FAT seeds, as before: *a run of
   sectors fails to read* and *a FAT32 entry's first cluster is past 65535*
   (and *a run of sectors fails to write*, met at neither).
+
+**B15** (item 78): a gopher.elf built `-Dcoverage` checks `tcp_check`'s
+rules after every `handle` and `transmit` (`stream.checkTable`, as the
+simulators do, as one `always`: "tcp: the table's invariants hold"), and the
+volumes after every request ("fat: after a request, a volume has no damage
+beyond what a stop leaves"). Every build checks at boot ("fat: at boot,
+..."), since `diskCheck` already walks the volume there. "Damage" is
+`fat16.Problem.damage`: broken, crossed, short and bad `.`/`..`; leaked
+clusters, a long chain, FAT copies apart and a stale FSInfo are what a stop
+may leave. A production build compiles no per-turn or per-request check
+(`coverage_checks` is comptime). Built here both ways against angry-gopher
+`f5d360e`; not run (no KVM).
 
 ## Errors under the Store
 
@@ -224,4 +240,13 @@ metal-vmm run in `long.sh`; once a run reaches it, it goes on
 |---|---|---|
 | virtio: a flush fails, is counted, and the disk stays unflushed | `virtio.zig` | `VOLUME=<copy> VOLUME_CACHE=1 VOLUME_SYNC_FAIL=1`, and a chat post |
 | (no property) The Store's `replace` flushes before it renames | `store_fat.zig` | `VOLUME=<copy> VOLUME_CACHE=1 VOLUME_CUT_AT_EXIT=1` around a `replace`: in memory a flush does nothing, so only a write cache shows that the rename cannot reach the media before the data. Needs a kernel that calls the Store, which none does yet |
+| stream: a read finds the peer closed or done, so nothing more is coming | `stream.zig` | `PEER_RESET_AT=<before the request ends>` (unverified) |
+| stream: a read waits idle_ns for a byte, and gives up | `stream.zig` | `PEER_DRIP_US=11000000` with a request of several segments (`PEER_MSS`), each later than `idle_ns` (10 s) (unverified) |
+| stream: a write finds the connection gone | `stream.zig` | `PEER_RESET_AT=<while the answer goes out>` (unverified) |
+| stream: a write finds the connection gone, with a spill | `stream.zig` | the same, on a large answer (unverified) |
+| stream: a write waits idle_ns with nothing taken, and gives up | `stream.zig` | `PEER_SHUT_AFTER=1000 PEER_SHUT_FOR_US=11000000`, or `PEER_VANISH_AFTER=1000` (unverified) |
+| stream: a spill too full to keep more is drained first | `stream.zig` | a large answer (a picture) and `PEER_SHUT_AFTER` small (unverified) |
+| stream: draining a spill finds the connection gone; and waits idle_ns and gives up | `stream.zig` | the two above, together (unverified) |
+| tcp: the table's invariants hold | `stream.zig` (B15) | any run of a `-Dcoverage` gopher.elf; every rough-peer run in `long.sh` |
+| fat: after a request, a volume has no damage beyond what a stop leaves | `probe/gopher.zig` (B15) | any run of a `-Dcoverage` gopher.elf that serves a request; with `VOLUME_CUT_AFTER` or `DISK_CUT_AFTER` and a remount, it judges what a cut left |
 | io: a flush failed, and the response goes out anyway | `io.zig` | the same, for the volume. **No knob fails a flush of the boot disk**: it is virtio-blk and writes through (virtio 1.2 §5.2.5.1), so nothing is sent; a knob would need metal-vmm's `DISK_CACHE` to offer FLUSH and fail it (a proposal) |

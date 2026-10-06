@@ -8,6 +8,15 @@
 //! There is no cache and no request side. Everything we send goes to whoever
 //! sent to us first, so we already know their hardware address.
 
+const std = @import("std");
+const props = @import("coverage");
+
+comptime {
+    props.catalogFile(@import("coverage_catalog"), here());
+}
+fn here() std.builtin.SourceLocation {
+    return @src();
+}
 const proto = @import("proto.zig");
 
 const packet_len: usize = 28;
@@ -26,14 +35,32 @@ pub const Request = struct {
 /// An ARP request out of an ethernet frame, or null for anything else —
 /// another ethertype, a reply, a hardware or protocol pair we do not speak.
 pub fn parseRequest(frame: []const u8) ?Request {
-    if (frame.len < proto.eth_header_len + packet_len) return null;
-    if (proto.readBe16(frame[12..14]) != proto.ethertype_arp) return null;
+    if (frame.len < proto.eth_header_len + packet_len) {
+        props.reachable(@src(), "arp: a frame too short for an ARP packet", null);
+        return null;
+    }
+    if (proto.readBe16(frame[12..14]) != proto.ethertype_arp) {
+        props.reachable(@src(), "arp: a frame of another ethertype is not ARP", null);
+        return null;
+    }
 
     const a = frame[proto.eth_header_len..];
-    if (proto.readBe16(a[0..2]) != htype_ethernet) return null;
-    if (proto.readBe16(a[2..4]) != proto.ethertype_ipv4) return null;
-    if (a[4] != 6 or a[5] != 4) return null;
-    if (proto.readBe16(a[6..8]) != oper_request) return null;
+    if (proto.readBe16(a[0..2]) != htype_ethernet) {
+        props.reachable(@src(), "arp: a hardware type other than Ethernet", null);
+        return null;
+    }
+    if (proto.readBe16(a[2..4]) != proto.ethertype_ipv4) {
+        props.reachable(@src(), "arp: a protocol type other than IPv4", null);
+        return null;
+    }
+    if (a[4] != 6 or a[5] != 4) {
+        props.reachable(@src(), "arp: address lengths other than 6 and 4", null);
+        return null;
+    }
+    if (proto.readBe16(a[6..8]) != oper_request) {
+        props.reachable(@src(), "arp: an operation other than a request", null);
+        return null;
+    }
 
     return .{
         .sender_mac = a[8..14].*,

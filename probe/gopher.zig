@@ -53,6 +53,10 @@ const ready = metal.ready;
 const RequestHeap = metal.request_heap.RequestHeap;
 const interrupts = metal.interrupts;
 const gm_build = @import("gm_build");
+/// B15 (metal-vmm QUEUE item 78): a `-Dcoverage` build checks the TCP table
+/// after every turn of the network (`stream.checkTable`) and the volumes after
+/// every request (`checkVolumes`). A production build has neither.
+pub const coverage_checks = gm_build.coverage;
 
 /// The application, as it is.
 const router = @import("router.zig");
@@ -577,6 +581,7 @@ pub fn kmain() noreturn {
         serial.putDec(request_heap.used);
         serial.put(" bytes\n");
         request_heap.reset();
+        if (coverage_checks) checkVolumes();
         deepest = reportStack(deepest);
         // **LOUD, ONCE PER OCCURRENCE** (REVIEW-item90-step2.md finding 1): a
         // frame too long to send is a kernel bug net.zig refused rather than
@@ -1061,7 +1066,9 @@ fn reportStack(deepest: usize) usize {
 fn close(wire: *stream.Wire, table: *tcp.Table, i: usize) void {
     table.finish(i);
     if (table.conns[i].state != .closing) return table.abandon(wire, i);
-    table.transmit(wire, Io.awakeNs() orelse 0);
+    const now = Io.awakeNs() orelse 0;
+    table.transmit(wire, now);
+    if (coverage_checks) stream.checkTable(table, now, .after_transmit);
 }
 
 /// **A MACHINE WITH NOTHING TO DO HALTS**, once the network card can wake it.
@@ -1209,6 +1216,27 @@ fn mountFat(blk: *virtio.Block, scratch: *[fat16.sector_size]u8, what: []const u
 ///
 /// It runs after `cacheFat`, so following a chain is a memory read; the walk
 /// reads each directory sector once.
+/// **B15: THE VOLUMES, CHECKED AFTER EVERY REQUEST**, in a `-Dcoverage` build
+/// only: the whole check, as `diskCheck` runs it at boot, with no line
+/// printed. The kernel cannot tell when a run ends (metal-vmm ends it from
+/// outside), so this is the nearest thing: the state after the last request
+/// is the state the run ended in.
+fn checkVolumes() void {
+    for ([_]?*fat16.Volume{ Io.siteVolume(), Io.dataVolume() }) |maybe| {
+        const vol = maybe orelse continue;
+        const seen = pages.allocator.alloc(u8, vol.checkBytes()) catch continue;
+        defer pages.allocator.free(seen);
+        var damage: u32 = 0;
+        const Count = struct {
+            fn each(n: *u32, f: fat16.Finding) void {
+                if (f.problem.damage()) n.* += 1;
+            }
+        };
+        _ = vol.check(seen, &damage, Count.each) catch continue;
+        metal.coverage.always(@src(), damage == 0, "fat: after a request, a volume has no damage beyond what a stop leaves", .{ .damage = damage });
+    }
+}
+
 fn diskCheck(vol: *fat16.Volume, what: []const u8) void {
     serial.put("  disk check, ");
     serial.put(what);
@@ -1225,7 +1253,10 @@ fn diskCheck(vol: *fat16.Volume, what: []const u8) void {
         held: [most]fat16.Finding = undefined,
         paths: [most][256]u8 = undefined,
         n: u32 = 0,
+        /// Findings that are damage (`fat16.Problem.damage`), all of them.
+        damage: u32 = 0,
         fn each(self: *@This(), f: fat16.Finding) void {
+            if (f.problem.damage()) self.damage += 1;
             if (self.n < most) {
                 const len = @min(f.path.len, self.paths[self.n].len);
                 @memcpy(self.paths[self.n][0..len], f.path[0..len]);
@@ -1252,6 +1283,8 @@ fn diskCheck(vol: *fat16.Volume, what: []const u8) void {
     serial.put(" leaked, ");
     serial.putDec(h.problems);
     serial.put(" problems\n");
+    // At boot, so the last run's end: observed in every build.
+    metal.coverage.always(@src(), shown.damage == 0, "fat: at boot, a volume has no damage beyond what a stop leaves", .{ .damage = shown.damage });
     for (shown.held[0..@min(shown.n, Shown.most)]) |f| {
         serial.put("    ");
         serial.put(@tagName(f.problem));

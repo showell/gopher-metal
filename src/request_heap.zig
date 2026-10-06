@@ -22,6 +22,14 @@
 //! the client was still sending.
 
 const std = @import("std");
+const props = @import("coverage");
+
+comptime {
+    props.catalogFile(@import("coverage_catalog"), here());
+}
+fn here() std.builtin.SourceLocation {
+    return @src();
+}
 
 pub const RequestHeap = struct {
     arena: std.heap.ArenaAllocator,
@@ -43,7 +51,10 @@ pub const RequestHeap = struct {
     /// Takes the memory it keeps up front, so the first request does not pay
     /// for it. False if the machine has not that much to give.
     pub fn preheat(self: *RequestHeap) bool {
-        const first = self.arena.allocator().alloc(u8, self.keep) catch return false;
+        const first = self.arena.allocator().alloc(u8, self.keep) catch {
+            props.reachable(@src(), "request heap: the machine has not the memory it keeps", .{ .keep = self.keep });
+            return false;
+        };
         self.arena.allocator().free(first);
         _ = self.arena.reset(.retain_capacity);
         return true;
@@ -58,6 +69,7 @@ pub const RequestHeap = struct {
         self.most = @max(self.most, self.used);
         self.used = 0;
         _ = self.arena.reset(.{ .retain_with_limit = self.keep });
+        props.reachable(@src(), "request heap: a request is answered and its memory goes back", null);
     }
 
     /// How much it holds from the pages, including what it keeps.
@@ -75,7 +87,10 @@ pub const RequestHeap = struct {
     fn alloc(ctx: *anyopaque, len: usize, alignment: std.mem.Alignment, ret_addr: usize) ?[*]u8 {
         const self: *RequestHeap = @ptrCast(@alignCast(ctx));
         const inner = self.arena.allocator();
-        const p = inner.vtable.alloc(inner.ptr, len, alignment, ret_addr) orelse return null;
+        const p = inner.vtable.alloc(inner.ptr, len, alignment, ret_addr) orelse {
+            props.reachable(@src(), "request heap: the pages run out under a request", .{ .len = len });
+            return null;
+        };
         self.used += len;
         return p;
     }
@@ -91,7 +106,10 @@ pub const RequestHeap = struct {
     fn remap(ctx: *anyopaque, memory: []u8, alignment: std.mem.Alignment, new_len: usize, ret_addr: usize) ?[*]u8 {
         const self: *RequestHeap = @ptrCast(@alignCast(ctx));
         const inner = self.arena.allocator();
-        const p = inner.vtable.remap(inner.ptr, memory, alignment, new_len, ret_addr) orelse return null;
+        const p = inner.vtable.remap(inner.ptr, memory, alignment, new_len, ret_addr) orelse {
+            props.reachable(@src(), "request heap: a block cannot grow in place, and the caller must move it", .{ .len = new_len });
+            return null;
+        };
         if (new_len > memory.len) self.used += new_len - memory.len;
         return p;
     }
