@@ -43,6 +43,12 @@ t=$SECONDS
 lap() { echo "time: $1 $((SECONDS - t)) s"; t=$SECONDS; }
 
 GOPHER_ROOT="${GOPHER_ROOT:-$HOME/showell_repos/angry-gopher}"
+# **WHICH CODE THIS RUN JUDGES** (tools/verdicts.py): both commits, printed,
+# and a port that is not angry-gopher's HEAD refused. A full run keeps its
+# verdict for exactly this pair, which droplet/chat.py requires.
+VERDICT_PAIR="$(python3 tools/verdicts.py ids)" || exit 2
+export VERDICT_PAIR
+python3 tools/verdicts.py pair
 VERDICTS="${GATES_VERDICTS:-$HOME/build/gopher-metal/gates}"
 mkdir -p "$VERDICTS"
 
@@ -168,8 +174,10 @@ VMM="${METAL_VMM:-$HOME/showell_repos/metal-vmm}"
 lap "metal-vmm check, same and rest"
 
 if [ ${#failed[@]} = 0 ]; then
+    [ "$mode" = full ] && python3 tools/verdicts.py record gates PASS
     echo "GATES: PASS"
 else
+    [ "$mode" = full ] && python3 tools/verdicts.py record gates FAIL
     echo "GATES: FAIL (${failed[*]})"
     exit 1
 fi

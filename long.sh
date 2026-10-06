@@ -48,6 +48,15 @@ OUT="${LONG_OUT:-$HOME/build/gopher-metal/long}"
 want="${1:-all}"
 case "$want" in all | sim | metal) ;; *) echo "usage: ./long.sh [sim|metal]"; exit 2 ;; esac
 
+# **WHICH CODE THIS RUN JUDGES** (tools/verdicts.py), as gates.sh does. Only
+# a whole run at full size keeps a verdict: a release asks for this tier as
+# it is, not a smaller one.
+VERDICT_PAIR="$(python3 tools/verdicts.py ids)" || exit 2
+export VERDICT_PAIR
+python3 tools/verdicts.py pair
+keeps_verdict=no
+[ "$want" = all ] && [ "$SEEDS" -ge 10000 ] && [ "$FAT_SEEDS" -ge 300 ] && keeps_verdict=yes
+
 failed=()
 began=$(date +%s)
 lap() { echo "time: $1 $(( $(date +%s) - began )) s"; began=$(date +%s); }
@@ -181,8 +190,11 @@ EOF
 fi
 
 if [ ${#failed[@]} = 0 ]; then
+    if [ $keeps_verdict = yes ]; then python3 tools/verdicts.py record long PASS
+    else echo "no verdict kept: only a whole run ($want) at full size (SEEDS>=10000, FAT_SEEDS>=300) keeps one"; fi
     echo "LONG: PASS"
 else
+    [ $keeps_verdict = yes ] && python3 tools/verdicts.py record long FAIL
     echo "LONG: FAIL (${failed[*]})"
     exit 1
 fi
