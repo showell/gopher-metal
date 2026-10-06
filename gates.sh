@@ -16,12 +16,11 @@
 # that skipped this judged yesterday's kernel and passed. It assumes port.sh
 # has already prepared angry-gopher's sources; it does not re-port them.
 #
-# **THE CHAT JUDGE RUNS FAT32 EVERY TIME** (QUEUE.md item 88): prod's data is a
-# FAT32 volume now. The FAT16 run is the extra one, taken only when it could be
-# affected — `src/fat16*`, `src/io*`, the judge or `droplet/chat.py` changed
-# since `GATES_BASE` (default `origin/master`), or `GATES_FAT16=1` — and the
-# skip is printed with its reason, never silent. FAT16 is still covered every
-# run by `zig build test` and `tools/check_fat16_images.sh`.
+# **THE CHAT JUDGE RUNS FAT32 HERE, FAT16 IN long.sh** (QUEUE.md item 88; the
+# gates essay, item 6): prod's data is a FAT32 volume. The FAT16 judge was
+# nine of this run's twenty-five minutes; it now runs on every long.sh, which
+# every release needs, and FAT16 is still covered here by `zig build test`
+# and `tools/check_fat16_images.sh`.
 #
 # **ITS EXIT CODE IS THE VERDICT.** Every step's own status is kept, through
 # the pipes that trim its output, and the last line names the steps that
@@ -129,26 +128,10 @@ else
     done
 fi
 
-# The FAT16 judge, the extra one: only when it could be affected, the reason
-# said out loud (QUEUE.md items 85, 88).
-fat16_reason() {  # prints why it runs; empty output + return 1 means skip
-    [ "${GATES_FAT16:-0}" = 1 ] && { echo "GATES_FAT16=1"; return 0; }
-    local base="${GATES_BASE:-origin/master}" files
-    files=$(git diff --name-only "$base"...HEAD 2>/dev/null) ||
-        { echo "cannot diff against $base, so running it"; return 0; }
-    [ -z "$files" ] && files=$(git diff --name-only "$base" 2>/dev/null)
-    echo "$files" | grep -qE '^src/fat16|^src/io|^probe/judge_gopher\.py|^droplet/chat\.py|^src/test_disk' &&
-        { echo "src/fat16*, src/io*, the judge or chat.py changed since $base"; return 0; }
-    return 1
-}
-if reason=$(fat16_reason); then
-    echo "FAT16 chat judge: running ($reason)"
-    judge microvm 16
-    report microvm-fat16
-    lap "gopher judge, microvm (FAT16)"
-else
-    echo "FAT16 chat judge: skipped (nothing it covers changed since ${GATES_BASE:-origin/master}; GATES_FAT16=1 to force). FAT16 is still in zig build test and tools/check_fat16_images.sh."
-fi
+# **THE FAT16 JUDGE IS long.sh's** (the gates essay, item 6): prod's data is
+# FAT32, and FAT16 stays covered here by zig build test, the FAT simulator
+# and tools/check_fat16_images.sh. long.sh runs the judge on every release.
+echo "FAT16 chat judge: in long.sh, before every release"
 
 # ── the droplet and metal-vmm checks ─────────────────────────────────────────
 b=$(droplet/boot.sh 2>&1) || failed+=(droplet-boot)
