@@ -8,9 +8,10 @@
 //! virtio-scsi carries SCSI commands. A request is a header naming the disk
 //! (target and LUN) with a command block (the CDB), then the data, then a
 //! response the device writes: its own outcome, the disk's SCSI status, and
-//! sense data saying why when the status is CHECK CONDITION. Four commands are
+//! sense data saying why when the status is CHECK CONDITION. Six commands are
 //! all a disk needs here: INQUIRY (is there a disk at this address?), READ
-//! CAPACITY (how big?), READ(10) and WRITE(10).
+//! CAPACITY (how big?), MODE SENSE (does it cache writes?), READ(10),
+//! WRITE(10), and SYNCHRONIZE CACHE (make what it cached durable).
 //!
 //! **IT IS A `virtio.Block` LIKE ANY OTHER.** The FAT16 volume and the GPT
 //! reader call `read`, `readMany`, `write` and `writeMany`; on a Block brought
@@ -89,6 +90,8 @@ const status_check_condition: u8 = 2;
 /// The sense key a disk reports once after it is attached or reset: a fact to
 /// be told, not a failure. The command is simply sent again.
 const sense_unit_attention: u8 = 6;
+/// The sense key of a command the disk does not support.
+const sense_illegal_request: u8 = 5;
 
 /// The memory a SCSI disk needs on top of `virtio.BlockMemory`'s ring: the
 /// controller's two other queues, the header and response, and a sector of
@@ -181,6 +184,36 @@ pub fn transfer(b: *virtio.Block, at: Address, from_disk: bool, lba: u64, addr: 
     return if (good(o)) virtio.blk_s_ok else virtio.blk_s_ioerr;
 }
 
+/// **SYNCHRONIZE CACHE(10)** over the whole disk (SBC-3 §5.22: a zero LBA
+/// and a zero count mean every block): everything the disk has answered as
+/// written is durable when this answers GOOD. A disk that does not know the
+/// command (ILLEGAL REQUEST) has no cache to synchronize, and says so once:
+/// it is marked write-through and never asked again.
+pub fn synchronize(b: *virtio.Block, at: Address) u8 {
+    const cdb = [10]u8{ 0x35, 0, 0, 0, 0, 0, 0, 0, 0, 0 };
+    const o = commandSettled(b, at, &cdb, .none, 0, 0);
+    if (good(o)) return virtio.blk_s_ok;
+    if (o.response == response_ok and o.status == status_check_condition and o.sense_key == sense_illegal_request) {
+        b.write_cache = false;
+        return virtio.blk_s_ok;
+    }
+    return virtio.blk_s_ioerr;
+}
+
+/// **DOES THE DISK CACHE WRITES?** MODE SENSE(10) for the caching mode page
+/// (SBC-3 §6.5.5, page 08h), current values, no block descriptors: its WCE
+/// bit says writes are answered from a cache. Null when the disk does not
+/// answer or the page is not there, which `Block.flush` treats as a cache.
+fn writeCache(b: *virtio.Block, at: Address, scratch: u64, page: []const u8) ?bool {
+    const want: u16 = 8 + 20; // the mode parameter header, then the page
+    const cdb = [10]u8{ 0x5A, 0x08, 0x08, 0, 0, 0, 0, @truncate(want >> 8), @truncate(want), 0 };
+    if (!good(commandSettled(b, at, &cdb, .from_disk, scratch, want))) return null;
+    const descriptors = (@as(usize, page[6]) << 8) | page[7];
+    const p = 8 + descriptors;
+    if (p + 3 > want or page[p] & 0x3F != 0x08) return null;
+    return page[p + 2] & 0x04 != 0;
+}
+
 fn be32(bytes: []const u8) u32 {
     return (@as(u32, bytes[0]) << 24) | (@as(u32, bytes[1]) << 16) | (@as(u32, bytes[2]) << 8) | bytes[3];
 }
@@ -219,8 +252,9 @@ pub fn bring(device: virtio.Device, mem: *virtio.BlockMemory) Error!virtio.Block
         .scsi = &mem.scsi,
     };
 
-    const max_target: u16 = @min(virtio.configRead16(device, 32), 63);
-    const max_lun: u32 = @min(virtio.configRead32(device, 36), 7);
+    // virtio 1.2 §5.6.4: max_channel le16 at 28, max_target le16 at 30, max_lun le32 at 32.
+    const max_target: u16 = @min(virtio.configRead16(device, 30), 63);
+    const max_lun: u32 = @min(virtio.configRead32(device, 32), 7);
     const scratch = @intFromPtr(&mem.scsi.scratch);
     var target: u16 = 0;
     while (target <= max_target) : (target += 1) {
@@ -240,6 +274,7 @@ pub fn bring(device: virtio.Device, mem: *virtio.BlockMemory) Error!virtio.Block
             if (be32(mem.scsi.scratch[4..8]) != 512 or last == 0xFFFF_FFFF) return Error.NoCapacity;
             b.capacity = @as(u64, last) + 1;
             b.address = at;
+            b.write_cache = writeCache(&b, at, scratch, &mem.scsi.scratch);
             return b;
         }
     }

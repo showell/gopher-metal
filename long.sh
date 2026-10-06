@@ -11,7 +11,10 @@
 #    rough seeds and FAT's, with `coverage/floor-sim.txt` as their floor:
 #    every property on it must be reached, and none broken.
 #
-# 2. **The real kernel, losing each of its frames in turn.** gopher.elf, built
+# 2. **The chat judge on FAT16** (QEMU's microvm, the whole story): moved
+#    here from gates.sh, whose FAT32 judges are what prod runs.
+#
+# 3. **The real kernel, losing each of its frames in turn.** gopher.elf, built
 #    with -Dcoverage, on metal-vmm's PC-shaped machine (TRANSPORT=pci: it
 #    halts between frames and wakes on interrupts, as on a droplet), over a
 #    5 ms wire. For each route, the wire eats the guest's 1st frame, then its
@@ -21,7 +24,7 @@
 #    run's coverage lines go to one sdk.jsonl, judged by zig-coverage-sdk's
 #    report.py against `coverage/floor-metal.txt`.
 #
-# 3. **The real kernel, with a peer that misbehaves**: one run each for a
+# 4. **The real kernel, with a peer that misbehaves**: one run each for a
 #    reset (exact and not), a peer that vanishes, a window it shuts, a
 #    damaged segment, a SYN flood that fills the table, and a request
 #    segment lost so the next arrives ahead (the table in the script).
@@ -48,6 +51,15 @@ OUT="${LONG_OUT:-$HOME/build/gopher-metal/long}"
 want="${1:-all}"
 case "$want" in all | sim | metal) ;; *) echo "usage: ./long.sh [sim|metal]"; exit 2 ;; esac
 
+# **WHICH CODE THIS RUN JUDGES** (tools/verdicts.py), as gates.sh does. Only
+# a whole run at full size keeps a verdict: a release asks for this tier as
+# it is, not a smaller one.
+VERDICT_PAIR="$(python3 tools/verdicts.py ids)" || exit 2
+export VERDICT_PAIR
+python3 tools/verdicts.py pair
+keeps_verdict=no
+[ "$want" = all ] && [ "$SEEDS" -ge 10000 ] && [ "$FAT_SEEDS" -ge 300 ] && keeps_verdict=yes
+
 failed=()
 began=$(date +%s)
 lap() { echo "time: $1 $(( $(date +%s) - began )) s"; began=$(date +%s); }
@@ -64,6 +76,19 @@ if [ "$want" != metal ]; then
 fi
 
 if [ "$want" != sim ]; then
+    # **THE FAT16 CHAT JUDGE** (moved here from gates.sh, the gates essay's
+    # item 6): the whole chat story on QEMU's microvm with the data on FAT16,
+    # every run. First, on gopher.elf as a release builds it: the coverage
+    # build below replaces it.
+    echo "── the chat judge on FAT16 (microvm)"
+    zig build gopher > "$OUT.fat16-build" 2>&1 || { echo "gopher.elf does not build: $OUT.fat16-build"; exit 2; }
+    env JUDGE_DROPLET=0 FAT=16 PROBE_WORK="$HOME/build/gopher-metal/probe-microvm-fat16" probe/run.sh gopher \
+        > "$OUT.fat16" 2>&1
+    code=$?
+    sed -n '/^\(PASS\|FAIL\|    \) *gopher/,$p' "$OUT.fat16"
+    { [ "$code" = 0 ] && grep -q "^PASS gopher" "$OUT.fat16"; } || failed+=(fat16-judge)
+    lap "chat judge, FAT16"
+
     echo "── the real kernel on metal-vmm's PC-shaped machine, losing each frame in turn"
     mkdir -p "$OUT"
     rm -f "$OUT/sdk.jsonl"
@@ -181,8 +206,11 @@ EOF
 fi
 
 if [ ${#failed[@]} = 0 ]; then
+    if [ $keeps_verdict = yes ]; then python3 tools/verdicts.py record long PASS
+    else echo "no verdict kept: only a whole run ($want) at full size (SEEDS>=10000, FAT_SEEDS>=300) keeps one"; fi
     echo "LONG: PASS"
 else
+    [ $keeps_verdict = yes ] && python3 tools/verdicts.py record long FAIL
     echo "LONG: FAIL (${failed[*]})"
     exit 1
 fi

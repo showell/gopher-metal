@@ -33,3 +33,8 @@ python3 "$HERE/tools/extract_assets.py" "$SRC/../build.zig" "$HERE/gen/assets.zi
 
 echo "$(ls "$OUT"/*.zig | wc -l) files copied, $before had the alias, $after now point at this machine"
 [ "$before" = "$after" ] || { echo "the edit did not take on every file"; exit 1; }
+
+# **WHICH angry-gopher THIS IS** (tools/verdicts.py): gates.sh and long.sh
+# refuse a port that is not angry-gopher's HEAD, and an image is built only
+# from a pair whose verdicts say PASS.
+python3 "$HERE/tools/verdicts.py" stamp

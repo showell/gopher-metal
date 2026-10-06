@@ -897,6 +897,11 @@ fn streamTurn() void {
 /// its browser will reconnect and resume. So is one whose mailbox overflowed —
 /// a stream with a gap in it is worse than one that starts again.
 fn serviceStreams(wire: *stream.Wire, table: *tcp.Table, hub: *Hub, scratch: std.mem.Allocator, now: i96, conf: Config) void {
+    // A frame shows others what was just saved: the save is durable first,
+    // as for any response (`io.durable`). These frames, and the keepalive
+    // ping below, are queued here, not through a Stream, so this one call
+    // covers all three of this function's queues.
+    Io.durable();
     for (&held) |*slot| {
         const h = if (slot.*) |*h| h else continue;
         const c = &table.conns[h.conn];
@@ -1513,6 +1518,13 @@ fn addVolume(facts: *std.ArrayList(router.host_status.Fact), alloc: std.mem.Allo
     else |e|
         try std.fmt.allocPrint(alloc, "{s}, serial {s}: free space unreadable ({s})", .{ kindName(v), named, @errorName(e) });
     try facts.append(alloc, .{ .label = label, .value = value });
+    // **WHETHER A SAVE IS DURABLE BEFORE IT IS ANSWERED** (io.durable): what
+    // the disk says of its write cache, and the flushes sent to it.
+    const cache: []const u8 = if (v.blk.write_cache) |on| (if (on) "on: writes wait in it until flushed" else "off: it writes through") else "not said: flushed as if on";
+    try facts.append(alloc, .{
+        .label = "  its write cache",
+        .value = try std.fmt.allocPrint(alloc, "{s}; {d} flushes, {d} failed", .{ cache, v.blk.flushes, v.blk.flush_failures }),
+    });
 }
 
 /// The data's volume, free and total, for the game store's floor: the volume

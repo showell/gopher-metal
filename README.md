@@ -49,19 +49,20 @@ item N" in a comment or commit names an item there). Since 2026-10-05 a cloud
 session works here again on the simulators and properties only, through
 metal-vmm's `QUEUE.md` and `CLOUD_WORK.md` (see `CLAUDE.md`).
 
-**Serving (2026-10-06): v17**, gopher-metal `4953f7e` with angry-gopher
-`162152b3`: a given-way half-open revived by its client's ACK (a flood no
-longer resets a real client whose handshake ACK was lost), FAT's deepest
-folder made only as deep as its check walks and a looped chain refused on
-read, and the log ring's full-ring read. Gated by `gates.sh` and `long.sh`
-on exactly that pair. v16's image is the way back.
+**Serving (2026-10-06): v18**, gopher-metal `f592d4d` with angry-gopher
+`7e3fbc5e`: no response leaves before the writes ahead of it are durable
+(SYNCHRONIZE CACHE on the volume when it says it caches; the cache and the
+flush counts on /admin/host), SCSI's target and LUN read at the spec's
+offsets, and the release rules as a script (`tools/verdicts.py`: `chat.py`
+builds only a pair both `gates.sh` and `long.sh` passed). On metal-vmm, v18
+sends a SYNCHRONIZE CACHE before a chat post's 303 where v17 sent none; the
+power cut after the 303 that would show v17 losing the message waits on a
+knob (metal-vmm QUEUE 68). v17's image is the way back.
 
 **Open (2026-10-06):**
-- Backups (above).
-- v18, on `box/v18`: no response leaves before the writes ahead of it are
-  durable (SYNCHRONIZE CACHE on the volume; its write cache on
-  /admin/host), and the release rules as a script (`tools/verdicts.py`:
-  `chat.py` builds only a pair both tiers passed).
+- Backups (above). v18 shipped without a volume snapshot (Steve's call).
+- v19: the flush decision pulled out and simulated (`durable.zig`, metal-vmm
+  QUEUE 59), on the cloud session's branch.
 
 ## Where it runs: https://lynrummy.com
 

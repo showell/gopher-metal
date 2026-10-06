@@ -27,6 +27,7 @@
 
 const std = @import("std");
 const serial = @import("serial.zig");
+const virtio = @import("virtio.zig");
 const stack = @import("stack.zig");
 const PageCache = @import("page_cache.zig").PageCache;
 const fat16 = @import("fat16.zig");
@@ -121,6 +122,33 @@ fn pagesFor(path: []const u8) ?*PageCache {
     const pc = page_cache orelse return null;
     if (data_dirs.len == 0 or placeOf(path) != .data) return null;
     return pc;
+}
+
+/// **NOTHING LEAVES THE MACHINE AHEAD OF THE WRITES BEFORE IT.** Every
+/// disk with writes it has answered but may not have kept is flushed
+/// (`virtio.Block.flush`). `stream.zig` calls this before any response byte
+/// joins a connection's send queue, so a 303 that says a message was saved,
+/// or a chat frame that shows it to others, goes out only once the message
+/// is durable. This is external synchrony (Nightingale et al., "Rethink the
+/// Sync", OSDI 2006): durability matters where someone can see it, so it is
+/// tied to output, not to the application's own calls. The application
+/// never calls `File.sync`, on Linux either, where a write sat in the page
+/// cache for up to half a minute; here every write already reaches the
+/// device, and this makes it past the device's cache.
+///
+/// A flush that fails is logged and counted (/admin/host), and the response
+/// goes out: the write itself was answered as done, and refusing every
+/// response after a disk stops flushing would take the site down for what
+/// may be a disk with no cache at all. The flush is tried again before the
+/// next response.
+pub fn durable() void {
+    for ([_]?fat16.Volume{ site, data }, 0..) |maybe, k| {
+        const v = maybe orelse continue;
+        if (!v.blk.unflushed) continue;
+        if (v.blk.flush() != virtio.blk_s_ok) {
+            serial.put(if (k == 0) "  a flush of the boot disk failed\n" else "  a flush of the volume failed\n");
+        }
+    }
 }
 
 /// The two volumes, for a host's status report: the site's, and the data's

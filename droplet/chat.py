@@ -42,6 +42,8 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
 sys.path.insert(0, os.path.join(ROOT, "probe"))
 import judge_gopher as judge  # noqa: E402
+sys.path.insert(0, os.path.join(ROOT, "tools"))
+import verdicts  # noqa: E402
 
 GOPHER_ROOT = os.environ.get("GOPHER_ROOT", os.path.expanduser("~/showell_repos/angry-gopher"))
 ELF = os.path.join(ROOT, "probe", "gopher.elf")
@@ -83,8 +85,25 @@ def main() -> int:
         print(__doc__)
         return 2
     out = args[0]
-    if not os.path.isfile(ELF):
-        print(f"no {ELF}: ./port.sh && zig build gopher")
+    # **ONLY JUDGED CODE BECOMES AN IMAGE** (tools/verdicts.py): both trees
+    # clean, and gates.sh and long.sh both PASS for exactly this pair.
+    refused = verdicts.require()
+    if refused and os.environ.get("RELEASE_UNGATED") == "1":
+        print("chat.py: RELEASE_UNGATED=1: building an image the gates have not passed, because:", file=sys.stderr)
+        for why in refused:
+            print(f"  - {why}", file=sys.stderr)
+    elif refused:
+        print("chat.py: REFUSING to build an image:")
+        for why in refused:
+            print(f"  - {why}")
+        print("(RELEASE_UNGATED=1 builds it anyway, for an emergency fix, and says so.)")
+        return 1
+    # **THE KERNEL IS BUILT HERE, FROM THIS TREE**, never taken from disk: a
+    # gopher.elf left by another build (long.sh's -Dcoverage one, say) is not
+    # what the verdicts judged.
+    built = subprocess.run(["zig", "build", "gopher"], cwd=ROOT)
+    if built.returncode != 0:
+        print("chat.py: gopher.elf does not build")
         return 1
     serial = open(SERIAL_FILE).read().strip()
     proxy = open(PROXY_FILE).read().strip() if os.path.isfile(PROXY_FILE) else None

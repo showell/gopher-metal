@@ -673,6 +673,21 @@ pub const Block = struct {
     address: ?scsi.Address = null,
     scsi: ?*scsi.Memory = null,
 
+    /// **WRITES THE DISK HAS ANSWERED BUT MAY NOT HAVE KEPT.** A disk with a
+    /// write cache answers a write once the bytes are in the cache; only a
+    /// flush makes them durable. Set by every write, cleared by `flush`.
+    /// `io.durable` reads it before any response leaves the machine.
+    unflushed: bool = false,
+    /// What the disk says of its own cache: true (writes wait in it), false
+    /// (it writes through), or null (it did not say). A SCSI disk says in
+    /// MODE SENSE's caching page (`scsi.zig`). A virtio-blk disk is
+    /// write-through unless VIRTIO_BLK_F_FLUSH is negotiated (virtio 1.2
+    /// §5.2.5.1), and this driver never negotiates it, so it is false there.
+    write_cache: ?bool = null,
+    /// Flushes sent, and those the disk answered with an error.
+    flushes: u64 = 0,
+    flush_failures: u64 = 0,
+
     /// **A DISK IN MEMORY, FOR HOST TESTS** (`inMemory`): every transfer is a
     /// copy to or from these bytes, and no device is touched. Null on a real
     /// device.
@@ -728,7 +743,10 @@ pub const Block = struct {
         if (self.fail_after_writes) |n| if (self.writes >= n) return blk_s_ioerr;
         const number = self.requests;
         self.requests +%= 1;
-        if (kind != blk_t_in) self.writes +%= 1;
+        if (kind != blk_t_in) {
+            self.writes +%= 1;
+            self.unflushed = true;
+        }
         const at = lba * 512;
         if (at > disk.len or len > disk.len - at) return blk_s_ioerr;
         const there = disk[@intCast(at)..][0..len];
@@ -777,7 +795,12 @@ pub const Block = struct {
     /// pass through this function.
     fn transfer(self: *Block, kind: u32, lba: u64, addr: u64, len: u32) u8 {
         if (self.memory) |disk| return self.memoryTransfer(disk, kind, lba, addr, len);
-        if (self.address) |at| return scsi.transfer(self, at, kind == blk_t_in, lba, addr, len);
+        if (self.address) |at| {
+            // Set before the command: a write that fails may still have
+            // landed in part, in the cache.
+            if (kind != blk_t_in) self.unflushed = true;
+            return scsi.transfer(self, at, kind == blk_t_in, lba, addr, len);
+        }
         self.header.* = .{ .type = kind, .reserved = 0, .sector = lba };
         self.status.* = 0xFF; // so a device that writes nothing is not read as OK
 
@@ -834,6 +857,23 @@ pub const Block = struct {
     pub fn writeMany(self: *Block, lba: u64, addr: u64, count: u32) u8 {
         if (count == 0 or count > max_sectors) return blk_s_unsupp;
         return self.transfer(blk_t_out, lba, addr, count * 512);
+    }
+
+    /// **EVERY WRITE ANSWERED SO FAR, MADE DURABLE.** A SCSI disk is sent
+    /// SYNCHRONIZE CACHE, unless it said it has no write cache. A virtio-blk
+    /// disk writes through (see `write_cache`), so there is nothing to send;
+    /// nor on a disk in memory, which counts the flush for host tests.
+    /// Answers a virtio-blk status byte. `unflushed` is cleared only on
+    /// success, so a failed flush is tried again before the next response.
+    pub fn flush(self: *Block) u8 {
+        if (!self.unflushed) return blk_s_ok;
+        self.flushes +%= 1;
+        const status = if (self.address) |at|
+            (if (self.write_cache == false) blk_s_ok else scsi.synchronize(self, at))
+        else
+            blk_s_ok;
+        if (status == blk_s_ok) self.unflushed = false else self.flush_failures +%= 1;
+        return status;
     }
 };
 
