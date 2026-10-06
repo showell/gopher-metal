@@ -11,11 +11,17 @@
 //!   its first sector zero or after its last. Oracle: the answer is exactly
 //!   the one the wrong thing calls for, and with nothing wrong the data
 //!   partition is the one answered.
+//! - **The page cache's rare refusals** (`pageSeed`), which `page_sim`'s
+//!   small budgets never make: every one of its 4096 slots taken (one seed
+//!   in a hundred, since it costs 16 MB), a write past a kept file's end,
+//!   and no memory to grow a copy. Oracle: the copy concerned is gone, the
+//!   rest are as they were, and the count stays within the slots.
 
 const std = @import("std");
 const virtio = @import("virtio.zig");
 const gpt = @import("gpt.zig");
 const kernel_partition = @import("kernel_partition.zig");
+const PageCache = @import("page_cache.zig").PageCache;
 const props = @import("coverage");
 
 comptime {
@@ -127,8 +133,55 @@ pub fn gptSeed(seed: u64) Failure!void {
     }
 }
 
+// ── the page cache ──────────────────────────────────────────────────────────
+
+pub fn pageSeed(seed: u64) Failure!void {
+    var prng = std.Random.DefaultPrng.init(seed ^ 0x7061_6765); // "page"
+    const r = prng.random();
+    const gpa = std.testing.allocator;
+    const page = PageCache.page;
+    if (seed % 100 == 0) {
+        // Every slot taken: the next file sends the oldest away.
+        const c = gpa.create(PageCache) catch return fail(seed, "no memory for the cache", .{});
+        defer gpa.destroy(c);
+        c.* = PageCache.init(gpa, (PageCache.slots + 1) * page, page);
+        defer c.clear();
+        var name: [16]u8 = undefined;
+        for (0..PageCache.slots + 1) |k| {
+            const n = std.fmt.bufPrint(&name, "f{d}", .{k}) catch unreachable;
+            c.put(n, "x");
+        }
+        if (c.count != PageCache.slots) return fail(seed, "{d} files kept, not {d}", .{ c.count, PageCache.slots });
+        if (c.get("f0") != null) return fail(seed, "the oldest file stayed when every slot was taken", .{});
+        if (c.get("f4096") == null) return fail(seed, "the newest file was not kept", .{});
+        return;
+    }
+    var failing = std.testing.FailingAllocator.init(gpa, .{});
+    const c = gpa.create(PageCache) catch return fail(seed, "no memory for the cache", .{});
+    defer gpa.destroy(c);
+    c.* = PageCache.init(failing.allocator(), 8 * page, 6 * page);
+    defer c.clear();
+    const len = r.intRangeAtMost(usize, 1, page);
+    var bytes: [2 * 4096]u8 = undefined;
+    r.bytes(&bytes);
+    c.put("data/a", bytes[0..len]);
+    c.put("data/b", "kept");
+    if (r.boolean()) {
+        // Past the end: the disk would refuse it, and the copy cannot know.
+        c.wrote("data/a", len + r.intRangeAtMost(usize, 1, 100), "z");
+    } else {
+        // Growing past the page it has, with no memory left for the next.
+        failing.fail_index = failing.alloc_index;
+        c.wrote("data/a", len, bytes[0 .. page + 1]);
+    }
+    if (c.get("data/a") != null) return fail(seed, "a copy that could not be kept exact is still kept", .{});
+    const b = c.get("data/b") orelse return fail(seed, "another file's copy was lost", .{});
+    if (!std.mem.eql(u8, b, "kept")) return fail(seed, "another file's copy changed", .{});
+}
+
 pub fn runSeed(seed: u64) Failure!void {
     try gptSeed(seed);
+    try pageSeed(seed);
 }
 
 test "floor_sim: GPT, built field by field with one field wrong, a handful of seeds" {

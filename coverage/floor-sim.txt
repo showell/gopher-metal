@@ -163,3 +163,20 @@ gpt: the kernel's own partition is passed over
 gpt: a partition with no first sector, or ending before it starts, is passed over
 gpt: a partition answered starts no later than it ends
 gpt: no partition but the kernel's, so no data partition
+
+# The page cache's refusals (metal-vmm QUEUE item 76): page_sim, and floor_sim for the rare ones.
+page cache: a file larger than the largest is not kept
+page cache: a file renamed to a path too long to key is dropped
+page cache: a file whose pages pass the whole budget is not kept
+page cache: a kept file is never larger than the largest
+page cache: a path too long to key is never kept
+page cache: a write past a kept file's end drops the copy
+page cache: a write that grows a copy past the largest drops it
+page cache: every slot is taken, so the oldest file goes
+page cache: no memory for a copy, so the file is not kept
+page cache: no memory to grow a copy, so it is dropped
+page cache: no room to grow a copy, so it is dropped
+page cache: no room, with nothing left to evict but the file itself
+page cache: the bytes held stay within its budget
+page cache: the files kept stay within its slots
+page cache: the least recently used file is evicted for room

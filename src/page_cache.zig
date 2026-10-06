@@ -31,6 +31,13 @@
 const std = @import("std");
 const props = @import("coverage");
 
+comptime {
+    props.catalogFile(@import("coverage_catalog"), here());
+}
+fn here() std.builtin.SourceLocation {
+    return @src();
+}
+
 pub const PageCache = struct {
     /// The longest path kept; longer ones are simply not cached.
     pub const max_key = 256;
@@ -71,15 +78,20 @@ pub const PageCache = struct {
         var parts = std.mem.tokenizeScalar(u8, path, '/');
         while (parts.next()) |part| {
             if (n != 0) {
-                if (n >= max_key) return null;
+                if (n >= max_key) return tooLong();
                 out[n] = '/';
                 n += 1;
             }
-            if (n + part.len > max_key) return null;
+            if (n + part.len > max_key) return tooLong();
             for (part, 0..) |c, i| out[n + i] = std.ascii.toLower(c);
             n += part.len;
         }
         return out[0..n];
+    }
+
+    fn tooLong() ?[]const u8 {
+        props.reachable(@src(), "page cache: a path too long to key is never kept", null);
+        return null;
     }
 
     fn find(self: *const PageCache, key: []const u8) ?usize {
@@ -133,7 +145,11 @@ pub const PageCache = struct {
                 if (keep_at != null and i == keep_at.?) continue;
                 if (oldest == null or self.used[i] < self.used[oldest.?]) oldest = i;
             }
-            const o = oldest orelse return false;
+            const o = oldest orelse {
+                props.reachable(@src(), "page cache: no room, with nothing left to evict but the file itself", .{ .bytes = bytes });
+                return false;
+            };
+            props.reachable(@src(), "page cache: the least recently used file is evicted for room", null);
             // Dropping moves the last slot into `o`: follow `keep` if it was
             // the last.
             if (keep_at) |k| if (k == self.count - 1) {
@@ -151,20 +167,35 @@ pub const PageCache = struct {
     /// comparisons): a property only.
     fn noteHeld(self: *const PageCache) void {
         props.alwaysLessThanOrEqualTo(@src(), self.held, self.budget, "page cache: the bytes held stay within its budget", null);
+        props.alwaysLessThanOrEqualTo(@src(), self.count, slots, "page cache: the files kept stay within its slots", null);
     }
 
     pub fn put(self: *PageCache, path: []const u8, bytes: []const u8) void {
         var kb: [max_key]u8 = undefined;
         const key = keyOf(path, &kb) orelse return;
         if (self.find(key)) |i| self.drop(i);
-        if (bytes.len > self.largest) return;
+        if (bytes.len > self.largest) {
+            props.reachable(@src(), "page cache: a file larger than the largest is not kept", .{ .bytes = bytes.len });
+            return;
+        }
         const size = roundUp(bytes.len);
-        if (size > self.budget) return;
-        if (!self.room(size, null)) return;
+        if (size > self.budget) {
+            props.reachable(@src(), "page cache: a file whose pages pass the whole budget is not kept", .{ .bytes = bytes.len });
+            return;
+        }
+        // Within the budget, room is always found: everything else can go.
+        if (!self.room(size, null)) {
+            props.@"unreachable"(@src(), "page cache: no room for a file within the budget", .{ .bytes = bytes.len });
+            return;
+        }
         if (self.count == slots) {
+            props.reachable(@src(), "page cache: every slot is taken, so the oldest file goes", null);
             if (!self.dropOldest()) return;
         }
-        const buf = self.alloc.alloc(u8, size) catch return;
+        const buf = self.alloc.alloc(u8, size) catch {
+            props.reachable(@src(), "page cache: no memory for a copy, so the file is not kept", .{ .bytes = size });
+            return;
+        };
         @memcpy(buf[0..bytes.len], bytes);
         const i = self.count;
         @memcpy(self.keys[i][0..key.len], key);
@@ -211,15 +242,28 @@ pub const PageCache = struct {
         var i = self.find(key) orelse return;
         const len = self.lens[i];
         const end = offset + bytes.len;
-        if (offset > len or end > self.largest) return self.drop(i);
+        if (offset > len) {
+            props.reachable(@src(), "page cache: a write past a kept file's end drops the copy", null);
+            return self.drop(i);
+        }
+        if (end > self.largest) {
+            props.reachable(@src(), "page cache: a write that grows a copy past the largest drops it", null);
+            return self.drop(i);
+        }
         if (end > self.bufs[i].len) {
             // Grows by a quarter more than it needs, so a run of appends
             // does not copy the file each time.
             const size = @min(roundUp(end + end / 4), roundUp(self.largest));
             const more = size - self.bufs[i].len;
-            if (!self.room(more, i)) return self.drop(self.find(key).?);
+            if (!self.room(more, i)) {
+                props.reachable(@src(), "page cache: no room to grow a copy, so it is dropped", .{ .more = more });
+                return self.drop(self.find(key).?);
+            }
             i = self.find(key).?;
-            const buf = self.alloc.alloc(u8, size) catch return self.drop(i);
+            const buf = self.alloc.alloc(u8, size) catch {
+                props.reachable(@src(), "page cache: no memory to grow a copy, so it is dropped", .{ .bytes = size });
+                return self.drop(i);
+            };
             @memcpy(buf[0..len], self.bufs[i][0..len]);
             self.alloc.free(self.bufs[i]);
             self.held += more;
@@ -228,6 +272,7 @@ pub const PageCache = struct {
         }
         @memcpy(self.bufs[i][offset..end], bytes);
         self.lens[i] = @max(len, end);
+        props.alwaysLessThanOrEqualTo(@src(), self.lens[i], self.largest, "page cache: a kept file is never larger than the largest", null);
     }
 
     /// Nothing is known of `path` any more: it was removed, or a change to it
@@ -246,7 +291,10 @@ pub const PageCache = struct {
         if (to_key) |k| if (self.find(k)) |i| self.drop(i);
         const from_key = keyOf(from, &fb) orelse return;
         const i = self.find(from_key) orelse return;
-        const k = to_key orelse return self.drop(i);
+        const k = to_key orelse {
+            props.reachable(@src(), "page cache: a file renamed to a path too long to key is dropped", null);
+            return self.drop(i);
+        };
         @memcpy(self.keys[i][0..k.len], k);
         self.key_lens[i] = @intCast(k.len);
     }

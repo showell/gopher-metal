@@ -49,7 +49,7 @@ pub fn build(b: *std.Build) void {
     const sdk = b.dependency("zig_coverage_sdk", .{});
     const coverage = sdk.module("coverage");
     coverage.red_zone = false;
-    const coverage_catalog = @import("zig_coverage_sdk").addCatalog(b, sdk.artifact("coverage-scan"), coverage, b.path("src"), &.{ "tcp.zig", "tcp_sim.zig", "fat16.zig", "fat_sim.zig", "page_sim.zig", "pure_sim.zig", "ready_sim.zig", "durable_sim.zig", "durable.zig", "gpt.zig", "floor_sim.zig" });
+    const coverage_catalog = @import("zig_coverage_sdk").addCatalog(b, sdk.artifact("coverage-scan"), coverage, b.path("src"), &.{ "tcp.zig", "tcp_sim.zig", "fat16.zig", "fat_sim.zig", "page_sim.zig", "pure_sim.zig", "ready_sim.zig", "durable_sim.zig", "durable.zig", "gpt.zig", "floor_sim.zig", "page_cache.zig" });
     const with_coverage = [_]std.Build.Module.Import{
         .{ .name = "coverage", .module = coverage },
         .{ .name = "coverage_catalog", .module = coverage_catalog },

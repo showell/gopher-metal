@@ -148,6 +148,7 @@ under "For the box" below.)*
 |---|---|---|---|---|
 | `durable` | 4 | 4 | `durable_sim` | none: `step` and `settle` decide, and a failed synchronize is the caller's status byte |
 | `gpt` | 8 | 8 | `floor_sim` (GPT built field by field, one field wrong) | `ReadFailed`, `NotGpt`, `NoPartition` |
+| `page_cache` | 16 (one `unreachable`: room is always found for a file within the budget) | 15 | `page_sim`; `floor_sim` for every slot taken, a write past a copy's end, and no memory to grow one | none: it answers a copy or nothing, and refuses by not keeping |
 | `virtio` (`Block.flush`) | 1 | 0 here | under metal-vmm | a SCSI status, as a virtio-blk status byte |
 | `io` (`durable`) | 1 | 0 here | under metal-vmm | none: a failed flush is logged, counted, and the response goes out |
 
