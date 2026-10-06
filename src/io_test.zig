@@ -62,6 +62,30 @@ fn logged(what: []const u8) bool {
     return std.mem.indexOf(u8, serial.captured(), what) != null;
 }
 
+// **NOTHING LEAVES AHEAD OF THE WRITES BEFORE IT** (`io.durable`): a write
+// leaves its disk unflushed, the next response's `durable` flushes it once,
+// and a response with no write before it, or after only reads, sends none.
+test "a write is flushed before the next response, once, and a read asks no flush" {
+    const t = try Two.make(true);
+    defer t.deinit();
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    try cwd.createDirPath(io, "data/chat");
+    try cwd.writeFile(io, .{ .sub_path = "data/chat/plan.md", .data = "saved" });
+    try testing.expect(t.volume.blk.unflushed);
+    try testing.expect(!t.site.blk.unflushed);
+
+    io_mod.durable();
+    try testing.expect(!t.volume.blk.unflushed);
+    try testing.expectEqual(@as(u64, 1), t.volume.blk.flushes);
+    try testing.expectEqual(@as(u64, 0), t.site.blk.flushes);
+
+    io_mod.durable();
+    try testing.expectEqualStrings("saved", try cwd.readFileAlloc(io, "data/chat/plan.md", arena.allocator(), .unlimited));
+    io_mod.durable();
+    try testing.expectEqual(@as(u64, 1), t.volume.blk.flushes);
+}
+
 test "a write under data/ or auth/ lands on the volume, and nothing of it on the site's disk" {
     const t = try Two.make(true);
     defer t.deinit();

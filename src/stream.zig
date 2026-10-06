@@ -181,6 +181,11 @@ pub const Spill = struct {
     }
 
     /// Hands what fits to connection `i`'s send queue; how much it took.
+    ///
+    /// **NO FLUSH HERE, ON PURPOSE.** Every byte in a spill came through
+    /// `Stream.sendAll`, which made the writes before it durable
+    /// (`io.durable`) before keeping it, and a write made since it was kept
+    /// is nothing these bytes say. A flush here would only delay them.
     pub fn push(self: *Spill, table: *tcp.Table, i: usize) usize {
         const n = table.queue(i, self.pending());
         self.at += n;
@@ -303,6 +308,9 @@ pub const Stream = struct {
     /// gone altogether.
     fn sendAll(self: *Stream, bytes: []const u8) error{WriteFailed}!void {
         self.timed_out = false;
+        // **THE WRITES BEFORE THESE BYTES ARE DURABLE FIRST** (`io.durable`):
+        // this is the one place a response joins a send queue.
+        io.durable();
         var at: usize = 0;
         if (self.spill) |sp| {
             // Bytes go straight to the send queue only while nothing waits
