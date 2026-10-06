@@ -134,3 +134,30 @@ simulator's floor holds them.
 - Properties in FAT (`fat16.zig`), the page cache, and restart.
 - An explorer: metal-vmm choosing faults, scored by which properties a run
   reaches. That's the long-term aim, and it isn't urgent.
+
+## The floor, module by module
+
+*(metal-vmm QUEUE items 76, 78 and 80: every refusal named with a
+`reachable`, every invariant with an `always`, and each one reached by a
+simulator or a host test, so a report says which any run has met. "Reached
+by" names what reaches it in `zig build properties`; "under metal-vmm" means
+only a real device reaches it, so it is off `floor-sim.txt` and listed
+under "For the box" below.)*
+
+| module | properties | reached | by what | errors it answers |
+|---|---|---|---|---|
+| `durable` | 4 | 4 | `durable_sim` | none: `step` and `settle` decide, and a failed synchronize is the caller's status byte |
+| `gpt` | 8 | 8 | `floor_sim` (GPT built field by field, one field wrong) | `ReadFailed`, `NotGpt`, `NoPartition` |
+| `virtio` (`Block.flush`) | 1 | 0 here | under metal-vmm | a SCSI status, as a virtio-blk status byte |
+| `io` (`durable`) | 1 | 0 here | under metal-vmm | none: a failed flush is logged, counted, and the response goes out |
+
+## For the box
+
+Properties that only a real device reaches. Each one's knob, for a
+metal-vmm run in `long.sh`; once a run reaches it, it goes on
+`floor-metal.txt`. A refusal with no knob says so: that is a proposal for one.
+
+| property | module | knob |
+|---|---|---|
+| virtio: a flush fails, is counted, and the disk stays unflushed | `virtio.zig` | `VOLUME=<copy> VOLUME_CACHE=1 VOLUME_SYNC_FAIL=1`, and a chat post |
+| io: a flush failed, and the response goes out anyway | `io.zig` | the same, for the volume. **No knob fails a flush of the boot disk**: it is virtio-blk and writes through (virtio 1.2 §5.2.5.1), so nothing is sent; a knob would need metal-vmm's `DISK_CACHE` to offer FLUSH and fail it (a proposal) |

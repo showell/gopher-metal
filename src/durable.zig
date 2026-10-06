@@ -10,6 +10,14 @@
 //! `Block.flush`, which asks `step` here.
 
 const std = @import("std");
+const props = @import("coverage");
+
+comptime {
+    props.catalogFile(@import("coverage_catalog"), here());
+}
+fn here() std.builtin.SourceLocation {
+    return @src();
+}
 
 /// One disk, as the decision sees it.
 pub const Disk = struct {
@@ -39,7 +47,11 @@ pub const Step = enum {
 /// sent, and asking one that does not cache costs a command per response.
 pub fn step(d: Disk) Step {
     if (!d.unflushed) return .none;
-    if (!d.asks or d.write_cache == false) return .clear;
+    if (!d.asks or d.write_cache == false) {
+        props.reachable(@src(), "durable: a disk that writes through is durable without a command", null);
+        return .clear;
+    }
+    props.reachable(@src(), "durable: a disk with a cache, or one that never said, is asked to synchronize", null);
     return .synchronize;
 }
 
@@ -54,7 +66,8 @@ pub fn settle(d: *Disk, s: Step, ok: bool) bool {
             return false;
         },
         .synchronize => {
-            if (ok) d.unflushed = false;
+            if (ok) d.unflushed = false else props.reachable(@src(), "durable: a synchronize that failed leaves the disk unflushed, to be asked again", null);
+            props.always(@src(), ok != d.unflushed, "durable: a disk is flushed exactly when its synchronize succeeded", null);
             return !ok;
         },
     }

@@ -20,6 +20,7 @@
 //! spoken on either transport.
 
 const std = @import("std");
+const props = @import("coverage");
 const tsc = @import("tsc.zig");
 const pci = @import("pci.zig");
 const scsi = @import("scsi.zig");
@@ -879,7 +880,12 @@ pub const Block = struct {
         // `synchronize` may learn the disk has no cache (ILLEGAL REQUEST),
         // and says so in `write_cache` and an ok.
         const status = if (s == .synchronize) scsi.synchronize(self, self.address.?) else blk_s_ok;
-        if (durable.settle(&d, s, status == blk_s_ok)) self.flush_failures +%= 1;
+        if (durable.settle(&d, s, status == blk_s_ok)) {
+            self.flush_failures +%= 1;
+            // Reached under metal-vmm with VOLUME_SYNC_FAIL=1: on the host
+            // every disk is in memory and writes through.
+            props.reachable(@src(), "virtio: a flush fails, is counted, and the disk stays unflushed", .{ .failures = self.flush_failures });
+        }
         self.unflushed = d.unflushed;
         return status;
     }

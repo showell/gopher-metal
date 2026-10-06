@@ -14,7 +14,16 @@
 //! data). That one type GUID is the only one interpreted; no CRCs are
 //! checked, and nothing is written.
 
+const std = @import("std");
+const props = @import("coverage");
 const virtio = @import("virtio.zig");
+
+comptime {
+    props.catalogFile(@import("coverage_catalog"), here());
+}
+fn here() std.builtin.SourceLocation {
+    return @src();
+}
 const kernel_partition = @import("kernel_partition.zig");
 
 pub const sector_size: u32 = 512;
@@ -51,22 +60,34 @@ fn le64(b: []const u8) u64 {
 /// The first partition in the table that is not the kernel's, or an error.
 /// `scratch` is one sector of identity-mapped memory the device writes into.
 pub fn dataPartition(blk: *virtio.Block, scratch: *[sector_size]u8) Error!Partition {
-    if (blk.read(header_lba, @intFromPtr(scratch)) != virtio.blk_s_ok) return Error.ReadFailed;
+    if (blk.read(header_lba, @intFromPtr(scratch)) != virtio.blk_s_ok) {
+        props.reachable(@src(), "gpt: the header cannot be read", null);
+        return Error.ReadFailed;
+    }
     for (signature, 0..) |c, i| {
-        if (scratch[i] != c) return Error.NotGpt;
+        if (scratch[i] != c) {
+            props.reachable(@src(), "gpt: no EFI PART signature, so not GPT", null);
+            return Error.NotGpt;
+        }
     }
 
     const entries_lba = le64(scratch[72..80]);
     const entry_count = le32(scratch[80..84]);
     const entry_size = le32(scratch[84..88]);
-    if (entry_count == 0 or entry_size < 128 or entry_size > sector_size) return Error.NotGpt;
+    if (entry_count == 0 or entry_size < 128 or entry_size > sector_size) {
+        props.reachable(@src(), "gpt: a table with no entries, or entries of a size this reader refuses", .{ .count = entry_count, .size = entry_size });
+        return Error.NotGpt;
+    }
 
     const per_sector = sector_size / entry_size;
     var index: u32 = 0;
     while (index < entry_count) : (index += 1) {
         const lba: u32 = @intCast(entries_lba + index / per_sector);
         if (index % per_sector == 0) {
-            if (blk.read(lba, @intFromPtr(scratch)) != virtio.blk_s_ok) return Error.ReadFailed;
+            if (blk.read(lba, @intFromPtr(scratch)) != virtio.blk_s_ok) {
+                props.reachable(@src(), "gpt: a sector of entries cannot be read", .{ .lba = lba });
+                return Error.ReadFailed;
+            }
         }
         const e = scratch[(index % per_sector) * entry_size ..][0..128];
 
@@ -77,12 +98,20 @@ pub fn dataPartition(blk: *virtio.Block, scratch: *[sector_size]u8) Error!Partit
             if (b != 0) used = true;
         }
         if (!used) continue;
-        if (eql16(e[0..16], &kernel_partition.type_guid)) continue;
+        if (eql16(e[0..16], &kernel_partition.type_guid)) {
+            props.reachable(@src(), "gpt: the kernel's own partition is passed over", null);
+            continue;
+        }
 
         const first = le64(e[32..40]);
         const last = le64(e[40..48]);
-        if (first == 0 or last < first) continue;
+        if (first == 0 or last < first) {
+            props.reachable(@src(), "gpt: a partition with no first sector, or ending before it starts, is passed over", null);
+            continue;
+        }
+        props.alwaysLessThanOrEqualTo(@src(), first, last, "gpt: a partition answered starts no later than it ends", null);
         return .{ .first_lba = @intCast(first), .last_lba = @intCast(last) };
     }
+    props.reachable(@src(), "gpt: no partition but the kernel's, so no data partition", .{ .entries = entry_count });
     return Error.NoPartition;
 }

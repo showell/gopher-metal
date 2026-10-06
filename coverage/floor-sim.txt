@@ -149,3 +149,17 @@ durable_sim: a spill is pushed after later writes, with no flush
 # Crowds the size of the kernel's table (tcp_sim.zig, `Crowd.chooseFull`),
 # at their default 20 seeds.
 tcp_sim: a crowd the size of the kernel's table fills it, and a SYN finds no room
+
+# The ground under the Store (metal-vmm QUEUE item 76).
+durable: a disk that writes through is durable without a command
+durable: a disk with a cache, or one that never said, is asked to synchronize
+durable: a synchronize that failed leaves the disk unflushed, to be asked again
+durable: a disk is flushed exactly when its synchronize succeeded
+gpt: the header cannot be read
+gpt: no EFI PART signature, so not GPT
+gpt: a table with no entries, or entries of a size this reader refuses
+gpt: a sector of entries cannot be read
+gpt: the kernel's own partition is passed over
+gpt: a partition with no first sector, or ending before it starts, is passed over
+gpt: a partition answered starts no later than it ends
+gpt: no partition but the kernel's, so no data partition

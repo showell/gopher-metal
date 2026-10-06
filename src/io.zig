@@ -26,6 +26,7 @@
 //! difference between those two designs is the whole lesson here.
 
 const std = @import("std");
+const props = @import("coverage");
 const serial = @import("serial.zig");
 const virtio = @import("virtio.zig");
 const stack = @import("stack.zig");
@@ -146,6 +147,10 @@ pub fn durable() void {
         const v = maybe orelse continue;
         if (!v.blk.unflushed) continue;
         if (v.blk.flush() != virtio.blk_s_ok) {
+            // Reached under metal-vmm with VOLUME_SYNC_FAIL=1 (the volume);
+            // no knob fails a flush of the boot disk, which is virtio-blk
+            // and writes through.
+            props.reachable(@src(), "io: a flush failed, and the response goes out anyway", .{ .disk = k });
             serial.put(if (k == 0) "  a flush of the boot disk failed\n" else "  a flush of the volume failed\n");
         }
     }
