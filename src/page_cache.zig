@@ -29,6 +29,7 @@
 //! its 8.3 name when it has no long one), so there is no third spelling.
 
 const std = @import("std");
+const props = @import("coverage");
 
 pub const PageCache = struct {
     /// The longest path kept; longer ones are simply not cached.
@@ -146,6 +147,12 @@ pub const PageCache = struct {
 
     /// `path` is now `bytes` on the disk, just read whole: kept, room
     /// allowing.
+    /// The most bytes any run held, against the budget (zig-coverage-sdk's
+    /// comparisons): a property only.
+    fn noteHeld(self: *const PageCache) void {
+        props.alwaysLessThanOrEqualTo(@src(), self.held, self.budget, "page cache: the bytes held stay within its budget", null);
+    }
+
     pub fn put(self: *PageCache, path: []const u8, bytes: []const u8) void {
         var kb: [max_key]u8 = undefined;
         const key = keyOf(path, &kb) orelse return;
@@ -168,6 +175,7 @@ pub const PageCache = struct {
         self.used[i] = self.clock;
         self.held += size;
         self.count += 1;
+        self.noteHeld();
     }
 
     /// `path` was written whole on the disk as `bytes`. **A WRITE NEVER
@@ -216,6 +224,7 @@ pub const PageCache = struct {
             self.alloc.free(self.bufs[i]);
             self.held += more;
             self.bufs[i] = buf;
+            self.noteHeld();
         }
         @memcpy(self.bufs[i][offset..end], bytes);
         self.lens[i] = @max(len, end);

@@ -607,6 +607,7 @@ pub const Table = struct {
         c.rto_at = now + c.rto_ns;
         self.arrivals += 1;
         c.serial = self.arrivals;
+        self.noteSlots();
         return slot;
     }
 
@@ -705,6 +706,22 @@ pub const Table = struct {
             self.emit(wire, i, flag_rst | flag_ack, c.highest(), "");
         }
         c.reset();
+    }
+
+    /// **HOW FULL THE TABLE CAME** (zig-coverage-sdk's comparisons), each
+    /// time a slot is taken: the most slots in use and the most half-open
+    /// any run had, against the table's size. A property only: nothing here
+    /// changes what the table does. The simulator's 2 slots against the
+    /// kernel's 256 is the gap these show.
+    fn noteSlots(self: *const Table) void {
+        var in_use: usize = 0;
+        var half_open: usize = 0;
+        for (self.conns) |c| {
+            if (c.state != .closed or c.claimed) in_use += 1;
+            if (c.state == .syn_received) half_open += 1;
+        }
+        props.alwaysLessThanOrEqualTo(@src(), in_use, self.conns.len, "tcp: slots in use stay within the table", null);
+        props.alwaysLessThanOrEqualTo(@src(), half_open, self.conns.len, "tcp: half-open connections stay within the table", null);
     }
 
     /// The host is serving connection `i`: its slot is not to be reused.
@@ -882,6 +899,8 @@ pub const Table = struct {
         c.rto_ns = @min(c.rto_ns * 2, max_rto_ns);
         props.always(@src(), c.rto_ns <= max_rto_ns, "tcp: a backed-off RTO stays under the cap", .{ .rto_ns = c.rto_ns });
         props.sometimes(@src(), c.rto_ns == max_rto_ns, "tcp: backoff reaches the RTO cap", null);
+        // The longest backoff any run had: its timeouts, against the most.
+        props.alwaysLessThanOrEqualTo(@src(), c.retries, max_retries, "tcp: a connection's timeouts stay within its retries", null);
         c.rto_at = now + c.rto_ns;
         return true;
     }
@@ -1029,6 +1048,7 @@ pub const Table = struct {
             c.rto_at = now + c.rto_ns;
             self.arrivals += 1;
             c.serial = self.arrivals;
+            self.noteSlots();
             self.emit(wire, slot, flag_syn | flag_ack, c.una, "");
             // **THE HANDSHAKE IS A ROUND TRIP**, and the only one that happens
             // before we have anything to send: timing it means the first byte

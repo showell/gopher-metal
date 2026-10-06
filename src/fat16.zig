@@ -1054,6 +1054,9 @@ pub const Volume = struct {
     /// host tests compare it with a fresh one after every operation.
     fn keepCount(self: *Volume, old: Cluster, new: Cluster) void {
         if (old == 0 and new != 0) props.always(@src(), self.free_clusters > 0, "fat: the kept free count never runs below zero", null);
+        // The fewest free clusters any run left (zig-coverage-sdk's
+        // comparisons): a property only, beside the one above.
+        if (old == 0 and new != 0) props.alwaysGreaterThan(@src(), self.free_clusters, 0, "fat: a cluster is taken with one free", null);
         if (old == 0 and new != 0) self.free_clusters -|= 1;
         if (old != 0 and new == 0) self.free_clusters += 1;
     }
@@ -1225,6 +1228,8 @@ pub const Volume = struct {
             return Error.DirectoryFull;
         }
         props.reachable(@src(), "fat: a directory grows by a cluster", .{ .clusters = end.clusters });
+        // The largest directory any run grew, against FAT's most.
+        props.alwaysLessThanOrEqualTo(@src(), (end.clusters + 1) * per_cluster, max_dir_entries, "fat: a directory grown stays within FAT's most entries", null);
         const last = end.last;
 
         const fresh = try self.allocChain(1);
