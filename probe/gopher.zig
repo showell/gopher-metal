@@ -1484,9 +1484,9 @@ fn metalFacts(io: Io, alloc: std.mem.Allocator) anyerror![]const router.host_sta
     try add(&facts, alloc, "memory (pages)", "{d} MB taken now, {d} MB at most, of {d} MB", .{
         p.bytes_taken >> 20, (p.pages_high_water * pages.page_size) >> 20, p.bytes_total >> 20,
     });
-    if (Io.siteVolume()) |v| try addVolume(&facts, alloc, "the boot disk (the site)", v);
+    if (Io.siteVolume()) |v| try addVolume(&facts, alloc, "the boot disk (the site)", "the boot disk's write cache", v);
     if (Io.dataVolume()) |v| {
-        try addVolume(&facts, alloc, "the volume (chat's data)", v);
+        try addVolume(&facts, alloc, "the volume (chat's data)", "the volume's write cache", v);
     } else try add(&facts, alloc, "the volume (chat's data)", "none attached: the data is on the boot disk", .{});
     const kept = Io.siteCache();
     try add(&facts, alloc, "site files in memory", "{d} kept, {d} KB of {d} KB; {d} reads answered from them", .{
@@ -1510,7 +1510,7 @@ fn kindName(v: *const fat16.Volume) []const u8 {
     return if (v.kind == .fat32) "FAT32" else "FAT16";
 }
 
-fn addVolume(facts: *std.ArrayList(router.host_status.Fact), alloc: std.mem.Allocator, label: []const u8, v: *fat16.Volume) !void {
+fn addVolume(facts: *std.ArrayList(router.host_status.Fact), alloc: std.mem.Allocator, label: []const u8, cache_label: []const u8, v: *fat16.Volume) !void {
     var serial_text: [9]u8 = undefined;
     const named = if (v.serial) |n| serialText(&serial_text, n) else "no serial";
     const value = if (v.space()) |sp|
@@ -1522,7 +1522,7 @@ fn addVolume(facts: *std.ArrayList(router.host_status.Fact), alloc: std.mem.Allo
     // the disk says of its write cache, and the flushes sent to it.
     const cache: []const u8 = if (v.blk.write_cache) |on| (if (on) "on: writes wait in it until flushed" else "off: it writes through") else "not said: flushed as if on";
     try facts.append(alloc, .{
-        .label = "  its write cache",
+        .label = cache_label,
         .value = try std.fmt.allocPrint(alloc, "{s}; {d} flushes, {d} failed", .{ cache, v.blk.flushes, v.blk.flush_failures }),
     });
 }
