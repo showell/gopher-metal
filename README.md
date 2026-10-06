@@ -55,9 +55,9 @@ metal-vmm's `QUEUE.md` and `CLOUD_WORK.md` (see `CLAUDE.md`).
 flush counts on /admin/host), SCSI's target and LUN read at the spec's
 offsets, and the release rules as a script (`tools/verdicts.py`: `chat.py`
 builds only a pair both `gates.sh` and `long.sh` passed). On metal-vmm, v18
-sends a SYNCHRONIZE CACHE before a chat post's 303 where v17 sent none; the
-power cut after the 303 that would show v17 losing the message waits on a
-knob (metal-vmm QUEUE 68). v17's image is the way back.
+sends a SYNCHRONIZE CACHE before a chat post's 303 where v17 sent none, and
+with the power cut after the 303 (`VOLUME_CUT_AT_EXIT`) v17 loses the
+message and v18 keeps it (metal-vmm QUEUE, B14). v17's image is the way back.
 
 **Open (2026-10-06):**
 - Backups (above). v18 shipped without a volume snapshot (Steve's call).
