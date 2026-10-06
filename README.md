@@ -19,9 +19,10 @@ What serves is a tag, not a branch: `master` may be ahead of it.
 
 **Branches and tags:**
 - `master` — everything.
-- `v17`, `v18`, … — released images; the newest serves. `antithesis-sdk`
+- `v17`, `v18`, … — released images, one tag per release; the newest serves. `antithesis-sdk`
   and `box/v18` are merged and retired.
-- `claude/*` — a cloud session's work, merged into `master`.
+- `claude/*` — a cloud session's work; the box merges it into `master`, and a
+  cloud session never pushes `master` or a tag.
 
 **Live work is in metal-vmm's [`QUEUE.md`](https://github.com/showell/metal-vmm/blob/master/QUEUE.md)**
 on `master`: one queue for all four repos, with the cloud session's charter
