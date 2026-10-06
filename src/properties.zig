@@ -4,9 +4,7 @@
 //!
 //!   zig build properties                  TCP seeds 1..100, FAT 1..20, pages 1..100
 //!   zig build properties -Dseeds=5000 -Dfat-seeds=1000     more
-//!   zig build properties -Dcrowd-seeds=10000                as many crowds
-//!                                         (500 by default: tcp_sim.zig,
-//!                                         `crowd_red`)
+//!   zig build properties -Dcrowd-seeds=500  fewer crowds (all by default)
 //!   zig build properties -Dsdk-jsonl=out/sdk.jsonl
 //!                                         also the JSONL, to a file
 //!   zig build properties -Dfloor=coverage/floor-sim.txt

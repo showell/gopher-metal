@@ -25,6 +25,8 @@ tcp: a segment for no connection is refused
 tcp: a segment arrives ahead of the next expected byte
 tcp: a segment from behind is answered, not taken
 tcp: a peer sends past the window and only what fits is taken
+tcp: a given-way half-open is revived by its client's ACK
+tcp: a revival finds no slot, and the ACK is dropped
 tcp_sim: the client vanishes part-way through the answer
 tcp_sim: the client resets the connection
 tcp_sim: a flood SYN is sent

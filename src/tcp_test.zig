@@ -1718,6 +1718,101 @@ test "a SYN flood does not keep a real client out: the oldest half-open connecti
     }
 }
 
+/// A real client's SYN, answered, and its ACK lost: it is now `seq` and
+/// `ack` as if connected, and the table holds a half-open for it.
+fn halfOpened(f: *Fixture, real: *Peer, now: i96) void {
+    var buf: [1600]u8 = undefined;
+    _ = handle(&f.table, &f.wire, real.frame(&buf, flag_syn, real.seq, ""), now);
+    const synack = f.wire.last();
+    real.seq +%= 1;
+    real.ack = synack.seq +% 1;
+}
+
+/// SYNs from addresses that never answer, `n` of them at `now`.
+fn floodSyns(f: *Fixture, first_port: u16, n: usize, now: i96) void {
+    var buf: [1600]u8 = undefined;
+    for (0..n) |k| {
+        const p = Peer{ .ip = .{ 203, 0, 113, 7 }, .port = first_port + @as(u16, @intCast(k)) };
+        _ = handle(&f.table, &f.wire, p.frame(&buf, flag_syn, p.seq, ""), now);
+    }
+}
+
+test "revival: a real client whose ACK was lost, its half-open given way to a flood, is revived by its next segment" {
+    var f: Fixture = .{};
+    f.init();
+    var buf: [1600]u8 = undefined;
+    var real = Peer{ .ip = .{ 10, 0, 2, 2 }, .port = 40000 };
+    halfOpened(&f, &real, 0);
+    floodSyns(&f, 50000, f.conns.len - 1, 0);
+    // A round trip on, one more flood SYN finds the table full: the oldest
+    // stuck half-open, the client's, gives way (the 14 rough seeds' race).
+    floodSyns(&f, 51000, 1, min_rto_ns + ms);
+    try testing.expectEqual(@as(u64, 1), f.table.half_open_given_way);
+    for (f.table.conns) |c| try testing.expect(c.peer_port != real.port);
+    // The client, believing itself connected, sends its request. Its ACK
+    // names our ISS + 1: the half-open is rebuilt, in a stuck flood slot,
+    // and the request is taken, not reset.
+    const request = "GET / HTTP/1.1\r\n\r\n";
+    const r = handle(&f.table, &f.wire, real.frame(&buf, flag_psh | flag_ack, real.seq, request), min_rto_ns + 2 * ms);
+    try testing.expectEqual(Event.opened, r.event);
+    try testing.expectEqual(State.established, f.table.conns[r.index].state);
+    try testing.expectEqualStrings(request, f.table.conns[r.index].pending());
+    try testing.expectEqual(@as(u64, 1), f.table.revived);
+    try testing.expect(f.wire.last().flags & flag_rst == 0);
+}
+
+test "revival: with no stuck slot to take, the ACK is dropped, not reset, and a round trip later it gets in" {
+    var f: Fixture = .{};
+    f.init();
+    var buf: [1600]u8 = undefined;
+    var real = Peer{ .ip = .{ 10, 0, 2, 2 }, .port = 40000 };
+    halfOpened(&f, &real, 0);
+    floodSyns(&f, 50000, f.conns.len - 1, 0);
+    floodSyns(&f, 51000, 1, min_rto_ns + ms); // the client's slot gives way
+    // Fresh flood SYNs fill what would free up: every slot is too young to
+    // give way when the client's ACK comes.
+    const fresh_at = 2 * min_rto_ns + 2 * ms;
+    floodSyns(&f, 52000, f.conns.len, fresh_at);
+    for (f.table.conns) |c| try testing.expect(fresh_at - c.opened_at < min_rto_ns);
+    const sent = f.wire.count;
+    _ = handle(&f.table, &f.wire, real.frame(&buf, flag_ack, real.seq, ""), fresh_at + ms);
+    try testing.expectEqual(sent, f.wire.count); // not a word: no reset
+    try testing.expectEqual(@as(u64, 1), f.table.revival_no_room);
+    // A round trip later the fresh ones are stuck; the client's ACK again
+    // finds its entry still kept, and gets in.
+    const r = handle(&f.table, &f.wire, real.frame(&buf, flag_ack, real.seq, ""), fresh_at + min_rto_ns + 2 * ms);
+    try testing.expectEqual(Event.opened, r.event);
+    try testing.expectEqual(@as(u64, 1), f.table.revived);
+}
+
+test "revival: only the ACK the half-open would have taken; a wrong one, a SYN or a reset never revives" {
+    var f: Fixture = .{};
+    f.init();
+    var buf: [1600]u8 = undefined;
+    var real = Peer{ .ip = .{ 10, 0, 2, 2 }, .port = 40000 };
+    halfOpened(&f, &real, 0);
+    floodSyns(&f, 50000, f.conns.len - 1, 0);
+    floodSyns(&f, 51000, 1, min_rto_ns + ms);
+    const at = min_rto_ns + 2 * ms;
+    // An ACK one off ISS + 1: refused with a reset, as any stray is.
+    var wrong = real;
+    wrong.ack +%= 1;
+    _ = handle(&f.table, &f.wire, wrong.frame(&buf, flag_ack, real.seq, ""), at);
+    try testing.expect(f.wire.last().flags & flag_rst != 0);
+    // From another port of the same address: the same.
+    var other = real;
+    other.port += 1;
+    _ = handle(&f.table, &f.wire, other.frame(&buf, flag_ack, real.seq, ""), at);
+    try testing.expect(f.wire.last().flags & flag_rst != 0);
+    // A reset with the right numbers: nothing at all.
+    _ = handle(&f.table, &f.wire, real.frame(&buf, flag_rst | flag_ack, real.seq, ""), at);
+    try testing.expectEqual(@as(u64, 0), f.table.revived);
+    // And the right ACK still revives: none of the above used its entry up.
+    const r = handle(&f.table, &f.wire, real.frame(&buf, flag_ack, real.seq, ""), at);
+    try testing.expectEqual(Event.opened, r.event);
+    try testing.expectEqual(@as(u64, 1), f.table.revived);
+}
+
 test "a storm of resets and FINs for connections we never had leaves no trace, and a real client is served through it" {
     var f: Fixture = .{};
     f.init();

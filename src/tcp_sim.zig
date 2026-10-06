@@ -316,9 +316,16 @@ const Network = struct {
     overflowed: u64 = 0,
     /// Frames the table has sent the client, for `drop_nth_to_client`.
     to_client: u64 = 0,
+    /// Every frame handed to the network, in order, hashed: two runs that
+    /// sent the same frames have the same trace.
+    trace: std.hash.Wyhash = .init(0),
 
     fn send(self: *Network, rng: std.Random, sc: *const Scenario, now: i96, to_table: bool, frame: []const u8) void {
         self.sent += 1;
+        // As an i128: an i96's bytes include padding nothing writes.
+        const at: i128 = now;
+        self.trace.update(std.mem.asBytes(&at));
+        self.trace.update(frame);
         // The deterministic drop (item 96): one chosen frame to the client,
         // whatever the clock. Counted as lost, like any other.
         if (!to_table) {
@@ -1217,6 +1224,11 @@ const TableWire = struct {
     }
 };
 
+/// **THE REVIVAL RING'S SIZE, FOR A MEASUREMENT** (tcp.zig `revival_cap`):
+/// null is the kernel's, all `tcp.revival_slots`; zero turns revival off,
+/// which is the table before it.
+pub var revival_cap: ?u16 = null;
+
 var sim_isn: u32 = 0;
 fn simIsn() u32 {
     sim_isn +%= 64_000;
@@ -1257,6 +1269,8 @@ const Sim = struct {
     client_given_up: u64 = 0,
     /// The first oracle that failed, if any.
     broken: ?[]const u8 = null,
+    /// A failure is not printed (`traceOf`, which asks whether one happens).
+    quiet: bool = false,
 
     /// In place: the table holds slices of this struct's own buffers.
     fn init(self: *Sim, seed: u64) void {
@@ -1302,6 +1316,7 @@ const Sim = struct {
         for (&self.conns, &self.rx, &self.tx) |*c, *r, *t| c.* = .{ .rx = r, .tx = t };
         sim_isn = self.rng.int(u32);
         self.table = tcp.Table.init(server_ip, server_mac, 80, self.conns[0..self.slots], &self.out, simIsn);
+        if (revival_cap) |cap| self.table.revival_cap = cap;
         self.client = Client.init(self.rng.int(u32));
         self.client.request_len = self.sc.request_len;
         self.client.answer_len = self.sc.answer_len;
@@ -1319,6 +1334,7 @@ const Sim = struct {
         self.slots = crowd.slots;
         self.n_clients = crowd.clients;
         self.table = tcp.Table.init(server_ip, server_mac, 80, self.conns[0..self.slots], &self.out, simIsn);
+        if (revival_cap) |cap| self.table.revival_cap = cap;
         for (0..crowd.clients) |i| {
             const c = self.clientAt(i);
             if (i > 0) c.* = Client.init(r.int(u32));
@@ -1520,6 +1536,7 @@ const Sim = struct {
         if (self.broken == null and stayed and self.rough.flood > 0)
             props.reachable(@src(), "tcp_sim: a client that stayed through a flood got its whole answer", .{ .given_way = self.table.half_open_given_way });
         const what = self.broken orelse return;
+        if (self.quiet) return error.SimulationFailed;
         const sc = self.sc;
         std.debug.print(
             \\seed {d} failed: {s}
@@ -1614,6 +1631,27 @@ pub fn runCrowdSeed(seed: u64) !void {
     };
 }
 
+pub const Mode = enum { plain, rough, crowd };
+
+/// One seed's run in `mode` with the revival ring at `cap` (null: the
+/// kernel's): whether every oracle held, the frames' trace, and how often
+/// a half-open gave way.
+pub fn traceOf(seed: u64, mode: Mode, cap: ?u16) !struct { ok: bool, trace: u64, given_way: u64, revived: u64 } {
+    const sim = try std.testing.allocator.create(Sim);
+    defer std.testing.allocator.destroy(sim);
+    const was = revival_cap;
+    revival_cap = cap;
+    defer revival_cap = was;
+    switch (mode) {
+        .plain => sim.init(seed),
+        .rough => sim.initRough(seed),
+        .crowd => sim.initCrowd(seed),
+    }
+    sim.quiet = true;
+    const ok = if (sim.run()) true else |_| false;
+    return .{ .ok = ok, .trace = sim.net.trace.final(), .given_way = sim.table.half_open_given_way, .revived = sim.table.revived };
+}
+
 /// The seeds `zig build test` runs. A seed that once failed and was fixed
 /// stays here, named, as a regression test.
 const seeds = [_]u64{ 1, 2, 3, 4, 5, 6, 7, 8 } ++ regressions;
@@ -1655,20 +1693,44 @@ test "several clients, a table sized by the seed, keep-alive and a held stream" 
     for (crowd_seeds) |seed| try runCrowdSeed(seed);
 }
 
-/// **ITEM 24'S CLASS, IN A CROWD** (QUEUE.md, Questions). Each of these
-/// seeds fails one way: a real client's handshake, slowed past `min_rto_ns`
-/// by a lost SYN-ACK or ACK while every slot is taken, looks to the table
-/// like a flood's stuck half-open; another client's SYN takes its slot
-/// (`oldestHalfOpen`), and its next segment draws a reset. They are the
-/// failures of the first 10,000 crowd seeds, every one of this class. The
-/// rough seeds' 14 at 50,000 are the same thing with a flood's SYN. Red
-/// until Steve rules on the oracle; then this test loses its skip, or the
-/// oracle learns to excuse them.
+/// **ITEM 24'S CLASS, AND REVIVAL** (REVIEW-flood.md option 4, QUEUE.md
+/// item 47). Each of these seeds failed one way before revival: a real
+/// client's handshake, slowed past `min_rto_ns` by a lost SYN-ACK or ACK
+/// while every slot was taken, looked to the table like a flood's stuck
+/// half-open; another SYN took its slot (`oldestHalfOpen`), and its next
+/// segment drew a reset. The rough ones are every failure of the first
+/// 50,000 rough seeds (a flood's SYN took the slot), the crowd ones every
+/// failure of the first 10,000 crowd seeds (another client's). With
+/// revival, the client's ACK rebuilds its half-open, and each passes; with
+/// the ring turned off (`revival_cap` 0) each fails as it did.
+const rough_red = [_]u64{ 11277, 11529, 13514, 16190, 20063, 20615, 22509, 25720, 32011, 38526, 41147, 43082, 48515, 48671 };
 const crowd_red = [_]u64{ 640, 1281, 1452, 1733, 1872, 1961, 2305, 2870, 4362, 6307, 6606, 6918, 7374, 7546, 7968, 8003, 8575, 9366, 9728, 9769, 9951 };
 
-test "item 24's class in a crowd: a real client's half-open slot taken by another's SYN" {
-    if (true) return error.SkipZigTest; // red until the ruling
-    for (crowd_red) |seed| try runCrowdSeed(seed);
+test "revival: item 24's seeds, rough and crowded, pass; with the ring off, each fails as before" {
+    for (rough_red) |seed| {
+        try runRoughSeed(seed);
+        const off = try traceOf(seed, .rough, 0);
+        try std.testing.expect(!off.ok);
+        // With it, a revival, or an ACK it matched dropped for want of
+        // room rather than reset (seed 20063), and the client carries on.
+        const on = try traceOf(seed, .rough, null);
+        try std.testing.expect(on.ok and on.given_way > 0);
+    }
+    for (crowd_red) |seed| {
+        try runCrowdSeed(seed);
+        const off = try traceOf(seed, .crowd, 0);
+        try std.testing.expect(!off.ok);
+    }
+}
+
+test "revival changes nothing where nothing gave way: the same frames, with the ring or without" {
+    for (1..41) |seed| {
+        for ([_]Mode{ .plain, .rough, .crowd }) |mode| {
+            const on = try traceOf(seed, mode, null);
+            const off = try traceOf(seed, mode, 0);
+            if (on.given_way == 0) try std.testing.expectEqual(off.trace, on.trace);
+        }
+    }
 }
 
 // **THE LOST-FRAME IncompleteRead, HUNTED** (QUEUE.md item 96). The bug was
