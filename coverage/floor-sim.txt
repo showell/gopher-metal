@@ -135,3 +135,13 @@ ready_sim: a head past the buffer is served unended (the 431 path)
 ready_sim: a head whose body is still coming waits
 ready_sim: a shut window serves a head before it ends
 ready_sim: std misses a bare-LF head end, the pinned bug
+
+# Nothing leaves ahead of the writes before it (durable_sim.zig), at its
+# default 1000 seeds.
+durable_sim: a disk that never said learns it writes through
+durable_sim: a synchronize fails, and the output goes out
+durable_sim: a synchronize keeps the writes before an output
+durable_sim: a disk that writes through is cleared without a command
+durable_sim: a disk that lies about its cache is believed, and loses
+durable_sim: a failed synchronize is sent again before the next output
+durable_sim: a spill is pushed after later writes, with no flush

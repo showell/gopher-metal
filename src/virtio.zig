@@ -23,6 +23,7 @@ const std = @import("std");
 const tsc = @import("tsc.zig");
 const pci = @import("pci.zig");
 const scsi = @import("scsi.zig");
+const durable = @import("durable.zig");
 
 /// A device, found on whichever transport this machine has.
 pub const Device = union(enum) {
@@ -867,14 +868,19 @@ pub const Block = struct {
     /// nor on a disk in memory, which counts the flush for host tests.
     /// Answers a virtio-blk status byte. `unflushed` is cleared only on
     /// success, so a failed flush is tried again before the next response.
+    ///
+    /// **WHAT TO DO IS `durable.step`'S** (a pure decision, driven by
+    /// `durable_sim.zig`); only the SYNCHRONIZE CACHE it asks for is here.
     pub fn flush(self: *Block) u8 {
-        if (!self.unflushed) return blk_s_ok;
+        var d = durable.Disk{ .unflushed = self.unflushed, .write_cache = self.write_cache, .asks = self.address != null };
+        const s = durable.step(d);
+        if (s == .none) return blk_s_ok;
         self.flushes +%= 1;
-        const status = if (self.address) |at|
-            (if (self.write_cache == false) blk_s_ok else scsi.synchronize(self, at))
-        else
-            blk_s_ok;
-        if (status == blk_s_ok) self.unflushed = false else self.flush_failures +%= 1;
+        // `synchronize` may learn the disk has no cache (ILLEGAL REQUEST),
+        // and says so in `write_cache` and an ok.
+        const status = if (s == .synchronize) scsi.synchronize(self, self.address.?) else blk_s_ok;
+        if (durable.settle(&d, s, status == blk_s_ok)) self.flush_failures +%= 1;
+        self.unflushed = d.unflushed;
         return status;
     }
 };
