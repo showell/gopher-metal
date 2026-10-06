@@ -9,9 +9,10 @@ strict Linux implementations, and `store_sim`, all new files, none of them
 in the image). Your charter, the
 branch map and the one shared queue live in metal-vmm, not here: read
 metal-vmm's `CLOUD_WORK.md` ("gopher-metal: the simulators") and its
-`QUEUE.md` on branch `interrupts` (github.com/showell/metal-vmm). Branch
-from `antithesis-sdk`, push only `claude/*` branches, and never touch
-`master`: master is what serves lynrummy.com.
+`QUEUE.md` on `master` (github.com/showell/metal-vmm). Branch from
+`master`, push only `claude/*` branches, and never push to `master` or a
+`vN` tag: the box merges. What serves lynrummy.com is a tag (`v18` today),
+not a branch.
 
 **THE SIMULATORS ARE THERE TO KEEP THE LAYERS HONEST.** A simulator can only
 drive code that is pure logic: no `io.zig`, no driver, no device, no clock but
