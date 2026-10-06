@@ -1428,3 +1428,17 @@ test "a lookup reads a directory in bursts and stops at the name, finding what t
     // The volume keeps the burst it was given, for deinit's check.
     d.vol.dir_burst = &d.dir_burst;
 }
+
+// **A FINDING, NOT YET A RULING** (metal-vmm QUEUE.md, Questions, item 77):
+// `remove` takes a directory's entry as it takes a file's, and leaves the
+// directory's clusters and everything under it allocated, reachable from
+// nothing: a leak `check` reports. Linux's unlink answers EISDIR. Reached
+// through io.zig's `deleteFile` only if the application deletes a directory
+// by that call. Red until the box rules; the Store refuses it either way.
+test "remove refuses a directory, and leaves the volume clean (red until the ruling)" {
+    if (true) return error.SkipZigTest;
+    const d = try test_disk.Disk.make("remove-dir", test_disk.small, false);
+    defer d.deinit();
+    try d.vol.writeFile("data/dir/inside.txt", "under the directory");
+    try testing.expectError(fat16.Error.IsDirectory, d.vol.remove("data/dir"));
+}

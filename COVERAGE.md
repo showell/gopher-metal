@@ -223,4 +223,5 @@ metal-vmm run in `long.sh`; once a run reaches it, it goes on
 | property | module | knob |
 |---|---|---|
 | virtio: a flush fails, is counted, and the disk stays unflushed | `virtio.zig` | `VOLUME=<copy> VOLUME_CACHE=1 VOLUME_SYNC_FAIL=1`, and a chat post |
+| (no property) The Store's `replace` flushes before it renames | `store_fat.zig` | `VOLUME=<copy> VOLUME_CACHE=1 VOLUME_CUT_AT_EXIT=1` around a `replace`: in memory a flush does nothing, so only a write cache shows that the rename cannot reach the media before the data. Needs a kernel that calls the Store, which none does yet |
 | io: a flush failed, and the response goes out anyway | `io.zig` | the same, for the volume. **No knob fails a flush of the boot disk**: it is virtio-blk and writes through (virtio 1.2 §5.2.5.1), so nothing is sent; a knob would need metal-vmm's `DISK_CACHE` to offer FLUSH and fail it (a proposal) |
