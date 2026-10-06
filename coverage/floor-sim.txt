@@ -127,3 +127,11 @@ fat: a write's name is empty or too long
 fat: an overwrite of a directory is refused
 fat: an overwrite past a file's end is refused
 fat_sim: the disk stops answering part-way through an operation
+
+# When a connection is ready (ready_sim.zig), at its default 300 seeds.
+ready_sim: a body too big for the buffer is served at its head
+ready_sim: a client that closed part-way is abandoned
+ready_sim: a head past the buffer is served unended (the 431 path)
+ready_sim: a head whose body is still coming waits
+ready_sim: a shut window serves a head before it ends
+ready_sim: std misses a bare-LF head end, the pinned bug
