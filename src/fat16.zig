@@ -386,7 +386,10 @@ pub const Volume = struct {
     /// `buf` must be identity-mapped, because the device writes FAT sectors
     /// straight out of it.
     pub fn cacheFat(self: *Volume, buf: []u8) Error!u32 {
-        if (buf.len < self.fatBytes()) return Error.TooBig;
+        if (buf.len < self.fatBytes()) {
+            props.reachable(@src(), "fat: a FAT cache buffer too small for the FAT is refused", null);
+            return Error.TooBig;
+        }
         const fat = buf[0..self.fatBytes()];
         try self.readSectors(self.fat_start, self.sectors_per_fat, fat.ptr);
         // The other copies are compared in runs, not a sector at a time: a
@@ -463,8 +466,14 @@ pub const Volume = struct {
             return Error.VolumeTooLarge;
         }
 
-        const root_start = std.math.add(u32, reserved, std.math.mul(u32, num_fats, sectors_per_fat) catch
-            return Error.BadBootSector) catch return Error.BadBootSector;
+        const fats = std.math.mul(u32, num_fats, sectors_per_fat) catch {
+            props.reachable(@src(), "fat: a mount refuses FATs whose total size overflows", null);
+            return Error.BadBootSector;
+        };
+        const root_start = std.math.add(u32, reserved, fats) catch {
+            props.reachable(@src(), "fat: a mount refuses reserved sectors and FATs whose sum overflows", null);
+            return Error.BadBootSector;
+        };
         const root_sectors = (root_entries * dirent_size + sector_size - 1) / sector_size;
         const data_start = root_start + root_sectors;
         if (total == 0 or data_start >= total) {
@@ -485,7 +494,10 @@ pub const Volume = struct {
         // clusters than numbers below the marks would have chains that end
         // where they should go on. Refused, rather than read as far as the
         // disk lets it (QUEUE.md item 69).
-        if (kind == .fat32 and clusters > 0x0FFF_FFF5) return Error.TooManyClusters;
+        if (kind == .fat32 and clusters > 0x0FFF_FFF5) {
+            props.reachable(@src(), "fat: a mount refuses a FAT32 volume with more clusters than its numbers", null);
+            return Error.TooManyClusters;
+        }
         var root_cluster: Cluster = 0;
         switch (kind) {
             .fat16 => if (root_entries == 0) {
@@ -723,7 +735,10 @@ pub const Volume = struct {
         fn start(vol: *Volume, dir_cluster: Cluster) Error!Walk {
             // FAT32's root is a chain like any other directory's.
             const first = vol.dirStart(dir_cluster);
-            if (first != 0 and !vol.inData(first)) return Error.BadChain;
+            if (first != 0 and !vol.inData(first)) {
+                props.reachable(@src(), "fat: a directory's first cluster is outside the data", null);
+                return Error.BadChain;
+            }
             return .{
                 .vol = vol,
                 .root = first == 0,
@@ -934,7 +949,10 @@ pub const Volume = struct {
     /// bulk, so a loop that split a longer write would be code no test could
     /// reach. Asking for more is an error instead.
     fn writeSectors(self: *Volume, lba: u32, count: u32, from: [*]const u8) Error!void {
-        if (count > virtio.Block.max_sectors) return Error.TooBig;
+        if (count > virtio.Block.max_sectors) {
+            props.@"unreachable"(@src(), "fat: a write of more sectors than one request", null);
+            return Error.TooBig;
+        }
         if (self.blk.writeMany(self.start_lba + lba, @intFromPtr(from), count) != virtio.blk_s_ok) {
             props.reachable(@src(), "fat: a run of sectors fails to write", null);
             return Error.WriteFailed;
@@ -1161,7 +1179,11 @@ pub const Volume = struct {
     };
 
     fn findRun(self: *Volume, dir_cluster: Cluster, needed: u32) Error!Run {
-        if (needed == 0 or needed > max_long_parts + 1) return Error.BadName;
+        if (needed == 0 or needed > max_long_parts + 1) {
+            // Names stop at `max_name` (96), 8 parts: a guard, not a refusal.
+            props.@"unreachable"(@src(), "fat: a name needing more long-name parts than FAT allows", null);
+            return Error.BadName;
+        }
         var walk = try Walk.start(self, dir_cluster);
         var run = Run{};
         // Live long-name parts since the last other entry: the last of them,
@@ -1335,7 +1357,10 @@ pub const Volume = struct {
                     const chain = entry.first_cluster;
                     const short_lba = walk.lba;
                     const run = parts[0..part_count];
-                    if (has_long and parts_overflowed) return Error.BadName; // cannot remove what cannot be found whole
+                    if (has_long and parts_overflowed) { // cannot remove what cannot be found whole
+                        props.reachable(@src(), "fat: a long name of more parts than FAT allows cannot be removed", null);
+                        return Error.BadName;
+                    }
 
                     // 1. the short entry, while its sector is in scratch
                     self.scratch[at] = 0xE5;
@@ -1382,7 +1407,10 @@ pub const Volume = struct {
     ) Error!void {
         const parts = longParts(name);
         const sum = shortChecksum(short);
-        if (run.len != parts + 1) return Error.BadName; // the run was sized for another name
+        if (run.len != parts + 1) { // the run was sized for another name
+            props.@"unreachable"(@src(), "fat: a directory run sized for another name", null);
+            return Error.BadName;
+        }
 
         // An orphan just before the run goes first (see Run): a stop after
         // this leaves it gone and the run still free.
@@ -1541,7 +1569,10 @@ pub const Volume = struct {
         const run = try self.findRun(dir_cluster, parts + 1);
 
         const per_cluster = self.sectors_per_cluster * sector_size;
-        if (bytes.len > 0xFFFF_FFFF) return Error.TooBig;
+        if (bytes.len > 0xFFFF_FFFF) {
+            props.reachable(@src(), "fat: a file of 4 GiB or more is refused", null);
+            return Error.TooBig;
+        }
         const clusters: u32 = @intCast((@as(u64, bytes.len) + per_cluster - 1) / per_cluster);
         const first = try self.allocChain(clusters);
         if (bytes.len > 0) try self.writeChain(first, bytes);
@@ -1679,7 +1710,10 @@ pub const Volume = struct {
         const cluster_bytes: u32 = self.sectors_per_cluster * sector_size;
         const old_size: u32 = entry.size;
         const reach: u64 = @as(u64, offset) + bytes.len;
-        if (reach > 0xFFFF_FFFF) return Error.TooBig;
+        if (reach > 0xFFFF_FFFF) {
+            props.reachable(@src(), "fat: a write reaching past 4 GiB is refused", null);
+            return Error.TooBig;
+        }
         const new_size: u32 = @max(old_size, @as(u32, @intCast(reach)));
 
         // **IN 64 BITS**: rounding a size near 4 GiB up to whole clusters
@@ -1717,7 +1751,10 @@ pub const Volume = struct {
 
     /// A chain's last cluster, and how many clusters it holds.
     fn chainEnd(self: *Volume, first: Cluster) Error!struct { last: Cluster, clusters: u32 } {
-        if (!self.inData(first)) return Error.BadChain;
+        if (!self.inData(first)) {
+            props.reachable(@src(), "fat: a file's first cluster is outside the data, at its chain's end", null);
+            return Error.BadChain;
+        }
         var cluster = first;
         var clusters: u32 = 1;
         var loop = Loop{};
@@ -1756,11 +1793,21 @@ pub const Volume = struct {
         const cluster_bytes: u32 = self.sectors_per_cluster * sector_size;
 
         var cluster = first;
-        if (!self.inData(cluster)) return Error.BadChain;
+        if (!self.inData(cluster)) {
+            // `first` is what `chainEnd` walked or `allocChain` made.
+            props.@"unreachable"(@src(), "fat: a write finds a file's first cluster outside the data", null);
+            return Error.BadChain;
+        }
         var skip = offset / cluster_bytes;
         while (skip > 0) : (skip -= 1) {
-            cluster = (try self.nextCluster(cluster)) orelse return Error.BadChain;
-            if (cluster < 2) return Error.BadChain;
+            cluster = (try self.nextCluster(cluster)) orelse {
+                props.reachable(@src(), "fat: a write finds a file's chain ends before its size, writing, at its start", null);
+                return Error.BadChain;
+            };
+            if (cluster < 2) {
+                props.@"unreachable"(@src(), "fat: a write finds a file's chain points at a reserved cluster, writing, at its start", null);
+                return Error.BadChain;
+            }
         }
 
         var sector_in_cluster: u32 = (offset % cluster_bytes) / sector_size;
@@ -1819,8 +1866,14 @@ pub const Volume = struct {
             }
 
             if (at >= bytes.len) break;
-            cluster = after orelse ((try self.nextCluster(last)) orelse return Error.BadChain);
-            if (cluster < 2) return Error.BadChain;
+            cluster = after orelse ((try self.nextCluster(last)) orelse {
+                props.reachable(@src(), "fat: a write finds a file's chain ends before its size, writing, past its first run", null);
+                return Error.BadChain;
+            });
+            if (cluster < 2) {
+                props.@"unreachable"(@src(), "fat: a write finds a file's chain points at a reserved cluster, writing, past its first run", null);
+                return Error.BadChain;
+            }
             sector_in_cluster = 0;
         }
     }
@@ -1828,7 +1881,10 @@ pub const Volume = struct {
     /// Writes a file's length and first cluster back into its directory entry,
     /// in place. `entry.lba`/`entry.slot` are where `list` found it.
     fn setEntry(self: *Volume, entry: Entry, first_cluster: Cluster, size: u32) Error!void {
-        if (entry.lba == 0) return Error.NotFound; // never located; refuse to guess
+        if (entry.lba == 0) { // never located; refuse to guess
+            props.@"unreachable"(@src(), "fat: an entry never located is written back", null);
+            return Error.NotFound;
+        }
         try self.readSector(entry.lba, self.scratch);
         const e = self.scratch[entry.slot..][0..dirent_size];
         // **A WRITE MOVES THE MODIFICATION TIME.** This is the one path that
@@ -1855,7 +1911,10 @@ pub const Volume = struct {
         var end = path.len;
         while (end > 0 and path[end - 1] == '/') end -= 1;
         const trimmed = path[0..end];
-        if (trimmed.len == 0) return Error.BadName;
+        if (trimmed.len == 0) {
+            props.reachable(@src(), "fat: a path with no name in it is refused", null);
+            return Error.BadName;
+        }
 
         var cut: ?usize = null;
         var i: usize = 0;
@@ -1900,7 +1959,10 @@ pub const Volume = struct {
             return Error.BadName;
         }
         if (b.name.len == 0 or b.name.len > max_name) return Error.BadName;
-        const src = (try self.find(a.cluster, a.name)) orelse return Error.NotFound;
+        const src = (try self.find(a.cluster, a.name)) orelse {
+            props.reachable(@src(), "fat: a rename of a file that is not there is refused", null);
+            return Error.NotFound;
+        };
         if (src.isDirectory()) {
             props.reachable(@src(), "fat: a rename of a directory is refused", null);
             return Error.BadName;
@@ -1952,7 +2014,10 @@ pub const Volume = struct {
     /// short entry and the long-name run in front of it.
     pub fn remove(self: *Volume, path: []const u8) Error!void {
         const p = try self.parentOf(path);
-        _ = (try self.find(p.cluster, p.name)) orelse return Error.NotFound;
+        _ = (try self.find(p.cluster, p.name)) orelse {
+            props.reachable(@src(), "fat: a remove of a file that is not there is refused", null);
+            return Error.NotFound;
+        };
         try self.removeEntry(p.cluster, p.name);
     }
 
@@ -2028,6 +2093,7 @@ pub const Volume = struct {
             if (first.is_dir) try self.removeTreeAt(first.cluster, depth + 1);
             try self.removeEntry(dir_cluster, first.name[0..first.len]);
         }
+        props.reachable(@src(), "fat: a tree with more entries than a volume holds is refused as broken", null);
         return Error.DirectoryFull; // more entries than this is a broken volume
     }
 
@@ -2071,7 +2137,10 @@ pub const Volume = struct {
         context: anytype,
         comptime each: fn (@TypeOf(context), Finding) void,
     ) Error!Health {
-        if (seen.len < self.checkBytes()) return Error.TooBig;
+        if (seen.len < self.checkBytes()) {
+            props.reachable(@src(), "fat: a check given too little room to mark clusters is refused", null);
+            return Error.TooBig;
+        }
         const len = self.checkBytes();
         @memset(seen[0..len], 0);
         var c = Checker(@TypeOf(context), each){ .vol = self, .seen = seen[0..len], .context = context };
@@ -2322,10 +2391,20 @@ pub const Volume = struct {
     /// fat16, vfat, restore, stdio, append — also exercises the positional
     /// read the application uses for Range requests.
     pub fn readFile(self: *Volume, entry: Entry, out: []u8) Error!usize {
-        if (entry.isDirectory()) return Error.NotFound;
-        if (entry.size > out.len) return Error.TooBig;
+        if (entry.isDirectory()) {
+            props.reachable(@src(), "fat: a directory read as a file is refused, reading a file whole", null);
+            return Error.NotFound;
+        }
+        if (entry.size > out.len) {
+            props.reachable(@src(), "fat: a file larger than the room to read it into is refused", null);
+            return Error.TooBig;
+        }
         const n = try self.readAt(entry, 0, out[0..entry.size]);
-        if (n != entry.size) return Error.BadChain; // the chain ended before the size did
+        if (n != entry.size) { // the chain ended before the size did
+            // `readAt` refuses a chain that ends early before it answers.
+            props.@"unreachable"(@src(), "fat: a file's chain ends before its size, reading a file whole", null);
+            return Error.BadChain;
+        }
         return n;
     }
 
@@ -2353,7 +2432,10 @@ pub const Volume = struct {
         var out = Layout{ .clusters = 0, .runs = 0, .longest = 0 };
         var cluster = entry.first_cluster;
         if (cluster < 2) return out;
-        if (!self.inData(cluster)) return Error.BadChain;
+        if (!self.inData(cluster)) {
+            props.reachable(@src(), "fat: a file's first cluster is outside the data, when its layout is asked", null);
+            return Error.BadChain;
+        }
         var previous: Cluster = 0;
         var run: u32 = 0;
         while (true) {
@@ -2367,19 +2449,34 @@ pub const Volume = struct {
             out.longest = @max(out.longest, run);
             previous = cluster;
             cluster = (try self.nextCluster(cluster)) orelse break;
-            if (cluster < 2 or out.clusters > self.max_cluster) return Error.BadChain;
+            // A reserved cluster cannot come back from `nextCluster`; a
+            // loop can, and goes round until the count passes the volume.
+            if (cluster < 2) {
+                props.@"unreachable"(@src(), "fat: a file's layout finds a reserved cluster", null);
+                return Error.BadChain;
+            }
+            if (out.clusters > self.max_cluster) {
+                props.reachable(@src(), "fat: a file's layout counts more clusters than the volume holds: a loop", null);
+                return Error.BadChain;
+            }
         }
         return out;
     }
 
     pub fn readAt(self: *Volume, entry: Entry, offset: u32, out: []u8) Error!usize {
-        if (entry.isDirectory()) return Error.NotFound;
+        if (entry.isDirectory()) {
+            props.reachable(@src(), "fat: a directory read as a file is refused, reading at an offset", null);
+            return Error.NotFound;
+        }
         if (offset >= entry.size or out.len == 0) return 0;
         const want: usize = @min(out.len, entry.size - offset);
 
         const cluster_bytes: u32 = self.sectors_per_cluster * sector_size;
         var cluster = entry.first_cluster;
-        if (!self.inData(cluster)) return Error.BadChain; // a non-empty file has a chain
+        if (!self.inData(cluster)) { // a non-empty file has a chain
+            props.reachable(@src(), "fat: a file's first cluster is outside the data", null);
+            return Error.BadChain;
+        }
         // **A CHAIN THAT LOOPS IS REFUSED**, as a directory walk and an append
         // refuse one. The read stops at the file's size, so without this a
         // looped chain answers its earlier clusters' bytes again as the
@@ -2390,8 +2487,15 @@ pub const Volume = struct {
         try loop.pass(cluster);
         var skip = offset / cluster_bytes;
         while (skip > 0) : (skip -= 1) {
-            cluster = (try self.nextCluster(cluster)) orelse return Error.BadChain;
-            if (cluster < 2) return Error.BadChain;
+            cluster = (try self.nextCluster(cluster)) orelse {
+                props.reachable(@src(), "fat: a file's chain ends before its size, reading at an offset, at its start", null);
+                return Error.BadChain;
+            };
+            if (cluster < 2) {
+                // `nextCluster` refuses any link outside the data first.
+                props.@"unreachable"(@src(), "fat: a file's chain points at a reserved cluster, reading at an offset, at its start", null);
+                return Error.BadChain;
+            }
             try loop.pass(cluster);
         }
 
@@ -2452,8 +2556,14 @@ pub const Volume = struct {
             }
 
             if (got >= want) break;
-            cluster = after orelse return Error.BadChain;
-            if (cluster < 2) return Error.BadChain;
+            cluster = after orelse {
+                props.reachable(@src(), "fat: a file's chain ends before its size, reading at an offset, past its first run", null);
+                return Error.BadChain;
+            };
+            if (cluster < 2) {
+                props.@"unreachable"(@src(), "fat: a file's chain points at a reserved cluster, reading at an offset, past its first run", null);
+                return Error.BadChain;
+            }
             try loop.pass(cluster);
             sector_in_cluster = 0;
         }

@@ -196,3 +196,26 @@ log ring: it holds no more than its capacity
 log ring: once bytes are lost, a read starts at the first whole line
 log ring: the next byte's place is inside the ring
 log ring: the rest of a cookie or authorization line is taken out
+
+# FAT's refusals named in item 76: fat_sim, and floor_sim's damaged volumes.
+fat: a FAT cache buffer too small for the FAT is refused
+fat: a check given too little room to mark clusters is refused
+fat: a cluster is taken with one free
+fat: a directory grown stays within FAT's most entries
+fat: a directory read as a file is refused, reading a file whole
+fat: a directory read as a file is refused, reading at an offset
+fat: a directory's first cluster is outside the data
+fat: a file larger than the room to read it into is refused
+fat: a file's chain ends before its size, reading at an offset, at its start
+fat: a file's chain ends before its size, reading at an offset, past its first run
+fat: a file's first cluster is outside the data
+fat: a file's first cluster is outside the data, at its chain's end
+fat: a file's first cluster is outside the data, when its layout is asked
+fat: a file's layout counts more clusters than the volume holds: a loop
+fat: a mount refuses FATs whose total size overflows
+fat: a mount refuses a FAT32 volume with more clusters than its numbers
+fat: a mount refuses reserved sectors and FATs whose sum overflows
+fat: a path with no name in it is refused
+fat: a remove of a file that is not there is refused
+fat: a rename of a file that is not there is refused
+fat: a write reaching past 4 GiB is refused

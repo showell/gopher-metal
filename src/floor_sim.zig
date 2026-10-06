@@ -20,6 +20,13 @@
 //!   a key naming a secret, `=` or `:`, perhaps a space, a quote or none,
 //!   and a value that may be empty. Oracle: a non-empty value never comes
 //!   out, and a line with an empty quoted value comes out as it went in.
+//! - **FAT on a damaged volume** (`fatSeed`): `fat_sim` only ever meets a
+//!   healthy volume and a failing disk. Here a small volume is formatted
+//!   (`test_disk`), given a directory and a file of a few clusters through
+//!   `fat16.zig`, then one thing is made wrong: a boot sector field, the
+//!   file's or directory's first cluster on the disk, its size, a link in
+//!   its chain, or a buffer or path handed in. Oracle: the operation answers
+//!   exactly the error that thing calls for, and nothing panics.
 
 const std = @import("std");
 const virtio = @import("virtio.zig");
@@ -27,6 +34,8 @@ const gpt = @import("gpt.zig");
 const kernel_partition = @import("kernel_partition.zig");
 const PageCache = @import("page_cache.zig").PageCache;
 const log_ring = @import("log_ring.zig");
+const fat16 = @import("fat16.zig");
+const test_disk = @import("test_disk.zig");
 const props = @import("coverage");
 
 comptime {
@@ -226,10 +235,184 @@ pub fn redactSeed(seed: u64) Failure!void {
     }
 }
 
+// ── FAT on a damaged volume ─────────────────────────────────────────────────
+
+const FatWrong = enum {
+    fats_overflow,
+    sum_overflow,
+    loop_layout,
+    too_many_clusters,
+    cache_short,
+    check_short,
+    dir_read_whole,
+    dir_read_at,
+    room_short,
+    first_outside_read,
+    first_outside_layout,
+    first_outside_append,
+    size_long_whole,
+    size_long_at,
+    size_long_skip,
+    reserved_at,
+    reserved_skip,
+    reserved_layout,
+    reserved_write,
+    reserved_write_skip,
+    dir_first_outside,
+    empty_path,
+    past_4gib,
+};
+
+fn le16put(b: []u8, v: u16) void {
+    std.mem.writeInt(u16, b[0..2], v, .little);
+}
+
+fn noFindings(_: void, _: fat16.Finding) void {}
+
+pub fn fatSeed(seed: u64) Failure!void {
+    var prng = std.Random.DefaultPrng.init(seed ^ 0x6661_7464_616d); // "fatdam"
+    const r = prng.random();
+    const wrong = r.enumValue(FatWrong);
+    const d = test_disk.Disk.make("damaged-floor", test_disk.small, false) catch return fail(seed, "no disk", .{});
+    defer d.deinit();
+    const v = &d.vol;
+    const cluster_bytes = v.sectors_per_cluster * fat16.sector_size;
+    // A file of a few clusters, in a directory.
+    const clusters = r.intRangeAtMost(u32, 3, 6);
+    var content: [6 * 512]u8 = undefined;
+    r.bytes(&content);
+    const size = clusters * cluster_bytes - r.uintLessThan(u32, cluster_bytes);
+    _ = v.makePath("data/dir") catch |e| return fail(seed, "makePath: {s}", .{@errorName(e)});
+    v.writeFile("data/f.bin", content[0..size]) catch |e| return fail(seed, "writeFile: {s}", .{@errorName(e)});
+    var entry = v.open("data/f.bin") catch |e| return fail(seed, "open: {s}", .{@errorName(e)});
+    // `slot` is the entry's byte offset in its sector.
+    const dirent = d.bytes[entry.lba * 512 + entry.slot ..][0..32];
+    const fat_at = v.fat_start * 512 + entry.first_cluster * 2;
+    var out: [8 * 512]u8 = undefined;
+
+    const Want = fat16.Error;
+    var want: Want = undefined;
+    const got: anyerror!void = switch (wrong) {
+        .fats_overflow, .sum_overflow, .too_many_clusters => blk: {
+            // The boot sector, as FAT32 reads it: a FAT size of 32 bits.
+            const b = d.bytes[0..512];
+            le16put(b[22..24], 0);
+            if (wrong == .fats_overflow) {
+                b[16] = 2;
+                std.mem.writeInt(u32, b[36..40], 0x8000_0000 + r.uintLessThan(u32, 0x1000), .little);
+                want = Want.BadBootSector;
+            } else if (wrong == .sum_overflow) {
+                // One FAT that fits, and reserved sectors past what is left.
+                b[16] = 1;
+                std.mem.writeInt(u32, b[36..40], 0xFFFF_FF00 + r.uintLessThan(u32, 0xF0), .little);
+                le16put(b[14..16], 0x100 + r.uintLessThan(u16, 0x100));
+                want = Want.BadBootSector;
+            } else {
+                b[13] = 1;
+                le16put(b[19..21], 0);
+                std.mem.writeInt(u32, b[32..36], 0xFFFF_0000 + r.uintLessThan(u32, 0xF000), .little);
+                std.mem.writeInt(u32, b[36..40], 64, .little);
+                want = Want.TooManyClusters;
+            }
+            var scratch: [512]u8 align(16) = undefined;
+            break :blk if (fat16.Volume.mount(&d.blk, &scratch, 0)) |_| {} else |e| e;
+        },
+        .cache_short => blk: {
+            want = Want.TooBig;
+            const short = std.testing.allocator.alloc(u8, v.fatBytes() - 1 - r.uintLessThan(usize, 512)) catch return fail(seed, "no memory", .{});
+            defer std.testing.allocator.free(short);
+            break :blk if (v.cacheFat(short)) |_| {} else |e| e;
+        },
+        .check_short => blk: {
+            want = Want.TooBig;
+            const short = std.testing.allocator.alloc(u8, v.checkBytes() - 1) catch return fail(seed, "no memory", .{});
+            defer std.testing.allocator.free(short);
+            break :blk if (v.check(short, {}, noFindings)) |_| {} else |e| e;
+        },
+        .dir_read_whole, .dir_read_at => blk: {
+            want = Want.NotFound;
+            const dir = v.open("data/dir") catch |e| return fail(seed, "open dir: {s}", .{@errorName(e)});
+            break :blk if (wrong == .dir_read_whole)
+                (if (v.readFile(dir, &out)) |_| {} else |e| e)
+            else
+                (if (v.readAt(dir, 0, &out)) |_| {} else |e| e);
+        },
+        .room_short => blk: {
+            want = Want.TooBig;
+            break :blk if (v.readFile(entry, out[0 .. size - 1])) |_| {} else |e| e;
+        },
+        .first_outside_read, .first_outside_layout => blk: {
+            want = Want.BadChain;
+            entry.first_cluster = @intCast(v.max_cluster + 1 + r.uintLessThan(u32, 100));
+            break :blk if (wrong == .first_outside_read)
+                (if (v.readAt(entry, 0, &out)) |_| {} else |e| e)
+            else
+                (if (v.layout(entry)) |_| {} else |e| e);
+        },
+        .first_outside_append => blk: {
+            want = Want.BadChain;
+            le16put(dirent[26..28], @intCast(v.max_cluster + 1));
+            break :blk v.writeInto("data/f.bin", size, "more");
+        },
+        .size_long_whole, .size_long_at, .size_long_skip => blk: {
+            want = Want.BadChain;
+            entry.size = size + 2 * cluster_bytes;
+            break :blk switch (wrong) {
+                .size_long_whole => if (v.readFile(entry, &out)) |_| {} else |e| e,
+                .size_long_at => if (v.readAt(entry, 0, &out)) |_| {} else |e| e,
+                else => if (v.readAt(entry, (clusters + 1) * cluster_bytes, &out)) |_| {} else |e| e,
+            };
+        },
+        .reserved_at, .reserved_skip, .reserved_layout, .reserved_write, .reserved_write_skip => blk: {
+            // The file's first link points at cluster 1, which is reserved.
+            want = Want.BadChain;
+            le16put(d.bytes[fat_at..][0..2], 1);
+            break :blk switch (wrong) {
+                .reserved_at => if (v.readAt(entry, 0, &out)) |_| {} else |e| e,
+                .reserved_skip => if (v.readAt(entry, cluster_bytes + 1, &out)) |_| {} else |e| e,
+                .reserved_layout => if (v.layout(entry)) |_| {} else |e| e,
+                .reserved_write => v.writeInto("data/f.bin", 0, content[0 .. 2 * cluster_bytes]),
+                else => v.writeInto("data/f.bin", cluster_bytes + 1, "x"),
+            };
+        },
+        .loop_layout => blk: {
+            // The file's last link goes back to its first.
+            want = Want.BadChain;
+            const last = entry.first_cluster + clusters - 1;
+            le16put(d.bytes[v.fat_start * 512 + last * 2 ..][0..2], @intCast(entry.first_cluster));
+            break :blk if (v.layout(entry)) |_| {} else |e| e;
+        },
+        .dir_first_outside => blk: {
+            want = Want.BadChain;
+            const dir = v.open("data/dir") catch |e| return fail(seed, "open dir: {s}", .{@errorName(e)});
+            le16put(d.bytes[dir.lba * 512 + dir.slot ..][26..28], @intCast(v.max_cluster + 1));
+            break :blk v.writeFile("data/dir/x", "y");
+        },
+        .empty_path => blk: {
+            want = Want.BadName;
+            // `writeFile` refuses an empty name before it looks for a
+            // parent; `remove` and `rename` look first.
+            const path = ([_][]const u8{ "", "/", "//" })[r.uintLessThan(usize, 3)];
+            break :blk if (r.boolean()) v.remove(path) else v.rename(path, "data/g");
+        },
+        .past_4gib => blk: {
+            // A file of nearly 4 GiB cannot be made here; its entry can say
+            // it is one, and a write at its end reaches past.
+            want = Want.TooBig;
+            std.mem.writeInt(u32, dirent[28..32], 0xFFFF_FFFF, .little);
+            break :blk v.writeInto("data/f.bin", 0xFFFF_FFFF, "xy");
+        },
+    };
+    if (got) |_| return fail(seed, "{s}: wanted {s}, and it was taken", .{ @tagName(wrong), @errorName(want) }) else |e| {
+        if (e != want) return fail(seed, "{s}: wanted {s}, got {s}", .{ @tagName(wrong), @errorName(want), @errorName(e) });
+    }
+}
+
 pub fn runSeed(seed: u64) Failure!void {
     try gptSeed(seed);
     try pageSeed(seed);
     try redactSeed(seed);
+    try fatSeed(seed);
 }
 
 test "floor_sim: GPT, built field by field with one field wrong, a handful of seeds" {

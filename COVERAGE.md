@@ -151,8 +151,68 @@ under "For the box" below.)*
 | `page_cache` | 16 (one `unreachable`: room is always found for a file within the budget) | 15 | `page_sim`; `floor_sim` for every slot taken, a write past a copy's end, and no memory to grow one | none: it answers a copy or nothing, and refuses by not keeping |
 | `log_ring` | 9 (2 limits on the ring, the 3 redactions, an empty quoted value, and how a read starts) | 9 | `pure_sim`; `floor_sim` for an empty quoted value | none: it keeps what fits and takes secrets out |
 | `kept_log` | 5 (3 ways a slot is read, no boot before, and never writing over the boot before) | 5 | `pure_sim` | none: a header that fails its check reads as no log |
+| `fat16` | 84 (11 of them `unreachable`: guards behind other checks) | 61 of the 73 others in `properties`; the 12 missed are listed below | `fat_sim`; `floor_sim` for damaged volumes (a boot sector field, a first cluster or size on the disk, a link in a chain, a loop) and buffers or paths handed in | see "Errors under the Store" |
 | `virtio` (`Block.flush`) | 1 | 0 here | under metal-vmm | a SCSI status, as a virtio-blk status byte |
 | `io` (`durable`) | 1 | 0 here | under metal-vmm | none: a failed flush is logged, counted, and the response goes out |
+
+**What `fat16` leaves unreached in `properties`, and why:**
+
+- *a file of 4 GiB or more is refused*: `writeFileIn` takes the bytes whole,
+  and no host test holds 4 GiB. The write at an offset past 4 GiB, the other
+  way there, is reached.
+- *a write finds a file's chain ends before its size* (writing, at its
+  start; and past its first run): `writeInto` walks the chain with
+  `chainEnd` first and links what is missing, so `writeRuns` only meets a
+  short chain if the disk answers its second read of the FAT differently.
+  No metal-vmm knob does that on purpose; **a knob that answers one read
+  with other bytes** (as `Block.Fault.garbage` does in host tests) would.
+- *a long name of more parts than FAT allows cannot be removed* and *a tree
+  with more entries than a volume holds is refused as broken*: each needs a
+  directory written by something other than this driver (a long name of 21
+  parts; a directory whose entries come back after removal). Not built yet:
+  the debt ledger has it.
+- Four that were missed in `properties` before item 76 as well: *no 8.3
+  alias is left*, *a directory reaches FAT's most entries*, *a directory
+  deeper than the check walks*, *a tree too deep to remove*. `fat16_test.zig`
+  drives those limits; `properties` does not run it.
+- Two met only at the long tier's 300 FAT seeds, as before: *a run of
+  sectors fails to read* and *a FAT32 entry's first cluster is past 65535*
+  (and *a run of sectors fails to write*, met at neither).
+
+## Errors under the Store
+
+Each error a module answers, and the named refusals that answer it, read
+from the source (a property followed by its `return`). Phase B's Store
+errors are built from these.
+
+**`fat16.zig`**
+
+- `BadBootSector`: fat: a mount refuses FAT32 with FAT16's fields set; fat: a mount refuses FATs whose total size overflows; fat: a mount refuses a FAT of no sectors; fat: a mount refuses a FAT too short for its clusters; fat: a mount refuses a FAT16 root of no entries; fat: a mount refuses a cluster size no volume has; fat: a mount refuses a sector without the boot signature; fat: a mount refuses a volume with no data region; fat: a mount refuses no reserved sectors, or a count of FATs it does not keep; fat: a mount refuses reserved sectors and FATs whose sum overflows
+- `BadChain`: fat: a chain leads outside the data area; fat: a chain that loops is refused; fat: a directory's first cluster is outside the data; fat: a file's chain ends before its size, reading a file whole *(a guard)*; fat: a file's chain ends before its size, reading at an offset, at its start; fat: a file's chain ends before its size, reading at an offset, past its first run; fat: a file's chain points at a reserved cluster, reading at an offset, at its start *(a guard)*; fat: a file's chain points at a reserved cluster, reading at an offset, past its first run *(a guard)*; fat: a file's first cluster is outside the data; fat: a file's first cluster is outside the data, at its chain's end; fat: a file's first cluster is outside the data, when its layout is asked; fat: a file's layout counts more clusters than the volume holds: a loop; fat: a file's layout finds a reserved cluster *(a guard)*; fat: a tree too deep to remove is refused; fat: a write finds a file's chain ends before its size, writing, at its start; fat: a write finds a file's chain ends before its size, writing, past its first run; fat: a write finds a file's chain points at a reserved cluster, writing, at its start *(a guard)*; fat: a write finds a file's chain points at a reserved cluster, writing, past its first run *(a guard)*; fat: a write finds a file's first cluster outside the data *(a guard)*; fat: an overwrite past a file's end is refused
+- `BadName`: fat: a directory deeper than the check walks is refused; fat: a directory run sized for another name *(a guard)*; fat: a directory to be made is a file's name; fat: a long name of more parts than FAT allows cannot be removed; fat: a name needing more long-name parts than FAT allows *(a guard)*; fat: a path with no name in it is refused; fat: a rename across directories is refused; fat: a rename of a directory is refused; fat: a write's name is empty or too long; fat: an overwrite of a directory is refused; fat: no 8.3 alias is left for a name
+- `BadRoot`: fat: a mount refuses a FAT32 root outside the data
+- `DirectoryFull`: fat: a FAT16 root directory is full; fat: a directory reaches FAT's most entries; fat: a tree with more entries than a volume holds is refused as broken
+- `FatVersion`: fat: a mount refuses a FAT32 version it does not know
+- `Full`: fat: a volume full part-way through an allocation gives back what it took
+- `IsDirectory`: fat: a rename onto a directory is refused; fat: a write onto a directory is refused
+- `NotFat16`: fat: a mount refuses a volume too small for FAT16; fat: a mount refuses sectors that are not 512 bytes; fat: a path whose parent is a file is refused
+- `NotFound`: fat: a directory read as a file is refused, reading a file whole; fat: a directory read as a file is refused, reading at an offset; fat: a path through a file names nothing; fat: a remove of a file that is not there is refused; fat: a rename of a file that is not there is refused; fat: an entry never located is written back *(a guard)*
+- `NotMirrored`: fat: a mount refuses a FAT32 volume that is not mirrored
+- `ReadFailed`: fat: a mount cannot read the boot sector; fat: a run of sectors fails to read; fat: a sector read fails
+- `TooBig`: fat: a FAT cache buffer too small for the FAT is refused; fat: a check given too little room to mark clusters is refused; fat: a file larger than the room to read it into is refused; fat: a file of 4 GiB or more is refused; fat: a write of more sectors than one request *(a guard)*; fat: a write reaching past 4 GiB is refused
+- `TooManyClusters`: fat: a mount refuses a FAT32 volume with more clusters than its numbers
+- `VolumeTooLarge`: fat: a mount refuses a volume past 32-bit sectors
+- `WriteFailed`: fat: a run of sectors fails to write; fat: a sector write fails
+
+**`gpt.zig`**
+
+- `NoPartition`: gpt: no partition but the kernel's, so no data partition
+- `NotGpt`: gpt: a table with no entries, or entries of a size this reader refuses; gpt: no EFI PART signature, so not GPT
+- `ReadFailed`: gpt: a sector of entries cannot be read; gpt: the header cannot be read
+
+
+`page_cache`, `log_ring`, `kept_log` and `durable` answer no errors: each
+refuses by not keeping, by taking out, or by a status byte the caller reads.
 
 ## For the box
 
