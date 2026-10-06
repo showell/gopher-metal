@@ -21,7 +21,7 @@ const testing = std.testing;
 const Error = store.Error;
 
 /// A tree, as text: one line per name, sorted, with each file's bytes.
-fn snapshot(s: store.Store, gpa: std.mem.Allocator) ![]u8 {
+pub fn snapshot(s: store.Store, gpa: std.mem.Allocator) ![]u8 {
     var out: std.ArrayListUnmanaged(u8) = .empty;
     errdefer out.deinit(gpa);
     try walk(s, gpa, "", &out);

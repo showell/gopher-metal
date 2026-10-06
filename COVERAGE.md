@@ -156,6 +156,7 @@ under "For the box" below.)*
 | `arp` | 6 | 6 | `floor_sim`: an ARP request built field by field, one field wrong | none: a silent null |
 | `request_heap` | 4 (the memory it keeps missing, the pages running out, a block that cannot grow in place, a reset) | 4 | `pure_sim`; `floor_sim` for a growth only the last block can make | none: the allocator answers null and the caller decides |
 | `stream` | 7 (a read finding the peer gone or idle; a write, or draining a spill, finding the connection gone or idle; a spill too full) | 0 here | under metal-vmm (below): `stream.zig` imports `io.zig`, the driver and interrupts, so no simulator can drive it. The seam that would let one is under Proposed in QUEUE.md | `WriteFailed`, and null for a read |
+| `store` (`store_model`, `store_fat`, `store_linux`) | 12 in `store_sim` | 12 | `store_sim`: the model, the FAT store on a disk in memory (FAT16, and FAT32 one seed in four) and the strict Linux store in a temporary directory, given the same operations from a pool of paths that differ in case, nest, and break the rules; a cut on the FAT side one write in 4 to 20, plain or torn. 1000 seeds | the Store's own (`store.zig`): `NotFound`, `IsDirectory`, `BadName`, `TooBig`, `NoSpace`, `Damaged`, `Io` |
 | `virtio` (`Block.flush`) | 1 | 0 here | under metal-vmm | a SCSI status, as a virtio-blk status byte |
 | `io` (`durable`) | 1 | 0 here | under metal-vmm | none: a failed flush is logged, counted, and the response goes out |
 

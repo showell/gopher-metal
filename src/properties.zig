@@ -32,6 +32,7 @@ const pure_sim = @import("pure_sim.zig");
 const ready_sim = @import("ready_sim.zig");
 const durable_sim = @import("durable_sim.zig");
 const floor_sim = @import("floor_sim.zig");
+const store_sim = @import("store_sim.zig");
 const options = @import("tcp_properties_options");
 
 var jsonl: std.ArrayList(u8) = .empty;
@@ -87,6 +88,11 @@ test "the properties over a sweep of seeds" {
         const ok = if (sim.runFullSeed(seed)) true else |_| false;
         if (!ok) failed_seeds += 1;
         at.always(@src(), ok, "tcp_sim: every oracle holds for a crowd the size of the kernel's table", .{ .seed = seed });
+    }
+    for (1..options.store_seeds + 1) |seed| {
+        const ok = if (store_sim.runSeed(seed)) true else |_| false;
+        if (!ok) failed_seeds += 1;
+        at.always(@src(), ok, "store_sim: every oracle holds for every seed", .{ .seed = seed });
     }
     for (1..options.floor_seeds + 1) |seed| {
         const ok = if (floor_sim.runSeed(seed)) true else |_| false;

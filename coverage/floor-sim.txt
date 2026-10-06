@@ -243,3 +243,17 @@ request heap: a block cannot grow in place, and the caller must move it
 request heap: a request is answered and its memory goes back
 request heap: the machine has not the memory it keeps
 request heap: the pages run out under a request
+
+# The Store (metal-vmm QUEUE item 79): store_sim, the model against FAT and strict Linux, at its default 1000 seeds.
+store_sim: a cut lands inside an operation
+store_sim: a spelling in another case, or with empty parts, finds the same file
+store_sim: after a cut, a removed file is there or gone
+store_sim: after a cut, a replaced file is wholly old or wholly new
+store_sim: after a cut, a written file is old, new or gone
+store_sim: after a cut, an appended file is old or new
+store_sim: all three find nothing there
+store_sim: all three refuse a file operation on a directory
+store_sim: all three refuse a name, for the same reason
+store_sim: all three refuse a read into too little room
+store_sim: the three stores answer every operation alike
+store_sim: the three trees are the same after every operation
