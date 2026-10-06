@@ -140,8 +140,8 @@ if [ "$want" != sim ]; then
     done
     lap "lossy sweep"
 
-    # **THE PEER MISBEHAVES**, one run per way (metal-vmm's README, "And the
-    # peer can misbehave"). A client that stays (`page`) must still get the
+    # **THE PEER MISBEHAVES**, one run per way (metal-vmm's KNOBS.md, "The peer:
+    # a worse client"). A client that stays (`page`) must still get the
     # page an unhurt run gets; one that hurts itself (`end`: a reset, a
     # vanish) is owed nothing, and the run may end with the guest idle,
     # waiting on a request that never comes. Either way metal-vmm must end
