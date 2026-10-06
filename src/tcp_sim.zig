@@ -100,8 +100,13 @@ const client_buffer: usize = 4096;
 const client_mss: u32 = 1000;
 /// A crowd's most slots and clients (`Crowd`). A plain seed's table has 2
 /// slots and one client.
-const max_slots = 8;
-const max_clients = 6;
+const crowd_slots = 8;
+const crowd_clients = 6;
+/// **A CROWD THE SIZE OF THE KERNEL'S TABLE** (`Crowd.chooseFull`, metal-vmm
+/// QUEUE item 72): gopher.zig's 256 slots, and a quarter more clients.
+/// The arrays are sized for it; a small crowd uses the first few.
+const max_slots = 256;
+const max_clients = max_slots + max_slots / 4;
 
 fn requestByte(k: usize) u8 {
     return @truncate(k *% 7 +% 1);
@@ -267,9 +272,9 @@ const Crowd = struct {
     stream_gap_ns: i96 = 0,
 
     fn choose(rng: std.Random) Crowd {
-        const clients = rng.intRangeAtMost(usize, 2, max_clients);
+        const clients = rng.intRangeAtMost(usize, 2, crowd_clients);
         var c: Crowd = .{
-            .slots = rng.intRangeAtMost(usize, 1, max_slots),
+            .slots = rng.intRangeAtMost(usize, 1, crowd_slots),
             .clients = clients,
             .gap_ns = randNs(rng, 300 * ns_per_ms),
         };
@@ -286,6 +291,35 @@ const Crowd = struct {
             c.asks[k] = 1;
             c.stream_chunks = rng.intRangeAtMost(usize, 1, 20);
             c.stream_chunk = rng.intRangeAtMost(usize, 1, 1500);
+            c.stream_gap_ns = @intCast(rng.intRangeAtMost(u64, 10 * ns_per_ms, 250 * ns_per_ms));
+        }
+        return c;
+    }
+
+    /// **A FULL TABLE** (QUEUE item 72): 64 to 256 slots and up to a quarter
+    /// more clients than that, opening 0 to 100 us apart so they overlap, with short
+    /// requests and answers so a seed stays affordable, one perhaps holding
+    /// a stream: the table as full as prod's, where `oldestHalfOpen`'s scan
+    /// and revival meet every slot taken.
+    fn chooseFull(rng: std.Random) Crowd {
+        const slots = rng.intRangeAtMost(usize, 64, max_slots);
+        const clients = slots + rng.intRangeAtMost(usize, 1, slots / 4);
+        var c: Crowd = .{
+            .slots = slots,
+            .clients = clients,
+            .gap_ns = randNs(rng, 100 * std.time.ns_per_us),
+        };
+        for (0..clients) |i| {
+            c.request_len[i] = rng.intRangeAtMost(usize, 1, 400);
+            c.answer_len[i] = rng.intRangeAtMost(usize, 0, 3000);
+            if (rng.uintLessThan(u8, 8) == 0) c.asks[i] = 2;
+        }
+        if (rng.boolean()) {
+            const k = rng.uintLessThan(usize, clients);
+            c.stream = k;
+            c.asks[k] = 1;
+            c.stream_chunks = rng.intRangeAtMost(usize, 1, 10);
+            c.stream_chunk = rng.intRangeAtMost(usize, 1, 1000);
             c.stream_gap_ns = @intCast(rng.intRangeAtMost(u64, 10 * ns_per_ms, 250 * ns_per_ms));
         }
         return c;
@@ -1329,7 +1363,19 @@ const Sim = struct {
         self.init(seed);
         var third = std.Random.DefaultPrng.init(seed ^ 0x6372_6f77_6463_726f); // "crowdcro"
         const r = third.random();
-        const crowd = Crowd.choose(r);
+        self.withCrowd(Crowd.choose(r), r);
+    }
+
+    /// Like `initCrowd`, with a crowd the size of the kernel's table
+    /// (`Crowd.chooseFull`), from a fourth generator.
+    fn initFull(self: *Sim, seed: u64) void {
+        self.init(seed);
+        var fourth = std.Random.DefaultPrng.init(seed ^ 0x6675_6c6c_7461_626c); // "fulltabl"
+        const r = fourth.random();
+        self.withCrowd(Crowd.chooseFull(r), r);
+    }
+
+    fn withCrowd(self: *Sim, crowd: Crowd, r: std.Random) void {
         self.crowd = crowd;
         self.slots = crowd.slots;
         self.n_clients = crowd.clients;
@@ -1611,6 +1657,20 @@ pub fn runCrowdSeed(seed: u64) !void {
     const sim = try std.testing.allocator.create(Sim);
     defer std.testing.allocator.destroy(sim);
     sim.initCrowd(seed);
+    try runCrowded(sim);
+}
+
+/// The same seed's network with a crowd the size of the kernel's table
+/// (`Crowd.chooseFull`, metal-vmm QUEUE item 72).
+pub fn runFullSeed(seed: u64) !void {
+    const sim = try std.testing.allocator.create(Sim);
+    defer std.testing.allocator.destroy(sim);
+    sim.initFull(seed);
+    try runCrowded(sim);
+    if (sim.table.refused > 0) props.reachable(@src(), "tcp_sim: a crowd the size of the kernel's table fills it, and a SYN finds no room", .{ .slots = sim.crowd.?.slots });
+}
+
+fn runCrowded(sim: *Sim) !void {
     sim.run() catch |e| {
         const c = sim.crowd.?;
         std.debug.print("  crowd: {d} clients {d} ms apart, {d} slots; requests {any}, answers {any}, asks {any}; stream {?d}: {d} chunks of {d} B every {d} ms\n", .{
@@ -1705,6 +1765,10 @@ test "several clients, a table sized by the seed, keep-alive and a held stream" 
 /// the ring turned off (`revival_cap` 0) each fails as it did.
 const rough_red = [_]u64{ 11277, 11529, 13514, 16190, 20063, 20615, 22509, 25720, 32011, 38526, 41147, 43082, 48515, 48671 };
 const crowd_red = [_]u64{ 640, 1281, 1452, 1733, 1872, 1961, 2305, 2870, 4362, 6307, 6606, 6918, 7374, 7546, 7968, 8003, 8575, 9366, 9728, 9769, 9951 };
+
+test "a crowd the size of the kernel's table: every oracle holds, and the table fills" {
+    for (1..3) |seed| try runFullSeed(seed);
+}
 
 test "revival: item 24's seeds, rough and crowded, pass; with the ring off, each fails as before" {
     for (rough_red) |seed| {

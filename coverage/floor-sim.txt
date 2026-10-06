@@ -145,3 +145,7 @@ durable_sim: a disk that writes through is cleared without a command
 durable_sim: a disk that lies about its cache is believed, and loses
 durable_sim: a failed synchronize is sent again before the next output
 durable_sim: a spill is pushed after later writes, with no flush
+
+# Crowds the size of the kernel's table (tcp_sim.zig, `Crowd.chooseFull`),
+# at their default 20 seeds.
+tcp_sim: a crowd the size of the kernel's table fills it, and a SYN finds no room

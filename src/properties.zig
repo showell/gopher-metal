@@ -82,6 +82,11 @@ test "the properties over a sweep of seeds" {
         if (!ok) failed_seeds += 1;
         at.always(@src(), ok, "ready_sim: every oracle holds for every seed", .{ .seed = seed });
     }
+    for (1..options.full_seeds + 1) |seed| {
+        const ok = if (sim.runFullSeed(seed)) true else |_| false;
+        if (!ok) failed_seeds += 1;
+        at.always(@src(), ok, "tcp_sim: every oracle holds for a crowd the size of the kernel's table", .{ .seed = seed });
+    }
     for (1..options.durable_seeds + 1) |seed| {
         const ok = if (durable_sim.runSeed(seed)) true else |_| false;
         if (!ok) failed_seeds += 1;

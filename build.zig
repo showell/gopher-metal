@@ -276,6 +276,7 @@ pub fn build(b: *std.Build) void {
     props_opts.addOption(u64, "fat_seeds", b.option(u64, "fat-seeds", "how many fat_sim seeds `properties` sweeps") orelse 20);
     props_opts.addOption(u64, "page_seeds", b.option(u64, "page-seeds", "how many page_sim seeds `properties` sweeps") orelse 100);
     props_opts.addOption(u64, "pure_seeds", b.option(u64, "pure-seeds", "how many pure_sim seeds `properties` sweeps") orelse 200);
+    props_opts.addOption(u64, "full_seeds", b.option(u64, "full-seeds", "how many tcp_sim seeds `properties` runs as a crowd the size of the kernel's table") orelse 20);
     props_opts.addOption(u64, "durable_seeds", b.option(u64, "durable-seeds", "how many durable_sim seeds `properties` sweeps") orelse 1000);
     props_opts.addOption(u64, "ready_seeds", b.option(u64, "ready-seeds", "how many ready_sim seeds `properties` sweeps") orelse 300);
     props_opts.addOption([]const u8, "sdk_jsonl", b.option([]const u8, "sdk-jsonl", "where `properties` writes its JSONL") orelse "");
