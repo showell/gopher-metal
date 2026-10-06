@@ -252,8 +252,9 @@ pub fn bring(device: virtio.Device, mem: *virtio.BlockMemory) Error!virtio.Block
         .scsi = &mem.scsi,
     };
 
-    const max_target: u16 = @min(virtio.configRead16(device, 32), 63);
-    const max_lun: u32 = @min(virtio.configRead32(device, 36), 7);
+    // virtio 1.2 §5.6.4: max_channel le16 at 28, max_target le16 at 30, max_lun le32 at 32.
+    const max_target: u16 = @min(virtio.configRead16(device, 30), 63);
+    const max_lun: u32 = @min(virtio.configRead32(device, 32), 7);
     const scratch = @intFromPtr(&mem.scsi.scratch);
     var target: u16 = 0;
     while (target <= max_target) : (target += 1) {
