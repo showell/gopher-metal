@@ -43,18 +43,25 @@ volume and prod's frozen pre-cutover data.
    the way back.
 
 **Who works on it:** Claude on the dev box, with Steve. The cloud session
-that built most of this through a shared work queue retired on 2026-10-04,
-and the queue files went with it (`QUEUE.md`, `QUEUE-DONE.md`, `CLOUD.md`,
-`CC-FEEDBACK.md`; all in `git show 3cd662c:QUEUE.md` and its siblings).
-A "QUEUE item N" in a comment or commit names an item there.
+that built most of this through a shared work queue left this repo's kernel on
+2026-10-04 (its files: `git show 3cd662c:QUEUE.md` and its siblings; a "QUEUE
+item N" in a comment or commit names an item there). Since 2026-10-05 a cloud
+session works here again on the simulators and properties only, through
+metal-vmm's `QUEUE.md` and `CLOUD_WORK.md` (see `CLAUDE.md`).
 
-**Open (2026-10-04):**
+**Serving (2026-10-06): v17**, gopher-metal `4953f7e` with angry-gopher
+`162152b3`: a given-way half-open revived by its client's ACK (a flood no
+longer resets a real client whose handshake ACK was lost), FAT's deepest
+folder made only as deep as its check walks and a looped chain refused on
+read, and the log ring's full-ring read. Gated by `gates.sh` and `long.sh`
+on exactly that pair. v16's image is the way back.
+
+**Open (2026-10-06):**
 - Backups (above).
-- v16: items 102 (pictures kept in the page cache), 104 (`/admin/retire`),
-  105 (big uploads streamed) and 106 (the session secret into `auth/`), with
-  angry-gopher's 107 (the watchdog watches metal, and sees a restart) and
-  109 (`ops/deploy` refuses to start prod's Linux server unless
-  `~/linux-serves` is on prod). Gated under KVM, then shipped as one image.
+- v18, on `box/v18`: no response leaves before the writes ahead of it are
+  durable (SYNCHRONIZE CACHE on the volume; its write cache on
+  /admin/host), and the release rules as a script (`tools/verdicts.py`:
+  `chat.py` builds only a pair both tiers passed).
 
 ## Where it runs: https://lynrummy.com
 
