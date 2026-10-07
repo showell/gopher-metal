@@ -106,16 +106,18 @@ test "the explorer against blind seeds" {
         defer steered.deinit(gpa);
 
         std.debug.print("\nbudget {d}: unreached of {d}: blind {d}, the explorer with random flips {d}, with aimed flips {d}; failures {d}, {d}, {d}; decisions taken first by the aimed explorer {d}\n", .{
-            budget,              blind.total,           blind.missed,         random_flips.missed,         steered.missed,
-            blind.failures,      random_flips.failures, steered.failures,     steered.report.decisions,
+            budget,         blind.total,           blind.missed,     random_flips.missed,      steered.missed,
+            blind.failures, random_flips.failures, steered.failures, steered.report.decisions,
         });
         std.debug.print("  explorer runs by move: blind {d}, branch {d}, flip {d}; new by move: {d}, {d}, {d}; corpus {d}\n", .{
             steered.report.by_move[0],     steered.report.by_move[1],     steered.report.by_move[2],
             steered.report.new_by_move[0], steered.report.new_by_move[1], steered.report.new_by_move[2],
             steered.report.corpus,
         });
-        if (!sim_is_store) for (targets) |t| {
-            std.debug.print("  target \"{s}\": blind {s}, explorer {s}\n", .{ t, if (blind.reached.contains(t)) "reached" else "missed", if (steered.reached.contains(t)) "reached" else "missed" });
+        if (!sim_is_store) {
+            for (targets) |t| {
+                std.debug.print("  target \"{s}\": blind {s}, explorer {s}\n", .{ t, if (blind.reached.contains(t)) "reached" else "missed", if (steered.reached.contains(t)) "reached" else "missed" });
+            }
         }
         var it = steered.reached.keyIterator();
         while (it.next()) |k| if (!blind.reached.contains(k.*)) std.debug.print("  only the explorer: {s}\n", .{k.*});

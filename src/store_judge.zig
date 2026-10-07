@@ -310,9 +310,9 @@ fn runSeed(seed: u64) !void {
         };
         if (!answers[0].eql(answers[1]) or !answers[0].eql(answers[2])) {
             std.debug.print("store_judge seed {d} step {d}: {s} \"{s}\": the model {s} ({?}), Linux {s} ({?}), metal {s} ({?})\n", .{
-                seed,                       step,              @tagName(op),               rel,
-                @tagName(answers[0].said),  answers[0].err,    @tagName(answers[1].said),  answers[1].err,
-                @tagName(answers[2].said),  answers[2].err,
+                seed,                      step,           @tagName(op),              rel,
+                @tagName(answers[0].said), answers[0].err, @tagName(answers[1].said), answers[1].err,
+                @tagName(answers[2].said), answers[2].err,
             });
             const a = w.arena.allocator();
             const ls = linux_store.stat(testing.io, a, try w.linuxPath(rel));
