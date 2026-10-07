@@ -271,14 +271,17 @@ metal-vmm run in `long.sh`; once a run reaches it, it goes on
 | scsi: a controller with no disk on it | `scsi.zig` | `VOLUME=<copy> VOLUME_GONE_AT=1`: INQUIRY answers BAD_TARGET (unverified) |
 | scsi: a disk that will not say how big it is | `scsi.zig` | `VOLUME_GONE_AT=<READ CAPACITY's command number>`, about 2 or 3 after a UNIT ATTENTION (unverified) |
 | scsi: a disk that does not answer MODE SENSE is taken to cache | `scsi.zig` | `VOLUME_GONE_AT=<MODE SENSE's command number>`, one after READ CAPACITY (unverified) |
-| scsi: a MODE SENSE answer without the caching page is taken to cache | `scsi.zig` | **no knob**: a proposal, `VOLUME_MODE_PAGES=none` |
+| scsi: a MODE SENSE answer without the caching page is taken to cache | `scsi.zig` | `VOLUME=<copy> VOLUME_MODE_PAGES=none` (metal-vmm item 82) |
 | scsi: a controller whose CDB or sense size is not the default | `scsi.zig` | **no knob**: a proposal, metal-vmm's virtio-scsi config with other sizes |
-| scsi: a disk whose sectors are not 512 bytes, or too many to count | `scsi.zig` | **no knob**: a proposal, `VOLUME_SECTOR=4096` |
+| scsi: a disk whose sectors are not 512 bytes, or too many to count | `scsi.zig` | `VOLUME=<copy> VOLUME_SECTOR=4096` (metal-vmm item 82) |
 | virtio: an mmio or a pci queue smaller than this driver needs, or none | `virtio.zig` | **no knob**: a proposal, a device whose `queue_num_max` is small |
 | virtio: a device without VIRTIO_F_VERSION_1, or without a feature this driver needs, is refused | `virtio.zig` | **no knob**: a proposal, a device that offers fewer features |
 | virtio: a device that will not keep FEATURES_OK; that fails at DRIVER_OK | `virtio.zig` | **no knob**: a proposal, a device that clears or fails a status bit |
-| rtc: no chip answers; two readings never agreed; updating for half a second; the seconds never changed | `rtc.zig` | **no knob** for any: metal-vmm's RTC (`clock.zig`) always answers. Proposals: `RTC_ABSENT=1`, `RTC_STUCK=1` |
-| pit: the count never moves; it wrapped; no round settled | `pit.zig` | **no knob**: metal-vmm's PIT always counts. A proposal: `PIT_FROZEN=1` |
+| rtc: no chip answers | `rtc.zig` | `RTC_ABSENT=1` (metal-vmm item 82) |
+| rtc: the chip says it is updating for half a second | `rtc.zig` | `RTC_STUCK=1` (metal-vmm item 82) |
+| rtc: two readings never agreed; the seconds never changed | `rtc.zig` | **no knob**: a proposal, an RTC whose registers change between two reads, or whose seconds stand still |
+| pit: the count never moves, so no timer | `pit.zig` | `PIT_FROZEN=1` (metal-vmm item 82) |
+| pit: it wrapped; no round settled | `pit.zig` | **no knob**: a proposal, a PIT that counts too fast or unevenly |
 | pci: a BAR past the sixth; an I/O BAR; a 64-bit BAR in the last slot | `pci.zig` | **no knob**: a proposal, metal-vmm's PCI devices with such BARs |
 | rng: a virtio-rng device that will not come up is left alone | `rng.zig` | **no knob**: a proposal, an entropy device that refuses negotiation |
 | admin reset: the boot disk has no admin to reset; a step on the boot disk failed | `admin_reset.zig` | a boot disk with `data/admin-reset` and no admin, and `DISK_REFUSE` during the reset; `admin_reset.zig`'s own host tests meet both |
