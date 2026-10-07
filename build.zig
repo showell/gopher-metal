@@ -268,6 +268,31 @@ pub fn build(b: *std.Build) void {
         test_step.dependOn(&b.addRunArtifact(unit).step);
     }
 
+    // **THE SEED EXPLORER AGAINST BLIND SEEDS** (src/explore_bench.zig): a
+    // tool, not a gate (Steve, 2026-10-07). ReleaseSafe by default: it is
+    // nearly all running.
+    const explore_opts = b.addOptions();
+    explore_opts.addOption([]const u8, "budgets", b.option([]const u8, "explore-budgets", "comma-separated run budgets `explore` compares at") orelse "20,100");
+    explore_opts.addOption(u64, "seed", b.option(u64, "explore-seed", "the explorer's own seed") orelse 1);
+    explore_opts.addOption(f32, "blind", b.option(f32, "explore-blind", "the share of the explorer's runs that are blind") orelse 0.2);
+    explore_opts.addOption(f32, "flip", b.option(f32, "explore-flip", "of the rest, the share that flip a named choice") orelse 0.5);
+    const explore_bench = b.addTest(.{
+        .name = "explore",
+        .filters = &.{"the explorer against blind seeds"},
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/explore_bench.zig"),
+            .target = b.graph.host,
+            .optimize = b.option(std.builtin.OptimizeMode, "explore-optimize", "how `explore` is compiled") orelse .ReleaseSafe,
+            .imports = &.{
+                .{ .name = "explore_options", .module = explore_opts.createModule() },
+                .{ .name = "coverage", .module = coverage },
+                .{ .name = "coverage_catalog", .module = coverage_catalog },
+                .{ .name = "explore", .module = explore },
+            },
+        }),
+    });
+    b.step("explore", "the seed explorer against blind seeds on fat_sim (a tool, not a gate)").dependOn(&b.addRunArtifact(explore_bench).step);
+
     // **COVERAGE PROPERTIES** (COVERAGE.md): the TCP and FAT simulators over
     // a sweep of seeds, then every assertion they reach judged. Not part of `test`: its report is read, not gated on, while it
     // is a proof of concept (a `sometimes` never met is a gap, not a bug).

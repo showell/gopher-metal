@@ -851,7 +851,10 @@ pub fn runWith(tape: *explore.Tape) !u64 {
         failed = failed or s.failed_disk;
     }
     props.sometimes(@src(), full > 0, "fat_sim: some run under a tape finds the volume full", null);
-    if (twin.drifted or twin.position() != end - start) {
+    // A probe that failed the disk ends a run where it struck, and the FAT
+    // held in memory meets it later or not at all (`runProbeSeed` excuses
+    // the same): only two runs the disk never failed must draw alike.
+    if (!failed and (twin.drifted or twin.position() != end - start)) {
         std.debug.print("fat_sim tape {d}: the run with the FAT in memory drew {d} times, the run with it on the disk {d}\n", .{ tape.seed, twin.position(), end - start });
         return error.SimulationFailed;
     }
