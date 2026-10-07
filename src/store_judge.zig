@@ -49,7 +49,7 @@ const Answer = struct {
     }
 };
 
-const Op = enum { read, write, append, remove, replace, list };
+const Op = enum { read, write, append, remove, replace, list, read_at, stat, has, make_dir, remove_tree };
 
 /// Paths shaped like the application's, and spellings of them in another
 /// case, under the data root.
@@ -143,7 +143,7 @@ fn sortedLines(a: std.mem.Allocator, lines: *std.ArrayList([]const u8)) ![]const
     return out.items;
 }
 
-fn onLinux(w: *World, op: Op, rel: []const u8, bytes: []const u8) !Answer {
+fn onLinux(w: *World, op: Op, rel: []const u8, bytes: []const u8, offset: u64) !Answer {
     const a = w.arena.allocator();
     const p = try w.linuxPath(rel);
     const io = testing.io;
@@ -156,6 +156,21 @@ fn onLinux(w: *World, op: Op, rel: []const u8, bytes: []const u8) !Answer {
         .append => _ = linux_store.append(io, a, p, bytes) catch |e| return .{ .said = said(e), .err = e },
         .replace => linux_store.replace(io, a, p, bytes, .{}) catch |e| return .{ .said = said(e), .err = e },
         .remove => linux_store.remove(io, a, p) catch |e| return .{ .said = said(e), .err = e },
+        .read_at => {
+            const buf = try a.alloc(u8, bytes.len);
+            const got = linux_store.readAt(io, a, p, offset, buf) catch |e| return .{ .said = said(e), .err = e };
+            return .{ .said = .ok, .bytes = buf[0..got] };
+        },
+        .stat => {
+            const st = linux_store.stat(io, a, p) catch |e| return .{ .said = said(e), .err = e };
+            return .{ .said = .ok, .bytes = try statLine(a, @tagName(st.kind), st.size) };
+        },
+        .has => {
+            const h = linux_store.has(io, a, p) catch |e| return .{ .said = said(e), .err = e };
+            return .{ .said = .ok, .bytes = if (h) "yes" else "no" };
+        },
+        .make_dir => linux_store.makeDir(io, a, p) catch |e| return .{ .said = said(e), .err = e },
+        .remove_tree => linux_store.removeTree(io, a, p) catch |e| return .{ .said = said(e), .err = e },
         .list => {
             const items = linux_store.list(io, a, p) catch |e| return .{ .said = said(e), .err = e };
             var lines: std.ArrayList([]const u8) = .empty;
@@ -166,7 +181,7 @@ fn onLinux(w: *World, op: Op, rel: []const u8, bytes: []const u8) !Answer {
     return .{ .said = .ok };
 }
 
-fn onMetal(w: *World, op: Op, rel: []const u8, bytes: []const u8) !Answer {
+fn onMetal(w: *World, op: Op, rel: []const u8, bytes: []const u8, offset: u64) !Answer {
     const a = w.arena.allocator();
     const p = try w.metalPath(rel);
     switch (op) {
@@ -178,6 +193,21 @@ fn onMetal(w: *World, op: Op, rel: []const u8, bytes: []const u8) !Answer {
         .append => _ = metal_store.append(mio, a, p, bytes) catch |e| return .{ .said = said(e), .err = e },
         .replace => metal_store.replace(mio, a, p, bytes, .{}) catch |e| return .{ .said = said(e), .err = e },
         .remove => metal_store.remove(mio, a, p) catch |e| return .{ .said = said(e), .err = e },
+        .read_at => {
+            const buf = try a.alloc(u8, bytes.len);
+            const got = metal_store.readAt(mio, a, p, offset, buf) catch |e| return .{ .said = said(e), .err = e };
+            return .{ .said = .ok, .bytes = buf[0..got] };
+        },
+        .stat => {
+            const st = metal_store.stat(mio, a, p) catch |e| return .{ .said = said(e), .err = e };
+            return .{ .said = .ok, .bytes = try statLine(a, @tagName(st.kind), st.size) };
+        },
+        .has => {
+            const h = metal_store.has(mio, a, p) catch |e| return .{ .said = said(e), .err = e };
+            return .{ .said = .ok, .bytes = if (h) "yes" else "no" };
+        },
+        .make_dir => metal_store.makeDir(mio, a, p) catch |e| return .{ .said = said(e), .err = e },
+        .remove_tree => metal_store.removeTree(mio, a, p) catch |e| return .{ .said = said(e), .err = e },
         .list => {
             const items = metal_store.list(mio, a, p) catch |e| return .{ .said = said(e), .err = e };
             var lines: std.ArrayList([]const u8) = .empty;
@@ -196,9 +226,15 @@ fn onMetal(w: *World, op: Op, rel: []const u8, bytes: []const u8) !Answer {
 /// not there. A write the model refuses as a bad name whose every part is a
 /// name FAT holds is a write through a file. Until the model is the seam's
 /// (STORE.md, open question 1), this is where the two meet.
-fn onModel(w: *World, op: Op, rel: []const u8, bytes: []const u8) !Answer {
+fn onModel(w: *World, op: Op, rel: []const u8, bytes: []const u8, offset: u64) !Answer {
     const a = w.arena.allocator();
     const s: Store = w.model.store_();
+    // `has` is no for anything not there, a path through a file among them.
+    if (op == .has) {
+        const st = w.model.stat(rel) catch return .{ .said = .ok, .bytes = "no" };
+        _ = st;
+        return .{ .said = .ok, .bytes = "yes" };
+    }
     // A path through a file is "not a directory" at the seam, whatever the
     // operation, as both hosts answer it.
     var end: usize = 0;
@@ -217,6 +253,19 @@ fn onModel(w: *World, op: Op, rel: []const u8, bytes: []const u8) !Answer {
             error.NotFound, error.BadName => {},
             else => return .{ .said = said(e), .err = e },
         },
+        .read_at => {
+            const n = s.read(rel, w.model_buf) catch |e| return .{ .said = if (e == error.BadName) .not_found else said(e), .err = e };
+            const from = @min(offset, n);
+            const to = @min(n, from + bytes.len);
+            return .{ .said = .ok, .bytes = try a.dupe(u8, w.model_buf[from..to]) };
+        },
+        .stat => {
+            const st = w.model.stat(rel) catch |e| return .{ .said = if (e == error.BadName) .not_found else said(e), .err = e };
+            return .{ .said = .ok, .bytes = try statLine(a, @tagName(st.kind), st.size) };
+        },
+        .has => unreachable,
+        .make_dir => w.model.makeDir(rel) catch |e| return created(rel, e),
+        .remove_tree => w.model.removeTree(rel) catch |e| return .{ .said = said(e), .err = e },
         .list => {
             // A file listed is "not a directory" at the seam, as std.Io's
             // openDir answers on both hosts; the model lists it as nothing.
@@ -242,6 +291,12 @@ fn onModel(w: *World, op: Op, rel: []const u8, bytes: []const u8) !Answer {
     return .{ .said = .ok };
 }
 
+/// A stat as the judge compares it: the kind, and a file's size (a folder's
+/// size is the host's own business: Linux says 4096, FAT 0).
+fn statLine(a: std.mem.Allocator, kind: []const u8, size: u64) ![]const u8 {
+    return std.fmt.allocPrint(a, "{s} {d}", .{ kind, if (std.mem.eql(u8, kind, "directory")) 0 else size });
+}
+
 /// What a creating call's refusal means at the seam: a bad name only if some
 /// part of the path is one; otherwise the model refused a folder that is a
 /// file.
@@ -262,9 +317,9 @@ fn tree(w: *World, comptime side: enum { linux, metal, model }) ![]const u8 {
     try stack.append(a, "");
     while (stack.pop()) |dir| {
         const listed = switch (side) {
-            .linux => try onLinux(w, .list, dir, ""),
-            .metal => try onMetal(w, .list, dir, ""),
-            .model => try onModel(w, .list, dir, ""),
+            .linux => try onLinux(w, .list, dir, "", 0),
+            .metal => try onMetal(w, .list, dir, "", 0),
+            .model => try onModel(w, .list, dir, "", 0),
         };
         if (listed.said != .ok) continue;
         var it = std.mem.splitScalar(u8, std.mem.trimEnd(u8, listed.bytes, "\n"), '\n');
@@ -279,9 +334,9 @@ fn tree(w: *World, comptime side: enum { linux, metal, model }) ![]const u8 {
                 try stack.append(a, rel);
             } else {
                 const got = switch (side) {
-                    .linux => try onLinux(w, .read, rel, ""),
-                    .metal => try onMetal(w, .read, rel, ""),
-                    .model => try onModel(w, .read, rel, ""),
+                    .linux => try onLinux(w, .read, rel, "", 0),
+                    .metal => try onMetal(w, .read, rel, "", 0),
+                    .model => try onModel(w, .read, rel, "", 0),
                 };
                 try lines.append(a, try std.fmt.allocPrint(a, "{s} {x}", .{ rel, std.hash.Wyhash.hash(0, got.bytes) }));
             }
@@ -303,10 +358,12 @@ fn runSeed(seed: u64) !void {
         const rel = paths[r.uintLessThan(usize, paths.len)];
         const n = r.uintLessThan(usize, bytes.len);
         r.bytes(bytes[0..n]);
+        // readAt's offset; its length is `n`.
+        const offset = r.uintLessThan(u64, 4000);
         const answers = [_]Answer{
-            try onModel(&w, op, rel, bytes[0..n]),
-            try onLinux(&w, op, rel, bytes[0..n]),
-            try onMetal(&w, op, rel, bytes[0..n]),
+            try onModel(&w, op, rel, bytes[0..n], offset),
+            try onLinux(&w, op, rel, bytes[0..n], offset),
+            try onMetal(&w, op, rel, bytes[0..n], offset),
         };
         if (!answers[0].eql(answers[1]) or !answers[0].eql(answers[2])) {
             std.debug.print("store_judge seed {d} step {d}: {s} \"{s}\": the model {s} ({?}), Linux {s} ({?}), metal {s} ({?})\n", .{
@@ -332,5 +389,5 @@ fn runSeed(seed: u64) !void {
 }
 
 test "angry-gopher's store on Linux and on metal answers as the model, step by step" {
-    for (1..41) |seed| try runSeed(seed);
+    for (1..201) |seed| try runSeed(seed);
 }

@@ -826,6 +826,9 @@ pub const Dir = struct {
         self.fromRoot();
         const v = try writing(sub_path);
         if (pagesFor(sub_path)) |c| c.forgetTree(sub_path);
+        // A tree that is not there is gone already; one through a file is
+        // NotDir, as std.Io's deleteTree answers on Linux.
+        if (throughFile(v, sub_path)) return Error.NotDir;
         v.removeTree(sub_path) catch return Error.WriteFailed;
     }
 

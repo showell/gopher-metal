@@ -13,7 +13,7 @@ Store". The census of what the application calls: STORE-CENSUS.md.*
 | **on Linux** | that file over `std.Io` | as written |
 | **on metal** | that file over this repo's `io.zig` and `fat16` | the port's copy (`port.sh`), `Io = metal.io` |
 | **the model** | the oracle: plain, in memory | `src/store_model.zig` |
-| **the judge** | all three, the same seeded operations, the same answers | `src/store_judge.zig`, `zig build store-judge`: six operations so far, no power cuts or full volumes yet |
+| **the judge** | all three, the same seeded operations, the same answers | `src/store_judge.zig`, `zig build store-judge`: all eleven operations, 200 seeds; no power cuts or full volumes yet |
 
 gopher-metal's own `store.zig`, `store_fat.zig` and `store_linux.zig` are
 where this contract was first written and proven against `fat16`

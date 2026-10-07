@@ -152,6 +152,55 @@ pub const Model = struct {
         bytes.deinit(m.gpa);
     }
 
+    /// **THE SEAM'S OTHER FOLDER OPERATIONS** (STORE.md: the eleven), for the
+    /// store judge; not in the six, so not in the vtable.
+    ///
+    /// A folder and every one above it. A part that is a file is `BadName`,
+    /// as in a write.
+    pub fn makeDir(m: *Model, path: []const u8) Error!void {
+        var pb: [store.max_parts][]const u8 = undefined;
+        const parts = try store.checkPath(path, &pb, false);
+        try m.makeParents(parts);
+        if (m.find(parts)) |e| {
+            if (e.kind != .directory) return Error.BadName;
+            return;
+        }
+        try m.put(parts, .directory);
+    }
+
+    /// `path` and everything under it; a file is removed as itself, and
+    /// nothing there is no error.
+    pub fn removeTree(m: *Model, path: []const u8) Error!void {
+        var pb: [store.max_parts][]const u8 = undefined;
+        const parts = try store.checkPath(path, &pb, false);
+        _ = (m.walkTo(parts) catch return) orelse return;
+        var buf: [key_bytes]u8 = undefined;
+        const k = key(parts, &buf);
+        var doomed: std.ArrayListUnmanaged([]const u8) = .empty;
+        defer doomed.deinit(m.gpa);
+        var it = m.entries.iterator();
+        while (it.next()) |e| {
+            const ek = e.key_ptr.*;
+            if (std.mem.eql(u8, ek, k) or (ek.len > k.len and std.mem.startsWith(u8, ek, k) and ek[k.len] == '/'))
+                doomed.append(m.gpa, ek) catch @panic("the model ran out of memory");
+        }
+        for (doomed.items) |ek| {
+            const kv = m.entries.fetchRemove(ek).?;
+            m.gpa.free(kv.key);
+            m.gpa.free(kv.value.name);
+            var bytes = kv.value.bytes;
+            bytes.deinit(m.gpa);
+        }
+    }
+
+    /// What is at `path`: its kind and, for a file, its size.
+    pub fn stat(m: *Model, path: []const u8) Error!struct { kind: store.Kind, size: u64 } {
+        var pb: [store.max_parts][]const u8 = undefined;
+        const parts = try store.checkPath(path, &pb, false);
+        const e = (try m.walkTo(parts)) orelse return Error.NotFound;
+        return .{ .kind = e.kind, .size = e.bytes.items.len };
+    }
+
     pub fn list(m: *Model, path: []const u8, each: store.Each) Error!void {
         var pb: [store.max_parts][]const u8 = undefined;
         const parts = try store.checkPath(path, &pb, true);
