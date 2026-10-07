@@ -61,6 +61,7 @@ const proto = @import("proto.zig");
 const tcp = @import("tcp.zig");
 const invariants = @import("tcp_check.zig");
 const props = @import("coverage");
+const explore = @import("explore");
 
 // Every property in this file, in the catalog, called or not (COVERAGE.md).
 comptime {
@@ -1669,6 +1670,54 @@ pub fn runSeed(seed: u64) !void {
     defer std.testing.allocator.destroy(sim);
     sim.init(seed);
     try sim.run();
+}
+
+/// **ONE RUN UNDER A TAPE** (the seed explorer, zig-coverage-sdk's
+/// explore.zig): which peer the table meets is a named choice (a plain
+/// client, a rougher one, a crowd, a crowd the size of the kernel's table),
+/// and every draw after it, the network's and each client's, comes from
+/// `tape`. The four `run...Seed`s draw a rough peer or a crowd from
+/// generators of their own so that a plain seed's run never changes; here one
+/// tape is the whole story.
+pub fn runWith(tape: *explore.Tape) !void {
+    const r = tape.random();
+    const peer = explore.pick(r, "tcp_sim: the peer", .{ .plain = 3, .rough = 2, .crowd = 2, .full = 1 });
+    const sim = try std.testing.allocator.create(Sim);
+    defer std.testing.allocator.destroy(sim);
+    sim.seed = tape.seed;
+    sim.prng = std.Random.DefaultPrng.init(tape.seed);
+    sim.rng = r;
+    sim.sc = Scenario.choose(r);
+    sim.build();
+    switch (peer) {
+        .plain => try sim.run(),
+        .rough => {
+            sim.rough = Rough.choose(r, &sim.sc);
+            try sim.run();
+        },
+        .crowd => {
+            sim.withCrowd(Crowd.choose(r), r);
+            try runCrowded(sim);
+        },
+        .full => {
+            sim.withCrowd(Crowd.chooseFull(r), r);
+            try runCrowded(sim);
+            if (sim.table.refused > 0) props.reachable(@src(), "tcp_sim: a crowd the size of the kernel's table fills it, and a SYN finds no room", .{ .slots = sim.crowd.?.slots });
+        },
+    }
+}
+
+test "a run under a tape is a function of its tape: replayed whole, it draws the same" {
+    for (0..12) |seed| {
+        var first = explore.Tape.init(std.testing.allocator, seed);
+        defer first.deinit();
+        try runWith(&first);
+        var again = explore.Tape.branch(std.testing.allocator, &first, first.position(), seed +% 0x9999, null);
+        defer again.deinit();
+        try runWith(&again);
+        try std.testing.expect(!again.drifted);
+        try std.testing.expectEqual(first.position(), again.position());
+    }
 }
 
 /// The same seed with a rougher peer (`Rough`).

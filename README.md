@@ -326,6 +326,17 @@ gets a seam, not a mock ([`CLAUDE.md`](CLAUDE.md)).
 [`COVERAGE.md`](COVERAGE.md) has the decisions, the three tiers, and what the
 runs have found.
 
+**The seed explorer** (zig-coverage-sdk's `explore.zig`) runs fat_sim,
+store_sim and tcp_sim from a recorded tape instead of a seed (`runWith`), so
+it can return to a run and steer it. Two tools, neither a gate:
+
+    zig build explore      # the explorer against blind seeds on one simulator (~15 min)
+    tools/soak.sh          # OVERNIGHT, detached: explorer and blind columns on all three, 7 hours, log in ~/soak-logs/
+
+The soak prints, round by round, what only some columns reached and every
+failure with its recipe (simulator, column, explorer seed); stop it (its
+PID) before a morning's gates.
+
 ## How it works
 
 - **`std.http.Server` runs unmodified.** It is built from a reader and a

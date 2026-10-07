@@ -329,6 +329,32 @@ pub fn build(b: *std.Build) void {
     });
     b.step("explore", "the seed explorer against blind seeds on fat_sim (a tool, not a gate)").dependOn(&b.addRunArtifact(explore_bench).step);
 
+    // **THE SOAK** (src/explore_soak.zig): the explorer and blind runs on the
+    // simulators, round after round; overnight, through tools/soak.sh.
+    const soak_opts = b.addOptions();
+    soak_opts.addOption([]const u8, "sims", b.option([]const u8, "soak-sims", "the simulators the soak runs: any of fat, store, tcp") orelse "fat,store,tcp");
+    soak_opts.addOption(u32, "runs", b.option(u32, "soak-runs", "runs per exploration in the soak") orelse 1000);
+    soak_opts.addOption(u32, "rounds", b.option(u32, "soak-rounds", "rounds the soak makes") orelse 1000);
+    soak_opts.addOption(u32, "hours", b.option(u32, "soak-hours", "no round of the soak starts after this many hours") orelse 7);
+    soak_opts.addOption(u64, "seed", b.option(u64, "soak-seed", "the explorer seed of the soak's first round") orelse 1);
+    const soak = b.addTest(.{
+        .name = "soak",
+        .filters = &.{"the soak"},
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/explore_soak.zig"),
+            .target = b.graph.host,
+            .optimize = .ReleaseSafe,
+            .imports = &.{
+                .{ .name = "soak_options", .module = soak_opts.createModule() },
+                .{ .name = "coverage", .module = coverage },
+                .{ .name = "coverage_catalog", .module = coverage_catalog },
+                .{ .name = "explore", .module = explore },
+                .{ .name = "kernel_partition", .module = kernel_partition },
+            },
+        }),
+    });
+    b.step("soak", "the seed explorer and blind runs on fat, store and tcp, round after round (overnight; tools/soak.sh)").dependOn(&b.addRunArtifact(soak).step);
+
     // **COVERAGE PROPERTIES** (COVERAGE.md): the TCP and FAT simulators over
     // a sweep of seeds, then every assertion they reach judged. Not part of `test`: its report is read, not gated on, while it
     // is a proof of concept (a `sometimes` never met is a gap, not a bug).
