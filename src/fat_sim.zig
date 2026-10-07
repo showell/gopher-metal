@@ -311,16 +311,22 @@ const Sim = struct {
     }
 
     fn turn(s: *Sim) !void {
-        const roll = s.rng.uintLessThan(u8, 100);
-        // Crowding a directory is mostly making names in it.
-        const op: Op = if (s.sc.crowded and roll < 50) .write else switch (roll) {
-            0...29 => .write,
-            30...54 => .append,
-            55...64 => .remove,
-            65...74 => .rename,
-            75...82 => .mkdir,
-            83...87 => .remove_tree,
-            else => .remount,
+        // A named choice outside a crowd (explore.pick, drawn as
+        // `uintLessThan(u8, 100)` was); a crowd keeps the raw roll, since
+        // crowding a directory is mostly making names in it.
+        const op: Op = if (!s.sc.crowded) switch (explore.pick(s.rng, "fat_sim: the operation", .{ .write = 30, .append = 25, .remove = 10, .rename = 10, .mkdir = 8, .remove_tree = 5, .remount = 12 })) {
+            inline else => |o| @field(Op, @tagName(o)),
+        } else blk: {
+            const roll = s.rng.uintLessThan(u8, 100);
+            break :blk if (roll < 50) .write else switch (roll) {
+                0...29 => .write,
+                30...54 => .append,
+                55...64 => .remove,
+                65...74 => .rename,
+                75...82 => .mkdir,
+                83...87 => .remove_tree,
+                else => .remount,
+            };
         };
         const vol = &s.disk.vol;
         s.last = op;
@@ -430,8 +436,11 @@ const Sim = struct {
         const vol = &s.disk.vol;
         const E = fat16.Error;
         const Kind = enum { boot, unreadable, bad_name, onto_dir, overwrite_dir, hole, through_open, through_write, through_remove, rename_across, rename_dir, rename_onto_dir, chain_out, chain_loop, failing };
-        var kind = std.enums.values(Kind)[r.uintLessThan(usize, std.enums.values(Kind).len - 1)];
-        if (s.step + 1 == s.sc.ops and r.uintLessThan(u8, 2) == 0) kind = .failing;
+        // Named choices (explore.pickAs, .pick, .flag), each drawn exactly as
+        // the call it replaced, so a probe seed's run is the run it was.
+        const named = explore.pickAs(r, usize, "fat_sim: the probe", .{ .boot = 1, .unreadable = 1, .bad_name = 1, .onto_dir = 1, .overwrite_dir = 1, .hole = 1, .through_open = 1, .through_write = 1, .through_remove = 1, .rename_across = 1, .rename_dir = 1, .rename_onto_dir = 1, .chain_out = 1, .chain_loop = 1 });
+        var kind: Kind = std.meta.stringToEnum(Kind, @tagName(named)).?;
+        if (s.step + 1 == s.sc.ops and explore.pick(r, "fat_sim: the last probe fails the disk", .{ .yes = 1, .no = 1 }) == .yes) kind = .failing;
         var buf: [300]u8 = undefined;
         var buf2: [300]u8 = undefined;
         s.last_probe = @tagName(kind);
@@ -510,21 +519,21 @@ const Sim = struct {
             .chain_out, .chain_loop => try s.probeChain(r, kind == .chain_loop),
             .failing => {
                 // The disk stops answering a few requests into an operation.
-                s.disk.blk.fail_after = s.disk.blk.requests + r.uintLessThan(u64, if (r.boolean()) 12 else 80);
+                s.disk.blk.fail_after = s.disk.blk.requests + r.uintLessThan(u64, if (explore.flag(r, "fat_sim: the disk fails within 12 requests, not 80")) 12 else 80);
                 s.failed_disk = true;
                 const k = r.uintLessThan(usize, dirs.len + 1);
                 const path = join(if (k == dirs.len) "" else dirs[k], names[r.uintLessThan(usize, names.len)], &buf);
                 var failed: ?anyerror = null;
-                const appended = if (r.boolean()) s.someFile(r) else null;
+                const appended = if (explore.flag(r, "fat_sim: the failing operation is an append")) s.someFile(r) else null;
                 if (appended) |f| {
                     // An append, which writes its runs of sectors whole: the
                     // disk stops at one of its writes rather than a request.
                     s.disk.blk.fail_after = null;
-                    s.disk.blk.fail_after_writes = s.disk.blk.writes + r.uintLessThan(u64, if (r.boolean()) 8 else 600);
+                    s.disk.blk.fail_after_writes = s.disk.blk.writes + r.uintLessThan(u64, if (explore.flag(r, "fat_sim: the append fails within 8 writes, not 600")) 8 else 600);
                     vol.writeInto(f.path, @intCast(f.bytes.len), s.content(@max(1, @min(s.sc.max_bytes, r.uintLessThan(usize, 200_000))))) catch |e| {
                         failed = e;
                     };
-                } else if (r.boolean()) {
+                } else if (explore.flag(r, "fat_sim: the failing operation is a write, not a read")) {
                     vol.writeFile(path, s.content(@min(s.sc.max_bytes, r.uintLessThan(usize, 200_000)))) catch |e| {
                         failed = e;
                     };

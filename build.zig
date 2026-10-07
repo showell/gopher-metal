@@ -275,6 +275,7 @@ pub fn build(b: *std.Build) void {
     explore_opts.addOption([]const u8, "budgets", b.option([]const u8, "explore-budgets", "comma-separated run budgets `explore` compares at") orelse "20,100");
     explore_opts.addOption(u64, "seed", b.option(u64, "explore-seed", "the explorer's own seed") orelse 1);
     explore_opts.addOption(f32, "blind", b.option(f32, "explore-blind", "the share of the explorer's runs that are blind") orelse 0.2);
+    explore_opts.addOption(bool, "list_missed", b.option(bool, "explore-list-missed", "list the properties neither reached") orelse false);
     explore_opts.addOption(f32, "flip", b.option(f32, "explore-flip", "of the rest, the share that flip a named choice") orelse 0.5);
     const explore_bench = b.addTest(.{
         .name = "explore",

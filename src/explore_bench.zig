@@ -98,5 +98,14 @@ test "the explorer against blind seeds" {
         while (it.next()) |k| if (!blind.reached.contains(k.*)) std.debug.print("  only the explorer: {s}\n", .{k.*});
         var bt = blind.reached.keyIterator();
         while (bt.next()) |k| if (!steered.reached.contains(k.*)) std.debug.print("  only blind: {s}\n", .{k.*});
+        if (options.list_missed) {
+            var cat = coverage.catalog();
+            while (cat.next()) |site| {
+                if (!ours(site) or (site.kind.basic() != .sometimes and site.kind.basic() != .reachable)) continue;
+                const m = std.mem.span(site.message);
+                if (!blind.reached.contains(m) and !steered.reached.contains(m))
+                    std.debug.print("  missed by both: {s}  ({s}:{d})\n", .{ m, std.fs.path.basename(std.mem.span(site.file)), site.line });
+            }
+        }
     }
 }
