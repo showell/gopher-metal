@@ -1254,6 +1254,7 @@ const TableWire = struct {
 
     pub fn send(self: *TableWire, frame: []const u8) void {
         const sim = self.sim;
+        sim.karn(frame);
         sim.net.send(sim.rng, &sim.sc, sim.now, false, frame);
     }
 };
@@ -1404,6 +1405,33 @@ const Sim = struct {
 
     fn clientAtConst(self: *const Sim, i: usize) *const Client {
         return if (i == 0) &self.client else &self.others[i - 1];
+    }
+
+    /// **KARN'S RULE, CHECKED FROM OUTSIDE** (metal-vmm QUEUE 93, mutant
+    /// T14): a segment the table sends again over bytes it is timing must
+    /// find the timer already stopped. Otherwise the acknowledgement that
+    /// follows is taken as a sample, and nobody can tell which copy it
+    /// answers. The frame is read here as the wire carries it, before the
+    /// network can lose or delay it.
+    fn karn(self: *Sim, frame: []const u8) void {
+        const at = tcp.segment_at;
+        if (frame.len < at + tcp.header_len) return;
+        const t = frame[at..];
+        const ip_len: usize = proto.readBe16(frame[proto.eth_header_len + 2 ..][0..2]);
+        const offset = @as(usize, t[12] >> 4) * 4;
+        if (ip_len -| proto.ip_header_len <= offset or t[13] & tcp.flag_syn != 0) return; // no data
+        const port = proto.readBe16(t[2..4]);
+        const seq = proto.readBe32(t[4..8]);
+        const to = frame[proto.eth_header_len + 16 ..][0..4];
+        for (self.table.conns) |c| {
+            if (c.state == .closed or c.peer_port != port or !std.mem.eql(u8, &c.peer_ip, to)) continue;
+            if (seq -% c.una >= c.high) return; // sent for the first time
+            const timed = c.timed_at != null and seqLt(seq, c.timed_seq);
+            props.always(@src(), !timed, "tcp_sim: a segment sent again is never timed (Karn)", .{ .port = port });
+            props.reachable(@src(), "tcp_sim: the table sends a segment again", null);
+            if (timed) self.fault("a segment sent again while it was timed (Karn)");
+            return;
+        }
     }
 
     fn fault(self: *Sim, what: []const u8) void {

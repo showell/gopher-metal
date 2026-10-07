@@ -29,6 +29,8 @@ tcp: a given-way half-open is revived by its client's ACK
 tcp: a revival finds no slot, and the ACK is dropped
 tcp_sim: the client vanishes part-way through the answer
 tcp_sim: the client resets the connection
+tcp_sim: the table sends a segment again
+tcp_sim: a segment sent again is never timed (Karn)
 tcp_sim: a flood SYN is sent
 tcp_sim: the table alone gives up on a client that left
 tcp_sim: a client that stayed through a flood got its whole answer
