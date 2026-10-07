@@ -294,9 +294,25 @@ fn cacheable(path: []const u8) bool {
 /// absent (QUEUE.md item 89).
 fn openEntry(v: *fat16.Volume, path: []const u8) Error!fat16.Entry {
     return v.open(path) catch |e| switch (e) {
-        error.NotFound => Error.FileNotFound,
+        error.NotFound => if (throughFile(v, path)) Error.NotDir else Error.FileNotFound,
         else => Error.ReadFailed,
     };
+}
+
+/// **A PATH THROUGH A FILE IS `NotDir`, AS std.Io ANSWERS ON LINUX.** fat16
+/// refuses `a/b` with `a` a file as a name that is not there, and this
+/// answered FileNotFound, where Linux says NotDir: so the same store.zig call
+/// read as an absent file on metal and as an error on Linux (the store judge,
+/// 2026-10-07: `readOrEmpty` gave "" on one host and failed on the other).
+/// Asked only after a miss, so a found path costs nothing more.
+fn throughFile(v: *fat16.Volume, path: []const u8) bool {
+    var end: usize = 0;
+    while (std.mem.indexOfScalarPos(u8, path, end, '/')) |slash| : (end = slash + 1) {
+        if (slash == 0) continue;
+        const e = v.open(path[0..slash]) catch return false;
+        if (!e.isDirectory()) return true;
+    }
+    return false;
 }
 
 /// The volume to read `path` from.
@@ -475,6 +491,7 @@ pub const File = struct {
         const v = try writing(path);
         const pc = pagesFor(path);
         v.writeInto(path, @intCast(offset), bytes) catch |e| {
+            if (throughFile(v, path)) return Error.NotDir;
             if (pc) |c| c.forget(path);
             return switch (e) {
                 error.NotFound => Error.FileNotFound,
@@ -693,6 +710,7 @@ pub const Dir = struct {
         const v = try writing(options.sub_path);
         const pc = pagesFor(options.sub_path);
         v.writeFile(options.sub_path, options.data) catch |e| {
+            if (throughFile(v, options.sub_path)) return Error.NotDir;
             if (pc) |c| c.forget(options.sub_path);
             return switch (e) {
                 error.BadName => Error.NameTooLong,
@@ -711,10 +729,16 @@ pub const Dir = struct {
     pub fn createDirPath(self: Dir, _: Self, sub_path: []const u8) Error!void {
         self.fromRoot();
         const v = try writing(sub_path);
-        _ = v.makePath(sub_path) catch |e| switch (e) {
-            error.BadName => return Error.NameTooLong,
-            error.Full, error.DirectoryFull => return Error.NoSpaceLeft,
-            else => return Error.WriteFailed,
+        _ = v.makePath(sub_path) catch |e| {
+            // A folder path that runs through a file, or is one, is NotDir,
+            // as std.Io's createDirPath answers it on Linux.
+            const is_file = if (v.open(sub_path)) |found| !found.isDirectory() else |_| false;
+            if (is_file or throughFile(v, sub_path)) return Error.NotDir;
+            switch (e) {
+                error.BadName => return Error.NameTooLong,
+                error.Full, error.DirectoryFull => return Error.NoSpaceLeft,
+                else => return Error.WriteFailed,
+            }
         };
     }
 
@@ -757,9 +781,14 @@ pub const Dir = struct {
         self.fromRoot();
         const v = try writing(sub_path);
         if (pagesFor(sub_path)) |c| c.forget(sub_path);
-        v.remove(sub_path) catch |e| switch (e) {
-            error.NotFound => return Error.FileNotFound,
-            else => return Error.WriteFailed,
+        v.remove(sub_path) catch |e| {
+            if (throughFile(v, sub_path)) return Error.NotDir;
+            switch (e) {
+                error.NotFound => return Error.FileNotFound,
+                // As std.Io answers a directory given to deleteFile.
+                error.IsDirectory => return Error.IsDir,
+                else => return Error.WriteFailed,
+            }
         };
     }
 

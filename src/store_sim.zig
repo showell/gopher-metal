@@ -17,9 +17,18 @@
 //!   `store.zig` promises: `replace` wholly old or wholly new, `append` old
 //!   or new, `write` old, new or gone, `remove` there or gone. Then the
 //!   model and the Linux store are made what FAT holds, and the run goes on.
+//! - **What a full volume leaves** (metal-vmm item 83). One seed in four,
+//!   chosen by a second generator so the others run as they did, has a
+//!   volume of about 2 MiB and files of up to 600 KB, so FAT runs out of room
+//!   where the model and the Linux store do not. When FAT answers `NoSpace`,
+//!   the file must be what the operation's promise allows without the room
+//!   to finish: `replace` wholly old, `append` old, `write` old or gone
+//!   (FAT removes the old file before it writes the new). Then the model
+//!   and the Linux store are made what FAT holds, as after a cut.
 
 const std = @import("std");
 const store = @import("store.zig");
+const explore = @import("explore");
 const Model = @import("store_model.zig").Model;
 const FatStore = @import("store_fat.zig").FatStore;
 const LinuxStore = @import("store_linux.zig").LinuxStore;
@@ -162,17 +171,36 @@ const World = struct {
 };
 
 pub fn runSeed(seed: u64) Failure!void {
-    return runSeedInner(seed) catch |e| switch (e) {
+    var prng = std.Random.DefaultPrng.init(seed);
+    var second = std.Random.DefaultPrng.init(seed ^ 0x6675_6c6c); // "full"
+    return runFrom(seed, prng.random(), second.random()) catch |e| switch (e) {
         error.SimulationFailed => error.SimulationFailed,
         else => fail(seed, "{s}", .{@errorName(e)}),
     };
 }
 
-fn runSeedInner(seed: u64) !void {
-    var prng = std.Random.DefaultPrng.init(seed);
-    const r = prng.random();
+/// **ONE RUN UNDER A TAPE** (the seed explorer, zig-coverage-sdk's
+/// explore.zig): every draw, the filling tier's too, comes from `tape`, so
+/// all of it is recorded and can be steered. **A tape's seed is not a
+/// `runSeed` seed**: the filling tier draws from the tape here and from a
+/// stream of its own there, so a tape replays only as a tape.
+pub fn runWith(tape: *explore.Tape) Failure!void {
+    const r = tape.random();
+    return runFrom(tape.seed, r, r) catch |e| switch (e) {
+        error.SimulationFailed => error.SimulationFailed,
+        else => fail(tape.seed, "{s}", .{@errorName(e)}),
+    };
+}
+
+/// A run whose draws come from `r`, and the filling tier's from `second`
+/// (`runSeed` keeps them apart, as its seeds always have). The decisions
+/// are named choices (explore.pick, .pickAs, .flag), each drawn exactly as
+/// the call it replaced.
+fn runFrom(seed: u64, r: std.Random, second: std.Random) !void {
     const gpa = std.testing.allocator;
-    const shape = if (r.uintLessThan(u8, 4) == 0) test_disk.small32 else test_disk.small;
+    const fat32 = explore.pick(r, "store_sim: the volume is FAT32", .{ .yes = 1, .no = 3 }) == .yes;
+    const filling = explore.pick(second, "store_sim: the volume is tiny, and fills", .{ .yes = 1, .no = 3 }) == .yes;
+    const shape = if (filling) tiny else if (fat32) test_disk.small32 else test_disk.small;
     var w = World{
         .seed = seed,
         .gpa = gpa,
@@ -183,7 +211,9 @@ fn runSeedInner(seed: u64) !void {
         .linux = undefined,
         .big = undefined,
     };
-    for (&w.big) |*b| b.* = try gpa.alloc(u8, @as(usize, shape.sectors) * 512);
+    const max_n: usize = if (filling) 1_500_000 else 6000;
+    // Room for the volume, and for an append's old bytes and new together.
+    for (&w.big) |*b| b.* = try gpa.alloc(u8, @as(usize, shape.sectors) * 512 + max_n);
     defer for (w.big) |b| gpa.free(b);
     w.fat = .{ .vol = &w.disk.vol };
     w.linux = .{ .io = std.testing.io, .root = w.tmp.dir };
@@ -194,23 +224,32 @@ fn runSeedInner(seed: u64) !void {
     }
     const stores = [_]store.Store{ w.model.store_(), w.fat.store_(), w.linux.store_() };
     _ = stores;
-    var bytes: [6000]u8 = undefined;
+    const bytes = try gpa.alloc(u8, max_n);
+    defer gpa.free(bytes);
     var outs: [3][8192]u8 = undefined;
     const cut_every = r.intRangeAtMost(u32, 4, 20);
     for (0..r.intRangeAtMost(usize, 30, 120)) |step| {
-        const op = r.enumValue(Op);
+        const op: Op = switch (explore.pickAs(r, usize, "store_sim: the operation", .{ .read = 1, .write = 1, .append = 1, .remove = 1, .replace = 1, .list = 1 })) {
+            inline else => |o| @field(Op, @tagName(o)),
+        };
         const path = paths[r.uintLessThan(usize, paths.len)];
-        const n = if (r.boolean()) r.uintLessThan(usize, 64) else r.uintLessThan(usize, bytes.len);
+        const n = if (explore.flag(r, "store_sim: the bytes are few")) r.uintLessThan(usize, 64) else if (filling) second.uintLessThan(usize, bytes.len) else r.uintLessThan(usize, bytes.len);
         r.bytes(bytes[0..n]);
         const writes_something = op == .write or op == .append or op == .replace or op == .remove;
         if (writes_something and r.uintLessThan(u32, cut_every) == 0) {
             try cutOne(&w, r, op, path, bytes[0..n], step);
             continue;
         }
+        // What FAT holds there before, for the promise if it runs out.
+        const before: ?[]const u8 = if (filling and writes_something) (if (w.fat.store_().read(path, w.big[0])) |got| w.big[0][0..got] else |_| null) else null;
         const a = [_]Answer{
             run(w.model.store_(), op, path, bytes[0..n], &outs[0]),
             run(w.fat.store_(), op, path, bytes[0..n], &outs[1]),
             run(w.linux.store_(), op, path, bytes[0..n], &outs[2]),
+        };
+        if (a[1].err) |fe| if (fe == Error.NoSpace) {
+            try noSpace(&w, op, path, before, step);
+            continue;
         };
         const alike = a[0].eql(a[1]) and a[0].eql(a[2]);
         props.always(@src(), alike, "store_sim: the three stores answer every operation alike", .{ .step = step, .op = @tagName(op) });
@@ -239,6 +278,39 @@ fn same(w: *World, step: usize) !void {
     if (!alike) return fail(w.seed, "step {d}: the trees differ\nthe model:\n{s}FAT:\n{s}Linux:\n{s}", .{ step, m, f, l });
 }
 
+/// The smallest FAT16 volume `test_disk` makes: about 2 MiB, so a few large
+/// files fill it.
+const tiny = test_disk.Shape{ .sectors = 4400, .suffix = "-tiny" };
+
+/// FAT answered `NoSpace` to `op` on `path`, which held `before`: the file
+/// must be what the promise allows without the room to finish.
+fn noSpace(w: *World, op: Op, path: []const u8, before: ?[]const u8, step: usize) !void {
+    props.reachable(@src(), "store_sim: a full volume answers NoSpace", .{ .op = @tagName(op) });
+    const now: ?[]const u8 = if (w.fat.store_().read(path, w.big[2])) |got| w.big[2][0..got] else |e| switch (e) {
+        Error.NotFound => null,
+        else => return fail(w.seed, "step {d}, {s} \"{s}\" out of room: the file reads as {s}", .{ step, @tagName(op), path, @errorName(e) }),
+    };
+    const old = if (now == null or before == null) now == null and before == null else std.mem.eql(u8, now.?, before.?);
+    const kept = switch (op) {
+        .replace => blk: {
+            props.always(@src(), old, "store_sim: after NoSpace, a replaced file is wholly old", .{ .step = step });
+            break :blk old;
+        },
+        .append => blk: {
+            props.always(@src(), old, "store_sim: after NoSpace, an appended file is old", .{ .step = step });
+            break :blk old;
+        },
+        .write => blk: {
+            props.always(@src(), old or now == null, "store_sim: after NoSpace, a written file is old or gone", .{ .step = step });
+            break :blk old or now == null;
+        },
+        else => false,
+    };
+    if (!kept) return fail(w.seed, "step {d}, {s} \"{s}\" out of room: the file is not what store.zig allows", .{ step, @tagName(op), path });
+    try w.copyFromFat();
+    try same(w, step);
+}
+
 /// `op` on the FAT store with the power cut at a request the seed picks,
 /// then the next boot's mount, and the promise for `op` checked on `path`.
 fn cutOne(w: *World, r: std.Random, op: Op, path: []const u8, bytes: []const u8, step: usize) !void {
@@ -264,7 +336,7 @@ fn cutOne(w: *World, r: std.Random, op: Op, path: []const u8, bytes: []const u8,
     }
     const base = w.disk.blk.requests;
     w.disk.blk.fail_after = base + r.uintLessThan(u64, 60);
-    if (r.uintLessThan(u8, 3) == 0) w.disk.blk.fault = .{ .at = w.disk.blk.fail_after.? -| 1, .kind = .torn };
+    if (explore.pick(r, "store_sim: the cut tears a sector", .{ .yes = 1, .no = 2 }) == .yes) w.disk.blk.fault = .{ .at = w.disk.blk.fail_after.? -| 1, .kind = .torn };
     var scratch: [8192]u8 = undefined;
     const answered = run(w.fat.store_(), op, path, bytes, &scratch);
     const cut = w.disk.blk.requests >= w.disk.blk.fail_after.?;
@@ -320,4 +392,18 @@ fn cutOne(w: *World, r: std.Random, op: Op, path: []const u8, bytes: []const u8,
 
 test "store_sim: a handful of seeds" {
     for (1..21) |seed| try runSeed(seed);
+}
+
+test "a run under a tape replays exactly: the same draws, the same choices" {
+    for (1..21) |seed| {
+        var first = explore.Tape.init(std.testing.allocator, seed);
+        defer first.deinit();
+        try runWith(&first);
+        var again = explore.Tape.branch(std.testing.allocator, &first, first.position(), seed +% 0x9999, null);
+        defer again.deinit();
+        try runWith(&again);
+        try std.testing.expect(!again.drifted);
+        try std.testing.expectEqualSlices(u8, first.bytes.items, again.bytes.items);
+        try std.testing.expectEqual(first.choices.items.len, again.choices.items.len);
+    }
 }

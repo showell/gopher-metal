@@ -1190,12 +1190,17 @@ fn mountFat(blk: *virtio.Block, scratch: *[fat16.sector_size]u8, what: []const u
         serial.fail("no memory to read directories in bursts");
     // Directory sectors, once read, are held (fat16's `dirs`): 8 MiB, sixteen
     // thousand sectors, so a send or Recent finds its folders in memory.
+    // A speed-up, so memory it cannot have means serving without it, never
+    // a boot that stops.
     const dir_slots = 16384;
-    const dir_keys = pages.allocator.alloc(u32, dir_slots) catch
-        serial.fail("no memory to hold directories");
-    const dir_data = pages.allocator.alloc(u8, dir_slots * fat16.sector_size) catch
-        serial.fail("no memory to hold directories");
-    vol.cacheDirs(dir_keys, dir_data);
+    if (pages.allocator.alloc(u32, dir_slots)) |dir_keys| {
+        if (pages.allocator.alloc(u8, dir_slots * fat16.sector_size)) |dir_data| {
+            vol.cacheDirs(dir_keys, dir_data);
+        } else |_| {
+            pages.allocator.free(dir_keys);
+            serial.put("  no memory to hold folders: they are read from the disk\n");
+        }
+    } else |_| serial.put("  no memory to hold folders: they are read from the disk\n");
     // A machine stopped between the first FAT copy's write and the second's
     // leaves them apart; the first is the FAT (fat16.cacheFat).
     if (repaired > 0) {
@@ -1216,14 +1221,6 @@ fn mountFat(blk: *virtio.Block, scratch: *[fat16.sector_size]u8, what: []const u
     return vol;
 }
 
-/// **THE DISK CHECK, AT EVERY MOUNT** (`fat16.Volume.check`, QUEUE.md item
-/// 13): one summary line per volume, then each finding. It reports and never
-/// halts, and it writes nothing: a damaged volume still boots and serves, and
-/// the log says what to look at with fsck.vfat on a copy. The judges read the
-/// summary line on every boot (probe/judge_gopher.py, `disk_check_lines`).
-///
-/// It runs after `cacheFat`, so following a chain is a memory read; the walk
-/// reads each directory sector once.
 /// **B15: THE VOLUMES, CHECKED AFTER EVERY REQUEST**, in a `-Dcoverage` build
 /// only: the whole check, as `diskCheck` runs it at boot, with no line
 /// printed. The kernel cannot tell when a run ends (metal-vmm ends it from
@@ -1245,6 +1242,14 @@ fn checkVolumes() void {
     }
 }
 
+/// **THE DISK CHECK, AT EVERY MOUNT** (`fat16.Volume.check`, QUEUE.md item
+/// 13): one summary line per volume, then each finding. It reports and never
+/// halts, and it writes nothing: a damaged volume still boots and serves, and
+/// the log says what to look at with fsck.vfat on a copy. The judges read the
+/// summary line on every boot (probe/judge_gopher.py, `disk_check_lines`).
+///
+/// It runs after `cacheFat`, so following a chain is a memory read; the walk
+/// reads each directory sector once.
 fn diskCheck(vol: *fat16.Volume, what: []const u8) void {
     serial.put("  disk check, ");
     serial.put(what);
@@ -1413,7 +1418,20 @@ const reserved_for_requests = 64;
 
 fn readConfig(io: Io, alloc: std.mem.Allocator) Config {
     var conf = Config{};
-    const text = Io.Dir.cwd().readFileAlloc(io, config_path, alloc, .limited(4096)) catch return conf;
+    // **A MISSING FILE IS THE DEFAULTS; ANY OTHER FAILURE STOPS THE BOOT**
+    // (metal-vmm QUEUE B21). A refused read once meant "serve with the
+    // defaults", which on a droplet is serving without the settings it was
+    // given: the volume it must serve, the proxy it must trust. As
+    // angry-gopher's files.zig has it, an error is not an empty file.
+    const text = Io.Dir.cwd().readFileAlloc(io, config_path, alloc, .limited(4096)) catch |e| switch (e) {
+        error.FileNotFound => return conf,
+        else => {
+            serial.put("  " ++ config_path ++ ": ");
+            serial.put(@errorName(e));
+            serial.put("\n");
+            serial.fail(config_path ++ " is there but could not be read; serving without it would ignore what it says");
+        },
+    };
     // No setting keeps the text (numbers, and a card's name), so nothing needs
     // it once it is read. It
     // used to stay in the long-lived heap, where a longer file meant a bigger
@@ -1568,7 +1586,7 @@ fn addVolume(facts: *std.ArrayList(router.host_status.Fact), alloc: std.mem.Allo
     });
     if (v.dirs) |d| try facts.append(alloc, .{
         .label = dirs_label,
-        .value = try std.fmt.allocPrint(alloc, "{d} sectors held at most; {d} reads answered from it, {d} not", .{ d.keys.len, d.hits, d.misses }),
+        .value = try std.fmt.allocPrint(alloc, "{d} sectors held at most; {d} sector reads answered from it, {d} from the disk (every sector read asks it, folders or not)", .{ d.keys.len, d.hits, d.misses }),
     });
 }
 

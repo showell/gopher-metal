@@ -15,6 +15,7 @@ const std = @import("std");
 const coverage = @import("coverage");
 const explore = @import("explore");
 const fat_sim = @import("fat_sim.zig");
+const store_sim = @import("store_sim.zig");
 const options = @import("explore_options");
 
 /// The properties blind seeds reach only at `long.sh`'s 300 FAT seeds.
@@ -27,9 +28,18 @@ fn runFat(tape: *explore.Tape) anyerror!void {
     _ = try fat_sim.runWith(tape);
 }
 
-/// The FAT's properties: what this simulator is for.
+fn runStore(tape: *explore.Tape) anyerror!void {
+    try store_sim.runWith(tape);
+}
+
+const sim_is_store = std.mem.eql(u8, options.sim, "store");
+const runSim: explore.RunFn = if (sim_is_store) runStore else runFat;
+
+/// The properties the simulator is for: FAT's, or the Store's and the FAT
+/// under it.
 fn ours(site: *const coverage.Site) bool {
     const file = std.mem.span(site.file);
+    if (sim_is_store) return std.mem.endsWith(u8, file, "store_sim.zig") or std.mem.endsWith(u8, file, "fat16.zig");
     return std.mem.endsWith(u8, file, "fat16.zig") or std.mem.endsWith(u8, file, "fat_sim.zig");
 }
 
@@ -59,16 +69,24 @@ const Tally = struct {
     }
 };
 
-fn runOnce(gpa: std.mem.Allocator, budget: u32, seed: u64, blind: f32) !Tally {
+fn runOnce(gpa: std.mem.Allocator, budget: u32, seed: u64, blind: f32, aim: bool) !Tally {
     coverage.reset();
-    const report = try explore.explore(gpa, runFat, .{ .budget = budget, .seed = seed, .blind = blind, .flip = options.flip });
+    var report = try explore.explore(gpa, runSim, .{ .budget = budget, .seed = seed, .blind = blind, .flip = options.flip, .aim = aim });
+    // **A RUN THAT DRIFTED IS NOT A STEERED RUN** (CC's review, metal-vmm
+    // QUEUE 94): a simulator whose draws are not its tape's makes a
+    // benchmark of luck, so none is reported.
+    if (report.drifted > 0) {
+        std.debug.print("  {d} runs drifted from the tape they replayed: the simulator is not a function of its tape\n", .{report.drifted});
+        report.deinit(gpa);
+        return error.Drifted;
+    }
     for (report.failures.items) |f| {
         std.debug.print("  a run failed its oracle: tape seed {d}, {d} fills, replayed {d} (drifted {}):", .{ f.seed, f.position(), f.replay_upto, f.drifted });
         for (f.choices.items) |c| std.debug.print(" [{s} = {d}]", .{ c.name, c.chosen });
         std.debug.print("\n", .{});
         var again = explore.Tape.branch(gpa, &f, f.position(), 12345, null);
         defer again.deinit();
-        const replayed = if (fat_sim.runWith(&again)) |_| "passes" else |_| "fails again";
+        const replayed = if (runSim(&again)) |_| "passes" else |_| "fails again";
         std.debug.print("    replayed whole: {s}\n", .{replayed});
     }
     return Tally.take(gpa, report);
@@ -77,22 +95,29 @@ fn runOnce(gpa: std.mem.Allocator, budget: u32, seed: u64, blind: f32) !Tally {
 test "the explorer against blind seeds" {
     const gpa = std.testing.allocator;
     var budgets = std.mem.tokenizeScalar(u8, options.budgets, ',');
-    std.debug.print("\nfat_sim: blind runs against the explorer (seed {d}, blind share {d:.2}, flip share {d:.2})\n", .{ options.seed, options.blind, options.flip });
+    std.debug.print("\n{s}_sim: blind runs against the explorer (seed {d}, blind share {d:.2}, flip share {d:.2})\n", .{ options.sim, options.seed, options.blind, options.flip });
     while (budgets.next()) |text| {
         const budget = try std.fmt.parseInt(u32, text, 10);
-        var blind = try runOnce(gpa, budget, options.seed, 1.0);
+        var blind = try runOnce(gpa, budget, options.seed, 1.0, false);
         defer blind.deinit(gpa);
-        var steered = try runOnce(gpa, budget, options.seed, options.blind);
+        var random_flips = try runOnce(gpa, budget, options.seed, options.blind, false);
+        defer random_flips.deinit(gpa);
+        var steered = try runOnce(gpa, budget, options.seed, options.blind, true);
         defer steered.deinit(gpa);
 
-        std.debug.print("\nbudget {d}: blind leaves {d} of {d} unreached, the explorer {d}; failures {d} and {d}\n", .{ budget, blind.missed, blind.total, steered.missed, blind.failures, steered.failures });
+        std.debug.print("\nbudget {d}: unreached of {d}: blind {d}, the explorer with random flips {d}, with aimed flips {d}; failures {d}, {d}, {d}; decisions taken first by the aimed explorer {d}\n", .{
+            budget,         blind.total,           blind.missed,     random_flips.missed,      steered.missed,
+            blind.failures, random_flips.failures, steered.failures, steered.report.decisions,
+        });
         std.debug.print("  explorer runs by move: blind {d}, branch {d}, flip {d}; new by move: {d}, {d}, {d}; corpus {d}\n", .{
             steered.report.by_move[0],     steered.report.by_move[1],     steered.report.by_move[2],
             steered.report.new_by_move[0], steered.report.new_by_move[1], steered.report.new_by_move[2],
             steered.report.corpus,
         });
-        for (targets) |t| {
-            std.debug.print("  target \"{s}\": blind {s}, explorer {s}\n", .{ t, if (blind.reached.contains(t)) "reached" else "missed", if (steered.reached.contains(t)) "reached" else "missed" });
+        if (!sim_is_store) {
+            for (targets) |t| {
+                std.debug.print("  target \"{s}\": blind {s}, explorer {s}\n", .{ t, if (blind.reached.contains(t)) "reached" else "missed", if (steered.reached.contains(t)) "reached" else "missed" });
+            }
         }
         var it = steered.reached.keyIterator();
         while (it.next()) |k| if (!blind.reached.contains(k.*)) std.debug.print("  only the explorer: {s}\n", .{k.*});

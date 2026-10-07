@@ -1474,14 +1474,12 @@ test "folders held in memory: a lookup made before reads no sector, and a write 
     d.vol.dirs = held;
 }
 
-// **A FINDING, NOT YET A RULING** (metal-vmm QUEUE.md, Questions, item 77):
-// `remove` takes a directory's entry as it takes a file's, and leaves the
+// `remove` once took a directory's entry as it takes a file's, and left the
 // directory's clusters and everything under it allocated, reachable from
-// nothing: a leak `check` reports. Linux's unlink answers EISDIR. Reached
-// through io.zig's `deleteFile` only if the application deletes a directory
-// by that call. Red until the box rules; the Store refuses it either way.
-test "remove refuses a directory, and leaves the volume clean (red until the ruling)" {
-    if (true) return error.SkipZigTest;
+// nothing (the cloud session's finding, item 77). It refuses one now, as
+// Linux's unlink does (EISDIR; metal-vmm QUEUE B22), and the volume the
+// refusal leaves checks clean on the way out (test_disk's deinit).
+test "remove refuses a directory, and leaves the volume clean" {
     const d = try test_disk.Disk.make("remove-dir", test_disk.small, false);
     defer d.deinit();
     try d.vol.writeFile("data/dir/inside.txt", "under the directory");

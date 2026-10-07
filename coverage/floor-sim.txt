@@ -29,6 +29,8 @@ tcp: a given-way half-open is revived by its client's ACK
 tcp: a revival finds no slot, and the ACK is dropped
 tcp_sim: the client vanishes part-way through the answer
 tcp_sim: the client resets the connection
+tcp_sim: the table sends a segment again
+tcp_sim: a segment sent again is never timed (Karn)
 tcp_sim: a flood SYN is sent
 tcp_sim: the table alone gives up on a client that left
 tcp_sim: a client that stayed through a flood got its whole answer
@@ -257,6 +259,11 @@ store_sim: all three refuse a name, for the same reason
 store_sim: all three refuse a read into too little room
 store_sim: the three stores answer every operation alike
 store_sim: the three trees are the same after every operation
+# A volume filled (metal-vmm QUEUE item 83): one seed in four on a 2 MiB FAT16 volume.
+store_sim: a full volume answers NoSpace
+store_sim: after NoSpace, a replaced file is wholly old
+store_sim: after NoSpace, an appended file is old
+store_sim: after NoSpace, a written file is old or gone
 
 # The rest of the floor (metal-vmm QUEUE item 80): pvh, restart, pages, rtc, pit, admin_reset, ready.
 admin reset: a value with no space between a name and a hash
