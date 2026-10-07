@@ -125,6 +125,15 @@ fn generate(r: std.Random, cap: usize) !Request {
             }
         },
         .chunked => {
+            // Now and then a length as well, which the chunks override
+            // (RFC 9112 §6.3), and which std's parser keeps beside them
+            // (metal-vmm QUEUE 93, mutant R6).
+            if (r.uintLessThan(u8, 3) == 0) {
+                var line: [64]u8 = undefined;
+                try q.bytes.appendSlice(gpa, std.fmt.bufPrint(&line, "Content-Length: {d}", .{r.intRangeAtMost(usize, 1, 3000)}) catch unreachable);
+                try q.bytes.appendSlice(gpa, eol);
+                props.reachable(@src(), "ready_sim: a chunked body also says a length, which the chunks override", null);
+            }
             try q.bytes.appendSlice(gpa, "Transfer-Encoding: chunked");
             try q.bytes.appendSlice(gpa, eol);
         },

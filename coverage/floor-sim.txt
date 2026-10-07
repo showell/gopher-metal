@@ -137,6 +137,7 @@ ready_sim: a head past the buffer is served unended (the 431 path)
 ready_sim: a head whose body is still coming waits
 ready_sim: a shut window serves a head before it ends
 ready_sim: std misses a bare-LF head end, the pinned bug
+ready_sim: a chunked body also says a length, which the chunks override
 
 # Nothing leaves ahead of the writes before it (durable_sim.zig), at its
 # default 1000 seeds.
@@ -293,3 +294,7 @@ rtc: a day its month does not have
 rtc: a month outside 1 to 12
 rtc: a register that is not BCD
 rtc: an hour, minute or second out of range
+
+# A SYN's options (metal-vmm QUEUE item 93, mutant T16): floor_sim builds them one by one.
+floor_sim: a SYN's option has a length under 2
+floor_sim: a SYN's options carry an MSS

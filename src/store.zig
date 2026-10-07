@@ -153,7 +153,7 @@ test "paths: empty parts ignored, FAT's rules kept, the Store's prefix refused" 
     const p = try checkPath("data//chat/x.md/", &buf, false);
     try testing.expectEqual(@as(usize, 3), p.len);
     try testing.expectEqualStrings("x.md", p[2]);
-    for ([_][]const u8{ "", "/", "a/./b", "a/../b", "a:b", "what?", "trailing.", "trailing ", ".~mine", "a\x01b", "a/b/c/d/e/f/g/h/i" }) |bad| {
+    for ([_][]const u8{ "", "/", "a/./b", "a/../b", "a:b", "what?", "trailing.", "trailing ", ".~mine", "a\x01b", "a\x7fb", "a/b/c/d/e/f/g/h/i" }) |bad| {
         try testing.expectError(Error.BadName, checkPath(bad, &buf, false));
     }
     try testing.expectEqual(@as(usize, 0), (try checkPath("", &buf, true)).len);
