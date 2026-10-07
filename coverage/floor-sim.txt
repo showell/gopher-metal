@@ -137,6 +137,7 @@ ready_sim: a head past the buffer is served unended (the 431 path)
 ready_sim: a head whose body is still coming waits
 ready_sim: a shut window serves a head before it ends
 ready_sim: std misses a bare-LF head end, the pinned bug
+ready_sim: a chunked body also says a length, which the chunks override
 
 # Nothing leaves ahead of the writes before it (durable_sim.zig), at its
 # default 1000 seeds.
