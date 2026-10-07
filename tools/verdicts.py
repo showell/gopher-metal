@@ -5,8 +5,12 @@ it. A gate that passed on other code than the image carries has proved
 nothing about the image, and nothing used to say which code a gate judged.
 So:
 
-- `port.sh` writes a **stamp** into the ported tree: angry-gopher's commit,
-  and whether its `zig-server/` had uncommitted changes.
+- `port.sh` writes a **stamp** into the ported tree: a hash of the content
+  of every angry-gopher file an image reads (`served_files`: the server's
+  source, the assets its build.zig embeds, pages/ and gallery/), and its
+  commit for the reader. A verdict is keyed by that content and by this
+  repo's and the SDK's commits (B16), so a README commit in angry-gopher
+  leaves a verdict standing and an SDK change does not.
 - `gates.sh` and `long.sh` call `pair`, which prints the two commits they
   are about to judge and refuses a port that is not angry-gopher's HEAD.
   At the end they call `record`, which keeps their verdict for that pair.
@@ -29,7 +33,9 @@ Verdicts live in `~/build/gopher-metal/verdicts/` (GATES_VERDICT_DIR), one
 file per tier and pair, so a run in another worktree of the same commit
 counts.
 """
+import hashlib
 import os
+import re
 import subprocess
 import sys
 import time
@@ -39,7 +45,17 @@ GOPHER_ROOT = os.environ.get("GOPHER_ROOT", os.path.expanduser("~/showell_repos/
 PORT = os.environ.get("GOPHER_PORT", os.path.expanduser("~/build/gopher-metal/port"))
 STAMP = os.path.join(PORT, "PORTED_FROM")
 VERDICT_DIR = os.environ.get("GATES_VERDICT_DIR", os.path.expanduser("~/build/gopher-metal/verdicts"))
+SDK = os.environ.get("COVERAGE_SDK", os.path.join(os.path.dirname(ROOT), "zig-coverage-sdk"))
 TIERS = ("gates", "long")
+
+# **WHAT AN IMAGE READS FROM ANGRY-GOPHER** (metal-vmm QUEUE B16): port.sh
+# copies zig-server/src; the kernel embeds the assets zig-server/build.zig's
+# table names (many generated, so not in git); droplet/chat.py stages pages/
+# and gallery/. A verdict is keyed by those files' content, so a commit that
+# touches none of them (a README) leaves it standing, and a rebuilt asset
+# that git cannot see does not.
+SERVED_DIRS = ("zig-server/src", "pages", "gallery")
+ASSET_ROW = re.compile(r'\.\{\s*\.name\s*=\s*"([^"]+)"\s*,\s*\.path\s*=\s*"([^"]+)"\s*\}')
 
 
 def git(repo: str, *args: str) -> str:
@@ -54,36 +70,77 @@ def commit_of(repo: str, paths: tuple = ()) -> str:
     return head + ("-dirty" if changed else "")
 
 
+def served_files() -> list:
+    """Every angry-gopher file an image reads, as paths from its root."""
+    files = []
+    for d in SERVED_DIRS:
+        for dirpath, _, names in os.walk(os.path.join(GOPHER_ROOT, d)):
+            for n in names:
+                files.append(os.path.relpath(os.path.join(dirpath, n), GOPHER_ROOT))
+    build = os.path.join(GOPHER_ROOT, "zig-server", "build.zig")
+    files.append("zig-server/build.zig")
+    for _, path in ASSET_ROW.findall(open(build).read()):
+        files.append(os.path.normpath(os.path.join("zig-server", path)))
+    return sorted(set(files))
+
+
+def content_id() -> str:
+    """`content-` and a hash of every served file's path and bytes (a file
+    named but not there counts as missing)."""
+    h = hashlib.sha256()
+    for rel in served_files():
+        h.update(rel.encode() + b"\0")
+        try:
+            with open(os.path.join(GOPHER_ROOT, rel), "rb") as f:
+                h.update(hashlib.sha256(f.read()).digest())
+        except FileNotFoundError:
+            h.update(b"missing")
+    return "content-" + h.hexdigest()[:16]
+
+
+def ours_id() -> str:
+    """This repo's commit, and the SDK's it builds against (by path)."""
+    return commit_of(ROOT) + ".sdk-" + commit_of(SDK)
+
+
 def stamp() -> int:
-    ported = commit_of(GOPHER_ROOT, ("zig-server",))
+    theirs = content_id()
+    commit = commit_of(GOPHER_ROOT)
     with open(STAMP, "w") as f:
-        f.write(ported + "\n")
-    print(f"ported angry-gopher {ported[:12]}{'-dirty' if ported.endswith('-dirty') else ''}")
+        f.write(theirs + "\n" + commit + "\n")
+    print(f"ported angry-gopher {short(commit)} ({theirs})")
     return 0
 
 
 def ported() -> str:
+    """The stamp's content id; empty if there is no stamp, or an old one."""
     try:
         with open(STAMP) as f:
-            return f.read().strip()
+            first = f.readline().strip()
     except FileNotFoundError:
         return ""
+    return first if first.startswith("content-") else ""
 
 
 def current_pair() -> tuple:
-    """(this repo's commit, the ported angry-gopher commit), or an error."""
-    ours = commit_of(ROOT)
+    """(this repo's and the SDK's commits, the ported angry-gopher content),
+    or an error."""
+    ours = ours_id()
     theirs = ported()
     if not theirs:
-        return ours, None, f"no stamp at {STAMP}: run ./port.sh"
-    now = commit_of(GOPHER_ROOT, ("zig-server",))
+        return ours, None, f"no stamp (or one from before B16) at {STAMP}: run ./port.sh"
+    now = content_id()
     if theirs != now:
-        return ours, theirs, (f"the port is angry-gopher {theirs[:12]}, but angry-gopher is now {now[:12]}"
-                              f"{' (with uncommitted changes)' if now.endswith('-dirty') else ''}: run ./port.sh")
+        return ours, theirs, f"the port is angry-gopher {theirs}, but what it serves is now {now}: run ./port.sh"
     return ours, theirs, None
 
 
 def short(c: str) -> str:
+    if ".sdk-" in c:
+        a, b = c.split(".sdk-", 1)
+        return short(a) + " with the SDK at " + short(b)
+    if c.startswith("content-"):
+        return c
     return c[:12] + ("-dirty" if c.endswith("-dirty") else "")
 
 
@@ -134,10 +191,16 @@ def require() -> list:
     if problem:
         return [problem]
     why = []
-    if ours.endswith("-dirty"):
+    here, sdk = ours.split(".sdk-", 1)
+    if here.endswith("-dirty"):
         why.append("gopher-metal has uncommitted changes")
-    if theirs.endswith("-dirty"):
-        why.append("angry-gopher's zig-server has uncommitted changes")
+    if sdk.endswith("-dirty"):
+        why.append("zig-coverage-sdk has uncommitted changes")
+    # An image is built from committed code: what it serves from angry-gopher
+    # (the content id says which bytes; this says they are committed ones).
+    # Generated assets are not in git, and are not asked to be.
+    if git(GOPHER_ROOT, "status", "--porcelain", "--untracked-files=no", "--", *SERVED_DIRS, "zig-server/build.zig"):
+        why.append("angry-gopher's served files have uncommitted changes")
     for tier in TIERS:
         try:
             with open(verdict_path(tier, ours, theirs)) as f:
