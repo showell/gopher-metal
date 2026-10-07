@@ -257,6 +257,11 @@ store_sim: all three refuse a name, for the same reason
 store_sim: all three refuse a read into too little room
 store_sim: the three stores answer every operation alike
 store_sim: the three trees are the same after every operation
+# A volume filled (metal-vmm QUEUE item 83): one seed in four on a 2 MiB FAT16 volume.
+store_sim: a full volume answers NoSpace
+store_sim: after NoSpace, a replaced file is wholly old
+store_sim: after NoSpace, an appended file is old
+store_sim: after NoSpace, a written file is old or gone
 
 # The rest of the floor (metal-vmm QUEUE item 80): pvh, restart, pages, rtc, pit, admin_reset, ready.
 admin reset: a value with no space between a name and a hash
