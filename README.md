@@ -64,16 +64,36 @@ metal-vmm, with the power cut after a chat post's 303
 (`VOLUME_CUT_AT_EXIT`), v17 loses the message and v18 keeps it (metal-vmm
 QUEUE item B14).
 
-**Open (2026-10-06):**
+**Open (2026-10-07):**
+- **v19 was skipped.** Its gates passed everything but the metal coverage
+  floor, where four TCP properties had only ever been reached by timing luck
+  on the coverage kernel; they are off `coverage/floor-metal.txt` with the
+  reason written there (metal-vmm QUEUE item 102). Nothing in v19's code was
+  wrong.
+- **v20, planned for 2026-10-08** (gates on the morning, then Steve's go):
+  folders held in memory (a chat send 466 disk requests to 88; v19's
+  content), the flush decision pulled out and simulated (`durable.zig`),
+  B21 (a config file that exists but can't be read stops the boot), B22 (a
+  folder is refused by `remove`; `removeTree` takes the emptied folder by its
+  entry), a path through a file answers `NotDir` as on Linux, the request-head
+  buffer sized from angry-gopher's `limits.zig`, and angry-gopher's
+  `store.has` and case-folding fixes. **Steve's steps gain one**: install
+  angry-gopher's `deploy/Caddyfile` on prod and reload Caddy (its ordinary
+  body cap is `1MiB` now, matching `limits.zig`).
 - **Backups are not set up.** The plan, agreed with Steve, is in
   `CUTOVER.md` "Backups, after the cutover": a DigitalOcean volume snapshot
   every day at 20:00 UTC by a `doctl` cron on the dev box (it needs an API
   token from Steve), and the encrypted tar by hand with `droplet/backup.sh`
   on prod. Until then, chat's only copies are the live volume and prod's
-  frozen pre-cutover data. v18 shipped without a volume snapshot (Steve's
-  call).
-- v19: the flush decision pulled out and simulated (`durable.zig`, metal-vmm
-  QUEUE item 59), on the cloud session's branch, not yet merged.
+  frozen pre-cutover data.
+
+**The contracts, written down:** [`STORE.md`](STORE.md) (the data: eleven
+operations, their crash promises, judged by `zig build store-judge` on
+angry-gopher's own store over Linux and over this machine);
+[`HOST.md`](HOST.md) (what both hosts promise the application: one handler
+at a time, durability, one source of truth for limits); angry-gopher's
+`zig-server/src/limits.zig` (every bound on a request);
+[`MUTATION.md`](MUTATION.md) (which planted bugs the tests catch).
 
 **Files to read, in order:**
 1. this README — what metal is, how it is built and tested, and where it
@@ -85,9 +105,10 @@ QUEUE item B14).
 3. `docs/` — the design, by topic ("The design", at the end).
 
 **Who works on it:** Claude on the dev box, with Steve. A cloud session
-works here on the simulators, the properties and the Store (metal-vmm QUEUE
-items 76-81), through metal-vmm's `QUEUE.md` and `CLOUD_WORK.md`; see
-[`CLAUDE.md`](CLAUDE.md).
+works through metal-vmm's `QUEUE.md` and `CLOUD_WORK.md` (see
+[`CLAUDE.md`](CLAUDE.md)): it built the simulators, the properties and the
+first Store, and is now the adversary (planted bugs, reviews of the box's
+work).
 
 ## Where it runs: https://lynrummy.com
 
