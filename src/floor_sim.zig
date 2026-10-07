@@ -57,6 +57,13 @@
 //!   admin reset's `name hash` line, one part wrong (`adminSeed`). Oracle,
 //!   each time: the answer the wrong part calls for, and the right one when
 //!   nothing is wrong.
+//! - **A SYN's options** (`mssSeed`, item 93, mutant T16): options built one
+//!   by one as a sender writes them (no-ops, an MSS, other kinds of any
+//!   length, an MSS of the wrong length), with one of them perhaps broken: a
+//!   length under 2, an end of options, or the last cut short. Oracle: the
+//!   MSS found is the first well-formed one before anything broken, and
+//!   none otherwise. The answer is known from how the bytes were built, not
+//!   from parsing them again.
 
 const std = @import("std");
 const virtio = @import("virtio.zig");
@@ -75,6 +82,7 @@ const pages_mod = @import("pages.zig");
 const rtc = @import("rtc.zig");
 const pit = @import("pit.zig");
 const admin_reset = @import("admin_reset.zig");
+const tcp = @import("tcp.zig");
 const props = @import("coverage");
 
 comptime {
@@ -794,6 +802,73 @@ pub fn adminSeed(seed: u64) Failure!void {
     } else if (got != null) return fail(seed, "admin reset line {d} with a part wrong was taken", .{wrong});
 }
 
+// ── a SYN's options ─────────────────────────────────────────────────────────
+
+pub fn mssSeed(seed: u64) Failure!void {
+    var prng = std.Random.DefaultPrng.init(seed ^ 0x6d_7373); // "mss"
+    const r = prng.random();
+    var buf: [40]u8 = undefined;
+    var n: usize = 0;
+    // Decided once: the first MSS before anything broken, or none.
+    var want: ?u16 = null;
+    var settled = false;
+    for (0..r.uintLessThan(usize, 7)) |_| {
+        switch (r.uintLessThan(u8, 6)) {
+            0 => { // a no-op
+                if (n + 1 > buf.len) break;
+                buf[n] = 1;
+                n += 1;
+            },
+            1 => { // an MSS
+                if (n + 4 > buf.len) break;
+                const v = r.int(u16);
+                buf[n..][0..4].* = .{ 2, 4, @truncate(v >> 8), @truncate(v) };
+                n += 4;
+                if (!settled) {
+                    want = v;
+                    settled = true;
+                }
+            },
+            2, 3 => |k| { // another kind, or an MSS of a length that is not 4
+                const len = if (k == 2) r.intRangeAtMost(u8, 2, 10) else ([_]u8{ 2, 3, 5, 6 })[r.uintLessThan(usize, 4)];
+                if (n + len > buf.len) break;
+                buf[n] = if (k == 2) r.intRangeAtMost(u8, 3, 254) else 2;
+                buf[n + 1] = len;
+                r.bytes(buf[n + 2 .. n + len]);
+                n += len;
+            },
+            4 => { // a length under 2: broken from here
+                if (n + 2 > buf.len) break;
+                buf[n] = r.intRangeAtMost(u8, 2, 254);
+                buf[n + 1] = r.uintLessThan(u8, 2);
+                n += 2;
+                props.reachable(@src(), "floor_sim: a SYN's option has a length under 2", null);
+                settled = true;
+            },
+            else => { // the end of the options; what follows is not read
+                if (n + 1 > buf.len) break;
+                buf[n] = 0;
+                n += 1;
+                settled = true;
+            },
+        }
+    }
+    if (r.boolean() and n + 2 <= buf.len) {
+        // The last option cut short: a kind and no length, or a length
+        // past the end.
+        buf[n] = r.intRangeAtMost(u8, 2, 254);
+        n += 1;
+        if (r.boolean()) {
+            buf[n] = r.intRangeAtMost(u8, 3, 40);
+            n += 1;
+        }
+        settled = true;
+    }
+    if (want != null) props.reachable(@src(), "floor_sim: a SYN's options carry an MSS", null);
+    const got = tcp.parseMss(buf[0..n]);
+    if (got != want) return fail(seed, "options {any}: wanted MSS {any}, got {any}", .{ buf[0..n], want, got });
+}
+
 pub fn runSeed(seed: u64) Failure!void {
     try gptSeed(seed);
     try pageSeed(seed);
@@ -808,6 +883,7 @@ pub fn runSeed(seed: u64) Failure!void {
     try rtcSeed(seed);
     try pitSeed(seed);
     try adminSeed(seed);
+    try mssSeed(seed);
 }
 
 test "floor_sim: GPT, built field by field with one field wrong, a handful of seeds" {

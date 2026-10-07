@@ -293,3 +293,7 @@ rtc: a day its month does not have
 rtc: a month outside 1 to 12
 rtc: a register that is not BCD
 rtc: an hour, minute or second out of range
+
+# A SYN's options (metal-vmm QUEUE item 93, mutant T16): floor_sim builds them one by one.
+floor_sim: a SYN's option has a length under 2
+floor_sim: a SYN's options carry an MSS
