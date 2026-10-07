@@ -137,6 +137,11 @@ var tcp_out: [net.buffer_size]u8 align(16) = undefined;
 /// about 20 MB for all of them.
 const max_connections = 256;
 const rx_bytes = 16 * 1024;
+comptime {
+    // A head the application allows must fit a connection's receive buffer,
+    // or ready.zig would wait for one that cannot arrive.
+    std.debug.assert(rx_bytes >= router.request_limits.head_bytes);
+}
 /// A send queue holds what the peer has not yet acknowledged. A response
 /// larger than this waits for acknowledgements as it goes; a held stream whose
 /// next frames do not fit is a client that is not keeping up.
@@ -216,7 +221,9 @@ var busiest: usize = 0;
 /// When this boot's wall clock started, and the TSC's measured rate.
 var booted_unix: i64 = 0;
 var tsc_hz_seen: u64 = 0;
-var read_buf: [16 * 1024]u8 align(16) = undefined;
+/// The request head's buffer: angry-gopher's limits.zig sizes it, as it
+/// sizes Linux's, so the two hosts answer 431 at the same byte.
+var read_buf: [router.request_limits.head_bytes]u8 align(16) = undefined;
 var write_buf: [64 * 1024]u8 align(16) = undefined;
 
 /// Each request's heap, reset after the response: the equivalent of the arena

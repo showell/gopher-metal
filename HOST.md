@@ -68,6 +68,14 @@ Today the same limit is written in several places:
 | an upload | Caddy, `chat_upload.zig`'s kinds | 110 MB at Caddy; 10 MiB images, 100 MiB video |
 | a name, a path, a depth | angry-gopher `store.zig`, metal `fat16.zig` and `io.zig` | 96, 256, 16 (checked: `tools/check_limits.py`) |
 
+**Done (2026-10-07):** angry-gopher's `zig-server/src/limits.zig` holds them,
+every route reads its cap from it, both hosts size the head buffer from it
+(`router.request_limits.head_bytes`; metal also asserts at compile time that
+a connection's receive buffer holds a head), and `tools/check_caddy_limits.py`
+in `ops/check_zig` holds the Caddyfile to it. It found Caddy's ordinary cap at
+1,000,000 bytes where a document may be 1,048,576 (fixed in the repo; prod's
+Caddy needs a reload).
+
 **The rule:** each limit is defined once, in angry-gopher, where the
 application that depends on it lives (a `limits.zig` the router exports), and
 every other place either reads it or is checked against it:
@@ -116,8 +124,7 @@ right; B21). A missing file is the defaults.
 1. **One handler at a time on Linux** (`server.zig`: angry-gopher branch
    `one-handler`), then the application's locks deleted, then a small body
    read before the turn, as metal's `ready.zig` does.
-2. **`limits.zig`** in angry-gopher, both hosts' head buffers read from it,
-   and the Caddyfile check.
+2. ~~`limits.zig`~~ (done).
 3. **Durability on Linux:** an `fsync` before a response that followed a
    write, as metal's flush.
 4. **The Bus simulator.**
