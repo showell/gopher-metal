@@ -205,6 +205,11 @@ pub const Disk = struct {
     /// three sectors: an odd size, so a burst ends inside a cluster as often
     /// as at its end.
     dir_burst: [3 * fat16.sector_size]u8 = undefined,
+    /// A cached disk holds directory sectors too (fat16's `dirs`), in few
+    /// slots, an odd number: sectors replace each other often, as they would
+    /// in a volume larger than the host's cache.
+    dir_keys: [61]u32 = undefined,
+    dir_data: [61 * fat16.sector_size]u8 = undefined,
     vol: fat16.Volume = undefined,
     /// FAT sectors the last mount's `cacheFat` brought into line.
     repaired: u32 = 0,
@@ -230,6 +235,7 @@ pub const Disk = struct {
             d.fat_cache = try testing.allocator.alloc(u8, d.vol.fatBytes());
             d.repaired = try d.vol.cacheFat(d.fat_cache.?);
             d.vol.dir_burst = &d.dir_burst;
+            d.vol.cacheDirs(&d.dir_keys, &d.dir_data);
         }
     }
 
