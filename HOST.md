@@ -36,13 +36,14 @@ served between handlers, never during one, as metal serves it. The
 application's locks then guard nothing and go, and what's left is one
 machine, judged the same way on both hosts.
 
-**One difference remains, owed:** gopher-metal starts a handler only once
-a small body (one that fits the connection's 16 KiB buffer) has arrived
-(`ready.zig`), so a client slow to send a small body holds nobody up; Linux
-takes the turn at the head and reads the body inside it. A large, chunked
-or `Expect: 100-continue` body is read by the handler as it arrives on both
-hosts, holding the turn while it does. Closing the gap is the request
-door's next step: the host reads a small body before the turn.
+**A small body arrives before the turn, on both hosts** (2026-10-07):
+gopher-metal starts a handler only once a small body (one that fits the
+connection's 16 KiB buffer) has arrived (`ready.zig`), and Linux's
+`server.zig` reads such a body before taking the turn. A large, chunked or
+`Expect: 100-continue` body is read by the handler as it arrives on both
+hosts, holding the turn while it does. Checked live on Linux: a client that
+stalled 3 s before its body held another client's request for 2.51 s before,
+and not at all after.
 
 Cost: Linux loses request parallelism. At lynrummy.com's load (a handful of
 people, requests answered in milliseconds) that costs nothing measurable,
@@ -126,9 +127,9 @@ right; B21). A missing file is the defaults.
 
 ## What's owed, in order
 
-1. **One handler at a time on Linux** (`server.zig`: angry-gopher branch
-   `one-handler`), then the application's locks deleted, then a small body
-   read before the turn, as metal's `ready.zig` does.
+1. ~~One handler at a time on Linux; the application's locks deleted; a
+   small body read before the turn~~ (done: angry-gopher `master`, and the
+   locks' removal on `request-door` for v21).
 2. ~~`limits.zig`~~ (done).
 3. ~~Durability on Linux~~ (on `request-door`, v21).
 4. ~~The Bus simulator~~ (done).
