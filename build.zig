@@ -310,6 +310,8 @@ pub fn build(b: *std.Build) void {
     explore_opts.addOption(f32, "blind", b.option(f32, "explore-blind", "the share of the explorer's runs that are blind") orelse 0.2);
     explore_opts.addOption(bool, "list_missed", b.option(bool, "explore-list-missed", "list the properties neither reached") orelse false);
     explore_opts.addOption(f32, "flip", b.option(f32, "explore-flip", "of the rest, the share that flip a named choice") orelse 0.5);
+    explore_opts.addOption(u32, "seeds", b.option(u32, "explore-seeds", "explorer seeds each column is run from (one exploration is one sample)") orelse 20);
+    explore_opts.addOption(u32, "reference", b.option(u32, "explore-reference", "blind runs that decide what is counted: what they reach") orelse 300);
     const explore_bench = b.addTest(.{
         .name = "explore",
         .filters = &.{"the explorer against blind seeds"},

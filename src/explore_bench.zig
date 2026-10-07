@@ -3,13 +3,23 @@
 //!
 //!   zig build explore                          fat_sim, budgets 20 and 100
 //!   zig build explore -Dexplore-budgets=20,100,300 -Dexplore-seed=2
+//!   zig build explore -Dexplore-seeds=5 -Dexplore-reference=100   quicker
 //!
-//! For each budget it runs the simulator that many times blind (each run a
-//! fresh tape, as `properties` runs seeds) and that many times under the
-//! explorer, from a clean catalog each time, and prints, for the simulator's
-//! own properties: how many each left unreached, the named targets, and
-//! which properties only one of the two reached, and any run whose oracle
-//! failed.
+//! **WHAT IT COUNTS** (metal-vmm QUEUE 98): only the simulator's own
+//! properties that blind runs reach at `-Dexplore-reference` runs (300, as
+//! `long.sh` sweeps FAT seeds). A property no blind sweep reaches is not one
+//! the explorer can be judged on here, and counting it only hides the
+//! difference.
+//!
+//! **ONE EXPLORATION IS ONE SAMPLE.** For each budget, each of three columns
+//! (blind runs, the explorer with random flips, the explorer with aimed
+//! flips) is run once for each of `-Dexplore-seeds` explorer seeds (20), each
+//! from a clean catalog. A property is reported as reached in N of 20, and a
+//! column by how many of the counted properties it left unreached on
+//! average. Any run whose oracle failed is printed with its tape, whether it
+//! drifted, whether a flip could not be written into it (`unfaithful`, so
+//! that replaying it does not take the flip), and whether it fails again
+//! when replayed whole.
 
 const std = @import("std");
 const coverage = @import("coverage");
@@ -43,35 +53,25 @@ fn ours(site: *const coverage.Site) bool {
     return std.mem.endsWith(u8, file, "fat16.zig") or std.mem.endsWith(u8, file, "fat_sim.zig");
 }
 
-const Tally = struct {
-    reached: std.StringHashMap(void),
-    missed: u32 = 0,
-    total: u32 = 0,
-    failures: u32 = 0,
-    report: explore.Report,
+const Column = enum { blind, random_flips, aimed_flips };
 
-    fn take(gpa: std.mem.Allocator, report: explore.Report) !Tally {
-        var t: Tally = .{ .reached = .init(gpa), .report = report };
-        var it = coverage.catalog();
-        while (it.next()) |site| {
-            if (!ours(site)) continue;
-            if (site.kind.basic() != .sometimes and site.kind.basic() != .reachable) continue;
-            t.total += 1;
-            if (site.passes > 0) try t.reached.put(std.mem.span(site.message), {}) else t.missed += 1;
-        }
-        t.failures = @intCast(report.failures.items.len);
-        return t;
-    }
+/// The simulator's own properties a run can be reached on: its Sometimes and
+/// Reachable sites.
+fn counted(site: *const coverage.Site) bool {
+    return ours(site) and (site.kind.basic() == .sometimes or site.kind.basic() == .reachable);
+}
 
-    fn deinit(t: *Tally, gpa: std.mem.Allocator) void {
-        t.reached.deinit();
-        t.report.deinit(gpa);
-    }
-};
-
-fn runOnce(gpa: std.mem.Allocator, budget: u32, seed: u64, blind: f32, aim: bool) !Tally {
+/// Runs one exploration from a clean catalog, prints any failure, and
+/// answers its report; the catalog then holds what it reached.
+fn runOnce(gpa: std.mem.Allocator, budget: u32, seed: u64, column: Column) !explore.Report {
     coverage.reset();
-    var report = try explore.explore(gpa, runSim, .{ .budget = budget, .seed = seed, .blind = blind, .flip = options.flip, .aim = aim });
+    var report = try explore.explore(gpa, runSim, .{
+        .budget = budget,
+        .seed = seed,
+        .blind = if (column == .blind) 1.0 else options.blind,
+        .flip = options.flip,
+        .aim = column == .aimed_flips,
+    });
     // **A RUN THAT DRIFTED IS NOT A STEERED RUN** (CC's review, metal-vmm
     // QUEUE 94): a simulator whose draws are not its tape's makes a
     // benchmark of luck, so none is reported.
@@ -81,7 +81,7 @@ fn runOnce(gpa: std.mem.Allocator, budget: u32, seed: u64, blind: f32, aim: bool
         return error.Drifted;
     }
     for (report.failures.items) |f| {
-        std.debug.print("  a run failed its oracle: tape seed {d}, {d} fills, replayed {d} (drifted {}):", .{ f.seed, f.position(), f.replay_upto, f.drifted });
+        std.debug.print("  {s}, explorer seed {d}: a run failed its oracle: tape seed {d}, {d} fills, replayed {d} (drifted {}, unfaithful {}):", .{ @tagName(column), seed, f.seed, f.position(), f.replay_upto, f.drifted, f.unfaithful });
         for (f.choices.items) |c| std.debug.print(" [{s} = {d}]", .{ c.name, c.chosen });
         std.debug.print("\n", .{});
         var again = explore.Tape.branch(gpa, &f, f.position(), 12345, null);
@@ -89,47 +89,81 @@ fn runOnce(gpa: std.mem.Allocator, budget: u32, seed: u64, blind: f32, aim: bool
         const replayed = if (runSim(&again)) |_| "passes" else |_| "fails again";
         std.debug.print("    replayed whole: {s}\n", .{replayed});
     }
-    return Tally.take(gpa, report);
+    return report;
 }
 
 test "the explorer against blind seeds" {
     const gpa = std.testing.allocator;
+    const seeds: u32 = options.seeds;
+
+    // What blind runs reach at the reference budget: all that is counted.
+    var reference = try runOnce(gpa, options.reference, options.seed +% 0x7265_6600, .blind); // "ref"
+    reference.deinit(gpa);
+    var sites: std.ArrayList(*coverage.Site) = .empty;
+    defer sites.deinit(gpa);
+    var total: u32 = 0;
+    var it = coverage.catalog();
+    while (it.next()) |site| {
+        if (!counted(site)) continue;
+        total += 1;
+        if (site.passes > 0) try sites.append(gpa, site);
+    }
+    std.debug.print("\n{s}_sim: blind runs against the explorer, explorer seeds {d} to {d} (blind share {d:.2}, flip share {d:.2})\n", .{ options.sim, options.seed, options.seed + seeds - 1, options.blind, options.flip });
+    std.debug.print("counted: the {d} of the simulator's {d} properties that {d} blind runs reach\n", .{ sites.items.len, total, options.reference });
+
+    const reached = try gpa.alloc([3]u32, sites.items.len);
+    defer gpa.free(reached);
     var budgets = std.mem.tokenizeScalar(u8, options.budgets, ',');
-    std.debug.print("\n{s}_sim: blind runs against the explorer (seed {d}, blind share {d:.2}, flip share {d:.2})\n", .{ options.sim, options.seed, options.blind, options.flip });
     while (budgets.next()) |text| {
         const budget = try std.fmt.parseInt(u32, text, 10);
-        var blind = try runOnce(gpa, budget, options.seed, 1.0, false);
-        defer blind.deinit(gpa);
-        var random_flips = try runOnce(gpa, budget, options.seed, options.blind, false);
-        defer random_flips.deinit(gpa);
-        var steered = try runOnce(gpa, budget, options.seed, options.blind, true);
-        defer steered.deinit(gpa);
-
-        std.debug.print("\nbudget {d}: unreached of {d}: blind {d}, the explorer with random flips {d}, with aimed flips {d}; failures {d}, {d}, {d}; decisions taken first by the aimed explorer {d}\n", .{
-            budget,         blind.total,           blind.missed,     random_flips.missed,      steered.missed,
-            blind.failures, random_flips.failures, steered.failures, steered.report.decisions,
-        });
-        std.debug.print("  explorer runs by move: blind {d}, branch {d}, flip {d}; new by move: {d}, {d}, {d}; corpus {d}\n", .{
-            steered.report.by_move[0],     steered.report.by_move[1],     steered.report.by_move[2],
-            steered.report.new_by_move[0], steered.report.new_by_move[1], steered.report.new_by_move[2],
-            steered.report.corpus,
-        });
-        if (!sim_is_store) {
-            for (targets) |t| {
-                std.debug.print("  target \"{s}\": blind {s}, explorer {s}\n", .{ t, if (blind.reached.contains(t)) "reached" else "missed", if (steered.reached.contains(t)) "reached" else "missed" });
+        @memset(reached, .{ 0, 0, 0 });
+        var target_hits: [targets.len][3]u32 = @splat(.{ 0, 0, 0 });
+        var missed: [3]u64 = .{ 0, 0, 0 };
+        var failures: [3]u32 = .{ 0, 0, 0 };
+        var unfaithful: [3]u32 = .{ 0, 0, 0 };
+        for (0..seeds) |k| {
+            inline for (comptime std.enums.values(Column)) |column| {
+                const c = @intFromEnum(column);
+                var report = try runOnce(gpa, budget, options.seed + k, column);
+                failures[c] += @intCast(report.failures.items.len);
+                unfaithful[c] += report.unfaithful;
+                report.deinit(gpa);
+                for (sites.items, reached) |site, *r| {
+                    if (site.passes > 0) r[c] += 1 else missed[c] += 1;
+                }
+                if (!sim_is_store) for (targets, &target_hits) |t, *h| {
+                    var cat = coverage.catalog();
+                    while (cat.next()) |site| {
+                        if (std.mem.eql(u8, std.mem.span(site.message), t) and site.passes > 0) {
+                            h[c] += 1;
+                            break;
+                        }
+                    }
+                };
             }
         }
-        var it = steered.reached.keyIterator();
-        while (it.next()) |k| if (!blind.reached.contains(k.*)) std.debug.print("  only the explorer: {s}\n", .{k.*});
-        var bt = blind.reached.keyIterator();
-        while (bt.next()) |k| if (!steered.reached.contains(k.*)) std.debug.print("  only blind: {s}\n", .{k.*});
+        const n: f64 = @floatFromInt(seeds);
+        std.debug.print("\nbudget {d}: of {d} counted, left unreached on average: blind {d:.1}, random flips {d:.1}, aimed flips {d:.1}; failures {d}, {d}, {d}; unfaithful flips {d}, {d}\n", .{
+            budget,                                 sites.items.len,
+            @as(f64, @floatFromInt(missed[0])) / n, @as(f64, @floatFromInt(missed[1])) / n,
+            @as(f64, @floatFromInt(missed[2])) / n, failures[0],
+            failures[1],                            failures[2],
+            unfaithful[1],                          unfaithful[2],
+        });
+        if (!sim_is_store) for (targets, target_hits) |t, h| {
+            std.debug.print("  target \"{s}\": reached in {d}, {d} and {d} of {d}\n", .{ t, h[0], h[1], h[2], seeds });
+        };
+        // The properties some column did not reach every time: where the
+        // columns can differ.
+        for (sites.items, reached) |site, r| {
+            if (r[0] == seeds and r[1] == seeds and r[2] == seeds) continue;
+            std.debug.print("  {d:>2} {d:>2} {d:>2} of {d}  {s}\n", .{ r[0], r[1], r[2], seeds, std.mem.span(site.message) });
+        }
         if (options.list_missed) {
             var cat = coverage.catalog();
             while (cat.next()) |site| {
-                if (!ours(site) or (site.kind.basic() != .sometimes and site.kind.basic() != .reachable)) continue;
-                const m = std.mem.span(site.message);
-                if (!blind.reached.contains(m) and !steered.reached.contains(m))
-                    std.debug.print("  missed by both: {s}  ({s}:{d})\n", .{ m, std.fs.path.basename(std.mem.span(site.file)), site.line });
+                if (counted(site) and std.mem.indexOfScalar(*coverage.Site, sites.items, site) == null)
+                    std.debug.print("  not counted (blind runs never reach it): {s}  ({s}:{d})\n", .{ std.mem.span(site.message), std.fs.path.basename(std.mem.span(site.file)), site.line });
             }
         }
     }
