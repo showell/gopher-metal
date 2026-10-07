@@ -181,7 +181,9 @@ pub fn runSeed(seed: u64) Failure!void {
 
 /// **ONE RUN UNDER A TAPE** (the seed explorer, zig-coverage-sdk's
 /// explore.zig): every draw, the filling tier's too, comes from `tape`, so
-/// all of it is recorded and can be steered; a seed's run is `runSeed`'s.
+/// all of it is recorded and can be steered. **A tape's seed is not a
+/// `runSeed` seed**: the filling tier draws from the tape here and from a
+/// stream of its own there, so a tape replays only as a tape.
 pub fn runWith(tape: *explore.Tape) Failure!void {
     const r = tape.random();
     return runFrom(tape.seed, r, r) catch |e| switch (e) {

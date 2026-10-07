@@ -24,11 +24,13 @@ const Model = world.store_model.Model;
 const Store = world.store.Store;
 
 /// What an operation answered, in the terms angry-gopher's callers act on.
-const Said = enum { ok, not_found, is_directory, bad_name, no_space, other };
+const Said = enum { ok, not_found, through_file, is_directory, bad_name, no_space, other };
 
 fn said(e: anyerror) Said {
     return switch (e) {
-        error.FileNotFound, error.NotFound, error.NotDir => .not_found,
+        error.FileNotFound, error.NotFound => .not_found,
+        // A path whose folder is a file: std.Io's answer.
+        error.NotDir => .through_file,
         error.IsDir, error.IsDirectory => .is_directory,
         error.BadName, error.PathTooLong, error.PathTooDeep, error.NameTooLong => .bad_name,
         error.NoSpaceLeft, error.NoSpace => .no_space,
@@ -75,8 +77,12 @@ const World = struct {
     model: Model,
     disk: *test_disk.Disk,
     tmp: testing.TmpDir,
-    /// The Linux side's data root, as a path from the working directory.
+    /// The Linux side's roots, as paths from the working directory; the
+    /// store keeps both (`setBases`), so they live as long as the world.
     linux_root: []const u8,
+    linux_auth: []const u8,
+    /// Where the model's reads land, reused.
+    model_buf: []u8,
 
     fn make(gpa: std.mem.Allocator) !World {
         var w: World = .{
@@ -86,14 +92,15 @@ const World = struct {
             .disk = try test_disk.Disk.make("store-judge", test_disk.small, false),
             .tmp = testing.tmpDir(.{}),
             .linux_root = undefined,
+            .linux_auth = undefined,
+            .model_buf = try gpa.alloc(u8, 1 << 20),
         };
         io_mod.mount(w.disk.vol);
         io_mod.keepData(&.{ "data", "auth" }, null);
         w.linux_root = try std.fmt.allocPrint(gpa, ".zig-cache/tmp/{s}/data", .{w.tmp.sub_path});
         try w.tmp.dir.createDirPath(testing.io, "data");
-        const auth = try std.fmt.allocPrint(gpa, ".zig-cache/tmp/{s}/auth", .{w.tmp.sub_path});
-        defer gpa.free(auth);
-        linux_store.setBases(w.linux_root, auth);
+        w.linux_auth = try std.fmt.allocPrint(gpa, ".zig-cache/tmp/{s}/auth", .{w.tmp.sub_path});
+        linux_store.setBases(w.linux_root, w.linux_auth);
         metal_store.setBases("data", "auth");
         return w;
     }
@@ -104,6 +111,8 @@ const World = struct {
         w.model.deinit();
         w.tmp.cleanup();
         w.gpa.free(w.linux_root);
+        w.gpa.free(w.linux_auth);
+        w.gpa.free(w.model_buf);
         w.arena.deinit();
     }
 
@@ -179,19 +188,29 @@ fn onMetal(w: *World, op: Op, rel: []const u8, bytes: []const u8) !Answer {
     return .{ .said = .ok };
 }
 
+/// **THE MODEL, SPEAKING THE SEAM'S CONTRACT** (STORE.md): it is
+/// gopher-metal's Store, whose answers differ from angry-gopher's store.zig
+/// where the contract is the seam's: a remove of what is absent is done, a
+/// folder that is absent lists nothing, and a name is checked only where a
+/// call would create it, so one looked up that FAT could not hold is simply
+/// not there. A write the model refuses as a bad name whose every part is a
+/// name FAT holds is a write through a file. Until the model is the seam's
+/// (STORE.md, open question 1), this is where the two meet.
 fn onModel(w: *World, op: Op, rel: []const u8, bytes: []const u8) !Answer {
     const a = w.arena.allocator();
     const s: Store = w.model.store_();
     switch (op) {
         .read => {
-            const buf = try a.alloc(u8, 1 << 20);
-            const n = s.read(rel, buf) catch |e| return .{ .said = said(e), .err = e };
-            return .{ .said = .ok, .bytes = buf[0..n] };
+            const n = s.read(rel, w.model_buf) catch |e| return .{ .said = if (e == error.BadName) .not_found else said(e), .err = e };
+            return .{ .said = .ok, .bytes = try a.dupe(u8, w.model_buf[0..n]) };
         },
-        .write => s.write(rel, bytes) catch |e| return .{ .said = said(e), .err = e },
-        .append => s.append(rel, bytes) catch |e| return .{ .said = said(e), .err = e },
-        .replace => s.replace(rel, bytes) catch |e| return .{ .said = said(e), .err = e },
-        .remove => s.remove(rel) catch |e| return .{ .said = said(e), .err = e },
+        .write => s.write(rel, bytes) catch |e| return created(rel, e),
+        .append => s.append(rel, bytes) catch |e| return created(rel, e),
+        .replace => s.replace(rel, bytes) catch |e| return created(rel, e),
+        .remove => s.remove(rel) catch |e| switch (e) {
+            error.NotFound, error.BadName => {},
+            else => return .{ .said = said(e), .err = e },
+        },
         .list => {
             var lines: std.ArrayList([]const u8) = .empty;
             const Ctx = struct {
@@ -204,11 +223,25 @@ fn onModel(w: *World, op: Op, rel: []const u8, bytes: []const u8) !Answer {
                 }
             };
             var ctx = Ctx{ .a = a, .lines = &lines };
-            s.list(rel, .{ .context = &ctx, .call = Ctx.call }) catch |e| return .{ .said = said(e), .err = e };
+            s.list(rel, .{ .context = &ctx, .call = Ctx.call }) catch |e| switch (e) {
+                error.NotFound, error.BadName => return .{ .said = .ok, .bytes = "" },
+                else => return .{ .said = said(e), .err = e },
+            };
             return .{ .said = .ok, .bytes = try sortedLines(a, &lines) };
         },
     }
     return .{ .said = .ok };
+}
+
+/// What a creating call's refusal means at the seam: a bad name only if some
+/// part of the path is one; otherwise the model refused a folder that is a
+/// file.
+fn created(rel: []const u8, e: anyerror) Answer {
+    if (e == error.BadName) {
+        var parts: [world.store.max_parts][]const u8 = undefined;
+        if (world.store.checkPath(rel, &parts, false)) |_| return .{ .said = .through_file, .err = e } else |_| {}
+    }
+    return .{ .said = said(e), .err = e };
 }
 
 /// The whole tree under the data root, one line a file with its bytes'
@@ -255,6 +288,8 @@ fn runSeed(seed: u64) !void {
     const r = prng.random();
     var bytes: [3000]u8 = undefined;
     for (0..r.intRangeAtMost(usize, 20, 80)) |step| {
+        // Each step's answers and trees are compared and dropped.
+        _ = w.arena.reset(.retain_capacity);
         const op = r.enumValue(Op);
         const rel = paths[r.uintLessThan(usize, paths.len)];
         const n = r.uintLessThan(usize, bytes.len);

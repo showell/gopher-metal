@@ -13,7 +13,7 @@ Store". The census of what the application calls: STORE-CENSUS.md.*
 | **on Linux** | that file over `std.Io` | as written |
 | **on metal** | that file over this repo's `io.zig` and `fat16` | the port's copy (`port.sh`), `Io = metal.io` |
 | **the model** | the oracle: plain, in memory | `src/store_model.zig` |
-| **the judge** | all three, the same seeded operations, the same answers | `src/store_judge.zig`, `zig build store-judge` |
+| **the judge** | all three, the same seeded operations, the same answers | `src/store_judge.zig`, `zig build store-judge`: six operations so far, no power cuts or full volumes yet |
 
 gopher-metal's own `store.zig`, `store_fat.zig` and `store_linux.zig` are
 where this contract was first written and proven against `fat16`
@@ -59,8 +59,10 @@ And when the volume is full (`NoSpaceLeft`): a replaced or appended file is
 old; a written one is old or gone.
 
 `replace` is the one to use where losing the old file would matter; `write`
-is the cheap one. That is the whole difference, and the judge holds each to
-its row.
+is the cheap one. That is the whole difference. **Today `store_sim` holds
+each of the first four rows, against gopher-metal's own FAT store**; the
+judge of production's store holds none of them yet (no cuts, no full
+volume), and that is its next step.
 
 ## The rules, on every host
 
@@ -75,8 +77,7 @@ FAT's, so a laptop refuses what the droplet would (Steve, 2026-10-02):
   (`fat16`'s `max_path_depth`). `tools/check_limits.py`, in `gates.sh`,
   fails if angry-gopher's copies of these three move apart from metal's.
 - **An error is not an empty file** (`readOrEmpty` answers "" only for a
-  file that is not there), **and should not be "no"** (open question 3:
-  `has` does not keep this yet).
+  file that is not there), **and not "no"** (`has`, open question 3).
 
 ## Open questions
 
@@ -86,14 +87,11 @@ FAT's, so a laptop refuses what the droplet would (Steve, 2026-10-02):
    names stay under 80.
 2. **`WriteOptions.private`** (owner-only permissions on Linux) has no
    meaning on FAT. It stays an option the metal host ignores, as now.
-3. **`has` answers "no" for any error** (`stat(...) catch return false`),
-   so a disk that fails a read says the file is not there. Its callers:
-   chat retirement's `convGone` (an error there reads as "the conversation
-   is gone", and the sweep removes users' last-conversation and pinned
-   references to it), `authFileExists` (an error reads as "no password": a
-   refused login, failing closed), `isMarked` and `migrateSecret`. Proposed:
-   `has` answers `!bool`, "no" only for `FileNotFound`, and each caller
-   says what an error means to it. An angry-gopher change, Steve's call.
+3. **`has` answered "no" for any error.** Fixed on angry-gopher's branch
+   `has-errors`, with v20: "no" only for a path not found, through a file,
+   or with a name too long; any other error is the caller's, and each caller
+   says what it means (chat retirement keeps its references, legacy cookies
+   are refused, a secret is never written over).
 4. **`has` and `stat` against `list`**: the census suggests both could be
    one `list` of the parent. They cost a folder walk either way. With
    folders held in memory (v19) that walk is cheap, so the eleven can stay

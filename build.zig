@@ -269,17 +269,16 @@ pub fn build(b: *std.Build) void {
     }
 
     // **THE STORE PRODUCTION RUNS, JUDGED** (src/store_judge.zig):
-    // angry-gopher's store.zig over Linux and, as port.sh made it, over this
-    // repo's io.zig, against the model. Needs the sibling angry-gopher
-    // checkout and a port, so it is a step of its own that gates.sh runs,
-    // not part of `test`.
-    const ag_src = b.option([]const u8, "angry-gopher-src", "angry-gopher's zig-server/src") orelse "../angry-gopher/zig-server/src";
-    const port_dir = b.option([]const u8, "port", "port.sh's output") orelse b.fmt("{s}/build/gopher-metal/port", .{b.graph.env_map.get("HOME") orelse "."});
+    // angry-gopher's store.zig over Linux and, as port.sh made it
+    // (`-Dgopher`), over this repo's io.zig, against the model. Needs the
+    // sibling angry-gopher checkout and a port, so it is a step of its own,
+    // not part of `test`, and not yet in gates.sh: its model is still
+    // gopher-metal's Store, not the seam's (STORE.md).
+    const ag_src = b.option([]const u8, "angry-gopher-src", "angry-gopher's zig-server/src, the Linux side of store-judge") orelse "../angry-gopher/zig-server/src";
     const judge_world = b.createModule(.{
         .root_source_file = b.path("src/judge_world.zig"),
         .target = b.graph.host,
         .imports = &.{
-            .{ .name = "kernel_partition", .module = kernel_partition },
             .{ .name = "coverage", .module = coverage },
             .{ .name = "coverage_catalog", .module = coverage_catalog },
         },
@@ -293,7 +292,7 @@ pub fn build(b: *std.Build) void {
                 .{ .name = "judge_world", .module = judge_world },
                 .{ .name = "ag_store_linux", .module = b.createModule(.{ .root_source_file = .{ .cwd_relative = b.pathFromRoot(b.fmt("{s}/store.zig", .{ag_src})) } }) },
                 .{ .name = "ag_store_metal", .module = b.createModule(.{
-                    .root_source_file = .{ .cwd_relative = b.fmt("{s}/store.zig", .{port_dir}) },
+                    .root_source_file = .{ .cwd_relative = b.fmt("{s}/store.zig", .{gopher_port}) },
                     .imports = &.{.{ .name = "metal", .module = judge_world }},
                 }) },
             },

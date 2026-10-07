@@ -2194,7 +2194,10 @@ pub const Volume = struct {
         };
         if (!entry.isDirectory()) return self.remove(path);
         try self.removeTreeAt(entry.first_cluster, 0);
-        try self.remove(path);
+        // The directory itself, emptied: by its entry, as removeTreeAt takes
+        // each one under it (`remove` refuses a directory).
+        const p = try self.parentOf(path);
+        try self.removeEntry(p.cluster, p.name);
     }
 
     fn removeTreeAt(self: *Volume, dir_cluster: Cluster, depth: u32) Error!void {

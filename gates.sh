@@ -54,7 +54,7 @@ mkdir -p "$VERDICTS"
 # ── the kernels and host tests ───────────────────────────────────────────────
 # The limits angry-gopher's store copies from fat16.zig and io.zig: a
 # second, so first (tools/check_limits.py).
-python3 tools/check_limits.py || failed+=(limits)
+python3 tools/check_limits.py "$GOPHER_ROOT/zig-server/src" || failed+=(limits)
 zig build test --summary all 2>&1 | grep -E "tests passed|error"
 [ "${PIPESTATUS[0]}" = 0 ] || failed+=(test)
 lap "zig build test"
