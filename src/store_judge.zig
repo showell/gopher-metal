@@ -199,6 +199,12 @@ fn onMetal(w: *World, op: Op, rel: []const u8, bytes: []const u8) !Answer {
 fn onModel(w: *World, op: Op, rel: []const u8, bytes: []const u8) !Answer {
     const a = w.arena.allocator();
     const s: Store = w.model.store_();
+    // A path through a file is "not a directory" at the seam, whatever the
+    // operation, as both hosts answer it.
+    var end: usize = 0;
+    while (std.mem.indexOfScalarPos(u8, rel, end, '/')) |slash| : (end = slash + 1) {
+        if (s.read(rel[0..slash], w.model_buf)) |_| return .{ .said = .through_file } else |_| {}
+    }
     switch (op) {
         .read => {
             const n = s.read(rel, w.model_buf) catch |e| return .{ .said = if (e == error.BadName) .not_found else said(e), .err = e };
@@ -212,6 +218,9 @@ fn onModel(w: *World, op: Op, rel: []const u8, bytes: []const u8) !Answer {
             else => return .{ .said = said(e), .err = e },
         },
         .list => {
+            // A file listed is "not a directory" at the seam, as std.Io's
+            // openDir answers on both hosts; the model lists it as nothing.
+            if (s.read(rel, w.model_buf)) |_| return .{ .said = .through_file } else |_| {}
             var lines: std.ArrayList([]const u8) = .empty;
             const Ctx = struct {
                 a: std.mem.Allocator,
@@ -305,6 +314,11 @@ fn runSeed(seed: u64) !void {
                 @tagName(answers[0].said),  answers[0].err,    @tagName(answers[1].said),  answers[1].err,
                 @tagName(answers[2].said),  answers[2].err,
             });
+            const a = w.arena.allocator();
+            const ls = linux_store.stat(testing.io, a, try w.linuxPath(rel));
+            const ms = metal_store.stat(mio, a, try w.metalPath(rel));
+            std.debug.print("  stat there: Linux {any}, metal {any}\n", .{ ls, ms });
+            std.debug.print("  the trees before it:\n{s}", .{try tree(&w, .model)});
             return error.Disagree;
         }
         const m = try tree(&w, .model);
