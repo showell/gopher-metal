@@ -101,8 +101,14 @@ contract, as `bus.zig` has it and both hosts serve it:
 - **A stream ends** when its reader goes away, or when the host gives up on
   a reader that has stopped reading (metal: `idle_timeout_ms`).
 
-*(Owed: a simulator driving the Hub with stalling and vanishing readers,
-under both serving styles, checking the same frames reach the same readers.)*
+**Simulated** (angry-gopher `bus.zig`, "the mailbox contract over seeded
+runs", 300 runs, slow readers included so the overflow is met): a reader
+sees exactly its key's events since it opened, in order, nothing skipped,
+and ends with `EventsMissed` if and only if its mailbox was full when an
+event arrived. Writing it found the one difference: Linux's `serveKept`
+carried on past an overflow with a hole in the conversation, where metal's
+`nextFrame` ends the stream and the browser resumes; Linux now ends it too
+(2026-10-07).
 
 ## The clock and random bytes
 
@@ -127,4 +133,4 @@ right; B21). A missing file is the defaults.
 2. ~~`limits.zig`~~ (done).
 3. **Durability on Linux:** an `fsync` before a response that followed a
    write, as metal's flush.
-4. **The Bus simulator.**
+4. ~~The Bus simulator~~ (done).
