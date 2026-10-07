@@ -36,6 +36,14 @@ served between handlers, never during one, as metal serves it. The
 application's locks then guard nothing and go, and what's left is one
 machine, judged the same way on both hosts.
 
+**One difference remains, owed:** gopher-metal starts a handler only once
+a small body (one that fits the connection's 16 KiB buffer) has arrived
+(`ready.zig`), so a client slow to send a small body holds nobody up; Linux
+takes the turn at the head and reads the body inside it. A large, chunked
+or `Expect: 100-continue` body is read by the handler as it arrives on both
+hosts, holding the turn while it does. Closing the gap is the request
+door's next step: the host reads a small body before the turn.
+
 Cost: Linux loses request parallelism. At lynrummy.com's load (a handful of
 people, requests answered in milliseconds) that costs nothing measurable,
 and a slow handler is a bug on metal already.
@@ -105,8 +113,9 @@ right; B21). A missing file is the defaults.
 
 ## What's owed, in order
 
-1. **One handler at a time on Linux** (`server.zig`), then the application's
-   locks deleted. This is the change that makes the two hosts one machine.
+1. **One handler at a time on Linux** (`server.zig`: angry-gopher branch
+   `one-handler`), then the application's locks deleted, then a small body
+   read before the turn, as metal's `ready.zig` does.
 2. **`limits.zig`** in angry-gopher, both hosts' head buffers read from it,
    and the Caddyfile check.
 3. **Durability on Linux:** an `fsync` before a response that followed a
