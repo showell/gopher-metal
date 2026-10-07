@@ -54,8 +54,7 @@ and a slow handler is a bug on metal already.
 application never flushes; the host flushes at the one moment that matters,
 before the first byte of a response, and a failed flush is logged and the
 response still goes. On Linux the same promise is an `fsync` of what the
-request wrote. *(Not yet: Linux relies on the page cache, so the two hosts
-differ after a power cut. Owed.)*
+request wrote. *(Built on angry-gopher's `request-door` branch, for v21.)*
 
 ## Limits: one source of truth *(Steve, 2026-10-07)*
 
@@ -131,6 +130,5 @@ right; B21). A missing file is the defaults.
    `one-handler`), then the application's locks deleted, then a small body
    read before the turn, as metal's `ready.zig` does.
 2. ~~`limits.zig`~~ (done).
-3. **Durability on Linux:** an `fsync` before a response that followed a
-   write, as metal's flush.
+3. ~~Durability on Linux~~ (on `request-door`, v21).
 4. ~~The Bus simulator~~ (done).
