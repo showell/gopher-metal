@@ -32,6 +32,7 @@ const std = @import("std");
 const fat16 = @import("fat16.zig");
 const test_disk = @import("test_disk.zig");
 const props = @import("coverage");
+const explore = @import("explore");
 const testing = std.testing;
 
 comptime {
@@ -76,12 +77,14 @@ const Scenario = struct {
     check_every: usize,
 
     fn choose(rng: std.Random) Scenario {
-        const fat32 = rng.uintLessThan(u8, 4) == 0;
+        // Named choices (zig-coverage-sdk's explore.pick), drawn exactly as
+        // `uintLessThan(u8, 4)` was, so every seed's run is the run it was.
+        const fat32 = explore.pick(rng, "fat_sim: the volume is FAT32", .{ .yes = 1, .no = 3 }) == .yes;
         const shape = if (fat32) test_disk.small32 else test_disk.small;
         const volume_bytes = @as(usize, shape.sectors) * test_disk.sector;
-        const mode = rng.uintLessThan(u8, 4);
-        const filling = mode == 1;
-        const crowded = mode == 2;
+        const mode = explore.pick(rng, "fat_sim: the run's mode", .{ .plain = 1, .filling = 1, .crowded = 1, .also_plain = 1 });
+        const filling = mode == .filling;
+        const crowded = mode == .crowded;
         return .{
             .shape = shape,
             .ops = if (crowded) rng.intRangeAtMost(usize, 800, 1200) else rng.intRangeAtMost(usize, 20, 120),
@@ -186,6 +189,10 @@ const Sim = struct {
     /// between the operations from dice of their own, so a seed's
     /// operations are the ones it always had.
     probes: ?std.Random.DefaultPrng = null,
+    /// **A RUN UNDER A TAPE** (`runWith`): its draws come from `drawn`, not
+    /// from `prng`, and its probes too when `probes_drawn` says so.
+    drawn: ?std.Random = null,
+    probes_drawn: bool = false,
     /// A probe made the disk fail, which ends the run.
     failed_disk: bool = false,
     /// The last probe, for the report.
@@ -193,7 +200,19 @@ const Sim = struct {
 
     fn init(seed: u64, cached: bool) !Sim {
         var prng = std.Random.DefaultPrng.init(seed);
+        // The scenario first: the run's draws go on from where it left the PRNG.
         const sc = Scenario.choose(prng.random());
+        return initFrom(seed, prng, sc, cached);
+    }
+
+    /// A run whose every draw comes from `r` (a tape's, under `runWith`).
+    fn initWith(seed: u64, r: std.Random, cached: bool) !Sim {
+        var s = try initFrom(seed, .init(seed), Scenario.choose(r), cached);
+        s.drawn = r;
+        return s;
+    }
+
+    fn initFrom(seed: u64, prng: std.Random.DefaultPrng, sc: Scenario, cached: bool) !Sim {
         return .{
             .seed = seed,
             .prng = prng,
@@ -260,12 +279,12 @@ const Sim = struct {
     }
 
     fn run(s: *Sim) !void {
-        s.rng = s.prng.random();
+        s.rng = s.drawn orelse s.prng.random();
         while (s.step < s.sc.ops and s.broken == null) : (s.step += 1) {
             const full = s.full;
             try s.turn();
-            if (s.probes) |*p| if (s.broken == null and p.random().uintLessThan(u8, 3) == 0) {
-                try s.probe(p.random());
+            if (s.probeRandom()) |p| if (s.broken == null and p.uintLessThan(u8, 3) == 0) {
+                try s.probe(p);
                 if (s.failed_disk) break;
             };
             // After an operation that found no room, at once, but only for the
@@ -281,9 +300,14 @@ const Sim = struct {
                 s.step, @tagName(s.last),                                          s.last_said,
                 what,
             });
-            if (s.probes != null) std.debug.print("  the last probe: {s}\n", .{s.last_probe});
+            if (s.probes != null or s.probes_drawn) std.debug.print("  the last probe: {s}\n", .{s.last_probe});
             return error.SimulationFailed;
         }
+    }
+
+    fn probeRandom(s: *Sim) ?std.Random {
+        if (s.probes_drawn) return s.drawn;
+        return if (s.probes) |*p| p.random() else null;
     }
 
     fn turn(s: *Sim) !void {
@@ -793,6 +817,51 @@ pub fn runProbeSeed(seed: u64) !void {
     }
 }
 
+/// **ONE RUN UNDER A TAPE** (the seed explorer, zig-coverage-sdk's
+/// explore.zig): every draw, the probes' too, comes from `tape`, and whether
+/// to probe is itself a named choice. As `runSeed`, the story runs twice,
+/// with the FAT on the disk and with it held in memory; the second run
+/// replays the first's draws (`Tape.twin`) and must draw exactly as many and
+/// leave the same volume. Answers the volume's hash, for the replay test.
+pub fn runWith(tape: *explore.Tape) !u64 {
+    const r = tape.random();
+    const probed = explore.pick(r, "fat_sim: probes between the operations", .{ .no = 1, .yes = 1 }) == .yes;
+    const start = tape.position();
+    var hashes: [2]u64 = undefined;
+    var failed = false;
+    var full: usize = 0;
+    {
+        var s = try Sim.initWith(tape.seed, r, false);
+        s.probes_drawn = probed;
+        defer s.deinit();
+        try s.run();
+        hashes[0] = std.hash.Wyhash.hash(0, s.disk.bytes);
+        failed = s.failed_disk;
+        full = s.full;
+    }
+    const end = tape.position();
+    var twin = explore.Tape.twin(testing.allocator, tape, start, end, tape.seed ^ 0x7477_696e); // "twin"
+    defer twin.deinit();
+    {
+        var s = try Sim.initWith(tape.seed, twin.random(), true);
+        s.probes_drawn = probed;
+        defer s.deinit();
+        try s.run();
+        hashes[1] = std.hash.Wyhash.hash(0, s.disk.bytes);
+        failed = failed or s.failed_disk;
+    }
+    props.sometimes(@src(), full > 0, "fat_sim: some run under a tape finds the volume full", null);
+    if (twin.drifted or twin.position() != end - start) {
+        std.debug.print("fat_sim tape {d}: the run with the FAT in memory drew {d} times, the run with it on the disk {d}\n", .{ tape.seed, twin.position(), end - start });
+        return error.SimulationFailed;
+    }
+    if (!failed and hashes[0] != hashes[1]) {
+        std.debug.print("fat_sim tape {d}: the FAT on the disk and the FAT held in memory left different volumes\n", .{tape.seed});
+        return error.SimulationFailed;
+    }
+    return hashes[0];
+}
+
 pub fn runSeed(seed: u64) !void {
     var hashes: [2]u64 = undefined;
     var full: [2]usize = undefined;
@@ -860,4 +929,19 @@ test "the same, with probes of what the volume must refuse, a handful of seeds" 
 
 test "FAT16 and FAT32 against a random workload, a handful of seeds, both FAT paths" {
     for (seeds) |seed| try runSeed(seed);
+}
+
+test "a run under a tape replays exactly: the same draws, the same volume" {
+    for (1..41) |seed| {
+        var first = explore.Tape.init(testing.allocator, seed);
+        defer first.deinit();
+        const a = try runWith(&first);
+        var again = explore.Tape.branch(testing.allocator, &first, first.position(), seed +% 0x9999, null);
+        defer again.deinit();
+        const b = try runWith(&again);
+        try testing.expectEqual(a, b);
+        try testing.expect(!again.drifted);
+        try testing.expectEqualSlices(u8, first.bytes.items, again.bytes.items);
+        try testing.expectEqual(first.choices.items.len, again.choices.items.len);
+    }
 }

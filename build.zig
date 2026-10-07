@@ -49,6 +49,8 @@ pub fn build(b: *std.Build) void {
     const sdk = b.dependency("zig_coverage_sdk", .{});
     const coverage = sdk.module("coverage");
     coverage.red_zone = false;
+    // The seed explorer (zig-coverage-sdk's explore.zig): simulators only.
+    const explore = sdk.module("explore");
     const coverage_catalog = @import("zig_coverage_sdk").addCatalog(b, sdk.artifact("coverage-scan"), coverage, b.path("src"), &.{ "tcp.zig", "tcp_sim.zig", "fat16.zig", "fat_sim.zig", "page_sim.zig", "pure_sim.zig", "ready_sim.zig", "durable_sim.zig", "durable.zig", "gpt.zig", "floor_sim.zig", "page_cache.zig", "log_ring.zig", "kept_log.zig", "proto.zig", "arp.zig", "request_heap.zig", "store_sim.zig", "pvh.zig", "restart.zig", "pages.zig", "rtc.zig", "pit.zig", "admin_reset.zig", "rng.zig", "ready.zig" });
     const with_coverage = [_]std.Build.Module.Import{
         .{ .name = "coverage", .module = coverage },
@@ -260,6 +262,7 @@ pub fn build(b: *std.Build) void {
                 .{ .name = "kernel_partition", .module = kernel_partition },
                 .{ .name = "coverage", .module = coverage },
                 .{ .name = "coverage_catalog", .module = coverage_catalog },
+                .{ .name = "explore", .module = explore },
             },
         }) });
         test_step.dependOn(&b.addRunArtifact(unit).step);
@@ -303,6 +306,7 @@ pub fn build(b: *std.Build) void {
                 .{ .name = "tcp_properties_options", .module = props_opts.createModule() },
                 .{ .name = "coverage", .module = coverage },
                 .{ .name = "coverage_catalog", .module = coverage_catalog },
+                .{ .name = "explore", .module = explore },
             },
         }),
     });
