@@ -1413,7 +1413,20 @@ const reserved_for_requests = 64;
 
 fn readConfig(io: Io, alloc: std.mem.Allocator) Config {
     var conf = Config{};
-    const text = Io.Dir.cwd().readFileAlloc(io, config_path, alloc, .limited(4096)) catch return conf;
+    // **A MISSING FILE IS THE DEFAULTS; ANY OTHER FAILURE STOPS THE BOOT**
+    // (metal-vmm QUEUE B21). A refused read once meant "serve with the
+    // defaults", which on a droplet is serving without the settings it was
+    // given: the volume it must serve, the proxy it must trust. As
+    // angry-gopher's files.zig has it, an error is not an empty file.
+    const text = Io.Dir.cwd().readFileAlloc(io, config_path, alloc, .limited(4096)) catch |e| switch (e) {
+        error.FileNotFound => return conf,
+        else => {
+            serial.put("  " ++ config_path ++ ": ");
+            serial.put(@errorName(e));
+            serial.put("\n");
+            serial.fail(config_path ++ " is there but could not be read; serving without it would ignore what it says");
+        },
+    };
     // No setting keeps the text (numbers, and a card's name), so nothing needs
     // it once it is read. It
     // used to stay in the long-lived heap, where a longer file meant a bigger
