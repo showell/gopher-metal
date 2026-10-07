@@ -268,10 +268,44 @@ pub fn build(b: *std.Build) void {
         test_step.dependOn(&b.addRunArtifact(unit).step);
     }
 
+    // **THE STORE PRODUCTION RUNS, JUDGED** (src/store_judge.zig):
+    // angry-gopher's store.zig over Linux and, as port.sh made it, over this
+    // repo's io.zig, against the model. Needs the sibling angry-gopher
+    // checkout and a port, so it is a step of its own that gates.sh runs,
+    // not part of `test`.
+    const ag_src = b.option([]const u8, "angry-gopher-src", "angry-gopher's zig-server/src") orelse "../angry-gopher/zig-server/src";
+    const port_dir = b.option([]const u8, "port", "port.sh's output") orelse b.fmt("{s}/build/gopher-metal/port", .{b.graph.env_map.get("HOME") orelse "."});
+    const judge_world = b.createModule(.{
+        .root_source_file = b.path("src/judge_world.zig"),
+        .target = b.graph.host,
+        .imports = &.{
+            .{ .name = "kernel_partition", .module = kernel_partition },
+            .{ .name = "coverage", .module = coverage },
+            .{ .name = "coverage_catalog", .module = coverage_catalog },
+        },
+    });
+    const store_judge = b.addTest(.{
+        .name = "store-judge",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/store_judge.zig"),
+            .target = b.graph.host,
+            .imports = &.{
+                .{ .name = "judge_world", .module = judge_world },
+                .{ .name = "ag_store_linux", .module = b.createModule(.{ .root_source_file = .{ .cwd_relative = b.pathFromRoot(b.fmt("{s}/store.zig", .{ag_src})) } }) },
+                .{ .name = "ag_store_metal", .module = b.createModule(.{
+                    .root_source_file = .{ .cwd_relative = b.fmt("{s}/store.zig", .{port_dir}) },
+                    .imports = &.{.{ .name = "metal", .module = judge_world }},
+                }) },
+            },
+        }),
+    });
+    b.step("store-judge", "angry-gopher's store on Linux and on metal against the model (needs ../angry-gopher and a port)").dependOn(&b.addRunArtifact(store_judge).step);
+
     // **THE SEED EXPLORER AGAINST BLIND SEEDS** (src/explore_bench.zig): a
     // tool, not a gate (Steve, 2026-10-07). ReleaseSafe by default: it is
     // nearly all running.
     const explore_opts = b.addOptions();
+    explore_opts.addOption([]const u8, "sim", b.option([]const u8, "explore-sim", "which simulator `explore` runs: fat or store") orelse "fat");
     explore_opts.addOption([]const u8, "budgets", b.option([]const u8, "explore-budgets", "comma-separated run budgets `explore` compares at") orelse "20,100");
     explore_opts.addOption(u64, "seed", b.option(u64, "explore-seed", "the explorer's own seed") orelse 1);
     explore_opts.addOption(f32, "blind", b.option(f32, "explore-blind", "the share of the explorer's runs that are blind") orelse 0.2);
