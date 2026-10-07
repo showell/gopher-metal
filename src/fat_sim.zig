@@ -32,6 +32,7 @@ const std = @import("std");
 const fat16 = @import("fat16.zig");
 const test_disk = @import("test_disk.zig");
 const props = @import("coverage");
+const explore = @import("explore");
 const testing = std.testing;
 
 comptime {
@@ -76,12 +77,14 @@ const Scenario = struct {
     check_every: usize,
 
     fn choose(rng: std.Random) Scenario {
-        const fat32 = rng.uintLessThan(u8, 4) == 0;
+        // Named choices (zig-coverage-sdk's explore.pick), drawn exactly as
+        // `uintLessThan(u8, 4)` was, so every seed's run is the run it was.
+        const fat32 = explore.pick(rng, "fat_sim: the volume is FAT32", .{ .yes = 1, .no = 3 }) == .yes;
         const shape = if (fat32) test_disk.small32 else test_disk.small;
         const volume_bytes = @as(usize, shape.sectors) * test_disk.sector;
-        const mode = rng.uintLessThan(u8, 4);
-        const filling = mode == 1;
-        const crowded = mode == 2;
+        const mode = explore.pick(rng, "fat_sim: the run's mode", .{ .plain = 1, .filling = 1, .crowded = 1, .also_plain = 1 });
+        const filling = mode == .filling;
+        const crowded = mode == .crowded;
         return .{
             .shape = shape,
             .ops = if (crowded) rng.intRangeAtMost(usize, 800, 1200) else rng.intRangeAtMost(usize, 20, 120),
@@ -186,6 +189,10 @@ const Sim = struct {
     /// between the operations from dice of their own, so a seed's
     /// operations are the ones it always had.
     probes: ?std.Random.DefaultPrng = null,
+    /// **A RUN UNDER A TAPE** (`runWith`): its draws come from `drawn`, not
+    /// from `prng`, and its probes too when `probes_drawn` says so.
+    drawn: ?std.Random = null,
+    probes_drawn: bool = false,
     /// A probe made the disk fail, which ends the run.
     failed_disk: bool = false,
     /// The last probe, for the report.
@@ -193,7 +200,19 @@ const Sim = struct {
 
     fn init(seed: u64, cached: bool) !Sim {
         var prng = std.Random.DefaultPrng.init(seed);
+        // The scenario first: the run's draws go on from where it left the PRNG.
         const sc = Scenario.choose(prng.random());
+        return initFrom(seed, prng, sc, cached);
+    }
+
+    /// A run whose every draw comes from `r` (a tape's, under `runWith`).
+    fn initWith(seed: u64, r: std.Random, cached: bool) !Sim {
+        var s = try initFrom(seed, .init(seed), Scenario.choose(r), cached);
+        s.drawn = r;
+        return s;
+    }
+
+    fn initFrom(seed: u64, prng: std.Random.DefaultPrng, sc: Scenario, cached: bool) !Sim {
         return .{
             .seed = seed,
             .prng = prng,
@@ -260,12 +279,12 @@ const Sim = struct {
     }
 
     fn run(s: *Sim) !void {
-        s.rng = s.prng.random();
+        s.rng = s.drawn orelse s.prng.random();
         while (s.step < s.sc.ops and s.broken == null) : (s.step += 1) {
             const full = s.full;
             try s.turn();
-            if (s.probes) |*p| if (s.broken == null and p.random().uintLessThan(u8, 3) == 0) {
-                try s.probe(p.random());
+            if (s.probeRandom()) |p| if (s.broken == null and p.uintLessThan(u8, 3) == 0) {
+                try s.probe(p);
                 if (s.failed_disk) break;
             };
             // After an operation that found no room, at once, but only for the
@@ -281,22 +300,33 @@ const Sim = struct {
                 s.step, @tagName(s.last),                                          s.last_said,
                 what,
             });
-            if (s.probes != null) std.debug.print("  the last probe: {s}\n", .{s.last_probe});
+            if (s.probes != null or s.probes_drawn) std.debug.print("  the last probe: {s}\n", .{s.last_probe});
             return error.SimulationFailed;
         }
     }
 
+    fn probeRandom(s: *Sim) ?std.Random {
+        if (s.probes_drawn) return s.drawn;
+        return if (s.probes) |*p| p.random() else null;
+    }
+
     fn turn(s: *Sim) !void {
-        const roll = s.rng.uintLessThan(u8, 100);
-        // Crowding a directory is mostly making names in it.
-        const op: Op = if (s.sc.crowded and roll < 50) .write else switch (roll) {
-            0...29 => .write,
-            30...54 => .append,
-            55...64 => .remove,
-            65...74 => .rename,
-            75...82 => .mkdir,
-            83...87 => .remove_tree,
-            else => .remount,
+        // A named choice outside a crowd (explore.pick, drawn as
+        // `uintLessThan(u8, 100)` was); a crowd keeps the raw roll, since
+        // crowding a directory is mostly making names in it.
+        const op: Op = if (!s.sc.crowded) switch (explore.pick(s.rng, "fat_sim: the operation", .{ .write = 30, .append = 25, .remove = 10, .rename = 10, .mkdir = 8, .remove_tree = 5, .remount = 12 })) {
+            inline else => |o| @field(Op, @tagName(o)),
+        } else blk: {
+            const roll = s.rng.uintLessThan(u8, 100);
+            break :blk if (roll < 50) .write else switch (roll) {
+                0...29 => .write,
+                30...54 => .append,
+                55...64 => .remove,
+                65...74 => .rename,
+                75...82 => .mkdir,
+                83...87 => .remove_tree,
+                else => .remount,
+            };
         };
         const vol = &s.disk.vol;
         s.last = op;
@@ -406,8 +436,11 @@ const Sim = struct {
         const vol = &s.disk.vol;
         const E = fat16.Error;
         const Kind = enum { boot, unreadable, bad_name, onto_dir, overwrite_dir, hole, through_open, through_write, through_remove, rename_across, rename_dir, rename_onto_dir, chain_out, chain_loop, failing };
-        var kind = std.enums.values(Kind)[r.uintLessThan(usize, std.enums.values(Kind).len - 1)];
-        if (s.step + 1 == s.sc.ops and r.uintLessThan(u8, 2) == 0) kind = .failing;
+        // Named choices (explore.pickAs, .pick, .flag), each drawn exactly as
+        // the call it replaced, so a probe seed's run is the run it was.
+        const named = explore.pickAs(r, usize, "fat_sim: the probe", .{ .boot = 1, .unreadable = 1, .bad_name = 1, .onto_dir = 1, .overwrite_dir = 1, .hole = 1, .through_open = 1, .through_write = 1, .through_remove = 1, .rename_across = 1, .rename_dir = 1, .rename_onto_dir = 1, .chain_out = 1, .chain_loop = 1 });
+        var kind: Kind = std.meta.stringToEnum(Kind, @tagName(named)).?;
+        if (s.step + 1 == s.sc.ops and explore.pick(r, "fat_sim: the last probe fails the disk", .{ .yes = 1, .no = 1 }) == .yes) kind = .failing;
         var buf: [300]u8 = undefined;
         var buf2: [300]u8 = undefined;
         s.last_probe = @tagName(kind);
@@ -486,21 +519,21 @@ const Sim = struct {
             .chain_out, .chain_loop => try s.probeChain(r, kind == .chain_loop),
             .failing => {
                 // The disk stops answering a few requests into an operation.
-                s.disk.blk.fail_after = s.disk.blk.requests + r.uintLessThan(u64, if (r.boolean()) 12 else 80);
+                s.disk.blk.fail_after = s.disk.blk.requests + r.uintLessThan(u64, if (explore.flag(r, "fat_sim: the disk fails within 12 requests, not 80")) 12 else 80);
                 s.failed_disk = true;
                 const k = r.uintLessThan(usize, dirs.len + 1);
                 const path = join(if (k == dirs.len) "" else dirs[k], names[r.uintLessThan(usize, names.len)], &buf);
                 var failed: ?anyerror = null;
-                const appended = if (r.boolean()) s.someFile(r) else null;
+                const appended = if (explore.flag(r, "fat_sim: the failing operation is an append")) s.someFile(r) else null;
                 if (appended) |f| {
                     // An append, which writes its runs of sectors whole: the
                     // disk stops at one of its writes rather than a request.
                     s.disk.blk.fail_after = null;
-                    s.disk.blk.fail_after_writes = s.disk.blk.writes + r.uintLessThan(u64, if (r.boolean()) 8 else 600);
+                    s.disk.blk.fail_after_writes = s.disk.blk.writes + r.uintLessThan(u64, if (explore.flag(r, "fat_sim: the append fails within 8 writes, not 600")) 8 else 600);
                     vol.writeInto(f.path, @intCast(f.bytes.len), s.content(@max(1, @min(s.sc.max_bytes, r.uintLessThan(usize, 200_000))))) catch |e| {
                         failed = e;
                     };
-                } else if (r.boolean()) {
+                } else if (explore.flag(r, "fat_sim: the failing operation is a write, not a read")) {
                     vol.writeFile(path, s.content(@min(s.sc.max_bytes, r.uintLessThan(usize, 200_000)))) catch |e| {
                         failed = e;
                     };
@@ -793,6 +826,54 @@ pub fn runProbeSeed(seed: u64) !void {
     }
 }
 
+/// **ONE RUN UNDER A TAPE** (the seed explorer, zig-coverage-sdk's
+/// explore.zig): every draw, the probes' too, comes from `tape`, and whether
+/// to probe is itself a named choice. As `runSeed`, the story runs twice,
+/// with the FAT on the disk and with it held in memory; the second run
+/// replays the first's draws (`Tape.twin`) and must draw exactly as many and
+/// leave the same volume. Answers the volume's hash, for the replay test.
+pub fn runWith(tape: *explore.Tape) !u64 {
+    const r = tape.random();
+    const probed = explore.pick(r, "fat_sim: probes between the operations", .{ .no = 1, .yes = 1 }) == .yes;
+    const start = tape.position();
+    var hashes: [2]u64 = undefined;
+    var failed = false;
+    var full: usize = 0;
+    {
+        var s = try Sim.initWith(tape.seed, r, false);
+        s.probes_drawn = probed;
+        defer s.deinit();
+        try s.run();
+        hashes[0] = std.hash.Wyhash.hash(0, s.disk.bytes);
+        failed = s.failed_disk;
+        full = s.full;
+    }
+    const end = tape.position();
+    var twin = explore.Tape.twin(testing.allocator, tape, start, end, tape.seed ^ 0x7477_696e); // "twin"
+    defer twin.deinit();
+    {
+        var s = try Sim.initWith(tape.seed, twin.random(), true);
+        s.probes_drawn = probed;
+        defer s.deinit();
+        try s.run();
+        hashes[1] = std.hash.Wyhash.hash(0, s.disk.bytes);
+        failed = failed or s.failed_disk;
+    }
+    props.sometimes(@src(), full > 0, "fat_sim: some run under a tape finds the volume full", null);
+    // A probe that failed the disk ends a run where it struck, and the FAT
+    // held in memory meets it later or not at all (`runProbeSeed` excuses
+    // the same): only two runs the disk never failed must draw alike.
+    if (!failed and (twin.drifted or twin.position() != end - start)) {
+        std.debug.print("fat_sim tape {d}: the run with the FAT in memory drew {d} times, the run with it on the disk {d}\n", .{ tape.seed, twin.position(), end - start });
+        return error.SimulationFailed;
+    }
+    if (!failed and hashes[0] != hashes[1]) {
+        std.debug.print("fat_sim tape {d}: the FAT on the disk and the FAT held in memory left different volumes\n", .{tape.seed});
+        return error.SimulationFailed;
+    }
+    return hashes[0];
+}
+
 pub fn runSeed(seed: u64) !void {
     var hashes: [2]u64 = undefined;
     var full: [2]usize = undefined;
@@ -860,4 +941,19 @@ test "the same, with probes of what the volume must refuse, a handful of seeds" 
 
 test "FAT16 and FAT32 against a random workload, a handful of seeds, both FAT paths" {
     for (seeds) |seed| try runSeed(seed);
+}
+
+test "a run under a tape replays exactly: the same draws, the same volume" {
+    for (1..41) |seed| {
+        var first = explore.Tape.init(testing.allocator, seed);
+        defer first.deinit();
+        const a = try runWith(&first);
+        var again = explore.Tape.branch(testing.allocator, &first, first.position(), seed +% 0x9999, null);
+        defer again.deinit();
+        const b = try runWith(&again);
+        try testing.expectEqual(a, b);
+        try testing.expect(!again.drifted);
+        try testing.expectEqualSlices(u8, first.bytes.items, again.bytes.items);
+        try testing.expectEqual(first.choices.items.len, again.choices.items.len);
+    }
 }

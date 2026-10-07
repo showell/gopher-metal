@@ -16,12 +16,16 @@ tcp: three duplicate ACKs resend at once
 tcp: a backed-off RTO stays under the cap
 tcp: a measured RTO is within its bounds
 tcp: a round trip comes in faster than the estimate
-tcp: an exact reset closes a connection
-tcp: an inexact reset in the window draws a challenge ACK
+# off the metal floor, 2026-10-07 (metal-vmm QUEUE 102): reached only by timing luck
+# on the coverage kernel; floor-sim.txt holds it. tcp: an exact reset closes a connection
+# off the metal floor, 2026-10-07 (metal-vmm QUEUE 102): reached only by timing luck
+# on the coverage kernel; floor-sim.txt holds it. tcp: an inexact reset in the window draws a challenge ACK
 tcp: a silent peer is given up on
 tcp: backoff reaches the RTO cap
-tcp: a shut window is probed
+# off the metal floor, 2026-10-07 (metal-vmm QUEUE 102): reached only by timing luck
+# on the coverage kernel; floor-sim.txt holds it. tcp: a shut window is probed
 tcp: a damaged segment is dropped
 tcp: a stuck half-open connection gives way to a new SYN
-tcp: a segment for no connection is refused
+# off the metal floor, 2026-10-07 (metal-vmm QUEUE 102): reached only by timing luck
+# on the coverage kernel; floor-sim.txt holds it. tcp: a segment for no connection is refused
 tcp: a segment arrives ahead of the next expected byte

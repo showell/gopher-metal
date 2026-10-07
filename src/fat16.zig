@@ -287,6 +287,76 @@ pub const Health = struct {
     }
 };
 
+/// **DIRECTORY SECTORS, HELD** (`Volume.dirs`): direct-mapped, one sector a
+/// slot, a slot's key the sector's LBA plus one (0: empty). A sector put
+/// where another is held replaces it.
+pub const DirCache = struct {
+    keys: []u32,
+    data: []u8,
+    hits: u64 = 0,
+    misses: u64 = 0,
+
+    fn slot(c: *const DirCache, lba: u32) usize {
+        return @as(usize, (lba *% 2654435761) >> 7) % c.keys.len;
+    }
+
+    fn at(c: *DirCache, i: usize) *[sector_size]u8 {
+        return c.data[i * sector_size ..][0..sector_size];
+    }
+
+    /// The sector at `lba`, if held.
+    pub fn get(c: *DirCache, lba: u32) ?*[sector_size]u8 {
+        const i = c.slot(lba);
+        if (c.keys[i] == lba +% 1) {
+            c.hits += 1;
+            return c.at(i);
+        }
+        c.misses += 1;
+        return null;
+    }
+
+    fn put(c: *DirCache, lba: u32, bytes: *const [sector_size]u8) void {
+        const i = c.slot(lba);
+        c.keys[i] = lba +% 1;
+        @memcpy(c.at(i), bytes);
+    }
+
+    /// Copies `n` sectors from `lba` into `out` if every one is held.
+    fn copyOut(c: *DirCache, lba: u32, n: u32, out: []u8) bool {
+        var k: u32 = 0;
+        while (k < n) : (k += 1) {
+            const i = c.slot(lba + k);
+            if (c.keys[i] != lba + k +% 1) {
+                c.misses += 1;
+                return false;
+            }
+        }
+        k = 0;
+        while (k < n) : (k += 1) @memcpy(out[k * sector_size ..][0..sector_size], c.at(c.slot(lba + k)));
+        c.hits += 1;
+        return true;
+    }
+
+    /// `n` sectors from `lba` were written from `from`: each one held is
+    /// what was written now.
+    fn wrote(c: *DirCache, lba: u32, n: u32, from: [*]const u8) void {
+        var k: u32 = 0;
+        while (k < n) : (k += 1) {
+            const i = c.slot(lba + k);
+            if (c.keys[i] == lba + k +% 1) @memcpy(c.at(i), from[k * sector_size ..][0..sector_size]);
+        }
+    }
+
+    /// `n` sectors from `lba` are no longer known: a write to them failed.
+    fn drop(c: *DirCache, lba: u32, n: u32) void {
+        var k: u32 = 0;
+        while (k < n) : (k += 1) {
+            const i = c.slot(lba + k);
+            if (c.keys[i] == lba + k +% 1) c.keys[i] = 0;
+        }
+    }
+};
+
 pub const Volume = struct {
     blk: *virtio.Block,
 
@@ -375,6 +445,29 @@ pub const Volume = struct {
     /// has read cannot go stale under it. A listing the application holds
     /// open keeps its sector of its own (`Lister`).
     dir_burst: ?[]u8 = null,
+
+    /// **DIRECTORY SECTORS HELD IN MEMORY** (`cacheDirs`), once the host has
+    /// given it memory. A chat message touches five or six files, each
+    /// found folder by folder; with only the burst, a send cost about 400
+    /// sector reads, and a droplet's volume answered each in 3 to 5 ms
+    /// (2026-10-07: sends of a second, Recent of three). Held here, a lookup
+    /// that has been made before reads memory.
+    ///
+    /// **WHAT IT HOLDS IS ALWAYS THE DISK'S**: a directory read puts its
+    /// sectors here, every sector read looks here first, and every write
+    /// that succeeds updates the copy of each sector it wrote, so a sector
+    /// held is the sector on the disk whoever wrote it (a directory's
+    /// cluster freed and given to a file included). A write that fails drops
+    /// its sectors, since what the disk holds then is not known.
+    dirs: ?DirCache = null,
+
+    /// Holds directory sectors in `keys.len` slots of `data` from now on
+    /// (`dirs`). `data` is `keys.len` sectors.
+    pub fn cacheDirs(self: *Volume, keys: []u32, data: []u8) void {
+        std.debug.assert(data.len == keys.len * sector_size and keys.len > 0);
+        @memset(keys, 0);
+        self.dirs = .{ .keys = keys, .data = data };
+    }
 
     /// How much memory `cacheFat` needs: one copy of the FAT.
     pub fn fatBytes(self: *const Volume) usize {
@@ -650,6 +743,10 @@ pub const Volume = struct {
     }
 
     fn readSector(self: *Volume, lba: u32, into: *[sector_size]u8) Error!void {
+        if (self.dirs) |*c| if (c.get(lba)) |held| {
+            @memcpy(into, held);
+            return;
+        };
         if (self.blk.read(self.start_lba + lba, @intFromPtr(into)) != virtio.blk_s_ok) {
             props.reachable(@src(), "fat: a sector read fails", null);
             return Error.ReadFailed;
@@ -820,15 +917,29 @@ pub const Volume = struct {
         burst_lba: u32 = 0,
         burst_n: u32 = 0,
 
-        /// Reads the walk's sector, unless the burst already holds it.
+        /// Reads the walk's sector, unless the burst already holds it; the
+        /// volume's directory cache answers what it holds, and keeps what is
+        /// read (`Volume.dirs`).
         fn load(self: *Lister) Error!void {
+            const vol = self.walk.vol;
             const lba = self.walk.lba;
-            const b = self.burst orelse return self.walk.vol.readSector(lba, &self.sector);
+            const b = self.burst orelse {
+                try vol.readSector(lba, &self.sector);
+                if (vol.dirs) |*c| c.put(lba, &self.sector);
+                return;
+            };
             if (lba >= self.burst_lba and lba < self.burst_lba + self.burst_n) return;
             const n = @min(@as(u32, @intCast(b.len / sector_size)), self.walk.sectorsLeftInRun());
-            try self.walk.vol.readSectors(lba, n, b.ptr);
             self.burst_lba = lba;
             self.burst_n = n;
+            if (vol.dirs) |*c| if (c.copyOut(lba, n, b)) return;
+            self.burst_n = 0;
+            try vol.readSectors(lba, n, b.ptr);
+            self.burst_n = n;
+            if (vol.dirs) |*c| {
+                var k: u32 = 0;
+                while (k < n) : (k += 1) c.put(lba + k, b[k * sector_size ..][0..sector_size]);
+            }
         }
 
         /// The walk's sector, as `load` left it.
@@ -948,9 +1059,11 @@ pub const Volume = struct {
 
     fn writeSector(self: *Volume, lba: u32, from: *[sector_size]u8) Error!void {
         if (self.blk.write(self.start_lba + lba, @intFromPtr(from)) != virtio.blk_s_ok) {
+            if (self.dirs) |*c| c.drop(lba, 1);
             props.reachable(@src(), "fat: a sector write fails", null);
             return Error.WriteFailed;
         }
+        if (self.dirs) |*c| c.wrote(lba, 1, from);
     }
 
     /// `count` whole sectors straight from `from`, as one request. `from` is
@@ -966,9 +1079,11 @@ pub const Volume = struct {
             return Error.TooBig;
         }
         if (self.blk.writeMany(self.start_lba + lba, @intFromPtr(from), count) != virtio.blk_s_ok) {
+            if (self.dirs) |*c| c.drop(lba, count);
             props.reachable(@src(), "fat: a run of sectors fails to write", null);
             return Error.WriteFailed;
         }
+        if (self.dirs) |*c| c.wrote(lba, count, from);
     }
 
     /// How many bytes the data region holds, and how many of them no file
@@ -2021,15 +2136,25 @@ pub const Volume = struct {
         try self.writeEntry(r.run, if (needsLongName(b.name)) b.name else b.name[0..0], r.short, 0x20, src.first_cluster, src.size);
     }
 
-    /// Deletes one file, or one directory that is already empty. removeEntry
-    /// does the real work: it frees the cluster chain and tombstones both the
-    /// short entry and the long-name run in front of it.
+    /// Deletes one file. removeEntry does the real work: it frees the
+    /// cluster chain and tombstones both the short entry and the long-name
+    /// run in front of it.
+    ///
+    /// **A DIRECTORY IS REFUSED** (`IsDirectory`), empty or not, as Linux's
+    /// unlink refuses one (EISDIR). It once took a directory's entry like a
+    /// file's and left everything under it allocated and reachable from
+    /// nothing, a leak `check` reported (metal-vmm QUEUE B22, found by the
+    /// cloud session's item 77). `removeTree` is how a directory goes.
     pub fn remove(self: *Volume, path: []const u8) Error!void {
         const p = try self.parentOf(path);
-        _ = (try self.find(p.cluster, p.name)) orelse {
+        const e = (try self.find(p.cluster, p.name)) orelse {
             props.reachable(@src(), "fat: a remove of a file that is not there is refused", null);
             return Error.NotFound;
         };
+        if (e.isDirectory()) {
+            props.reachable(@src(), "fat: a remove of a directory is refused", null);
+            return Error.IsDirectory;
+        }
         try self.removeEntry(p.cluster, p.name);
     }
 
@@ -2069,7 +2194,10 @@ pub const Volume = struct {
         };
         if (!entry.isDirectory()) return self.remove(path);
         try self.removeTreeAt(entry.first_cluster, 0);
-        try self.remove(path);
+        // The directory itself, emptied: by its entry, as removeTreeAt takes
+        // each one under it (`remove` refuses a directory).
+        const p = try self.parentOf(path);
+        try self.removeEntry(p.cluster, p.name);
     }
 
     fn removeTreeAt(self: *Volume, dir_cluster: Cluster, depth: u32) Error!void {

@@ -114,7 +114,7 @@ pub const FatStore = struct {
         var jb: [path_bytes]u8 = undefined;
         const p = join(try store.checkPath(path, &pb, false), "", &jb);
         const e = (try f.entryAt(p)) orelse return Error.NotFound;
-        // fat16.remove takes a directory's entry and leaves its tree: the
+        // fat16.remove refuses a directory (B22); a directory goes by removeTree.
         // Store removes files only.
         if (e.isDirectory()) return Error.IsDirectory;
         f.vol.remove(p) catch |err| return map(err, false);

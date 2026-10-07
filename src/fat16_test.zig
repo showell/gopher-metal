@@ -1394,6 +1394,9 @@ test "a lookup reads a directory in bursts and stops at the name, finding what t
     const shape = Shape{ .sectors = 65536, .sectors_per_cluster = 8, .suffix = "-burst" };
     const d = try Disk.make("dir-burst", shape, true);
     defer d.deinit();
+    // The bursts alone: the directory cache (`dirs`) would answer the
+    // lookups after the first, and has a test of its own below.
+    d.vol.dirs = null;
     const dir = try d.vol.makePath("chat/conversation/sessions");
     // Long names, three slots each: two clusters and part of a third.
     var name: [40]u8 = undefined;
@@ -1429,14 +1432,54 @@ test "a lookup reads a directory in bursts and stops at the name, finding what t
     d.vol.dir_burst = &d.dir_burst;
 }
 
-// **A FINDING, NOT YET A RULING** (metal-vmm QUEUE.md, Questions, item 77):
-// `remove` takes a directory's entry as it takes a file's, and leaves the
+test "folders held in memory: a lookup made before reads no sector, and a write keeps what is held the disk's" {
+    const shape = Shape{ .sectors = 65536, .sectors_per_cluster = 8, .suffix = "-dirs" };
+    const d = try Disk.make("dir-cache", shape, true);
+    defer d.deinit();
+    var keys: [4096]u32 = undefined;
+    var data: [4096 * fat16.sector_size]u8 = undefined;
+    d.vol.cacheDirs(&keys, &data);
+    defer d.vol.cacheDirs(&d.dir_keys, &d.dir_data);
+    const dir = try d.vol.makePath("chat/conversation/sessions");
+    var name: [40]u8 = undefined;
+    for (0..60) |k| {
+        const n = try std.fmt.bufPrint(&name, "a-session-with-a-long-name-{d:0>4}", .{k});
+        try d.vol.writeFileIn(dir, n, n);
+    }
+    // The first round reads the folders; the second finds them in memory.
+    for (0..2) |round| {
+        const before = d.blk.requests;
+        for (0..60) |k| {
+            const n = try std.fmt.bufPrint(&name, "a-session-with-a-long-name-{d:0>4}", .{k});
+            const e = (try d.vol.find(dir, n)).?;
+            try testing.expectEqualStrings(n, e.text());
+        }
+        if (round == 1) try testing.expectEqual(@as(u64, 0), d.blk.requests - before);
+    }
+    // A file added, one removed, one renamed: what the folder holds now is
+    // found from memory as the disk has it.
+    try d.vol.writeFileIn(dir, "a new one", "new");
+    try d.vol.remove("chat/conversation/sessions/a-session-with-a-long-name-0007");
+    try d.vol.rename("chat/conversation/sessions/a-session-with-a-long-name-0009", "chat/conversation/sessions/renamed");
+    try testing.expect((try d.vol.find(dir, "a new one")) != null);
+    try testing.expect((try d.vol.find(dir, "a-session-with-a-long-name-0007")) == null);
+    try testing.expect((try d.vol.find(dir, "a-session-with-a-long-name-0009")) == null);
+    try testing.expect((try d.vol.find(dir, "renamed")) != null);
+    // And the uncached walk agrees, entry for entry.
+    const held = d.vol.dirs;
+    d.vol.dirs = null;
+    try testing.expect((try d.vol.find(dir, "a new one")) != null);
+    try testing.expect((try d.vol.find(dir, "a-session-with-a-long-name-0007")) == null);
+    try testing.expect((try d.vol.find(dir, "renamed")) != null);
+    d.vol.dirs = held;
+}
+
+// `remove` once took a directory's entry as it takes a file's, and left the
 // directory's clusters and everything under it allocated, reachable from
-// nothing: a leak `check` reports. Linux's unlink answers EISDIR. Reached
-// through io.zig's `deleteFile` only if the application deletes a directory
-// by that call. Red until the box rules; the Store refuses it either way.
-test "remove refuses a directory, and leaves the volume clean (red until the ruling)" {
-    if (true) return error.SkipZigTest;
+// nothing (the cloud session's finding, item 77). It refuses one now, as
+// Linux's unlink does (EISDIR; metal-vmm QUEUE B22), and the volume the
+// refusal leaves checks clean on the way out (test_disk's deinit).
+test "remove refuses a directory, and leaves the volume clean" {
     const d = try test_disk.Disk.make("remove-dir", test_disk.small, false);
     defer d.deinit();
     try d.vol.writeFile("data/dir/inside.txt", "under the directory");

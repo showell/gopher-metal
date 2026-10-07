@@ -137,6 +137,11 @@ var tcp_out: [net.buffer_size]u8 align(16) = undefined;
 /// about 20 MB for all of them.
 const max_connections = 256;
 const rx_bytes = 16 * 1024;
+comptime {
+    // A head the application allows must fit a connection's receive buffer,
+    // or ready.zig would wait for one that cannot arrive.
+    std.debug.assert(rx_bytes >= router.request_limits.head_bytes);
+}
 /// A send queue holds what the peer has not yet acknowledged. A response
 /// larger than this waits for acknowledgements as it goes; a held stream whose
 /// next frames do not fit is a client that is not keeping up.
@@ -216,7 +221,9 @@ var busiest: usize = 0;
 /// When this boot's wall clock started, and the TSC's measured rate.
 var booted_unix: i64 = 0;
 var tsc_hz_seen: u64 = 0;
-var read_buf: [16 * 1024]u8 align(16) = undefined;
+/// The request head's buffer: angry-gopher's limits.zig sizes it, as it
+/// sizes Linux's, so the two hosts answer 431 at the same byte.
+var read_buf: [router.request_limits.head_bytes]u8 align(16) = undefined;
 var write_buf: [64 * 1024]u8 align(16) = undefined;
 
 /// Each request's heap, reset after the response: the equivalent of the arena
@@ -1188,6 +1195,19 @@ fn mountFat(blk: *virtio.Block, scratch: *[fat16.sector_size]u8, what: []const u
     const burst_sectors = @min(vol.sectors_per_cluster, virtio.Block.max_sectors);
     vol.dir_burst = pages.allocator.alloc(u8, burst_sectors * fat16.sector_size) catch
         serial.fail("no memory to read directories in bursts");
+    // Directory sectors, once read, are held (fat16's `dirs`): 8 MiB, sixteen
+    // thousand sectors, so a send or Recent finds its folders in memory.
+    // A speed-up, so memory it cannot have means serving without it, never
+    // a boot that stops.
+    const dir_slots = 16384;
+    if (pages.allocator.alloc(u32, dir_slots)) |dir_keys| {
+        if (pages.allocator.alloc(u8, dir_slots * fat16.sector_size)) |dir_data| {
+            vol.cacheDirs(dir_keys, dir_data);
+        } else |_| {
+            pages.allocator.free(dir_keys);
+            serial.put("  no memory to hold folders: they are read from the disk\n");
+        }
+    } else |_| serial.put("  no memory to hold folders: they are read from the disk\n");
     // A machine stopped between the first FAT copy's write and the second's
     // leaves them apart; the first is the FAT (fat16.cacheFat).
     if (repaired > 0) {
@@ -1208,14 +1228,6 @@ fn mountFat(blk: *virtio.Block, scratch: *[fat16.sector_size]u8, what: []const u
     return vol;
 }
 
-/// **THE DISK CHECK, AT EVERY MOUNT** (`fat16.Volume.check`, QUEUE.md item
-/// 13): one summary line per volume, then each finding. It reports and never
-/// halts, and it writes nothing: a damaged volume still boots and serves, and
-/// the log says what to look at with fsck.vfat on a copy. The judges read the
-/// summary line on every boot (probe/judge_gopher.py, `disk_check_lines`).
-///
-/// It runs after `cacheFat`, so following a chain is a memory read; the walk
-/// reads each directory sector once.
 /// **B15: THE VOLUMES, CHECKED AFTER EVERY REQUEST**, in a `-Dcoverage` build
 /// only: the whole check, as `diskCheck` runs it at boot, with no line
 /// printed. The kernel cannot tell when a run ends (metal-vmm ends it from
@@ -1237,6 +1249,14 @@ fn checkVolumes() void {
     }
 }
 
+/// **THE DISK CHECK, AT EVERY MOUNT** (`fat16.Volume.check`, QUEUE.md item
+/// 13): one summary line per volume, then each finding. It reports and never
+/// halts, and it writes nothing: a damaged volume still boots and serves, and
+/// the log says what to look at with fsck.vfat on a copy. The judges read the
+/// summary line on every boot (probe/judge_gopher.py, `disk_check_lines`).
+///
+/// It runs after `cacheFat`, so following a chain is a memory read; the walk
+/// reads each directory sector once.
 fn diskCheck(vol: *fat16.Volume, what: []const u8) void {
     serial.put("  disk check, ");
     serial.put(what);
@@ -1405,7 +1425,20 @@ const reserved_for_requests = 64;
 
 fn readConfig(io: Io, alloc: std.mem.Allocator) Config {
     var conf = Config{};
-    const text = Io.Dir.cwd().readFileAlloc(io, config_path, alloc, .limited(4096)) catch return conf;
+    // **A MISSING FILE IS THE DEFAULTS; ANY OTHER FAILURE STOPS THE BOOT**
+    // (metal-vmm QUEUE B21). A refused read once meant "serve with the
+    // defaults", which on a droplet is serving without the settings it was
+    // given: the volume it must serve, the proxy it must trust. As
+    // angry-gopher's files.zig has it, an error is not an empty file.
+    const text = Io.Dir.cwd().readFileAlloc(io, config_path, alloc, .limited(4096)) catch |e| switch (e) {
+        error.FileNotFound => return conf,
+        else => {
+            serial.put("  " ++ config_path ++ ": ");
+            serial.put(@errorName(e));
+            serial.put("\n");
+            serial.fail(config_path ++ " is there but could not be read; serving without it would ignore what it says");
+        },
+    };
     // No setting keeps the text (numbers, and a card's name), so nothing needs
     // it once it is read. It
     // used to stay in the long-lived heap, where a longer file meant a bigger
@@ -1517,9 +1550,9 @@ fn metalFacts(io: Io, alloc: std.mem.Allocator) anyerror![]const router.host_sta
     try add(&facts, alloc, "memory (pages)", "{d} MB taken now, {d} MB at most, of {d} MB", .{
         p.bytes_taken >> 20, (p.pages_high_water * pages.page_size) >> 20, p.bytes_total >> 20,
     });
-    if (Io.siteVolume()) |v| try addVolume(&facts, alloc, "the boot disk (the site)", "the boot disk's write cache", v);
+    if (Io.siteVolume()) |v| try addVolume(&facts, alloc, "the boot disk (the site)", "the boot disk's write cache", "the boot disk's folders in memory", v);
     if (Io.dataVolume()) |v| {
-        try addVolume(&facts, alloc, "the volume (chat's data)", "the volume's write cache", v);
+        try addVolume(&facts, alloc, "the volume (chat's data)", "the volume's write cache", "the volume's folders in memory", v);
     } else try add(&facts, alloc, "the volume (chat's data)", "none attached: the data is on the boot disk", .{});
     const kept = Io.siteCache();
     try add(&facts, alloc, "site files in memory", "{d} kept, {d} KB of {d} KB; {d} reads answered from them", .{
@@ -1543,7 +1576,7 @@ fn kindName(v: *const fat16.Volume) []const u8 {
     return if (v.kind == .fat32) "FAT32" else "FAT16";
 }
 
-fn addVolume(facts: *std.ArrayList(router.host_status.Fact), alloc: std.mem.Allocator, label: []const u8, cache_label: []const u8, v: *fat16.Volume) !void {
+fn addVolume(facts: *std.ArrayList(router.host_status.Fact), alloc: std.mem.Allocator, label: []const u8, cache_label: []const u8, dirs_label: []const u8, v: *fat16.Volume) !void {
     var serial_text: [9]u8 = undefined;
     const named = if (v.serial) |n| serialText(&serial_text, n) else "no serial";
     const value = if (v.space()) |sp|
@@ -1557,6 +1590,10 @@ fn addVolume(facts: *std.ArrayList(router.host_status.Fact), alloc: std.mem.Allo
     try facts.append(alloc, .{
         .label = cache_label,
         .value = try std.fmt.allocPrint(alloc, "{s}; {d} flushes, {d} failed", .{ cache, v.blk.flushes, v.blk.flush_failures }),
+    });
+    if (v.dirs) |d| try facts.append(alloc, .{
+        .label = dirs_label,
+        .value = try std.fmt.allocPrint(alloc, "{d} sectors held at most; {d} sector reads answered from it, {d} from the disk (every sector read asks it, folders or not)", .{ d.keys.len, d.hits, d.misses }),
     });
 }
 

@@ -49,6 +49,8 @@ pub fn build(b: *std.Build) void {
     const sdk = b.dependency("zig_coverage_sdk", .{});
     const coverage = sdk.module("coverage");
     coverage.red_zone = false;
+    // The seed explorer (zig-coverage-sdk's explore.zig): simulators only.
+    const explore = sdk.module("explore");
     const coverage_catalog = @import("zig_coverage_sdk").addCatalog(b, sdk.artifact("coverage-scan"), coverage, b.path("src"), &.{ "tcp.zig", "tcp_sim.zig", "fat16.zig", "fat_sim.zig", "page_sim.zig", "pure_sim.zig", "ready_sim.zig", "durable_sim.zig", "durable.zig", "gpt.zig", "floor_sim.zig", "page_cache.zig", "log_ring.zig", "kept_log.zig", "proto.zig", "arp.zig", "request_heap.zig", "store_sim.zig", "pvh.zig", "restart.zig", "pages.zig", "rtc.zig", "pit.zig", "admin_reset.zig", "rng.zig", "ready.zig" });
     const with_coverage = [_]std.Build.Module.Import{
         .{ .name = "coverage", .module = coverage },
@@ -260,10 +262,70 @@ pub fn build(b: *std.Build) void {
                 .{ .name = "kernel_partition", .module = kernel_partition },
                 .{ .name = "coverage", .module = coverage },
                 .{ .name = "coverage_catalog", .module = coverage_catalog },
+                .{ .name = "explore", .module = explore },
             },
         }) });
         test_step.dependOn(&b.addRunArtifact(unit).step);
     }
+
+    // **THE STORE PRODUCTION RUNS, JUDGED** (src/store_judge.zig):
+    // angry-gopher's store.zig over Linux and, as port.sh made it
+    // (`-Dgopher`), over this repo's io.zig, against the model. Needs the
+    // sibling angry-gopher checkout and a port, so it is a step of its own,
+    // not part of `test`, and not yet in gates.sh: its model is still
+    // gopher-metal's Store, not the seam's (STORE.md).
+    const ag_src = b.option([]const u8, "angry-gopher-src", "angry-gopher's zig-server/src, the Linux side of store-judge") orelse "../angry-gopher/zig-server/src";
+    const judge_world = b.createModule(.{
+        .root_source_file = b.path("src/judge_world.zig"),
+        .target = b.graph.host,
+        .imports = &.{
+            .{ .name = "coverage", .module = coverage },
+            .{ .name = "coverage_catalog", .module = coverage_catalog },
+        },
+    });
+    const store_judge = b.addTest(.{
+        .name = "store-judge",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/store_judge.zig"),
+            .target = b.graph.host,
+            .imports = &.{
+                .{ .name = "judge_world", .module = judge_world },
+                .{ .name = "ag_store_linux", .module = b.createModule(.{ .root_source_file = .{ .cwd_relative = b.pathFromRoot(b.fmt("{s}/store.zig", .{ag_src})) } }) },
+                .{ .name = "ag_store_metal", .module = b.createModule(.{
+                    .root_source_file = .{ .cwd_relative = b.fmt("{s}/store.zig", .{gopher_port}) },
+                    .imports = &.{.{ .name = "metal", .module = judge_world }},
+                }) },
+            },
+        }),
+    });
+    b.step("store-judge", "angry-gopher's store on Linux and on metal against the model (needs ../angry-gopher and a port)").dependOn(&b.addRunArtifact(store_judge).step);
+
+    // **THE SEED EXPLORER AGAINST BLIND SEEDS** (src/explore_bench.zig): a
+    // tool, not a gate (Steve, 2026-10-07). ReleaseSafe by default: it is
+    // nearly all running.
+    const explore_opts = b.addOptions();
+    explore_opts.addOption([]const u8, "sim", b.option([]const u8, "explore-sim", "which simulator `explore` runs: fat or store") orelse "fat");
+    explore_opts.addOption([]const u8, "budgets", b.option([]const u8, "explore-budgets", "comma-separated run budgets `explore` compares at") orelse "20,100");
+    explore_opts.addOption(u64, "seed", b.option(u64, "explore-seed", "the explorer's own seed") orelse 1);
+    explore_opts.addOption(f32, "blind", b.option(f32, "explore-blind", "the share of the explorer's runs that are blind") orelse 0.2);
+    explore_opts.addOption(bool, "list_missed", b.option(bool, "explore-list-missed", "list the properties neither reached") orelse false);
+    explore_opts.addOption(f32, "flip", b.option(f32, "explore-flip", "of the rest, the share that flip a named choice") orelse 0.5);
+    const explore_bench = b.addTest(.{
+        .name = "explore",
+        .filters = &.{"the explorer against blind seeds"},
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/explore_bench.zig"),
+            .target = b.graph.host,
+            .optimize = b.option(std.builtin.OptimizeMode, "explore-optimize", "how `explore` is compiled") orelse .ReleaseSafe,
+            .imports = &.{
+                .{ .name = "explore_options", .module = explore_opts.createModule() },
+                .{ .name = "coverage", .module = coverage },
+                .{ .name = "coverage_catalog", .module = coverage_catalog },
+                .{ .name = "explore", .module = explore },
+            },
+        }),
+    });
+    b.step("explore", "the seed explorer against blind seeds on fat_sim (a tool, not a gate)").dependOn(&b.addRunArtifact(explore_bench).step);
 
     // **COVERAGE PROPERTIES** (COVERAGE.md): the TCP and FAT simulators over
     // a sweep of seeds, then every assertion they reach judged. Not part of `test`: its report is read, not gated on, while it
@@ -303,6 +365,7 @@ pub fn build(b: *std.Build) void {
                 .{ .name = "tcp_properties_options", .module = props_opts.createModule() },
                 .{ .name = "coverage", .module = coverage },
                 .{ .name = "coverage_catalog", .module = coverage_catalog },
+                .{ .name = "explore", .module = explore },
             },
         }),
     });
