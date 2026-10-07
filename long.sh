@@ -94,15 +94,27 @@ if [ "$want" != sim ]; then
     rm -f "$OUT/sdk.jsonl"
     [ -f "$SITE" ] || { echo "no site volume at $SITE: run probe/run.sh gopher once"; exit 2; }
     (cd "$VMM" && zig build) || { echo "metal-vmm does not build"; exit 2; }
+    # **TWO KERNELS, TWO JOBS** (2026-10-07): the production build is what
+    # each page is judged on, since it is what ships; the -Dcoverage build
+    # runs every case again only to say what it reached, its pages unjudged.
+    # A coverage kernel prints its catalog to the console, a byte an exit,
+    # about nine seconds of the guest's time a boot once the floor was named,
+    # and that alone made a late lost frame's resend miss the two seconds a
+    # guest gives its connections after its last request: v19's first
+    # long.sh failed every route that way while its production kernel served
+    # each page whole.
     zig build gopher -Dcoverage > "$OUT/build.log" 2>&1 || { echo "gopher.elf -Dcoverage does not build: $OUT/build.log"; exit 2; }
-    # gopher.elf goes back to what gates.sh expects, however this ends.
-    trap 'zig build gopher > "$OUT/rebuild.log" 2>&1 || echo "gopher.elf was not rebuilt without -Dcoverage: $OUT/rebuild.log"' EXIT
+    cp probe/gopher.elf "$OUT/gopher-coverage.elf"
+    zig build gopher > "$OUT/rebuild.log" 2>&1 || { echo "gopher.elf does not build: $OUT/rebuild.log"; exit 2; }
+    JUDGED=probe/gopher.elf
+    COUNTED="$OUT/gopher-coverage.elf"
 
-    # run <eat> <path>: one boot; sets code, sent, status, and the page in $OUT/page.
+    # run <eat> <path> [kernel]: one boot; sets code, sent, status, and the
+    # page in $OUT/page. The judged kernel unless another is named.
     run() {
         cp "$SITE" "$OUT/run.img"
         TRANSPORT=pci WIRE_LATENCY_US="$LATENCY_US" WIRE_EAT="$1" PEER_BODY="$OUT/page" \
-            timeout 120 "$VMM/zig-out/bin/metal-vmm" probe/gopher.elf "$OUT/run.img" "" "$2" \
+            timeout 120 "$VMM/zig-out/bin/metal-vmm" "${3:-$JUDGED}" "$OUT/run.img" "" "$2" \
             > "$OUT/run.out" 2> "$OUT/run.err"
         code=$?
         sent=$(sed -n 's/^wire: \([0-9]*\) frames sent.*/\1/p' "$OUT/run.err")
@@ -113,6 +125,7 @@ if [ "$want" != sim ]; then
     lost_pages=0
     for route in $ROUTES; do
         # Frame 9999 is never sent: the unhurt run, whose page every other must match.
+        run 9999 "$route" "$COUNTED"
         run 9999 "$route"
         cp "$OUT/page" "$OUT/unhurt.page"
         unhurt_status=$status
@@ -124,6 +137,7 @@ if [ "$want" != sim ]; then
         fi
         bad=""
         for n in $(seq 1 "$total"); do
+            run "$n" "$route" "$COUNTED"
             run "$n" "$route"
             if [ "$code" != 0 ] || [ "$status" != "$unhurt_status" ] || ! cmp -s "$OUT/page" "$OUT/unhurt.page"; then
                 bad="$bad #$n"
@@ -165,13 +179,15 @@ if [ "$want" != sim ]; then
         [ -z "$name" ] && continue
         img="$SITE"
         [ "$volume" = two ] && img="$OUT/two.img"
-        cp "$img" "$OUT/run.img"
-        # shellcheck disable=SC2086 # knobs are words on purpose
-        env TRANSPORT=pci WIRE_LATENCY_US="$LATENCY_US" PATIENCE_S=60 PEER_BODY="$OUT/page" $knobs \
-            timeout 300 "$VMM/zig-out/bin/metal-vmm" probe/gopher.elf "$OUT/run.img" "" "$route" \
-            > "$OUT/run.out" 2> "$OUT/run.err"
-        code=$?
-        grep -a '^coverage: ' "$OUT/run.out" | sed -e 's/^coverage: //' -e 's/\r$//' >> "$OUT/sdk.jsonl"
+        for kernel in "$COUNTED" "$JUDGED"; do
+            cp "$img" "$OUT/run.img"
+            # shellcheck disable=SC2086 # knobs are words on purpose
+            env TRANSPORT=pci WIRE_LATENCY_US="$LATENCY_US" PATIENCE_S=60 PEER_BODY="$OUT/page" $knobs \
+                timeout 300 "$VMM/zig-out/bin/metal-vmm" "$kernel" "$OUT/run.img" "" "$route" \
+                > "$OUT/run.out" 2> "$OUT/run.err"
+            code=$?
+            grep -a '^coverage: ' "$OUT/run.out" | sed -e 's/^coverage: //' -e 's/\r$//' >> "$OUT/sdk.jsonl"
+        done
         ok=yes
         case "$code" in
             0) ;;
