@@ -759,6 +759,8 @@ pub const Dir = struct {
         if (pagesFor(sub_path)) |c| c.forget(sub_path);
         v.remove(sub_path) catch |e| switch (e) {
             error.NotFound => return Error.FileNotFound,
+            // As std.Io answers a directory given to deleteFile.
+            error.IsDirectory => return Error.IsDir,
             else => return Error.WriteFailed,
         };
     }

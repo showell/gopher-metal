@@ -2136,15 +2136,25 @@ pub const Volume = struct {
         try self.writeEntry(r.run, if (needsLongName(b.name)) b.name else b.name[0..0], r.short, 0x20, src.first_cluster, src.size);
     }
 
-    /// Deletes one file, or one directory that is already empty. removeEntry
-    /// does the real work: it frees the cluster chain and tombstones both the
-    /// short entry and the long-name run in front of it.
+    /// Deletes one file. removeEntry does the real work: it frees the
+    /// cluster chain and tombstones both the short entry and the long-name
+    /// run in front of it.
+    ///
+    /// **A DIRECTORY IS REFUSED** (`IsDirectory`), empty or not, as Linux's
+    /// unlink refuses one (EISDIR). It once took a directory's entry like a
+    /// file's and left everything under it allocated and reachable from
+    /// nothing, a leak `check` reported (metal-vmm QUEUE B22, found by the
+    /// cloud session's item 77). `removeTree` is how a directory goes.
     pub fn remove(self: *Volume, path: []const u8) Error!void {
         const p = try self.parentOf(path);
-        _ = (try self.find(p.cluster, p.name)) orelse {
+        const e = (try self.find(p.cluster, p.name)) orelse {
             props.reachable(@src(), "fat: a remove of a file that is not there is refused", null);
             return Error.NotFound;
         };
+        if (e.isDirectory()) {
+            props.reachable(@src(), "fat: a remove of a directory is refused", null);
+            return Error.IsDirectory;
+        }
         try self.removeEntry(p.cluster, p.name);
     }
 
