@@ -205,6 +205,12 @@ const Sim = struct {
         const r = self.rng;
         if (r.uintLessThan(u8, 40) == 0) {
             const long = PageCache.max_key + r.uintLessThan(usize, 8);
+            if (long == PageCache.max_key + 1) {
+                // A lone part one byte past the key, with nothing before
+                // it: the edge of `keyOf`'s first check (MUTATION.md P1).
+                @memset(buf[0..long], 'x');
+                return buf[0..long];
+            }
             @memcpy(buf[0..name.len], name);
             buf[name.len] = '/';
             @memset(buf[name.len + 1 ..][0..long], 'x');

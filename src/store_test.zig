@@ -377,3 +377,26 @@ test "replace: a rename that fails takes its hidden copy back, and every cluster
     }
     try testing.expect(reached);
 }
+
+test "a write under a file is a bad name, on FAT as in the model; a read or a remove there finds nothing (MUTATION.md S11, equivalent)" {
+    const d = try test_disk.Disk.make("store-under-a-file", test_disk.small, false);
+    defer d.deinit();
+    var f = FatStore{ .vol = &d.vol };
+    var m = Model.init(testing.allocator);
+    defer m.deinit();
+    var buf: [16]u8 = undefined;
+    for ([_]store.Store{ m.store_(), f.store_() }) |s| {
+        try s.write("data/a", "a file");
+        // FAT meets `a` where a write would make a directory, and answers
+        // `BadName` itself (`makeDirIn`): so `map`'s `NotFat16` for a write
+        // is never reached, and MUTATION.md's S11 is equivalent in effect.
+        // This pins the answer either way.
+        try testing.expectError(Error.BadName, s.write("data/a/b", "x"));
+        try testing.expectError(Error.BadName, s.append("data/a/b", "x"));
+        try testing.expectError(Error.BadName, s.replace("data/a/b", "x"));
+        try testing.expectError(Error.NotFound, s.read("data/a/b", &buf));
+        try testing.expectError(Error.NotFound, s.remove("data/a/b"));
+        const n = try s.read("data/a", &buf);
+        try testing.expectEqualStrings("a file", buf[0..n]);
+    }
+}
