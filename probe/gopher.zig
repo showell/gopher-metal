@@ -1154,9 +1154,15 @@ fn dataVolume() ?virtio.Block {
 const fat_budget_bytes: usize = 32 << 20;
 
 fn mountFat(blk: *virtio.Block, scratch: *[fat16.sector_size]u8, what: []const u8) fat16.Volume {
-    const part = gpt.dataPartition(blk, scratch) catch {
+    // A table that cannot be read is a disk failing, not a blank one: the
+    // two are told apart.
+    const part = gpt.dataPartition(blk, scratch) catch |e| {
         serial.put("  ");
         serial.put(what);
+        if (e == error.ReadFailed) {
+            serial.put(": its partition table cannot be read\n");
+            serial.fail("a disk's partition table cannot be read");
+        }
         serial.put(": no GPT partition\n");
         serial.fail("a disk has no partition to serve from");
     };
