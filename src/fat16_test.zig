@@ -1079,6 +1079,53 @@ test "a first FAT copy that reads wrong is not written over the second: the copy
     }
 }
 
+test "copies apart and a directory that cannot be read: the volume mounts, and neither copy is written over (metal-vmm QUEUE 103, RED)" {
+    // **RED until fat16 answers it** (CC, 2026-10-08). Weighing the copies
+    // (B26) runs a whole check, which reads every directory. Before B26
+    // copies apart were brought into line from the first and the volume
+    // mounted; now one directory sector that fails to read fails the mount,
+    // and on metal the boot stops ("the FAT could not be held in memory").
+    // A disk with a bad sector in a folder and a rotted FAT sector is the
+    // disk B25 and B26 were for. The check failing should leave the choice
+    // unmade: mount with the first copy held, and write neither, so the
+    // second copy, perhaps the good one, is there for a boot that can weigh.
+    for (formats) |shape| {
+        const d = try Disk.make("damaged-weigh-unreadable", shape, false);
+        defer d.deinit();
+        try d.vol.writeFile("data/f", "x");
+        const l = Layout.of(d.bytes);
+        var c: usize = 2;
+        var last: usize = 0;
+        while (c <= l.end() and c < 1000) : (c += 1) {
+            if (l.get(d.bytes, 0, c) != 0) last = c;
+        }
+        try testing.expect(last >= 3);
+        const was = l.get(d.bytes, 1, last);
+        l.set(d.bytes, 0, last, 0);
+        const damaged = try testing.allocator.dupe(u8, d.bytes);
+        defer testing.allocator.free(damaged);
+        const buf = try testing.allocator.alloc(u8, d.vol.fatBytes());
+        defer testing.allocator.free(buf);
+        const room = try testing.allocator.alloc(u8, d.vol.checkBytes());
+        defer testing.allocator.free(room);
+
+        // How many requests come before the check: the copies read and
+        // compared, unweighed, less the sectors written to repair them.
+        try d.mount(false);
+        const r0 = d.blk.requests;
+        const unweighed = try d.vol.cacheFatChecked(buf, null);
+        const before_check = d.blk.requests - r0 - unweighed.repaired;
+        @memcpy(d.bytes, damaged);
+
+        // The same mount, weighing, and the check's first read fails.
+        try d.mount(false);
+        d.blk.fault = .{ .at = d.blk.requests + before_check, .kind = .fails };
+        const m = try d.vol.cacheFatChecked(buf, room);
+        try testing.expect(!m.checked);
+        try testing.expectEqual(was, l.get(d.bytes, 1, last)); // the second copy kept
+    }
+}
+
 // ---- the kept free count (QUEUE item 14) -------------------------------------
 
 test "the kept free count follows every operation, the refused and failed ones included" {
