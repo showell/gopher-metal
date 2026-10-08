@@ -302,3 +302,78 @@ test "write: after a power cut, old, new, or nothing, as store.zig says" {
     _ = try cutEverywhere(.write, .old_new_or_neither, false);
     _ = try cutEverywhere(.write, .old_new_or_neither, true);
 }
+
+/// Whether a write waiting in the cache lands before the power goes, in
+/// `replace`'s test below: only those to the root directory's sectors.
+const RootOnly = struct {
+    cache: *const test_disk.Cache,
+    first: u64,
+    end: u64,
+    fn keep(s: RootOnly, i: usize) bool {
+        const lba = s.cache.waiting.items[i].lba;
+        return lba >= s.first and lba < s.end;
+    }
+};
+
+test "replace: its flush puts the new bytes on the media before the name that points at them (metal-vmm QUEUE 112, S5)" {
+    // A disk with a write cache, cut just after `replace` answers, whose
+    // cache had written back only the root directory's sectors: a legal
+    // order for a cache, and the worst one for a rename. With the flush,
+    // the new file's clusters and its chain were durable before the rename
+    // began, and `f.md` is wholly new. Without it they were still waiting,
+    // and the entry the rename wrote points at a chain that never landed.
+    const d = try test_disk.Disk.make("damaged-store-replace-cache", test_disk.small, false);
+    defer d.deinit();
+    const c = try test_disk.Cache.attach(d);
+    defer c.detach(d);
+    var f = FatStore{ .vol = &d.vol };
+    const old = "the old file, " ** 120;
+    const new = "the whole new file, " ** 150;
+    try f.store_().write("f.md", old);
+    try testing.expectEqual(@import("virtio.zig").blk_s_ok, d.blk.flush());
+    try f.store_().replace("f.md", new);
+    try testing.expect(c.pending() > 0);
+    const l = test_disk.Layout.of(d.bytes);
+    const root = l.fat_start / test_disk.sector + 2 * l.fat_bytes / test_disk.sector;
+    c.cut(d, RootOnly{ .cache = c, .first = root, .end = l.data_sector }, RootOnly.keep);
+    try d.mount(false);
+    f = .{ .vol = &d.vol };
+    var buf: [8192]u8 = undefined;
+    const n = try f.store_().read("f.md", &buf);
+    try testing.expectEqualStrings(new, buf[0..n]);
+}
+
+test "replace: a rename that fails takes its hidden copy back, and every cluster it held (metal-vmm QUEUE 112, S6)" {
+    // A root with room for the hidden copy's entries and none for a new
+    // name: the copy is written, the rename refused, and the copy must go,
+    // its clusters freed and its entries with it. Found by filling the
+    // root, then freeing one entry at a time until a replace gets that far.
+    var reached = false;
+    var freed: usize = 1;
+    while (freed <= 4) : (freed += 1) {
+        const d = try test_disk.Disk.make("store-replace-full-root", test_disk.small, false);
+        defer d.deinit();
+        var f = FatStore{ .vol = &d.vol };
+        const s = f.store_();
+        var name: [8]u8 = undefined;
+        var made: usize = 0;
+        while (true) : (made += 1) {
+            s.write(try std.fmt.bufPrint(&name, "F{d:0>4}", .{made}), "") catch |e| {
+                try testing.expectEqual(Error.NoSpace, e);
+                break;
+            };
+        }
+        for (0..freed) |k| try s.remove(try std.fmt.bufPrint(&name, "F{d:0>4}", .{made - 1 - k}));
+        const free = d.free();
+        const writes = d.blk.writes;
+        const answered = s.replace("new.md", "the new file's bytes, " ** 100);
+        if (answered) |_| break else |e| try testing.expectEqual(Error.NoSpace, e);
+        // The copy was written (it took clusters), so the refusal came from
+        // the rename.
+        if (d.blk.writes - writes > 2) reached = true;
+        try testing.expectEqual(free, d.free());
+        try d.expectKept();
+        try testing.expectError(error.NotFound, d.vol.open(".~new.md"));
+    }
+    try testing.expect(reached);
+}

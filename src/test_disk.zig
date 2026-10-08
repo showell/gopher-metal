@@ -422,3 +422,108 @@ pub const small32 = Shape{ .sectors = 70_000, .kind = .fat32, .suffix = "-fat32"
 
 /// 4 MiB of 512-byte clusters: about 8,000 clusters, well inside FAT16.
 pub const small = Shape{ .sectors = 8192 };
+
+/// **A WRITE CACHE FOR A DISK IN MEMORY** (metal-vmm QUEUE 112): what a
+/// disk with a cache does, which no other disk in the host tests does. A
+/// write lands in the disk's bytes, which is what it shows until the power
+/// goes, and waits here; a flush makes every waiting write durable. A cut
+/// keeps what was durable and whichever waiting writes the test chooses,
+/// since a cache writes back in no order it promises.
+pub const Cache = struct {
+    gpa: std.mem.Allocator,
+    /// What survives a cut: the disk as of its last flush.
+    kept: []u8,
+    waiting: std.ArrayList(Write) = .empty,
+    hook: virtio.Block.Cache = undefined,
+
+    pub const Write = struct { lba: u64, bytes: []u8 };
+
+    /// A cache in front of `d`, from its bytes now: everything on it so far
+    /// is durable. Heap-allocated, as the block points at it.
+    pub fn attach(d: *Disk) !*Cache {
+        const c = try d.gpa.create(Cache);
+        errdefer d.gpa.destroy(c);
+        c.* = .{ .gpa = d.gpa, .kept = try d.gpa.dupe(u8, d.bytes) };
+        c.hook = .{ .context = c, .wrote = wrote, .flushed = flushed };
+        d.blk.cache = &c.hook;
+        return c;
+    }
+
+    /// The disk writes through again; what waits is dropped.
+    pub fn detach(c: *Cache, d: *Disk) void {
+        d.blk.cache = null;
+        c.drop();
+        c.waiting.deinit(c.gpa);
+        c.gpa.free(c.kept);
+        c.gpa.destroy(c);
+    }
+
+    fn drop(c: *Cache) void {
+        for (c.waiting.items) |w| c.gpa.free(w.bytes);
+        c.waiting.clearRetainingCapacity();
+    }
+
+    fn wrote(context: *anyopaque, lba: u64, bytes: []const u8) void {
+        const c: *Cache = @ptrCast(@alignCast(context));
+        const copy = c.gpa.dupe(u8, bytes) catch @panic("test_disk.Cache: out of memory");
+        c.waiting.append(c.gpa, .{ .lba = lba, .bytes = copy }) catch @panic("test_disk.Cache: out of memory");
+    }
+
+    fn flushed(context: *anyopaque) void {
+        const c: *Cache = @ptrCast(@alignCast(context));
+        for (c.waiting.items) |w| @memcpy(c.kept[@intCast(w.lba * sector)..][0..w.bytes.len], w.bytes);
+        c.drop();
+    }
+
+    /// Writes waiting for a flush.
+    pub fn pending(c: *const Cache) usize {
+        return c.waiting.items.len;
+    }
+
+    /// **THE POWER GOES**: the disk becomes what was durable, and each
+    /// waiting write lands too, in the order written, where `keep` says
+    /// so. A write that lands is whole: a torn sector is the block's
+    /// `Fault.torn`, not the cache's.
+    pub fn cut(c: *Cache, d: *Disk, context: anytype, comptime keep: fn (@TypeOf(context), usize) bool) void {
+        for (c.waiting.items, 0..) |w, i| {
+            if (keep(context, i)) @memcpy(c.kept[@intCast(w.lba * sector)..][0..w.bytes.len], w.bytes);
+        }
+        c.drop();
+        @memcpy(d.bytes, c.kept);
+    }
+};
+
+test "a write cache: a flush keeps, a cut drops what waits, and keeps what it is told" {
+    const d = try Disk.make("damaged-cache", small, false);
+    defer d.deinit();
+    const c = try Cache.attach(d);
+    defer c.detach(d);
+    var one: [sector]u8 align(16) = @splat(1);
+    var two: [sector]u8 align(16) = @splat(2);
+    const at = d.bytes.len / sector - 2;
+    try testing.expectEqual(virtio.blk_s_ok, d.blk.write(at, @intFromPtr(&one)));
+    try testing.expectEqual(virtio.blk_s_ok, d.blk.flush());
+    try testing.expectEqual(@as(usize, 0), c.pending());
+    try testing.expectEqual(virtio.blk_s_ok, d.blk.write(at, @intFromPtr(&two)));
+    try testing.expectEqual(virtio.blk_s_ok, d.blk.write(at + 1, @intFromPtr(&two)));
+    try testing.expectEqual(@as(u8, 2), d.bytes[at * sector]);
+    const Every = struct {
+        fn second(_: void, i: usize) bool {
+            return i == 1;
+        }
+    };
+    c.cut(d, {}, Every.second);
+    try testing.expectEqual(@as(u8, 1), d.bytes[at * sector]);
+    try testing.expectEqual(@as(u8, 2), d.bytes[(at + 1) * sector]);
+    // A flush once the power is gone keeps nothing.
+    try testing.expectEqual(virtio.blk_s_ok, d.blk.write(at, @intFromPtr(&two)));
+    d.blk.fail_after = d.blk.requests;
+    try testing.expectEqual(virtio.blk_s_ioerr, d.blk.flush());
+    d.blk.fail_after = null;
+    c.cut(d, {}, struct {
+        fn none(_: void, _: usize) bool {
+            return false;
+        }
+    }.none);
+    try testing.expectEqual(@as(u8, 1), d.bytes[at * sector]);
+}

@@ -729,6 +729,19 @@ pub const Block = struct {
     /// `requests` counts) on a disk in memory (QUEUE.md item 80).
     fault: ?Fault = null,
 
+    /// **A HOST TEST'S WRITE CACHE** (metal-vmm QUEUE 112), on a disk in
+    /// memory: told of every write as it lands in `memory`, which is what
+    /// the disk shows, and of every flush, which makes what it was told
+    /// durable. What a cut keeps of the rest is the test's to choose
+    /// (`test_disk.Cache`). Null: the disk writes through, as before.
+    cache: ?*const Cache = null,
+
+    pub const Cache = struct {
+        context: *anyopaque,
+        wrote: *const fn (context: *anyopaque, lba: u64, bytes: []const u8) void,
+        flushed: *const fn (context: *anyopaque) void,
+    };
+
     pub const Fault = struct {
         at: u64,
         kind: enum {
@@ -782,6 +795,7 @@ pub const Block = struct {
                 .torn => if (kind != blk_t_in and len > 512) {
                     const half = len / 512 / 2 * 512;
                     @memcpy(there[0..half], here[0..half]);
+                    if (self.cache) |c| c.wrote(c.context, lba, there[0..half]);
                     return blk_s_ok;
                 },
                 .garbage => if (kind == blk_t_in) {
@@ -790,7 +804,10 @@ pub const Block = struct {
                 },
             }
         };
-        if (kind == blk_t_in) @memcpy(here[0..len], there) else @memcpy(there, here[0..len]);
+        if (kind == blk_t_in) @memcpy(here[0..len], there) else {
+            @memcpy(there, here[0..len]);
+            if (self.cache) |c| c.wrote(c.context, lba, there);
+        }
         return blk_s_ok;
     }
 
@@ -910,6 +927,12 @@ pub const Block = struct {
         var d = durable.Disk{ .unflushed = self.unflushed, .write_cache = self.write_cache, .asks = self.address != null };
         const s = durable.step(d);
         if (s == .none) return blk_s_ok;
+        // A host test's cache: a disk whose power is cut keeps nothing more.
+        if (self.cache) |c| {
+            if (self.fail_after) |n| if (self.requests >= n) return blk_s_ioerr;
+            if (self.fail_after_writes) |n| if (self.writes >= n) return blk_s_ioerr;
+            c.flushed(c.context);
+        }
         self.flushes +%= 1;
         // `synchronize` may learn the disk has no cache (ILLEGAL REQUEST),
         // and says so in `write_cache` and an ok.
