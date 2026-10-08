@@ -24,11 +24,23 @@
 #    run's coverage lines go to one sdk.jsonl, judged by zig-coverage-sdk's
 #    report.py against `coverage/floor-metal.txt`.
 #
+#    **IN PRODUCTION'S SHAPE** (QUEUE B24, 2026-10-08): every boot of 3
+#    and 4 has a copy of the site volume attached as a SCSI disk, so chat's
+#    data is on a volume, as on the droplet. No gate ran that shape until
+#    then, and its first run found metal-vmm crashing on virtio-scsi's third
+#    queue and every write's residual wrong.
+#
 # 4. **The real kernel, with a peer that misbehaves**: one run each for a
 #    reset (exact and not), a peer that vanishes, a window it shuts, a
 #    damaged segment, a SYN flood that fills the table, and a request
 #    segment lost so the next arrives ahead (the table in the script).
 #    Their coverage joins the same sdk.jsonl.
+#
+# 5. **Seeded fault schedules, with a volume** (metal-vmm's sweep.sh,
+#    `VOLUME_SITE`): `VOLUME_SEEDS` seeds (100), each a whole schedule drawn
+#    over the wire, the peer, the disk and the volume. A seed that fails, as
+#    sweep.sh judges it (a page its faults do not excuse, an exit, a disk or
+#    volume left unsound, a broken property), fails this tier.
 #
 # Needs: metal-vmm and zig-coverage-sdk as sibling checkouts (METAL_VMM,
 # COVERAGE_SDK), the judge's site volume (probe/run.sh gopher builds it), and
@@ -45,6 +57,7 @@ SITE="${SITE:-$HOME/build/gopher-metal/probe/gopher/pristine.img}"
 SEEDS="${SEEDS:-10000}"
 FAT_SEEDS="${FAT_SEEDS:-300}"
 LATENCY_US="${LATENCY_US:-5000}"
+VOLUME_SEEDS="${VOLUME_SEEDS:-100}"
 # A page, a large one (many frames), and a form.
 ROUTES="${ROUTES:-/ /steve-resume.pdf /login/full}"
 OUT="${LONG_OUT:-$HOME/build/gopher-metal/long}"
@@ -113,11 +126,12 @@ if [ "$want" != sim ]; then
     # page in $OUT/page. The judged kernel unless another is named.
     run() {
         cp "$SITE" "$OUT/run.img"
+        cp "$SITE" "$OUT/run.vol"
         # A page is this run's or none: metal-vmm writes none for an answer
         # it kept only in part, and a page left by the run before would be
         # judged in its place.
         rm -f "$OUT/page"
-        TRANSPORT=pci WIRE_LATENCY_US="$LATENCY_US" WIRE_EAT="$1" PEER_BODY="$OUT/page" \
+        TRANSPORT=pci VOLUME="$OUT/run.vol" WIRE_LATENCY_US="$LATENCY_US" WIRE_EAT="$1" PEER_BODY="$OUT/page" \
             timeout 120 "$VMM/zig-out/bin/metal-vmm" "${3:-$JUDGED}" "$OUT/run.img" "" "$2" \
             > "$OUT/run.out" 2> "$OUT/run.err"
         code=$?
@@ -186,8 +200,9 @@ if [ "$want" != sim ]; then
         [ "$volume" = two ] && img="$OUT/two.img"
         for kernel in "$COUNTED" "$JUDGED"; do
             cp "$img" "$OUT/run.img"
+            cp "$SITE" "$OUT/run.vol"
             # shellcheck disable=SC2086 # knobs are words on purpose
-            env TRANSPORT=pci WIRE_LATENCY_US="$LATENCY_US" PATIENCE_S=60 PEER_BODY="$OUT/page" $knobs \
+            env TRANSPORT=pci VOLUME="$OUT/run.vol" WIRE_LATENCY_US="$LATENCY_US" PATIENCE_S=60 PEER_BODY="$OUT/page" $knobs \
                 timeout 300 "$VMM/zig-out/bin/metal-vmm" "$kernel" "$OUT/run.img" "" "$route" \
                 > "$OUT/run.out" 2> "$OUT/run.err"
             code=$?
@@ -220,6 +235,13 @@ ahead          one /                 page PEER_REQUEST=$OUT/req1k PEER_MSS=100 P
 EOF
     [ -z "$rough_bad" ] || failed+=("metal rough:$rough_bad")
     lap "rough peer"
+
+    echo "── seeded fault schedules with a volume attached: $VOLUME_SEEDS seeds (metal-vmm's sweep.sh)"
+    VOLUME_SITE="$SITE" SITE="$SITE" KERNEL="$HERE/$JUDGED" "$VMM/sweep.sh" 1 "$VOLUME_SEEDS" > "$OUT/volume-sweep" 2>&1
+    code=$?
+    grep -E '^[0-9]+ seeds:|FAULT_SEED=[0-9]+: FAIL|nothing can be judged' "$OUT/volume-sweep"
+    [ $code = 0 ] || { echo "  the volume sweep failed (exit $code): $OUT/volume-sweep"; failed+=(volume-sweep); }
+    lap "volume sweep"
     python3 "$SDK/tools/report.py" "$OUT/sdk.jsonl" --floor coverage/floor-metal.txt > "$OUT/report" 2>&1
     code=$?
     grep -E '^(FAIL|FLOOR|STALE)|^[0-9]+ runs|under the floor' "$OUT/report"
