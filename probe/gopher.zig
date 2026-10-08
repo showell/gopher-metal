@@ -1279,6 +1279,11 @@ fn mountFat(blk: *virtio.Block, scratch: *[fat16.sector_size]u8, what: []const u
         serial.put(if (mirrors.trusted == 1) "the first was written from the second\n" else "the second was written from the first\n");
     }
     if (weigh_room == null) serial.put("  no memory to weigh the FAT's copies: the first is the FAT\n");
+    if (mirrors.unweighed) {
+        serial.put("  ");
+        serial.put(what);
+        serial.put(": the FAT's copies differ and could not be weighed (a read failed): the first is held, neither written over\n");
+    }
     serial.put("  ");
     serial.put(what);
     serial.put(if (vol.kind == .fat32) ": FAT32 at LBA " else ": FAT16 at LBA ");

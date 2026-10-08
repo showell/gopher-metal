@@ -1105,8 +1105,8 @@ test "a first FAT copy that reads wrong is not written over the second: the copy
     }
 }
 
-test "copies apart and a directory that cannot be read: the volume mounts, and neither copy is written over (metal-vmm QUEUE 103, RED)" {
-    // **RED until fat16 answers it** (CC, 2026-10-08). Weighing the copies
+test "copies apart and a directory that cannot be read: the volume mounts, and neither copy is written over (metal-vmm QUEUE 103)" {
+    // (CC, 2026-10-08.) Weighing the copies
     // (B26) runs a whole check, which reads every directory. Before B26
     // copies apart were brought into line from the first and the volume
     // mounted; now one directory sector that fails to read fails the mount,
@@ -1148,6 +1148,8 @@ test "copies apart and a directory that cannot be read: the volume mounts, and n
         d.blk.fault = .{ .at = d.blk.requests + before_check, .kind = .fails };
         const m = try d.vol.cacheFatChecked(buf, room);
         try testing.expect(!m.checked);
+        try testing.expect(m.unweighed);
+        try testing.expectEqual(@as(u32, 0), m.repaired);
         try testing.expectEqual(was, l.get(d.bytes, 1, last)); // the second copy kept
     }
 }
