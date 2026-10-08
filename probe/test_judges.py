@@ -355,6 +355,47 @@ class Differences(unittest.TestCase):
         self.assertEqual(G.checkout_commit("/nonexistent"), "unknown")
 
 
+class Download(unittest.TestCase):
+    """A topic's download (QUEUE B27): compared by members, and each bundle
+    must hold the transcript and the reactions under their whole names."""
+    TOPIC = G.LONG_TOPIC
+    PATH = f"/chat/c/1_2/{G.LONG_TOPIC}/download"
+
+    def bundle(self, files, mtime):
+        import gzip
+        import io
+        import tarfile
+        buf = io.BytesIO()
+        with tarfile.open(fileobj=buf, mode="w", format=tarfile.USTAR_FORMAT) as t:
+            for name, data in files.items():
+                info = tarfile.TarInfo(name)
+                info.size = len(data)
+                info.mtime = mtime
+                t.addfile(info, io.BytesIO(data))
+        return gzip.compress(buf.getvalue())
+
+    def whole(self):
+        return {f"{self.TOPIC}/{self.TOPIC}.md": b"a transcript", f"{self.TOPIC}/{self.TOPIC}.reactions.jsonl": b"{}"}
+
+    def test_the_same_members_at_other_times_agree(self):
+        self.assertEqual(G.download_differences(self.PATH, self.bundle(self.whole(), 100), self.bundle(self.whole(), 999)), [])
+
+    def test_names_cut_to_one_are_a_difference_even_when_both_hosts_cut_them(self):
+        cut = {f"{self.TOPIC}/{self.TOPIC}.md"[:100]: b"{}"}
+        got = G.download_differences(self.PATH, self.bundle(cut, 100), self.bundle(cut, 100))
+        self.assertTrue(any("has no" in g for g in got), got)
+
+    def test_a_member_that_differs_is_named(self):
+        other = dict(self.whole())
+        other[f"{self.TOPIC}/{self.TOPIC}.md"] = b"another transcript"
+        got = G.download_differences(self.PATH, self.bundle(self.whole(), 1), self.bundle(other, 1))
+        self.assertTrue(any("differs" in g for g in got), got)
+
+    def test_not_a_bundle_is_said_so(self):
+        got = G.download_differences(self.PATH, b"not gzip", self.bundle(self.whole(), 1))
+        self.assertTrue(any("not a whole .tar.gz" in g for g in got), got)
+
+
 class Backup(unittest.TestCase):
     @staticmethod
     def tar(files, mtime=0, manifest=True):

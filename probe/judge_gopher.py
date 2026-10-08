@@ -162,10 +162,20 @@ def mint_uid(uid: str, issued: int, secret: bytes = SESSION_SECRET) -> str:
     mac = hmac.new(secret, f"gopher_uid\n{uid}\n{issued}".encode(), hashlib.sha256).digest()
     return f"gopher_uid={uid}.{issued}.{base64.urlsafe_b64encode(mac).rstrip(b'=').decode()}"
 
+# 80 characters, the most chat_store.validSessionID allows.
+LONG_TOPIC = ("a-topic-whose-name-is-as-long-as-a-topic-name-may-be-" + "x" * 80)[:80]
+
 MEMBER_STORY = [
     step("chat, anonymous", "GET", "/chat"),
     step("a wrong password", "POST", "/login/full", None,
          "name=Steve&password=hunter2&action=login&next=%2Fchat"),
+    # **A BODY THAT COMES AFTER ITS HEAD** (angry-gopher's server.zig): the
+    # Linux server read such a body over its head in the read buffer, and
+    # routed the request by the body's bytes (a login answered 404).
+    step("a wrong password, its body sent after its head", "RAW", "-", raw=[
+        b"POST /login/full HTTP/1.1\r\nHost: x\r\nContent-Type: application/x-www-form-urlencoded\r\n"
+        b"Content-Length: 65\r\n\r\n",
+        b"name=Steve&password=hunter2&action=login&next=%2Fchat&pad=xxxxxxx"]),
     step("the right one (a $2a$ hash)", "POST", "/login/full", None,
          "name=Steve&password=correct+horse+battery+staple&action=login&next=%2Fchat"),
     step("chat, with no conversations yet", "GET", "/chat", JAR),
@@ -194,6 +204,15 @@ MEMBER_STORY = [
     step("a message to it, in a third case", "POST", "/chat/c/1_2/Metal-Talk/send", JAR,
          "markdown=the+same+topic&cid=c5", headers=["X-Chat-Async: 1"]),
     step("the topic holds both messages", "GET", "/chat/c/1_2/metal-talk/raw", JAR),
+    # **A TOPIC'S DOWNLOAD, AT THE LONGEST NAME** (QUEUE B27): its bundle's
+    # names are `<topic>/<topic>.md` and `<topic>/<topic>.reactions.jsonl`,
+    # past ustar's 100-byte name field at this length; cut there, they were
+    # one name, and unpacking wrote the reactions over the transcript.
+    step("a topic of the longest name", "POST", "/chat/c/1_2/new", JAR, "topic=" + LONG_TOPIC, settle=3.0),
+    step("a message in it", "POST", f"/chat/c/1_2/{LONG_TOPIC}/send", JAR,
+         "markdown=the+longest+name&cid=c6", headers=["X-Chat-Async: 1"]),
+    step("a reaction in it", "POST", f"/chat/c/1_2/{LONG_TOPIC}/react", JAR, "msg=1&emoji=%F0%9F%91%8D"),
+    step("its download", "GET", f"/chat/c/1_2/{LONG_TOPIC}/download", JAR),
     # `msg` is the message's number in its topic. This step once posted
     # `id=general_1`, which both hosts refused alike (400), so it reacted to
     # nothing and still compared equal; the members story now requires it to
@@ -621,15 +640,21 @@ def free_port() -> int:
     return port
 
 
-def ask_raw(port: int, payload: bytes) -> dict:
-    """Bytes on a bare socket, and whatever comes back before the server closes."""
+def ask_raw(port: int, payload) -> dict:
+    """Bytes on a bare socket, and whatever comes back before the server closes.
+    `payload` may be a list of parts, sent a fifth of a second apart: a body
+    that comes after its head, as most clients send one."""
     try:
         s = socket.create_connection(("127.0.0.1", port), timeout=15)
     except OSError as e:
         return {"error": f"raw socket: {e}"}
     try:
-        if payload:
-            s.sendall(payload)
+        parts = payload if isinstance(payload, list) else [payload]
+        for i, part in enumerate(parts):
+            if i > 0:
+                time.sleep(0.2)
+            if part:
+                s.sendall(part)
         s.shutdown(socket.SHUT_WR)
         got = b""
         while True:
@@ -1042,6 +1067,17 @@ class LinuxServer:
                 time.sleep(0.05)
         raise RuntimeError("the Linux server never listened")
 
+    def last_words(self) -> str:
+        """The first panic in its log, or its last line."""
+        self.log.flush()
+        try:
+            with open(self.log.name, "rb") as f:
+                lines = f.read().decode("utf-8", "replace").splitlines()
+        except OSError:
+            return "no log"
+        panics = [l for l in lines if "panic" in l]
+        return (panics or lines or ["an empty log"])[0].strip()
+
     def stop(self):
         self.proc.terminate()
         try:
@@ -1136,6 +1172,8 @@ def differences(c: dict, metal: dict, linux: dict) -> list:
     elif (c["path"] == "/admin/backup" and metal["status"] == 200 and linux["status"] == 200
           and "x-tar" in metal["headers"].get("content-type", "") + linux["headers"].get("content-type", "")):
         out += backup_differences(metal["body"], linux["body"], metal["window"], linux["window"])
+    elif c["path"].endswith("/download") and metal["status"] == 200 and linux["status"] == 200:
+        out += download_differences(c["path"], metal["body"], linux["body"], metal["window"], linux["window"])
     elif c["path"] == "/admin/host" and metal["status"] == 200:
         # A refusal (no session, not the admin) is an ordinary page, compared
         # whole below; only the page itself differs on purpose.
@@ -1212,6 +1250,42 @@ def oracle_megabytes(path: str, base: int = None) -> tuple:
     total = ((v.max_cluster - 1) * v.cluster_bytes) >> 20
     free = (sum(1 for c in range(2, v.max_cluster + 1) if v.fat(c) == 0) * v.cluster_bytes) >> 20
     return free, total
+
+
+def download_differences(path: str, metal: bytes, linux: bytes, metal_window=None, linux_window=None) -> list:
+    """**A TOPIC'S DOWNLOAD, BY ITS MEMBERS** (QUEUE B27): a gzipped tar
+    whose bytes carry each host's own file times, so each member is compared
+    (name, size, contents normalized), and each bundle must hold the
+    transcript and the reactions under their whole, distinct names."""
+    import gzip
+    import io
+    import tarfile
+    topic = path.rstrip("/").split("/")[-2]
+    want = [f"{topic}/{topic}.md", f"{topic}/{topic}.reactions.jsonl"]
+
+    def members(name, body, window):
+        try:
+            t = tarfile.open(fileobj=io.BytesIO(gzip.decompress(body)))
+            return {m.name: (m.size, normalize(t.extractfile(m).read(), window) if window else t.extractfile(m).read())
+                    for m in t.getmembers() if m.isfile()}, None
+        except (OSError, EOFError, tarfile.TarError) as e:
+            return {}, f"{path} on {name} is not a whole .tar.gz: {e}"
+
+    m, merr = members("metal", metal, metal_window)
+    l, lerr = members("Linux", linux, linux_window)
+    out = [e for e in (merr, lerr) if e]
+    if out:
+        return out
+    for name, got in (("metal", m), ("Linux", l)):
+        for w in want:
+            if w not in got:
+                out.append(f"{path} on {name} has no {w} (it has {sorted(got)})")
+    for name in sorted(set(m) ^ set(l)):
+        out.append(f"{path}: {name} is on {'metal' if name in m else 'Linux'} only")
+    for name in sorted(set(m) & set(l)):
+        if m[name] != l[name]:
+            out.append(f"{path}: {name} differs ({m[name][0]} bytes on metal, {l[name][0]} on Linux)")
+    return out
 
 
 def backup_differences(metal: bytes, linux: bytes, metal_window=None, linux_window=None) -> list:
@@ -1469,6 +1543,12 @@ def run_story(elf, linux_bin, content, pristine, work, mnt, steps, label, report
         for i, s in enumerate(steps):
             if s.get("settle"):
                 time.sleep(s["settle"])
+            # **A SERVER THAT DIED FAILS EVERY STEP LEFT, AT ONCE**, saying
+            # why: asking a closed port waits out `ask`'s patience, seven
+            # minutes a step, and the run hung for hours on one panic.
+            if server.proc.poll() is not None:
+                linux_answers.append({"error": f"the Linux server had exited ({server.proc.returncode}): {server.last_words()}"})
+                continue
             a = ask(server.port, with_jar(s, jar, minted), os.path.join(scratch, f"l{i}"))
             jar = update_jar(a, jar)
             linux_answers.append(a)
