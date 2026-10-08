@@ -485,6 +485,9 @@ pub const Volume = struct {
         /// check found with each: problems, then leaked clusters.
         checked: bool = false,
         health: [2]Health = .{ .{}, .{} },
+        /// The copies differed and could not be weighed (the check failed):
+        /// the first is held, neither was written.
+        unweighed: bool = false,
     };
 
     /// The most differing sectors that are weighed copy against copy; past
@@ -560,15 +563,29 @@ pub const Volume = struct {
         var second: [max_weighed_sectors][sector_size]u8 = undefined;
         for (differ[0..n_differ], 0..) |at, i| try self.readSector(self.fat_start + self.sectors_per_fat + at, &second[i]);
         if (seen) |room| {
-            m.checked = true;
-            m.health[0] = try self.check(room, {}, ignoreFinding);
+            // **A WEIGHING THAT CANNOT RUN LEAVES THE CHOICE UNMADE** (CC,
+            // metal-vmm QUEUE 103): the check reads every directory, and one
+            // that fails to read would fail the mount, where copies apart
+            // used to mount. The first copy is held, and neither is written
+            // over, so the second, perhaps the good one, is there for a boot
+            // that can weigh.
+            const first_health = self.check(room, {}, ignoreFinding) catch {
+                unweighed();
+                return .{ .unweighed = true };
+            };
+            m.health[0] = first_health;
             var first: [max_weighed_sectors][sector_size]u8 = undefined;
             for (differ[0..n_differ], 0..) |at, i| {
                 const held = fat[at * sector_size ..][0..sector_size];
                 first[i] = held.*;
                 held.* = second[i];
             }
-            m.health[1] = try self.check(room, {}, ignoreFinding);
+            m.health[1] = self.check(room, {}, ignoreFinding) catch {
+                for (differ[0..n_differ], 0..) |at, i| fat[at * sector_size ..][0..sector_size].* = first[i];
+                unweighed();
+                return .{ .unweighed = true };
+            };
+            m.checked = true;
             const better = m.health[1].problems < m.health[0].problems or
                 (m.health[1].problems == m.health[0].problems and m.health[1].leaked < m.health[0].leaked);
             if (better) {
@@ -623,6 +640,11 @@ pub const Volume = struct {
     }
 
     fn ignoreFinding(_: void, _: Finding) void {}
+
+    /// One coverage site for both checks of a weighing that could not run.
+    fn unweighed() void {
+        props.reachable(@src(), "fat: FAT copies apart cannot be weighed (the check failed), and neither is written over", null);
+    }
 
     /// Reads the boot sector and works out where everything is.
     ///
