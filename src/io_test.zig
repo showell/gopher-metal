@@ -729,3 +729,17 @@ test "a disk that fails a read is not a file that is absent: createFile errors a
     try testing.expectError(error.ReadFailed, cwd.statFile(io, "data/chat/log.md", .{}));
     t.volume.blk.fault = null;
 }
+
+test "a read tried again (boot's read_tries) answers past one refusal, and is counted; tried once it fails" {
+    const t = try Two.make(true);
+    defer t.deinit();
+    try cwd.writeFile(io, .{ .sub_path = "data/chat/log.md", .data = "every message so far" });
+    t.volume.blk.read_tries = 3;
+    t.volume.blk.fault = .{ .at = t.volume.blk.requests, .kind = .fails };
+    _ = try cwd.statFile(io, "data/chat/log.md", .{});
+    try testing.expectEqual(@as(u64, 1), t.volume.blk.reads_retried);
+    t.volume.blk.read_tries = 1;
+    t.volume.blk.fault = .{ .at = t.volume.blk.requests, .kind = .fails };
+    try testing.expectError(error.ReadFailed, cwd.statFile(io, "data/chat/log.md", .{}));
+    t.volume.blk.fault = null;
+}

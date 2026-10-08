@@ -698,6 +698,16 @@ pub const Block = struct {
     /// write-through unless VIRTIO_BLK_F_FLUSH is negotiated (virtio 1.2
     /// §5.2.5.1), and this driver never negotiates it, so it is false there.
     write_cache: ?bool = null,
+    /// **HOW MANY TIMES A READ IS TRIED** before its failure is the caller's
+    /// (B25, Steve 2026-10-08). 1 while the machine serves: a request that
+    /// meets a failing disk fails, and says so. Boot sets more
+    /// (probe/gopher.zig): one refused read of the partition table or the FAT
+    /// would otherwise stop the machine, and a disk that refused once, a
+    /// transient error, answers the next time. Writes are never tried again
+    /// here: what a failed one left behind is the filesystem's to judge.
+    read_tries: u8 = 1,
+    /// Reads that failed and answered on a later try.
+    reads_retried: u64 = 0,
     /// Flushes sent, and those the disk answered with an error.
     flushes: u64 = 0,
     flush_failures: u64 = 0,
@@ -842,7 +852,19 @@ pub const Block = struct {
 
     /// The sector at `lba` into the 512 bytes at `addr`.
     pub fn read(self: *Block, lba: u64, addr: u64) u8 {
-        return self.transfer(blk_t_in, lba, addr, 512);
+        return self.readTried(lba, addr, 512);
+    }
+
+    /// A read, tried up to `read_tries` times while the disk answers with an
+    /// error.
+    fn readTried(self: *Block, lba: u64, addr: u64, len: u32) u8 {
+        var status = self.transfer(blk_t_in, lba, addr, len);
+        var tries: u8 = 1;
+        while (status == blk_s_ioerr and tries < self.read_tries) : (tries += 1) {
+            status = self.transfer(blk_t_in, lba, addr, len);
+            if (status == blk_s_ok) self.reads_retried += 1;
+        }
+        return status;
     }
 
     /// The most sectors one request asks for. virtio-blk lets a device state
@@ -859,7 +881,7 @@ pub const Block = struct {
     /// hundred round trips through the emulator.
     pub fn readMany(self: *Block, lba: u64, addr: u64, count: u32) u8 {
         if (count == 0 or count > max_sectors) return blk_s_unsupp;
-        return self.transfer(blk_t_in, lba, addr, count * 512);
+        return self.readTried(lba, addr, count * 512);
     }
 
     /// The 512 bytes at `addr` become the sector at `lba`.

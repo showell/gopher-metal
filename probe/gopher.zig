@@ -312,6 +312,7 @@ pub fn kmain() noreturn {
     // on a volume, and which one (`volume = 92DE-8831`); without that line a
     // volume is used if one is attached, and the boot disk otherwise.
     var boot_disk = bootDisk();
+    boot_disk.read_tries = boot_read_tries;
     disks[0] = &boot_disk;
     Io.mount(mountFat(&boot_disk, &sector, "the boot disk"));
     const io = Io.io();
@@ -320,6 +321,7 @@ pub fn kmain() noreturn {
     var volume_disk: virtio.Block = undefined;
     if (dataVolume()) |b| {
         volume_disk = b;
+        volume_disk.read_tries = boot_read_tries;
         disks[1] = &volume_disk;
         const vol = mountFat(&volume_disk, &volume_sector, "the volume");
         serial.put("  its serial: ");
@@ -470,6 +472,16 @@ pub fn kmain() noreturn {
     serial.put("  address: ");
     serial.putIp(lease.address);
     serial.put("\n  listening on port 80\n");
+    // Serving, a failed read fails its request and says so; boot's retries
+    // end here, and those it needed are told.
+    for (disks) |maybe| if (maybe) |d| {
+        d.read_tries = 1;
+        if (d.reads_retried > 0) {
+            serial.put("  reads that failed at boot and answered when tried again: ");
+            serial.putDec(d.reads_retried);
+            serial.put(if (d == &boot_disk) " (the boot disk)\n" else " (the volume)\n");
+        }
+    };
 
     const rx_all = pages.allocator.alloc(u8, max_connections * rx_bytes) catch
         serial.fail("the machine has not enough memory for its connections");
@@ -1169,6 +1181,11 @@ fn dataVolume() ?virtio.Block {
 /// The most memory one volume's FAT may take (FAT32.md §9): about 256 GiB of
 /// volume at 32 KiB clusters.
 const fat_budget_bytes: usize = 32 << 20;
+
+/// **HOW MANY TIMES BOOT TRIES A READ** (B25, Steve 2026-10-08): one refused
+/// read of the partition table or the FAT stopped the machine, and a disk
+/// that refused once answers the next time. Serving, a read is tried once.
+const boot_read_tries: u8 = 3;
 
 fn mountFat(blk: *virtio.Block, scratch: *[fat16.sector_size]u8, what: []const u8) fat16.Volume {
     // A table that cannot be read is a disk failing, not a blank one: the

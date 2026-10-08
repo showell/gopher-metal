@@ -254,7 +254,13 @@ pub fn build(b: *std.Build) void {
     // the formatter writes it. It was let slip once (three files, QUEUE.md
     // item 10), and a separate step nobody runs would let it slip again.
     test_step.dependOn(&b.addFmt(.{ .paths = &.{"src"}, .check = true }).step);
+    // One file's tests in seconds, while working on it: the whole step takes
+    // minutes. A name that matches none of the files is an error.
+    const test_file = b.option([]const u8, "test-file", "run only this file's unit tests (src/io_test.zig)");
+    var test_file_found = test_file == null;
     for ([_][]const u8{ "src/rtc.zig", "src/pit.zig", "src/stack.zig", "src/civil.zig", "src/fat16.zig", "src/pvh.zig", "src/pages.zig", "src/tcp.zig", "src/tcp_check.zig", "src/tcp_sim.zig", "src/fat_sim.zig", "src/page_sim.zig", "src/pure_sim.zig", "src/ready_sim.zig", "src/durable_sim.zig", "src/durable.zig", "src/floor_sim.zig", "src/store.zig", "src/store_model.zig", "src/store_test.zig", "src/store_linux.zig", "src/store_sim.zig", "src/io_test.zig", "src/log_ring.zig", "src/restart.zig", "src/kept_log.zig", "src/ready.zig", "src/request_heap.zig", "src/page_cache.zig", "src/admin_reset.zig", "droplet/image.zig", "src/dhcp.zig", "src/screen.zig", "src/serial_gate.zig", "src/net.zig" }) |path| {
+        if (test_file) |only| if (!std.mem.eql(u8, only, path)) continue;
+        test_file_found = true;
         const unit = b.addTest(.{ .root_module = b.createModule(.{
             .root_source_file = b.path(path),
             .target = b.graph.host,
@@ -267,6 +273,7 @@ pub fn build(b: *std.Build) void {
         }) });
         test_step.dependOn(&b.addRunArtifact(unit).step);
     }
+    if (!test_file_found) @panic("-Dtest-file names no file the unit tests run");
 
     // **THE STORE PRODUCTION RUNS, JUDGED** (src/store_judge.zig):
     // angry-gopher's store.zig over Linux and, as port.sh made it
