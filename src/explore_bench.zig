@@ -29,17 +29,25 @@ const store_sim = @import("store_sim.zig");
 const options = @import("explore_options");
 
 /// The properties blind seeds reach only at `long.sh`'s 300 FAT seeds.
+
+/// What the simulators allocate from, and their `Io`: the program's, set in
+/// `main` (an explorer's `RunFn` takes only its tape). The simulators took
+/// `std.testing`'s, which exist only in a test, so this was a test and its
+/// output was held until it ended (metal-vmm QUEUE 106).
+var host_gpa: std.mem.Allocator = undefined;
+var host_io: std.Io = undefined;
+
 const targets = [_][]const u8{
     "fat: a FAT32 entry's first cluster is past 65535",
     "fat: a run of sectors fails to read",
 };
 
 fn runFat(tape: *explore.Tape) anyerror!void {
-    _ = try fat_sim.runWith(tape);
+    _ = try fat_sim.runWithIn(host_gpa, host_io, tape);
 }
 
 fn runStore(tape: *explore.Tape) anyerror!void {
-    try store_sim.runWith(tape);
+    try store_sim.runWithIn(host_gpa, host_io, tape);
 }
 
 const sim_is_store = std.mem.eql(u8, options.sim, "store");
@@ -92,8 +100,10 @@ fn runOnce(gpa: std.mem.Allocator, budget: u32, seed: u64, column: Column) !expl
     return report;
 }
 
-test "the explorer against blind seeds" {
-    const gpa = std.testing.allocator;
+pub fn main(init: std.process.Init) !void {
+    const gpa = init.gpa;
+    host_gpa = gpa;
+    host_io = init.io;
     const seeds: u32 = options.seeds;
 
     // What blind runs reach at the reference budget: all that is counted.

@@ -32,8 +32,9 @@ mkdir -p "$HOME/soak-logs"
 log=$HOME/soak-logs/soak-$(date +%Y-%m-%d-%H%M).log
 echo "gopher-metal $commit, zig-coverage-sdk $sdk_commit, started $(date '+%F %T'), options: ${*:-the defaults}" > "$log"
 cd "$tree"
-# Built first, then run directly: under `zig build soak` the build runner
-# holds the test's output until it exits, and the log stays empty all night.
+# Built first, then run directly and detached: the soak is an ordinary
+# program (metal-vmm QUEUE 106), so its lines reach the log as they are
+# printed, and it outlives this shell.
 zig build soak-build "$@"
 setsid nohup ./zig-out/bin/soak >> "$log" 2>&1 < /dev/null &
 echo "soak: PID $!, log $log"

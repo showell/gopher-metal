@@ -98,43 +98,44 @@ const Scenario = struct {
 };
 
 const Model = struct {
+    gpa: std.mem.Allocator,
     files: std.StringHashMap([]u8),
     dirs: std.StringHashMap(void),
 
-    fn init() Model {
-        return .{ .files = .init(testing.allocator), .dirs = .init(testing.allocator) };
+    fn init(gpa: std.mem.Allocator) Model {
+        return .{ .gpa = gpa, .files = .init(gpa), .dirs = .init(gpa) };
     }
 
     fn deinit(m: *Model) void {
         var f = m.files.iterator();
         while (f.next()) |e| {
-            testing.allocator.free(e.key_ptr.*);
-            testing.allocator.free(e.value_ptr.*);
+            m.gpa.free(e.key_ptr.*);
+            m.gpa.free(e.value_ptr.*);
         }
         m.files.deinit();
         var d = m.dirs.keyIterator();
-        while (d.next()) |k| testing.allocator.free(k.*);
+        while (d.next()) |k| m.gpa.free(k.*);
         m.dirs.deinit();
     }
 
     fn setFile(m: *Model, path: []const u8, bytes: []const u8) !void {
-        const copy = try testing.allocator.dupe(u8, bytes);
+        const copy = try m.gpa.dupe(u8, bytes);
         if (m.files.getPtr(path)) |v| {
-            testing.allocator.free(v.*);
+            m.gpa.free(v.*);
             v.* = copy;
-        } else try m.files.put(try testing.allocator.dupe(u8, path), copy);
+        } else try m.files.put(try m.gpa.dupe(u8, path), copy);
     }
 
     fn dropFile(m: *Model, path: []const u8) void {
         if (m.files.fetchRemove(path)) |kv| {
-            testing.allocator.free(kv.key);
-            testing.allocator.free(kv.value);
+            m.gpa.free(kv.key);
+            m.gpa.free(kv.value);
         }
     }
 
     fn addDir(m: *Model, path: []const u8) !void {
         if (path.len == 0 or m.dirs.contains(path)) return;
-        try m.dirs.put(try testing.allocator.dupe(u8, path), {});
+        try m.dirs.put(try m.gpa.dupe(u8, path), {});
     }
 
     /// Every directory a path needs, in the model.
@@ -148,16 +149,16 @@ const Model = struct {
     /// A tree, gone: the directory and everything under it.
     fn dropTree(m: *Model, dir: []const u8) !void {
         var doomed: std.ArrayList([]const u8) = .empty;
-        defer doomed.deinit(testing.allocator);
+        defer doomed.deinit(m.gpa);
         var f = m.files.keyIterator();
-        while (f.next()) |k| if (under(k.*, dir)) try doomed.append(testing.allocator, k.*);
+        while (f.next()) |k| if (under(k.*, dir)) try doomed.append(m.gpa, k.*);
         for (doomed.items) |k| m.dropFile(k);
         doomed.clearRetainingCapacity();
         var d = m.dirs.keyIterator();
-        while (d.next()) |k| if (std.mem.eql(u8, k.*, dir) or under(k.*, dir)) try doomed.append(testing.allocator, k.*);
+        while (d.next()) |k| if (std.mem.eql(u8, k.*, dir) or under(k.*, dir)) try doomed.append(m.gpa, k.*);
         for (doomed.items) |k| {
             const kv = m.dirs.fetchRemove(k).?;
-            testing.allocator.free(kv.key);
+            m.gpa.free(kv.key);
         }
     }
 };
@@ -167,6 +168,9 @@ fn under(path: []const u8, dir: []const u8) bool {
 }
 
 const Sim = struct {
+    /// What the run allocates from: `std.testing`'s under a test, the
+    /// program's otherwise (metal-vmm QUEUE 106).
+    gpa: std.mem.Allocator,
     seed: u64,
     prng: std.Random.DefaultPrng,
     rng: std.Random,
@@ -202,32 +206,33 @@ const Sim = struct {
         var prng = std.Random.DefaultPrng.init(seed);
         // The scenario first: the run's draws go on from where it left the PRNG.
         const sc = Scenario.choose(prng.random());
-        return initFrom(seed, prng, sc, cached);
+        return initFrom(testing.allocator, testing.io, seed, prng, sc, cached);
     }
 
     /// A run whose every draw comes from `r` (a tape's, under `runWith`).
-    fn initWith(seed: u64, r: std.Random, cached: bool) !Sim {
-        var s = try initFrom(seed, .init(seed), Scenario.choose(r), cached);
+    fn initWith(gpa: std.mem.Allocator, io: std.Io, seed: u64, r: std.Random, cached: bool) !Sim {
+        var s = try initFrom(gpa, io, seed, .init(seed), Scenario.choose(r), cached);
         s.drawn = r;
         return s;
     }
 
-    fn initFrom(seed: u64, prng: std.Random.DefaultPrng, sc: Scenario, cached: bool) !Sim {
+    fn initFrom(gpa: std.mem.Allocator, io: std.Io, seed: u64, prng: std.Random.DefaultPrng, sc: Scenario, cached: bool) !Sim {
         return .{
+            .gpa = gpa,
             .seed = seed,
             .prng = prng,
             .rng = undefined,
             .sc = sc,
             .cached = cached,
-            .disk = try test_disk.Disk.make("fat-sim", sc.shape, cached),
-            .model = .init(),
-            .bytes = try testing.allocator.alloc(u8, sc.max_bytes),
+            .disk = try test_disk.Disk.makeIn(gpa, io, "fat-sim", sc.shape, cached),
+            .model = .init(gpa),
+            .bytes = try gpa.alloc(u8, sc.max_bytes),
         };
     }
 
     fn deinit(s: *Sim) void {
         s.model.deinit();
-        testing.allocator.free(s.bytes);
+        s.gpa.free(s.bytes);
         // test_disk checks a disk left healthy on the way out; a run that
         // failed has already said why, so it is not asked again.
         if (s.broken != null or s.failed_disk) s.disk.blk.fail_after = 0;
@@ -357,8 +362,8 @@ const Sim = struct {
                     return;
                 };
                 if (vol.writeInto(path, @intCast(old.len), bytes)) {
-                    const whole = try std.mem.concat(testing.allocator, u8, &.{ old, bytes });
-                    defer testing.allocator.free(whole);
+                    const whole = try std.mem.concat(s.gpa, u8, &.{ old, bytes });
+                    defer s.gpa.free(whole);
                     try s.model.setFile(path, whole);
                 } else |e| {
                     if (!roomless(e)) return s.fault(@errorName(e));
@@ -388,8 +393,8 @@ const Sim = struct {
                 const old_to = s.model.files.get(to);
                 if (vol.rename(from, to)) {
                     const moved = old_from orelse return s.fault("a rename of a file that is not there succeeded");
-                    const copy = try testing.allocator.dupe(u8, moved);
-                    defer testing.allocator.free(copy);
+                    const copy = try s.gpa.dupe(u8, moved);
+                    defer s.gpa.free(copy);
                     s.model.dropFile(from);
                     try s.model.setFile(to, copy);
                 } else |e| {
@@ -538,7 +543,7 @@ const Sim = struct {
                         failed = e;
                     };
                 } else if (s.disk.read(path)) |got| {
-                    testing.allocator.free(got);
+                    s.gpa.free(got);
                 } else |e| failed = e;
                 if (failed) |e| if (e != E.ReadFailed and e != E.WriteFailed and e != E.NotFound and !roomless(e))
                     return s.fault(@errorName(e));
@@ -717,7 +722,7 @@ const Sim = struct {
             if (s.disk.fat_cache) |c| raw.set(c[at * width ..], width, cached_saved);
         }
         if (s.disk.read(path)) |got| {
-            defer testing.allocator.free(got);
+            defer s.gpa.free(got);
             if (!loop) return s.fault("a file whose chain leads outside the data read without an error");
             if (!std.mem.eql(u8, got, bytes)) props.reachable(@src(), "fat_sim: a file whose chain loops reads as other bytes, without an error", null);
         } else |e| {
@@ -761,7 +766,7 @@ const Sim = struct {
             },
             else => return s.fault(@errorName(e)),
         };
-        defer testing.allocator.free(got);
+        defer s.gpa.free(got);
         const ok = (before != null and std.mem.eql(u8, got, before.?)) or (after != null and std.mem.eql(u8, got, after.?));
         if (!ok) return s.fault("an operation that found no room left a file that is neither its old self nor its new one");
         try s.model.setFile(path, got);
@@ -792,7 +797,7 @@ const Sim = struct {
         var f = s.model.files.iterator();
         while (f.next()) |e| {
             const got = d.read(e.key_ptr.*) catch return s.fault("a file the model holds does not open");
-            defer testing.allocator.free(got);
+            defer s.gpa.free(got);
             if (!std.mem.eql(u8, got, e.value_ptr.*)) return s.fault("a file reads back other bytes than were written");
         }
         var k = s.model.dirs.keyIterator();
@@ -833,6 +838,13 @@ pub fn runProbeSeed(seed: u64) !void {
 /// replays the first's draws (`Tape.twin`) and must draw exactly as many and
 /// leave the same volume. Answers the volume's hash, for the replay test.
 pub fn runWith(tape: *explore.Tape) !u64 {
+    return runWithIn(testing.allocator, testing.io, tape);
+}
+
+/// `runWith`, with the allocator and the `Io` a program gives it (the
+/// explorer's bench and soak, metal-vmm QUEUE 106): the same run, the same
+/// hash.
+pub fn runWithIn(gpa: std.mem.Allocator, io: std.Io, tape: *explore.Tape) !u64 {
     const r = tape.random();
     const probed = explore.pick(r, "fat_sim: probes between the operations", .{ .no = 1, .yes = 1 }) == .yes;
     const start = tape.position();
@@ -840,7 +852,7 @@ pub fn runWith(tape: *explore.Tape) !u64 {
     var failed = false;
     var full: usize = 0;
     {
-        var s = try Sim.initWith(tape.seed, r, false);
+        var s = try Sim.initWith(gpa, io, tape.seed, r, false);
         s.probes_drawn = probed;
         defer s.deinit();
         try s.run();
@@ -849,10 +861,10 @@ pub fn runWith(tape: *explore.Tape) !u64 {
         full = s.full;
     }
     const end = tape.position();
-    var twin = explore.Tape.twin(testing.allocator, tape, start, end, tape.seed ^ 0x7477_696e); // "twin"
+    var twin = explore.Tape.twin(gpa, tape, start, end, tape.seed ^ 0x7477_696e); // "twin"
     defer twin.deinit();
     {
-        var s = try Sim.initWith(tape.seed, twin.random(), true);
+        var s = try Sim.initWith(gpa, io, tape.seed, twin.random(), true);
         s.probes_drawn = probed;
         defer s.deinit();
         try s.run();
