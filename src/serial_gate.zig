@@ -46,8 +46,18 @@ pub const Gate = struct {
 
     /// Sends `bytes`, each after at most `patience` waits. Answers false, and
     /// marks the port dead with what was not sent counted, on a timeout.
+    ///
+    /// A port that declares a `burst` (a FIFO that `ready` says is empty)
+    /// is given that many bytes after each ready, in one `writeBurst`.
     fn raw(g: *Gate, bytes: []const u8, port: anytype, patience: u32) bool {
-        for (bytes, 0..) |b, i| {
+        const Port = @TypeOf(port);
+        const P = switch (@typeInfo(Port)) {
+            .pointer => |p| p.child,
+            else => Port,
+        };
+        const burst: usize = if (@hasDecl(P, "burst")) P.burst else 1;
+        var i: usize = 0;
+        while (i < bytes.len) {
             var waited: u32 = 0;
             while (!port.ready()) {
                 waited += 1;
@@ -58,7 +68,9 @@ pub const Gate = struct {
                     return false;
                 }
             }
-            port.write(b);
+            const n = @min(burst, bytes.len - i);
+            if (burst > 1) port.writeBurst(bytes[i..][0..n]) else port.write(bytes[i]);
+            i += n;
         }
         return true;
     }
@@ -135,4 +147,50 @@ test "a port that fills again in the middle of the note stays dead, and counts w
     try testing.expect(g.dead);
     try testing.expectEqualStrings("\n", f.sent.items);
     try testing.expect(g.dropped >= 3);
+}
+
+/// A 16550's FIFO: `burst` bytes after each ready, and full again for
+/// `full_after` readies once that many bursts have gone.
+const FifoFake = struct {
+    pub const burst = 16;
+    readies: u32 = 0,
+    full_after: u32 = std.math.maxInt(u32),
+    bursts: u32 = 0,
+    sent: std.ArrayList(u8) = .empty,
+
+    fn ready(f: *FifoFake) bool {
+        f.readies += 1;
+        return f.bursts < f.full_after;
+    }
+    fn write(_: *FifoFake, _: u8) void {
+        unreachable; // a port with a burst is sent bursts
+    }
+    fn writeBurst(f: *FifoFake, bytes: []const u8) void {
+        std.debug.assert(bytes.len <= burst);
+        f.bursts += 1;
+        f.sent.appendSlice(testing.allocator, bytes) catch unreachable;
+    }
+};
+
+test "a port with a FIFO is sent a burst after each ready, in order, the last one short" {
+    var f = FifoFake{};
+    defer f.sent.deinit(testing.allocator);
+    var g = Gate{};
+    var text: [40]u8 = undefined;
+    for (&text, 0..) |*b, i| b.* = @intCast('a' + i % 26);
+    g.send(&text, &f, 100);
+    try testing.expectEqualSlices(u8, &text, f.sent.items);
+    try testing.expectEqual(@as(u32, 3), f.bursts); // 16, 16, 8
+    try testing.expectEqual(@as(u32, 3), f.readies);
+}
+
+test "a FIFO port that stays full part-way counts exactly the bytes it dropped" {
+    var f = FifoFake{ .full_after = 2 };
+    defer f.sent.deinit(testing.allocator);
+    var g = Gate{};
+    const text = [_]u8{'x'} ** 40;
+    g.send(&text, &f, 50);
+    try testing.expectEqual(@as(usize, 32), f.sent.items.len);
+    try testing.expect(g.dead);
+    try testing.expectEqual(@as(u64, 8), g.dropped);
 }
