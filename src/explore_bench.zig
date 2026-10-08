@@ -29,7 +29,6 @@ const store_sim = @import("store_sim.zig");
 const options = @import("explore_options");
 
 /// The properties blind seeds reach only at `long.sh`'s 300 FAT seeds.
-
 /// What the simulators allocate from, and their `Io`: the program's, set in
 /// `main` (an explorer's `RunFn` takes only its tape). The simulators took
 /// `std.testing`'s, which exist only in a test, so this was a test and its
