@@ -24,12 +24,14 @@ in memory), and every fat16 survivor's line is still there unchanged.
 | Store (`store`, `store_fat`) | 11 | 7 | 8 | 0 | 8 / 11 |
 | log_ring | 11 | 8 | 8 | 2 (L6, L10) | 8 / 11 |
 | page_cache | 13 | 10 | 10 | 0 | 10 / 13 |
-| fat16 | 16 | 8 | 8 | 4 (F2, F13; F4, F11 in effect) | 8 / 16 |
-| **all** | **85** | **59** | **63** | **8** | **63 / 85** |
+| fat16 | 16 | 8 | 12 | 4 (F2, F13; F4, F11 in effect) | 12 / 16 |
+| **all** | **85** | **59** | **67** | **8** | **67 / 85** |
 
-"Killed now" counts the four survivors that later got an oracle (T14, T16,
-R6, S2). Leaving out the eight equivalent mutants, which no oracle could
-kill, the score is 63 of 77.
+"Killed now" counts the eight survivors that later got an oracle: T14, T16,
+R6 and S2 (item 93), and F6, F10, F14 and F15 (fat16_test, item 107, the
+tests named in the tables below, each re-planted and killed). Leaving out
+the eight equivalent mutants, which no oracle could kill, the score is 67 of
+77, and fat16's is 12 of 12.
 
 What the run itself shows:
 
@@ -128,16 +130,16 @@ What the run itself shows:
 | F3 | src/fat16.zig:1871 | `.kept => try self.readSector(lba, self.scratch),` | `.kept => @memset(self.scratch, 0),` | killed | `io_test`: the page cache is the disk: every change interleaved with reads, under evictions and failed writes |
 | F4 | src/fat16.zig:1835 | `at + have >= bytes.len` | `at + have > bytes.len` | survived | see below |
 | F5 | src/fat16.zig:1837 | `next != last + 1` | `next != last + 2` | killed | `store_sim`: store_sim: a handful of seeds |
-| F6 | src/fat16.zig:1872 | `.zeros => @memset(self.scratch, 0),` | `.zeros => try self.readSector(lba, self.scratch),` | survived | see below |
+| F6 | src/fat16.zig:1872 | `.zeros => @memset(self.scratch, 0),` | `.zeros => try self.readSector(lba, self.scratch),` | survived, now killed | fat16_test: a file ending inside a sector leaves zeros past its end, not what a file before it left (mutant F6) |
 | F7 | src/fat16.zig:1717 | `offset > entry.size` | `offset > entry.size + 1` | killed | `floor_sim`: floor_sim: GPT, built field by field with one field wrong, a handful of seeds |
 | F8 | src/fat16.zig:1753 | `need > end.clusters` | `need > end.clusters + 1` | killed | `fat16_faults_test`: every operation stopped after every write leaves an outcome its doc names, and at worst leaked clusters |
 | F9 | src/fat16.zig:2016 | `if (d.first_cluster >= 2) try self.freeChain(d.first_cluster);` | `if (false) try self.freeChain(d.first_cluster);` | killed | `fat_sim`: the same, with probes of what the volume must refuse, a handful of seeds |
-| F10 | src/fat16.zig:2483 | `offset >= entry.size` | `offset > entry.size` | survived | see below |
+| F10 | src/fat16.zig:2483 | `offset >= entry.size` | `offset > entry.size` | survived, now killed | fat16_test: reading at a file's very end reads nothing, even where its chain ends there too (mutant F10) |
 | F11 | src/fat16.zig:2533 | `got + have >= want` | `got + have > want` | survived | see below |
 | F12 | src/fat16.zig:2410 | `entry.size > out.len` | `entry.size > out.len + 1` | killed | `floor_sim`: floor_sim: GPT, built field by field with one field wrong, a handful of seeds |
 | F13 | src/fat16.zig:2470 | `out.clusters > self.max_cluster` | `out.clusters > self.max_cluster * 2` | survived | see below |
-| F14 | src/fat16.zig:2236 | `if (n < need) self.report(.short, first, n);` | `if (n + 1 < need) self.report(.short, first, n);` | survived | see below |
-| F15 | src/fat16.zig:1211 | `first == 0x00 or first == 0xE5` | `first == 0x00` | survived | see below |
+| F14 | src/fat16.zig:2236 | `if (n < need) self.report(.short, first, n);` | `if (n + 1 < need) self.report(.short, first, n);` | survived, now killed | fat16_test: the check finds a chain exactly one cluster short of its size (mutant F14) |
+| F15 | src/fat16.zig:1211 | `first == 0x00 or first == 0xE5` | `first == 0x00` | survived, now killed | fat16_test: a name removed leaves its entries for the next name of the same length (mutant F15) |
 | F16 | src/fat16.zig:1385 | `self.scratch[pos.at] = 0xE5;` | `self.scratch[pos.at] = self.scratch[pos.at];` | killed | `fat16_test`: a file rewritten under a name in another case keeps the name and alias it has |
 
 ## The survivors
@@ -176,12 +178,12 @@ on). There are three verdicts:
 | P5 | unreached | `page_sim`'s budgets are whole pages and sizes are rounded to pages, so `size == budget + 1` can't occur. | already there (`props.unreachable` "no room for a file within the budget"), once a budget can be one byte short of a page multiple | mine (`page_sim`'s budget) |
 | F2 | equivalent | Looking once more at the first candidate, already found taken, changes nothing. | nothing can | none |
 | F4 | equivalent in effect | When a write's run ends exactly at the end of its data, the mutant looks up one more cluster and then writes the same sectors. Unreached under the probe as well. | nothing can (one more FAT lookup) | none |
-| F6 | reached, unchecked | A write that ends inside a new sector keeps whatever the disk held there instead of zeroing it. Bytes past the file's size are never read, so nothing notices. 150 test runs reach it. | `fat_sim`'s end of run: the bytes after each file's size in its last sector are zero | mine (`fat_sim`) |
-| F10 | unreached | No caller reads at `offset == size`. The mutant then walks the chain to a cluster that may not exist and answers `BadChain` instead of 0. | floor_sim's `readAt` cases: at `offset == size`, with the size a whole number of clusters, expect 0 bytes | mine (`floor_sim`) |
+| F6 | reached, unchecked; **now killed** | A write that ends inside a new sector keeps whatever the disk held there instead of zeroing it. Bytes past the file's size are never read, so nothing notices. 150 test runs reach it. | `fat_sim`'s end of run: the bytes after each file's size in its last sector are zero | mine (`fat_sim`) |
+| F10 | unreached; **now killed** | No caller reads at `offset == size`. The mutant then walks the chain to a cluster that may not exist and answers `BadChain` instead of 0. | floor_sim's `readAt` cases: at `offset == size`, with the size a whole number of clusters, expect 0 bytes | mine (`floor_sim`) |
 | F11 | equivalent in effect | When a read's run ends exactly at what is wanted, the mutant follows one more link, and copies only what is wanted. | nothing can (one more FAT lookup) | none |
 | F13 | equivalent | It detects a chain loop at twice the volume's cluster count instead of once. The error is the same, later. | nothing can | none |
-| F14 | reached, unchecked | `check` misses a chain exactly one cluster short of its size. The tests that reach one (2 runs) accept `.short` but don't require it. | floor_sim `fatSeed`: a size exactly one cluster past the chain, and `check` must report `.short` | mine (`floor_sim`) |
-| F15 | reached, unchecked | `findRun` never reuses a deleted (0xE5) entry, so a directory grows instead. On FAT16 the root fills sooner. Every outcome is still allowed, because a full directory is an accepted answer. | `fat_sim`: after a remove, a name needing no more entries than were freed fits without the directory growing | mine (`fat_sim`) |
+| F14 | reached, unchecked; **now killed** | `check` misses a chain exactly one cluster short of its size. The tests that reach one (2 runs) accept `.short` but don't require it. | floor_sim `fatSeed`: a size exactly one cluster past the chain, and `check` must report `.short` | mine (`floor_sim`) |
+| F15 | reached, unchecked; **now killed** | `findRun` never reuses a deleted (0xE5) entry, so a directory grows instead. On FAT16 the root fills sooner. Every outcome is still allowed, because a full directory is an accepted answer. | `fat_sim`: after a remove, a name needing no more entries than were freed fits without the directory growing | mine (`fat_sim`) |
 
 ### The fat16 survivors and the kernel
 
@@ -189,8 +191,8 @@ on). There are three verdicts:
 
 - **Four are equivalent** (F2, F13), or equivalent apart from speed (F4,
   F11): one more FAT lookup, or a loop detected later.
-- **The other four are weak oracles, all on the simulator side**, and mine
-  to fix:
+- **The other four were weak oracles**, and each now has the test that
+  kills it in `fat16_test.zig` (metal-vmm QUEUE 107):
   - F6: no test checks what is on the disk past a file's end.
   - F10: no test reads at the very end of a file.
   - F14: no test checks the checker on a chain one cluster short.

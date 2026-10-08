@@ -235,6 +235,23 @@ test "an offset past what FAT holds reads nothing and writes nothing, rather tha
     try t.volume.expectFile(path, "abc");
 }
 
+test "a directory that cannot be read is an error, never an empty listing (metal-vmm QUEUE 104)" {
+    const t = try Two.make(true);
+    defer t.deinit();
+    try cwd.writeFile(io, .{ .sub_path = "data/players/p1/name", .data = "Ada" });
+    var dir = try cwd.openDir(io, "data/players", .{ .iterate = true });
+    defer dir.close(io);
+    // The next request the disk is asked, whichever that is, fails.
+    t.volume.blk.fault = .{ .at = t.volume.blk.requests, .kind = .fails };
+    var it = dir.iterate();
+    try testing.expectError(io_mod.Error.ReadFailed, it.next(io));
+    // A directory whose entry names a cluster outside the data, as a damaged
+    // entry does: fat16 refuses to walk it, and that is no empty folder.
+    const damaged = io_mod.Dir{ .cluster = 0x0FFF_FFF0, .place = .data };
+    var it2 = damaged.iterate();
+    try testing.expect(std.meta.isError(it2.next(io)));
+}
+
 test "a directory opened under data/ lists the volume's entries, and deleting a tree there frees the volume" {
     const t = try Two.make(true);
     defer t.deinit();

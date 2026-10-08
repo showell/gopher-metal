@@ -128,7 +128,10 @@ pub fn checkPart(part: []const u8) Error!void {
     if (std.mem.eql(u8, part, ".") or std.mem.eql(u8, part, "..")) return Error.BadName;
     if (std.mem.startsWith(u8, part, temp_prefix)) return Error.BadName;
     for (part) |c| {
-        if (c < 0x20 or c == 0x7F) return Error.BadName;
+        // Control characters, and past ASCII: FAT holds a name's bytes as
+        // UTF-16 units and refuses any past ASCII (metal-vmm QUEUE 104), so
+        // every store refuses them too.
+        if (c < 0x20 or c >= 0x7F) return Error.BadName;
         if (std.mem.indexOfScalar(u8, "\"*/:<>?\\|", c) != null) return Error.BadName;
     }
     const last = part[part.len - 1];
@@ -153,7 +156,7 @@ test "paths: empty parts ignored, FAT's rules kept, the Store's prefix refused" 
     const p = try checkPath("data//chat/x.md/", &buf, false);
     try testing.expectEqual(@as(usize, 3), p.len);
     try testing.expectEqualStrings("x.md", p[2]);
-    for ([_][]const u8{ "", "/", "a/./b", "a/../b", "a:b", "what?", "trailing.", "trailing ", ".~mine", "a\x01b", "a\x7fb", "a/b/c/d/e/f/g/h/i" }) |bad| {
+    for ([_][]const u8{ "", "/", "a/./b", "a/../b", "a:b", "what?", "trailing.", "trailing ", ".~mine", "a\x01b", "a\x7fb", "caf\xc3\xa9", "a/b/c/d/e/f/g/h/i" }) |bad| {
         try testing.expectError(Error.BadName, checkPath(bad, &buf, false));
     }
     try testing.expectEqual(@as(usize, 0), (try checkPath("", &buf, true)).len);

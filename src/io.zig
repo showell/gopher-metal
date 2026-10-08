@@ -522,6 +522,12 @@ pub const Entry = struct {
 /// entry it fails on.
 pub const Iterator = struct {
     lister: ?fat16.Volume.Lister = null,
+    /// **A DIRECTORY THAT CANNOT BE LISTED IS NOT AN EMPTY ONE** (metal-vmm
+    /// QUEUE 104). `iterate` cannot answer an error (its shape is std's), so
+    /// a volume that is not there, or a directory fat16 will not walk (an
+    /// entry naming a cluster outside the data), is kept here and is what
+    /// the first `next` answers.
+    failed: ?Error = null,
     /// **THE LONG NAME, NOT THE 8.3 ALIAS.** This stored `e.name` -- the alias
     /// -- and the application read its own directories back in upper case:
     /// chat's topic list came out `GENERAL` instead of `general`, so /chat
@@ -531,6 +537,7 @@ pub const Iterator = struct {
     name: [fat16.max_name]u8 = undefined,
 
     pub fn next(self: *Iterator, _: Self) Error!?Entry {
+        if (self.failed) |e| return e;
         const l = if (self.lister) |*l| l else return null;
         while (true) {
             const e = (l.next() catch return Error.ReadFailed) orelse return null;
@@ -857,8 +864,8 @@ pub const Dir = struct {
     pub fn iterate(self: Dir) Iterator {
         if (stack.nearTheEnd())
             serial.fail("a directory walk has recursed to within the stack's guard: the tree is deeper than this machine can walk");
-        const v = volumeAt(self.place) catch return .{};
-        return .{ .lister = v.lister(self.cluster) catch null };
+        const v = volumeAt(self.place) catch |e| return .{ .failed = e };
+        return .{ .lister = v.lister(self.cluster) catch return .{ .failed = Error.ReadFailed } };
     }
 };
 

@@ -1698,6 +1698,15 @@ pub const Volume = struct {
     /// An 8.3 alias for a name. A name that already fits is its own alias; one
     /// that does not gets SESSIO~1, SESSIO~2, and so on until one is free.
     fn aliasFor(self: *Volume, dir_cluster: Cluster, name: []const u8) Error![11]u8 {
+        // **A NEW NAME IS ASCII** (metal-vmm QUEUE 104). A long name holds a
+        // byte as one UTF-16 unit, and `takeLongPart` reads a unit past ASCII
+        // as '?': a name past it would be written, then found under no name
+        // it was given. Every name made here comes through this, before
+        // anything is changed (`writeFileIn`, `makeDirIn`, `rename`).
+        for (name) |c| if (c >= 0x80) {
+            props.reachable(@src(), "fat: a name past ASCII is refused", null);
+            return Error.BadName;
+        };
         if (!needsLongName(name)) {
             if (encode(name)) |short| return short else |_| {}
         }
