@@ -627,6 +627,23 @@ pub fn kmain() noreturn {
     while (closing(&table) and (Io.awakeNs() orelse 0) - stopping_at < 2 * std.time.ns_per_s) {
         if (stream.pump(&wire, &table, lease.address) == null) interrupts.rest();
     }
+    // **A RESPONSE CUT BY THE STOP IS SAID TO BE.** One still unacknowledged
+    // now is never finished: its request counted as answered, and its client
+    // has part of the answer. Only a request limit stops the machine.
+    var cut_conns: usize = 0;
+    var cut_bytes: usize = 0;
+    for (table.conns) |c| {
+        if (c.state != .closing or c.queued() == 0) continue;
+        cut_conns += 1;
+        cut_bytes += c.queued();
+    }
+    if (cut_conns > 0) {
+        serial.put("  let go at the end: ");
+        serial.putDec(cut_conns);
+        serial.put(" response(s) cut by the stop, ");
+        serial.putDec(cut_bytes);
+        serial.put(" bytes never acknowledged\n");
+    }
     serial.put("  streams: at most ");
     serial.putDec(held_most);
     serial.put(" held at once, ");
