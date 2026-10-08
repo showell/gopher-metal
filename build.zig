@@ -354,6 +354,11 @@ pub fn build(b: *std.Build) void {
         }),
     });
     b.step("soak", "the seed explorer and blind runs on fat, store and tcp, round after round (overnight; tools/soak.sh)").dependOn(&b.addRunArtifact(soak).step);
+    // **THE SOAK'S BINARY, NOT RUN** (zig-out/bin/soak): `zig build soak`
+    // holds everything the test prints until it exits, so an overnight run
+    // writes nothing to its log until morning. tools/soak.sh runs this
+    // binary directly, and its lines reach the log as they are printed.
+    b.step("soak-build", "build the soak's binary into zig-out/bin, for tools/soak.sh to run").dependOn(&b.addInstallArtifact(soak, .{}).step);
 
     // **COVERAGE PROPERTIES** (COVERAGE.md): the TCP and FAT simulators over
     // a sweep of seeds, then every assertion they reach judged. Not part of `test`: its report is read, not gated on, while it

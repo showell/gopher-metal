@@ -4,7 +4,7 @@
 # are up. Overnight only; stop it before a morning's gates (kill its PID).
 #
 #   tools/soak.sh                      the defaults: 1000 runs a column, 7 hours
-#   tools/soak.sh -Dsoak-sims=tcp      any `zig build soak` option passes through
+#   tools/soak.sh -Dsoak-sims=tcp      any `zig build soak` option passes through to the build
 #
 # It runs from a worktree of its own at this checkout's commit
 # (../gopher-metal-soak), so this checkout stays free to edit, and logs to
@@ -32,5 +32,8 @@ mkdir -p "$HOME/soak-logs"
 log=$HOME/soak-logs/soak-$(date +%Y-%m-%d-%H%M).log
 echo "gopher-metal $commit, zig-coverage-sdk $sdk_commit, started $(date '+%F %T'), options: ${*:-the defaults}" > "$log"
 cd "$tree"
-setsid nohup zig build soak "$@" >> "$log" 2>&1 < /dev/null &
+# Built first, then run directly: under `zig build soak` the build runner
+# holds the test's output until it exits, and the log stays empty all night.
+zig build soak-build "$@"
+setsid nohup ./zig-out/bin/soak >> "$log" 2>&1 < /dev/null &
 echo "soak: PID $!, log $log"
