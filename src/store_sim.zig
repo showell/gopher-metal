@@ -112,9 +112,18 @@ const World = struct {
     fat: FatStore,
     tmp: ScratchDir,
     linux: LinuxStore,
+    /// The disk's write cache, on a run that has one (`runSeedCached`): what
+    /// a cut keeps of the writes since the last flush is the seed's choice.
+    cache: ?*test_disk.Cache = null,
     /// Room to read any file the volume can hold (a seed's appends grow
     /// them): before a cut, what it should leave, after it, and a copy.
     big: [4][]u8,
+
+    /// The disk flushed, as before a response.
+    fn flush(w: *World, step: usize) !void {
+        if (w.disk.blk.flush() != @import("virtio.zig").blk_s_ok) return fail(w.seed, "step {d}: a flush failed with the power on", .{step});
+        if (w.cache.?.pending() != 0) return fail(w.seed, "step {d}: a flush left writes waiting", .{step});
+    }
 
     fn reset(w: *World) !void {
         w.model.deinit();
@@ -175,7 +184,7 @@ const World = struct {
 pub fn runSeed(seed: u64) Failure!void {
     var prng = std.Random.DefaultPrng.init(seed);
     var second = std.Random.DefaultPrng.init(seed ^ 0x6675_6c6c); // "full"
-    return runFrom(std.testing.allocator, std.testing.io, seed, prng.random(), second.random()) catch |e| switch (e) {
+    return runFrom(std.testing.allocator, std.testing.io, seed, prng.random(), second.random(), false) catch |e| switch (e) {
         error.SimulationFailed => error.SimulationFailed,
         else => fail(seed, "{s}", .{@errorName(e)}),
     };
@@ -194,7 +203,7 @@ pub fn runWith(tape: *explore.Tape) Failure!void {
 /// explorer's bench and soak, metal-vmm QUEUE 106): the same run.
 pub fn runWithIn(gpa: std.mem.Allocator, io: std.Io, tape: *explore.Tape) Failure!void {
     const r = tape.random();
-    return runFrom(gpa, io, tape.seed, r, r) catch |e| switch (e) {
+    return runFrom(gpa, io, tape.seed, r, r, false) catch |e| switch (e) {
         error.SimulationFailed => error.SimulationFailed,
         else => fail(tape.seed, "{s}", .{@errorName(e)}),
     };
@@ -204,7 +213,7 @@ pub fn runWithIn(gpa: std.mem.Allocator, io: std.Io, tape: *explore.Tape) Failur
 /// (`runSeed` keeps them apart, as its seeds always have). The decisions
 /// are named choices (explore.pick, .pickAs, .flag), each drawn exactly as
 /// the call it replaced.
-fn runFrom(gpa: std.mem.Allocator, io: std.Io, seed: u64, r: std.Random, second: std.Random) !void {
+fn runFrom(gpa: std.mem.Allocator, io: std.Io, seed: u64, r: std.Random, second: std.Random, cached: bool) !void {
     const fat32 = explore.pick(r, "store_sim: the volume is FAT32", .{ .yes = 1, .no = 3 }) == .yes;
     const filling = explore.pick(second, "store_sim: the volume is tiny, and fills", .{ .yes = 1, .no = 3 }) == .yes;
     const shape = if (filling) tiny else if (fat32) test_disk.small32 else test_disk.small;
@@ -225,8 +234,10 @@ fn runFrom(gpa: std.mem.Allocator, io: std.Io, seed: u64, r: std.Random, second:
     defer for (w.big) |b| gpa.free(b);
     w.fat = .{ .vol = &w.disk.vol };
     w.linux = .{ .io = io, .root = w.tmp.dir };
+    if (cached) w.cache = try test_disk.Cache.attach(w.disk);
     defer {
         w.model.deinit();
+        if (w.cache) |c| c.detach(w.disk);
         w.disk.deinit();
         w.tmp.cleanup();
     }
@@ -244,6 +255,9 @@ fn runFrom(gpa: std.mem.Allocator, io: std.Io, seed: u64, r: std.Random, second:
         const n = if (explore.flag(r, "store_sim: the bytes are few")) r.uintLessThan(usize, 64) else if (filling) second.uintLessThan(usize, bytes.len) else r.uintLessThan(usize, bytes.len);
         r.bytes(bytes[0..n]);
         const writes_something = op == .write or op == .append or op == .replace or op == .remove;
+        // What `io.durable` does before every response: each step's writes
+        // are durable before the next begins. Only a cache can tell.
+        if (w.cache != null) try w.flush(step);
         if (writes_something and r.uintLessThan(u32, cut_every) == 0) {
             try cutOne(&w, r, op, path, bytes[0..n], step);
             continue;
@@ -350,6 +364,12 @@ fn cutOne(w: *World, r: std.Random, op: Op, path: []const u8, bytes: []const u8,
     const cut = w.disk.blk.requests >= w.disk.blk.fail_after.?;
     w.disk.blk.fail_after = null;
     w.disk.blk.fault = null;
+    if (w.cache) |c| {
+        if (cut) {
+            if (c.pending() > 0) props.reachable(@src(), "store_sim: a cut drops some of the writes a cache held", .{ .op = @tagName(op), .waiting = c.pending() });
+            c.cut(w.disk, r, keepOne);
+        } else try w.flush(step);
+    }
     try w.disk.mount(false);
     w.fat = .{ .vol = &w.disk.vol };
     if (!cut) {
@@ -398,6 +418,31 @@ fn cutOne(w: *World, r: std.Random, op: Op, path: []const u8, bytes: []const u8,
     try same(w, step);
 }
 
+/// Whether a waiting write reaches the disk before the power goes: a coin
+/// for each, so a cut keeps any subset of them, as a cache that writes back
+/// in its own order may.
+fn keepOne(r: std.Random, _: usize) bool {
+    return explore.flag(r, "store_sim: a cached write lands before the cut");
+}
+
+/// **`runSeed` ON A DISK WITH A WRITE CACHE** (metal-vmm QUEUE 112): each
+/// step's writes are flushed before the next step, as `io.durable` flushes
+/// before a response, and a cut keeps what was flushed and any subset of
+/// what was not. The same promises are checked. Its own entry, not a draw
+/// in `runSeed`, so every seed `runSeed` runs is the run it was.
+pub fn runSeedCached(seed: u64) Failure!void {
+    var prng = std.Random.DefaultPrng.init(seed);
+    var second = std.Random.DefaultPrng.init(seed ^ 0x6675_6c6c); // "full"
+    return runFrom(std.testing.allocator, std.testing.io, seed, prng.random(), second.random(), true) catch |e| switch (e) {
+        error.SimulationFailed => error.SimulationFailed,
+        else => fail(seed, "{s}", .{@errorName(e)}),
+    };
+}
+
+test {
+    _ = test_disk; // its write cache's own test
+}
+
 test "store_sim: a handful of seeds" {
     for (1..21) |seed| try runSeed(seed);
 }
@@ -414,4 +459,8 @@ test "a run under a tape replays exactly: the same draws, the same choices" {
         try std.testing.expectEqualSlices(u8, first.bytes.items, again.bytes.items);
         try std.testing.expectEqual(first.choices.items.len, again.choices.items.len);
     }
+}
+
+test "store_sim: on a disk with a write cache, a handful of seeds (RED, metal-vmm QUEUE 112)" {
+    for (1..41) |seed| try runSeedCached(seed);
 }
