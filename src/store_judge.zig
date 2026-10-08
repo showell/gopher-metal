@@ -226,6 +226,13 @@ fn onMetal(w: *World, op: Op, rel: []const u8, bytes: []const u8, offset: u64) !
 /// not there. A write the model refuses as a bad name whose every part is a
 /// name FAT holds is a write through a file. Until the model is the seam's
 /// (STORE.md, open question 1), this is where the two meet.
+/// Whether the model holds a file at `rel`, at any size: a read into
+/// `model_buf` (1 MiB) said no for a larger one (metal-vmm QUEUE 104).
+fn isFile(w: *World, rel: []const u8) bool {
+    const st = w.model.stat(rel) catch return false;
+    return st.kind == .file;
+}
+
 fn onModel(w: *World, op: Op, rel: []const u8, bytes: []const u8, offset: u64) !Answer {
     const a = w.arena.allocator();
     const s: Store = w.model.store_();
@@ -239,7 +246,7 @@ fn onModel(w: *World, op: Op, rel: []const u8, bytes: []const u8, offset: u64) !
     // operation, as both hosts answer it.
     var end: usize = 0;
     while (std.mem.indexOfScalarPos(u8, rel, end, '/')) |slash| : (end = slash + 1) {
-        if (s.read(rel[0..slash], w.model_buf)) |_| return .{ .said = .through_file } else |_| {}
+        if (isFile(w, rel[0..slash])) return .{ .said = .through_file };
     }
     switch (op) {
         .read => {
@@ -269,7 +276,7 @@ fn onModel(w: *World, op: Op, rel: []const u8, bytes: []const u8, offset: u64) !
         .list => {
             // A file listed is "not a directory" at the seam, as std.Io's
             // openDir answers on both hosts; the model lists it as nothing.
-            if (s.read(rel, w.model_buf)) |_| return .{ .said = .through_file } else |_| {}
+            if (isFile(w, rel)) return .{ .said = .through_file };
             var lines: std.ArrayList([]const u8) = .empty;
             const Ctx = struct {
                 a: std.mem.Allocator,
