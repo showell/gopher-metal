@@ -32,6 +32,7 @@ const explore = @import("explore");
 const Model = @import("store_model.zig").Model;
 const FatStore = @import("store_fat.zig").FatStore;
 const LinuxStore = @import("store_linux.zig").LinuxStore;
+const ScratchDir = @import("scratch_dir.zig").ScratchDir;
 const test_disk = @import("test_disk.zig");
 const snapshot = @import("store_test.zig").snapshot;
 const props = @import("coverage");
@@ -105,10 +106,11 @@ fn run(s: store.Store, op: Op, path: []const u8, bytes: []const u8, out: []u8) A
 const World = struct {
     seed: u64,
     gpa: std.mem.Allocator,
+    io: std.Io,
     model: Model,
     disk: *test_disk.Disk,
     fat: FatStore,
-    tmp: std.testing.TmpDir,
+    tmp: ScratchDir,
     linux: LinuxStore,
     /// Room to read any file the volume can hold (a seed's appends grow
     /// them): before a cut, what it should leave, after it, and a copy.
@@ -118,8 +120,8 @@ const World = struct {
         w.model.deinit();
         w.model = Model.init(w.gpa);
         w.tmp.cleanup();
-        w.tmp = std.testing.tmpDir(.{ .iterate = true });
-        w.linux = .{ .io = std.testing.io, .root = w.tmp.dir };
+        w.tmp = try ScratchDir.make(w.io, .{ .iterate = true });
+        w.linux = .{ .io = w.io, .root = w.tmp.dir };
     }
 
     /// The model and the Linux store, made what FAT holds: after a cut.
@@ -173,7 +175,7 @@ const World = struct {
 pub fn runSeed(seed: u64) Failure!void {
     var prng = std.Random.DefaultPrng.init(seed);
     var second = std.Random.DefaultPrng.init(seed ^ 0x6675_6c6c); // "full"
-    return runFrom(seed, prng.random(), second.random()) catch |e| switch (e) {
+    return runFrom(std.testing.allocator, std.testing.io, seed, prng.random(), second.random()) catch |e| switch (e) {
         error.SimulationFailed => error.SimulationFailed,
         else => fail(seed, "{s}", .{@errorName(e)}),
     };
@@ -185,8 +187,14 @@ pub fn runSeed(seed: u64) Failure!void {
 /// `runSeed` seed**: the filling tier draws from the tape here and from a
 /// stream of its own there, so a tape replays only as a tape.
 pub fn runWith(tape: *explore.Tape) Failure!void {
+    return runWithIn(std.testing.allocator, std.testing.io, tape);
+}
+
+/// `runWith`, with the allocator and the `Io` a program gives it (the
+/// explorer's bench and soak, metal-vmm QUEUE 106): the same run.
+pub fn runWithIn(gpa: std.mem.Allocator, io: std.Io, tape: *explore.Tape) Failure!void {
     const r = tape.random();
-    return runFrom(tape.seed, r, r) catch |e| switch (e) {
+    return runFrom(gpa, io, tape.seed, r, r) catch |e| switch (e) {
         error.SimulationFailed => error.SimulationFailed,
         else => fail(tape.seed, "{s}", .{@errorName(e)}),
     };
@@ -196,18 +204,18 @@ pub fn runWith(tape: *explore.Tape) Failure!void {
 /// (`runSeed` keeps them apart, as its seeds always have). The decisions
 /// are named choices (explore.pick, .pickAs, .flag), each drawn exactly as
 /// the call it replaced.
-fn runFrom(seed: u64, r: std.Random, second: std.Random) !void {
-    const gpa = std.testing.allocator;
+fn runFrom(gpa: std.mem.Allocator, io: std.Io, seed: u64, r: std.Random, second: std.Random) !void {
     const fat32 = explore.pick(r, "store_sim: the volume is FAT32", .{ .yes = 1, .no = 3 }) == .yes;
     const filling = explore.pick(second, "store_sim: the volume is tiny, and fills", .{ .yes = 1, .no = 3 }) == .yes;
     const shape = if (filling) tiny else if (fat32) test_disk.small32 else test_disk.small;
     var w = World{
         .seed = seed,
         .gpa = gpa,
+        .io = io,
         .model = Model.init(gpa),
-        .disk = try test_disk.Disk.make("damaged-store-sim", shape, false),
+        .disk = try test_disk.Disk.makeIn(gpa, io, "damaged-store-sim", shape, false),
         .fat = undefined,
-        .tmp = std.testing.tmpDir(.{ .iterate = true }),
+        .tmp = try ScratchDir.make(io, .{ .iterate = true }),
         .linux = undefined,
         .big = undefined,
     };
@@ -216,7 +224,7 @@ fn runFrom(seed: u64, r: std.Random, second: std.Random) !void {
     for (&w.big) |*b| b.* = try gpa.alloc(u8, @as(usize, shape.sectors) * 512 + max_n);
     defer for (w.big) |b| gpa.free(b);
     w.fat = .{ .vol = &w.disk.vol };
-    w.linux = .{ .io = std.testing.io, .root = w.tmp.dir };
+    w.linux = .{ .io = io, .root = w.tmp.dir };
     defer {
         w.model.deinit();
         w.disk.deinit();

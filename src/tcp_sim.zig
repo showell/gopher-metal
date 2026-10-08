@@ -1680,10 +1680,18 @@ pub fn runSeed(seed: u64) !void {
 /// generators of their own so that a plain seed's run never changes; here one
 /// tape is the whole story.
 pub fn runWith(tape: *explore.Tape) !void {
+    return runWithIn(std.testing.allocator, std.testing.io, tape);
+}
+
+/// `runWith`, with the allocator a program gives it (the explorer's bench
+/// and soak, metal-vmm QUEUE 106), and an `Io` as the other simulators take
+/// one (this one needs none): the same run.
+pub fn runWithIn(gpa: std.mem.Allocator, io: std.Io, tape: *explore.Tape) !void {
+    _ = io;
     const r = tape.random();
     const peer = explore.pick(r, "tcp_sim: the peer", .{ .plain = 3, .rough = 2, .crowd = 2, .full = 1 });
-    const sim = try std.testing.allocator.create(Sim);
-    defer std.testing.allocator.destroy(sim);
+    const sim = try gpa.create(Sim);
+    defer gpa.destroy(sim);
     sim.seed = tape.seed;
     sim.prng = std.Random.DefaultPrng.init(tape.seed);
     sim.rng = r;

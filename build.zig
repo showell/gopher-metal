@@ -258,7 +258,7 @@ pub fn build(b: *std.Build) void {
     // minutes. A name that matches none of the files is an error.
     const test_file = b.option([]const u8, "test-file", "run only this file's unit tests (src/io_test.zig)");
     var test_file_found = test_file == null;
-    for ([_][]const u8{ "src/rtc.zig", "src/pit.zig", "src/stack.zig", "src/civil.zig", "src/fat16.zig", "src/pvh.zig", "src/pages.zig", "src/tcp.zig", "src/tcp_check.zig", "src/tcp_sim.zig", "src/fat_sim.zig", "src/page_sim.zig", "src/pure_sim.zig", "src/ready_sim.zig", "src/durable_sim.zig", "src/durable.zig", "src/floor_sim.zig", "src/store.zig", "src/store_model.zig", "src/store_test.zig", "src/store_linux.zig", "src/store_sim.zig", "src/io_test.zig", "src/log_ring.zig", "src/restart.zig", "src/kept_log.zig", "src/ready.zig", "src/request_heap.zig", "src/page_cache.zig", "src/admin_reset.zig", "droplet/image.zig", "src/dhcp.zig", "src/screen.zig", "src/serial_gate.zig", "src/net.zig" }) |path| {
+    for ([_][]const u8{ "src/rtc.zig", "src/pit.zig", "src/stack.zig", "src/civil.zig", "src/fat16.zig", "src/pvh.zig", "src/pages.zig", "src/tcp.zig", "src/tcp_check.zig", "src/tcp_sim.zig", "src/fat_sim.zig", "src/page_sim.zig", "src/pure_sim.zig", "src/ready_sim.zig", "src/durable_sim.zig", "src/durable.zig", "src/floor_sim.zig", "src/store.zig", "src/store_model.zig", "src/store_test.zig", "src/store_linux.zig", "src/store_sim.zig", "src/scratch_dir.zig", "src/io_test.zig", "src/log_ring.zig", "src/restart.zig", "src/kept_log.zig", "src/ready.zig", "src/request_heap.zig", "src/page_cache.zig", "src/admin_reset.zig", "droplet/image.zig", "src/dhcp.zig", "src/screen.zig", "src/serial_gate.zig", "src/net.zig" }) |path| {
         if (test_file) |only| if (!std.mem.eql(u8, only, path)) continue;
         test_file_found = true;
         const unit = b.addTest(.{ .root_module = b.createModule(.{
@@ -325,9 +325,8 @@ pub fn build(b: *std.Build) void {
     explore_opts.addOption(f32, "flip", b.option(f32, "explore-flip", "of the rest, the share that flip a named choice") orelse 0.5);
     explore_opts.addOption(u32, "seeds", b.option(u32, "explore-seeds", "explorer seeds each column is run from (one exploration is one sample)") orelse 20);
     explore_opts.addOption(u32, "reference", b.option(u32, "explore-reference", "blind runs that decide what is counted: what they reach") orelse 300);
-    const explore_bench = b.addTest(.{
+    const explore_bench = b.addExecutable(.{
         .name = "explore",
-        .filters = &.{"the explorer against blind seeds"},
         .root_module = b.createModule(.{
             .root_source_file = b.path("src/explore_bench.zig"),
             .target = b.graph.host,
@@ -350,9 +349,8 @@ pub fn build(b: *std.Build) void {
     soak_opts.addOption(u32, "rounds", b.option(u32, "soak-rounds", "rounds the soak makes") orelse 1000);
     soak_opts.addOption(u32, "hours", b.option(u32, "soak-hours", "no round of the soak starts after this many hours") orelse 7);
     soak_opts.addOption(u64, "seed", b.option(u64, "soak-seed", "the explorer seed of the soak's first round") orelse 1);
-    const soak = b.addTest(.{
+    const soak = b.addExecutable(.{
         .name = "soak",
-        .filters = &.{"the soak"},
         .root_module = b.createModule(.{
             .root_source_file = b.path("src/explore_soak.zig"),
             .target = b.graph.host,
@@ -367,10 +365,9 @@ pub fn build(b: *std.Build) void {
         }),
     });
     b.step("soak", "the seed explorer and blind runs on fat, store and tcp, round after round (overnight; tools/soak.sh)").dependOn(&b.addRunArtifact(soak).step);
-    // **THE SOAK'S BINARY, NOT RUN** (zig-out/bin/soak): `zig build soak`
-    // holds everything the test prints until it exits, so an overnight run
-    // writes nothing to its log until morning. tools/soak.sh runs this
-    // binary directly, and its lines reach the log as they are printed.
+    // **THE SOAK'S BINARY, NOT RUN** (zig-out/bin/soak), for tools/soak.sh
+    // to run detached. An ordinary program since metal-vmm QUEUE 106: as a
+    // test, `zig build soak` held everything it printed until it exited.
     b.step("soak-build", "build the soak's binary into zig-out/bin, for tools/soak.sh to run").dependOn(&b.addInstallArtifact(soak, .{}).step);
 
     // **COVERAGE PROPERTIES** (COVERAGE.md): the TCP and FAT simulators over

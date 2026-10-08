@@ -24,6 +24,14 @@ const store_sim = @import("store_sim.zig");
 const tcp_sim = @import("tcp_sim.zig");
 const options = @import("soak_options");
 
+
+/// What the simulators allocate from, and their `Io`: the program's, set in
+/// `main` (an explorer's `RunFn` takes only its tape). The simulators took
+/// `std.testing`'s, which exist only in a test, so this was a test and its
+/// output was held until it ended (metal-vmm QUEUE 106).
+var host_gpa: std.mem.Allocator = undefined;
+var host_io: std.Io = undefined;
+
 const Sim = struct {
     name: []const u8,
     run: explore.RunFn,
@@ -32,15 +40,15 @@ const Sim = struct {
 };
 
 fn runFat(tape: *explore.Tape) anyerror!void {
-    _ = try fat_sim.runWith(tape);
+    _ = try fat_sim.runWithIn(host_gpa, host_io, tape);
 }
 
 fn runStore(tape: *explore.Tape) anyerror!void {
-    try store_sim.runWith(tape);
+    try store_sim.runWithIn(host_gpa, host_io, tape);
 }
 
 fn runTcp(tape: *explore.Tape) anyerror!void {
-    try tcp_sim.runWith(tape);
+    try tcp_sim.runWithIn(host_gpa, host_io, tape);
 }
 
 const all_sims = [_]Sim{
@@ -72,9 +80,11 @@ const Tally = struct {
     reached: std.ArrayList([columns.len]u32) = .empty,
 };
 
-test "the soak" {
+pub fn main(init: std.process.Init) !void {
     const gpa = std.heap.page_allocator;
-    const io = std.testing.io;
+    const io = init.io;
+    host_gpa = init.gpa;
+    host_io = io;
     var tallies: [all_sims.len]Tally = @splat(.{});
     std.debug.print("\nthe soak: up to {d} rounds or {d} hours, {d} runs per column, simulators {s}\n", .{ options.rounds, options.hours, options.runs, options.sims });
     const start = std.Io.Timestamp.now(io, .awake);

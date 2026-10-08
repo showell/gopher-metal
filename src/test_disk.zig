@@ -189,6 +189,9 @@ pub const Layout = struct {
 
 /// A disk in memory with a mounted volume on it.
 pub const Disk = struct {
+    /// What its buffers come from, and what `keep` writes through.
+    gpa: std.mem.Allocator,
+    io: std.Io,
     /// What the image is called when the tests are asked to keep their
     /// images (-Dfat16-images): "damaged-" first for the ones a test broke on
     /// purpose, which a checker must find fault with.
@@ -222,25 +225,31 @@ pub const Disk = struct {
     /// memory if `cached`. Heap-allocated: the volume points at the block and
     /// the scratch, which must not move.
     pub fn make(label: []const u8, shape: Shape, cached: bool) !*Disk {
-        const d = try testing.allocator.create(Disk);
-        errdefer testing.allocator.destroy(d);
-        const bytes = try testing.allocator.alloc(u8, @as(usize, shape.sectors) * sector);
+        return makeIn(testing.allocator, testing.io, label, shape, cached);
+    }
+
+    /// `make`, with the allocator and the `Io` a simulator run as a program
+    /// is given (metal-vmm QUEUE 106): `std.testing`'s exist only in a test.
+    pub fn makeIn(gpa: std.mem.Allocator, io: std.Io, label: []const u8, shape: Shape, cached: bool) !*Disk {
+        const d = try gpa.create(Disk);
+        errdefer gpa.destroy(d);
+        const bytes = try gpa.alloc(u8, @as(usize, shape.sectors) * sector);
         format(bytes, shape);
-        d.* = .{ .label = label, .suffix = shape.suffix, .bytes = bytes, .blk = virtio.Block.inMemory(bytes) };
+        d.* = .{ .gpa = gpa, .io = io, .label = label, .suffix = shape.suffix, .bytes = bytes, .blk = virtio.Block.inMemory(bytes) };
         try d.mount(cached);
         return d;
     }
 
     pub fn mount(d: *Disk, cached: bool) !void {
         d.vol = try fat16.Volume.mount(&d.blk, &d.scratch, 0);
-        if (d.fat_cache) |c| testing.allocator.free(c);
+        if (d.fat_cache) |c| d.gpa.free(c);
         d.fat_cache = null;
-        if (d.check_room) |r| testing.allocator.free(r);
+        if (d.check_room) |r| d.gpa.free(r);
         d.check_room = null;
         if (cached) {
-            d.fat_cache = try testing.allocator.alloc(u8, d.vol.fatBytes());
-            if (d.check_room) |r| testing.allocator.free(r);
-            d.check_room = try testing.allocator.alloc(u8, d.vol.checkBytes());
+            d.fat_cache = try d.gpa.alloc(u8, d.vol.fatBytes());
+            if (d.check_room) |r| d.gpa.free(r);
+            d.check_room = try d.gpa.alloc(u8, d.vol.checkBytes());
             const m = try d.vol.cacheFatChecked(d.fat_cache.?, d.check_room.?);
             d.repaired = m.repaired;
             d.trusted = m.trusted;
@@ -262,16 +271,16 @@ pub const Disk = struct {
             if (!r.health.clean()) std.debug.panic("{s}: left healthy, and the check found {d} problems, the first {s} at {s}", .{ d.label, r.health.problems, @tagName(r.found[0].problem), r.found[0].text() });
         }
         if (d.images_dir.len > 0) d.keep() catch |e| std.debug.panic("writing {s}: {s}", .{ d.label, @errorName(e) });
-        if (d.fat_cache) |c| testing.allocator.free(c);
-        if (d.check_room) |r| testing.allocator.free(r);
-        testing.allocator.free(d.bytes);
-        testing.allocator.destroy(d);
+        if (d.fat_cache) |c| d.gpa.free(c);
+        if (d.check_room) |r| d.gpa.free(r);
+        d.gpa.free(d.bytes);
+        d.gpa.destroy(d);
     }
 
     /// Writes the image to `images_dir`, named by its label and whether its
     /// FAT was held in memory.
     pub fn keep(d: *Disk) !void {
-        const io = testing.io;
+        const io = d.io;
         var dir = try std.Io.Dir.cwd().createDirPathOpen(io, d.images_dir, .{});
         defer dir.close(io);
         var name: [128]u8 = undefined;
@@ -317,8 +326,8 @@ pub const Disk = struct {
     /// checks after every stop (QUEUE.md item 79).
     pub fn check(d: *Disk) !Report {
         const writes = d.blk.writes;
-        const seen = try testing.allocator.alloc(u8, d.vol.checkBytes());
-        defer testing.allocator.free(seen);
+        const seen = try d.gpa.alloc(u8, d.vol.checkBytes());
+        defer d.gpa.free(seen);
         var r = Report{};
         r.health = try d.vol.check(seen, &r, Report.each);
         try testing.expectEqual(r.health.problems, r.len);
@@ -329,8 +338,8 @@ pub const Disk = struct {
     /// The whole file at `path`, read through the volume.
     pub fn read(d: *Disk, path: []const u8) ![]u8 {
         const e = try d.vol.open(path);
-        const out = try testing.allocator.alloc(u8, e.size);
-        errdefer testing.allocator.free(out);
+        const out = try d.gpa.alloc(u8, e.size);
+        errdefer d.gpa.free(out);
         const n = try d.vol.readFile(e, out);
         try testing.expectEqual(@as(usize, e.size), n);
         return out;
@@ -338,7 +347,7 @@ pub const Disk = struct {
 
     pub fn expectFile(d: *Disk, path: []const u8, want: []const u8) !void {
         const got = try d.read(path);
-        defer testing.allocator.free(got);
+        defer d.gpa.free(got);
         try testing.expectEqualSlices(u8, want, got);
     }
 
