@@ -1141,6 +1141,72 @@ test "a name past ASCII is refused, not written to read back as another (metal-v
     }
 }
 
+// ---- the survivors of mutation testing (MUTATION.md, metal-vmm QUEUE 107) ----
+
+test "a file ending inside a sector leaves zeros past its end, not what a file before it left (mutant F6)" {
+    for (configs) |cfg| {
+        const d = try Disk.make("f6-tail", cfg.shape, cfg.cached);
+        defer d.deinit();
+        try d.vol.writeFile("data/old", "Y" ** 1500);
+        const old = (try d.vol.open("data/old")).first_cluster;
+        try d.vol.remove("data/old");
+        try d.vol.writeFile("data/new", "x" ** 10); // the freed cluster, first
+        const e = try d.vol.open("data/new");
+        try testing.expectEqual(old, e.first_cluster);
+        const l = Layout.of(d.bytes);
+        const at = (l.data_sector + (e.first_cluster - 2) * d.bytes[13]) * test_disk.sector;
+        try testing.expectEqualStrings("x" ** 10, d.bytes[at..][0..10]);
+        try testing.expect(std.mem.allEqual(u8, d.bytes[at + 10 ..][0 .. test_disk.sector - 10], 0));
+    }
+}
+
+test "reading at a file's very end reads nothing, even where its chain ends there too (mutant F10)" {
+    for (configs) |cfg| {
+        const d = try Disk.make("f10-end", cfg.shape, cfg.cached);
+        defer d.deinit();
+        const cluster_bytes = @as(usize, d.bytes[13]) * test_disk.sector;
+        const data = try testing.allocator.alloc(u8, 2 * cluster_bytes);
+        defer testing.allocator.free(data);
+        try d.vol.writeFile("data/f", pattern(data, 3));
+        const e = try d.vol.open("data/f");
+        var out: [16]u8 = undefined;
+        try testing.expectEqual(@as(usize, 0), try d.vol.readAt(e, e.size, &out));
+    }
+}
+
+test "the check finds a chain exactly one cluster short of its size (mutant F14)" {
+    for (configs) |cfg| {
+        const shape, const cached = .{ cfg.shape, cfg.cached };
+        const d = try Disk.make("damaged-f14-short", shape, cached);
+        defer d.deinit();
+        const cluster_bytes: u32 = @as(u32, d.bytes[13]) * test_disk.sector;
+        const data = try testing.allocator.alloc(u8, 2 * cluster_bytes);
+        defer testing.allocator.free(data);
+        try d.vol.writeFile("f", pattern(data, 4)); // two clusters
+        const e = try d.vol.open("f");
+        setEntry(d, e, .size, 2 * cluster_bytes + 1); // three's worth
+        try d.mount(cached);
+        const r = try d.check();
+        try r.expect(&.{.{ .problem = .short, .path = "/f", .cluster = e.first_cluster, .count = 2 }});
+    }
+}
+
+test "a name removed leaves its entries for the next name of the same length (mutant F15)" {
+    for (configs) |cfg| {
+        const d = try Disk.make("f15-reuse", cfg.shape, cfg.cached);
+        defer d.deinit();
+        try d.vol.writeFile("data/keep", "k");
+        try d.vol.writeFile("data/gone", "g");
+        const gone = try d.vol.open("data/gone");
+        try d.vol.writeFile("data/last", "l");
+        try d.vol.remove("data/gone");
+        try d.vol.writeFile("data/next", "n");
+        const next = try d.vol.open("data/next");
+        try testing.expectEqual(gone.lba, next.lba);
+        try testing.expectEqual(gone.slot, next.slot);
+    }
+}
+
 // ---- the kept free count (QUEUE item 14) -------------------------------------
 
 test "the kept free count follows every operation, the refused and failed ones included" {
