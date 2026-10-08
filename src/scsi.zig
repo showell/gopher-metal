@@ -105,7 +105,10 @@ pub const Memory = struct {
     scratch: [512]u8 align(16) = undefined,
 };
 
-const Outcome = struct { response: u8, status: u8, sense_key: u8 };
+/// How a command ended. `residual` is how many of the bytes asked for were
+/// not moved (virtio 1.2 §5.6.6): a command can end GOOD having moved fewer,
+/// an underrun, which is not the whole transfer it was asked for.
+const Outcome = struct { response: u8, status: u8, sense_key: u8, residual: u32 = 0 };
 
 const Direction = enum { none, from_disk, to_disk };
 
@@ -147,7 +150,7 @@ fn command(b: *virtio.Block, at: Address, cdb: []const u8, dir: Direction, addr:
     b.requests +%= 1;
 
     const sense_key: u8 = if (mem.response.sense_len >= 3) mem.response.sense[2] & 0x0F else 0;
-    return .{ .response = mem.response.response, .status = mem.response.status, .sense_key = sense_key };
+    return .{ .response = mem.response.response, .status = mem.response.status, .sense_key = sense_key, .residual = mem.response.residual };
 }
 
 /// A command, sent again while the disk answers UNIT ATTENTION (it does once
@@ -167,6 +170,11 @@ fn good(o: Outcome) bool {
     return o.response == response_ok and o.status == status_good;
 }
 
+/// GOOD, and every byte asked for moved.
+fn whole(o: Outcome) bool {
+    return good(o) and o.residual == 0;
+}
+
 /// READ(10) or WRITE(10): `len` bytes at `addr`, from or to the sectors from
 /// `lba`. Answers a virtio-blk status byte, which is what every caller of a
 /// Block already understands.
@@ -182,6 +190,13 @@ pub fn transfer(b: *virtio.Block, at: Address, from_disk: bool, lba: u64, addr: 
         @truncate(n),                  0,
     };
     const o = commandSettled(b, at, &cdb, if (from_disk) .from_disk else .to_disk, addr, len);
+    // **A SHORT TRANSFER IS A FAILED ONE.** A read that moved fewer bytes
+    // than asked leaves the rest of the buffer as it was; a write that did
+    // has not put them on the disk. Neither is answered as done.
+    if (good(o) and o.residual != 0) {
+        props.reachable(@src(), "scsi: a read or write ends GOOD having moved fewer bytes than asked, and fails", .{ .residual = o.residual, .len = len });
+        return virtio.blk_s_ioerr;
+    }
     return if (good(o)) virtio.blk_s_ok else virtio.blk_s_ioerr;
 }
 
@@ -208,13 +223,18 @@ pub fn synchronize(b: *virtio.Block, at: Address) u8 {
 fn writeCache(b: *virtio.Block, at: Address, scratch: u64, page: []const u8) ?bool {
     const want: u16 = 8 + 20; // the mode parameter header, then the page
     const cdb = [10]u8{ 0x5A, 0x08, 0x08, 0, 0, 0, 0, @truncate(want >> 8), @truncate(want), 0 };
-    if (!good(commandSettled(b, at, &cdb, .from_disk, scratch, want))) {
+    const o = commandSettled(b, at, &cdb, .from_disk, scratch, want);
+    if (!good(o)) {
         props.reachable(@src(), "scsi: a disk that does not answer MODE SENSE is taken to cache", null);
         return null;
     }
+    // Only what the disk sent is its answer: the bytes past it in `page` are
+    // whatever was there before.
+    const got = want -| o.residual;
+    if (got < 8) return null;
     const descriptors = (@as(usize, page[6]) << 8) | page[7];
     const p = 8 + descriptors;
-    if (p + 3 > want or page[p] & 0x3F != 0x08) {
+    if (p + 3 > got or page[p] & 0x3F != 0x08) {
         props.reachable(@src(), "scsi: a MODE SENSE answer without the caching page is taken to cache", null);
         return null;
     }
@@ -273,12 +293,12 @@ pub fn bring(device: virtio.Device, mem: *virtio.BlockMemory) Error!virtio.Block
             const inquiry = [6]u8{ 0x12, 0, 0, 0, 36, 0 };
             const o = commandSettled(&b, at, &inquiry, .from_disk, scratch, 36);
             if (o.response == response_bad_target) break; // nobody at this target
-            if (!good(o)) continue;
+            if (!good(o) or o.residual >= 36) continue;
             // Peripheral qualifier 0 (connected) and device type 0 (a disk).
             if (mem.scsi.scratch[0] != 0x00) continue;
 
             const capacity = [10]u8{ 0x25, 0, 0, 0, 0, 0, 0, 0, 0, 0 };
-            if (!good(commandSettled(&b, at, &capacity, .from_disk, scratch, 8))) {
+            if (!whole(commandSettled(&b, at, &capacity, .from_disk, scratch, 8))) {
                 props.reachable(@src(), "scsi: a disk that will not say how big it is", null);
                 return Error.NoCapacity;
             }
