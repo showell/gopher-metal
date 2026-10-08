@@ -11,15 +11,16 @@ droplet through our own BIOS loader.
 
 ## Start here
 
-**Serving (2026-10-06): the tag `v18`** — gopher-metal `f592d4d` with
-angry-gopher `7e3fbc5e` — at **https://lynrummy.com**, the whole site, on a
+**Serving (2026-10-08): the tag `v20`** — gopher-metal `a26f85d` with
+angry-gopher `8b617f3c` — at **https://lynrummy.com**, the whole site, on a
 droplet with no Linux on it, with prod's real data, since the cutover of
-2026-10-04 ([`CUTOVER.md`](CUTOVER.md)). `v17` (`4953f7e`) is the way back.
+2026-10-04 ([`CUTOVER.md`](CUTOVER.md)). `v18` (`f592d4d`) is the way back;
+v19 was skipped.
 What serves is a tag, not a branch: `master` may be ahead of it.
 
 **Branches and tags:**
 - `master` — everything.
-- `v17`, `v18`, … — released images, one tag per release; the newest serves. `antithesis-sdk`
+- `v17`, `v18`, `v20`, … — released images, one tag per release; the newest serves. `antithesis-sdk`
   and `box/v18` are merged and retired.
 - `claude/*` — a cloud session's work; the box merges it into `master`, and a
   cloud session never pushes `master` or a tag.
@@ -56,30 +57,24 @@ A release is a new boot image from this repo carrying both repos' commits
 ("A deploy", below). prod's old Linux droplet runs only Caddy, which
 proxies to metal, and the watchdog; its own server is stopped.
 
-**What `v18` changed:** no response leaves before the writes ahead of it are
-durable (SYNCHRONIZE CACHE on the volume when it says it caches; the cache
-and the flush counts on `/admin/host`), SCSI's target and LUN read at the
-spec's offsets, and the release rule as a script (`tools/verdicts.py`). On
-metal-vmm, with the power cut after a chat post's 303
-(`VOLUME_CUT_AT_EXIT`), v17 loses the message and v18 keeps it (metal-vmm
-QUEUE item B14).
+**What `v20` changed** (after v18): folders held in memory (a chat send 466
+disk requests to 88); the flush decision pulled out and simulated
+(`durable.zig`); a config file that exists but can't be read stops the boot
+(B21); `remove` refuses a folder (B22); a path through a file answers
+`NotDir` as on Linux; the request-head buffer sized from angry-gopher's
+`limits.zig`; a short disk transfer is a failed one (the SCSI residual);
+boot tries a read three times (B25); FAT copies apart keep the one that
+checks cleaner (B26); a response cut by the machine's stop is said; and
+angry-gopher's store reads that served a failure as nothing, its topic
+downloads' names, and its `store.has`. Caddy's body cap became `1MiB`.
 
-**Open (2026-10-07):**
-- **v19 was skipped.** Its gates passed everything but the metal coverage
-  floor, where four TCP properties had only ever been reached by timing luck
-  on the coverage kernel; they are off `coverage/floor-metal.txt` with the
-  reason written there (metal-vmm QUEUE item 102). Nothing in v19's code was
-  wrong.
-- **v20, planned for 2026-10-08** (gates on the morning, then Steve's go):
-  folders held in memory (a chat send 466 disk requests to 88; v19's
-  content), the flush decision pulled out and simulated (`durable.zig`),
-  B21 (a config file that exists but can't be read stops the boot), B22 (a
-  folder is refused by `remove`; `removeTree` takes the emptied folder by its
-  entry), a path through a file answers `NotDir` as on Linux, the request-head
-  buffer sized from angry-gopher's `limits.zig`, and angry-gopher's
-  `store.has` and case-folding fixes. **Steve's steps gain one**: install
-  angry-gopher's `deploy/Caddyfile` on prod and reload Caddy (its ordinary
-  body cap is `1MiB` now, matching `limits.zig`).
+**Open (2026-10-08):**
+- **On `master`, not yet released** (for the next one): the disk check reads
+  the FAT 64 sectors a request, the console in 16-byte bursts (both a faster
+  boot, on metal-vmm and on the droplet); FAT copies that cannot be weighed
+  are left as they are; and angry-gopher's work since `8b617f3c` (the
+  store-absence lint and its 67 sites, among them a counter that reissued
+  IDs; a home page that cannot render answers 500).
 - **Backups are not set up.** The plan, agreed with Steve, is in
   `CUTOVER.md` "Backups, after the cutover": a DigitalOcean volume snapshot
   every day at 20:00 UTC by a `doctl` cron on the dev box (it needs an API
