@@ -1228,7 +1228,11 @@ fn mountFat(blk: *virtio.Block, scratch: *[fat16.sector_size]u8, what: []const u
     }
     const fat_cache = pages.allocator.alloc(u8, vol.fatBytes()) catch
         serial.fail("no memory to hold the FAT");
-    const repaired = vol.cacheFat(fat_cache) catch |e| {
+    // Room for the check that weighs the FAT's copies when they differ (B26);
+    // without it, the first copy is the FAT, as before.
+    const weigh_room: ?[]u8 = pages.allocator.alloc(u8, vol.checkBytes()) catch null;
+    defer if (weigh_room) |r| pages.allocator.free(r);
+    const mirrors = vol.cacheFatChecked(fat_cache, weigh_room) catch |e| {
         serial.put("  fat cache: ");
         serial.put(@errorName(e));
         serial.put("\n");
@@ -1252,15 +1256,29 @@ fn mountFat(blk: *virtio.Block, scratch: *[fat16.sector_size]u8, what: []const u
             serial.put("  no memory to hold folders: they are read from the disk\n");
         }
     } else |_| serial.put("  no memory to hold folders: they are read from the disk\n");
-    // A machine stopped between the first FAT copy's write and the second's
-    // leaves them apart; the first is the FAT (fat16.cacheFat).
-    if (repaired > 0) {
+    // A machine stopped between the FAT copies' writes, or a copy that
+    // reads wrong, leaves them apart; the copy that checks cleaner is the
+    // FAT, the first on a tie (fat16.cacheFatChecked).
+    if (mirrors.repaired > 0) {
         serial.put("  ");
         serial.put(what);
         serial.put(": ");
-        serial.putDec(repaired);
-        serial.put(" sectors of the second FAT differed from the first, and were written from it\n");
+        serial.putDec(mirrors.repaired);
+        serial.put(" sectors of the FAT's copies differed; ");
+        if (mirrors.checked) {
+            serial.put("checked with each copy, the first had ");
+            serial.putDec(mirrors.health[0].problems);
+            serial.put(" problems and ");
+            serial.putDec(mirrors.health[0].leaked);
+            serial.put(" leaked, the second ");
+            serial.putDec(mirrors.health[1].problems);
+            serial.put(" and ");
+            serial.putDec(mirrors.health[1].leaked);
+            serial.put("; ");
+        }
+        serial.put(if (mirrors.trusted == 1) "the first was written from the second\n" else "the second was written from the first\n");
     }
+    if (weigh_room == null) serial.put("  no memory to weigh the FAT's copies: the first is the FAT\n");
     serial.put("  ");
     serial.put(what);
     serial.put(if (vol.kind == .fat32) ": FAT32 at LBA " else ": FAT16 at LBA ");

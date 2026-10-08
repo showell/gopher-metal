@@ -273,6 +273,12 @@ pub fn build(b: *std.Build) void {
         }) });
         test_step.dependOn(&b.addRunArtifact(unit).step);
     }
+    // The test files built on their own, below.
+    for ([_][]const u8{ "src/fat16_test.zig", "src/fat16_faults_test.zig", "src/tcp_test.zig" }) |path| {
+        if (test_file) |only| if (std.mem.eql(u8, only, path)) {
+            test_file_found = true;
+        };
+    }
     if (!test_file_found) @panic("-Dtest-file names no file the unit tests run");
 
     // **THE STORE PRODUCTION RUNS, JUDGED** (src/store_judge.zig):
@@ -443,7 +449,7 @@ pub fn build(b: *std.Build) void {
             },
         }),
     });
-    test_step.dependOn(&b.addRunArtifact(fat16_unit).step);
+    if (wanted(test_file, "src/fat16_test.zig")) test_step.dependOn(&b.addRunArtifact(fat16_unit).step);
     // The stops and the lying disk (QUEUE.md items 79-80): hundreds of runs
     // each, so binaries of their own, run beside fat16_test's: one for the
     // stops and the failed requests, one for the lies. Every test in the file
@@ -467,7 +473,7 @@ pub fn build(b: *std.Build) void {
                 },
             }),
         });
-        test_step.dependOn(&b.addRunArtifact(unit).step);
+        if (wanted(test_file, "src/fat16_faults_test.zig")) test_step.dependOn(&b.addRunArtifact(unit).step);
     }
 
     const starts = [_]struct { isn: u32, peer: u32 }{
@@ -494,8 +500,15 @@ pub fn build(b: *std.Build) void {
                 },
             }),
         });
-        test_step.dependOn(&b.addRunArtifact(unit).step);
+        if (wanted(test_file, "src/tcp_test.zig")) test_step.dependOn(&b.addRunArtifact(unit).step);
     }
+}
+
+/// Whether `zig build test` runs `path`'s tests: all of them, or only
+/// `-Dtest-file`'s.
+fn wanted(test_file: ?[]const u8, path: []const u8) bool {
+    const only = test_file orelse return true;
+    return std.mem.eql(u8, only, path);
 }
 
 /// `git rev-parse --short HEAD` in `dir`, with `+dirty` when its tree has

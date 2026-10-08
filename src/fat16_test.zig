@@ -1036,6 +1036,7 @@ test "a FAT whose copies differ is held as the first, and the others are written
 
         try d.mount(true);
         try testing.expectEqual(@as(u32, 2), d.repaired);
+        try testing.expectEqual(@as(u32, 0), d.trusted); // the second has clusters nothing holds
         try testing.expectEqual(writes + 2, d.blk.writes); // those two sectors, nothing else
         try testing.expect(d.fatsAgree());
         try testing.expectEqual(@as(u32, 0), l.get(d.bytes, 0, 3 * per_sector + 7));
@@ -1046,6 +1047,35 @@ test "a FAT whose copies differ is held as the first, and the others are written
         try d.mount(true);
         try testing.expectEqual(@as(u32, 0), d.repaired);
         try testing.expectEqual(writes + 2, d.blk.writes);
+    }
+}
+
+test "a first FAT copy that reads wrong is not written over the second: the copy that checks clean is the FAT (B26)" {
+    for (formats) |shape| {
+        const d = try Disk.make("first-copy-rotted", shape, false);
+        defer d.deinit();
+        try d.vol.writeFile("data/f", "x");
+        // The file's cluster, the last one taken: its first copy's entry is
+        // made free, as a rotted sector of the first copy would read.
+        const l = Layout.of(d.bytes);
+        var c: usize = 2;
+        var last: usize = 0;
+        while (c <= l.end() and c < 1000) : (c += 1) {
+            if (l.get(d.bytes, 0, c) != 0) last = c;
+        }
+        try testing.expect(last >= 3);
+        const was = l.get(d.bytes, 1, last);
+        l.set(d.bytes, 0, last, 0);
+        try testing.expect(!d.fatsAgree());
+
+        try d.mount(true);
+        try testing.expectEqual(@as(u32, 1), d.repaired);
+        try testing.expectEqual(@as(u32, 1), d.trusted); // the second copy
+        try testing.expect(d.fatsAgree());
+        try testing.expectEqual(was, l.get(d.bytes, 0, last)); // the first, healed from it
+        try d.expectFile("data/f", "x");
+        const r = try d.check();
+        try r.expect(&.{});
     }
 }
 

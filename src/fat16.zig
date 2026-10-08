@@ -474,23 +474,52 @@ pub const Volume = struct {
         return @as(usize, self.sectors_per_fat) * sector_size;
     }
 
-    /// Reads the FAT into `buf` and uses it from then on. Answers how many
-    /// sectors of the other copies it brought into line with the first.
+    /// What `cacheFatChecked` found of the FAT's copies.
+    pub const Mirrors = struct {
+        /// Sectors of a copy written to bring it into line with the other.
+        repaired: u32 = 0,
+        /// The copy the other was brought into line with: 0, the first,
+        /// unless the second checked cleaner.
+        trusted: u32 = 0,
+        /// Whether the copies differed and each was checked, and what the
+        /// check found with each: problems, then leaked clusters.
+        checked: bool = false,
+        health: [2]Health = .{ .{}, .{} },
+    };
+
+    /// The most differing sectors that are weighed copy against copy; past
+    /// it the first copy is the FAT, as before the choice was made.
+    pub const max_weighed_sectors = 64;
+
+    /// `cacheFatChecked` without a check: the first copy is the FAT.
+    pub fn cacheFat(self: *Volume, buf: []u8) Error!u32 {
+        return (try self.cacheFatChecked(buf, null)).repaired;
+    }
+
+    /// Reads the FAT into `buf` and uses it from then on, and brings its
+    /// copies into line where they differ.
     ///
-    /// **WHERE THE COPIES DISAGREE, THE FIRST IS THE FAT.** Every change here
-    /// writes the first copy, then the others (`fatSet`), so a machine stopped
-    /// between the two leaves them apart by a sector, the first the newer.
-    /// Linux's vfat reads only the first, too. This used to refuse such a
-    /// volume, and the boot stopped on the refusal, so a machine stopped at
-    /// that moment could never boot again (QUEUE.md item 80). Now each sector
-    /// of another copy that differs is written from the first, and the count
-    /// is the caller's to report: from here a change is written to each copy
-    /// as the whole cached sector, so a copy left apart would be overwritten
-    /// piecemeal anyway, saying nothing.
+    /// **COPIES APART ARE BROUGHT INTO LINE, NOT REFUSED.** Every change here
+    /// writes the first copy, then the others (`fatSet`), so a machine
+    /// stopped between the two leaves them apart by a sector. Refusing such a
+    /// volume stopped the boot, and the machine could never boot again
+    /// (QUEUE.md item 80). From here a change is written to each copy as the
+    /// whole held sector, so a copy left apart would be overwritten
+    /// piecemeal anyway, saying nothing; the count is the caller's to report.
     ///
     /// `buf` must be identity-mapped, because the device writes FAT sectors
     /// straight out of it.
-    pub fn cacheFat(self: *Volume, buf: []u8) Error!u32 {
+    ///
+    /// **WHICH COPY IS THE FAT** (B26, Steve 2026-10-08). Where the copies
+    /// differ, and `seen` is given (room for `check`), the volume is checked
+    /// with each copy's sectors, and the copy with fewer problems, then fewer
+    /// leaked clusters, is the FAT; the other is written from it. A tie is
+    /// the first copy. A machine stopped between the copies' writes leaves
+    /// them apart, and the check keeps whichever agrees with the directories;
+    /// a sector of the first copy that reads wrong (silent rot) is no longer
+    /// written over the good one. More than `max_weighed_sectors` differing
+    /// is the first copy, unweighed.
+    pub fn cacheFatChecked(self: *Volume, buf: []u8, seen: ?[]u8) Error!Mirrors {
         if (buf.len < self.fatBytes()) {
             props.reachable(@src(), "fat: a FAT cache buffer too small for the FAT is refused", null);
             return Error.TooBig;
@@ -500,6 +529,78 @@ pub const Volume = struct {
         // The other copies are compared in runs, not a sector at a time: a
         // FAT32 FAT of 12.5 MiB is 25,600 sectors (FAT32.md §9).
         var run: [run_sectors * sector_size]u8 align(16) = undefined;
+        var differ: [max_weighed_sectors]u32 = undefined;
+        var n_differ: usize = 0;
+        var too_many = false;
+        var copy: u32 = 1;
+        while (copy < self.num_fats) : (copy += 1) {
+            var s: u32 = 0;
+            while (s < self.sectors_per_fat) {
+                const n = @min(run_sectors, self.sectors_per_fat - s);
+                try self.readSectors(self.fat_start + copy * self.sectors_per_fat + s, n, &run);
+                var k: u32 = 0;
+                while (k < n) : (k += 1) {
+                    if (std.mem.eql(u8, run[k * sector_size ..][0..sector_size], fat[(s + k) * sector_size ..][0..sector_size])) continue;
+                    if (n_differ == differ.len) too_many = true else {
+                        differ[n_differ] = s + k;
+                        n_differ += 1;
+                    }
+                }
+                s += n;
+            }
+        }
+        self.fat = fat;
+        var m: Mirrors = .{};
+        if (n_differ == 0) return m;
+        if (too_many) {
+            props.reachable(@src(), "fat: more FAT sectors differ than are weighed, and the first copy is the FAT", null);
+            return .{ .repaired = try self.mirrorFirst(fat, &run) };
+        }
+        // The second copy's version of each differing sector, kept to weigh.
+        var second: [max_weighed_sectors][sector_size]u8 = undefined;
+        for (differ[0..n_differ], 0..) |at, i| try self.readSector(self.fat_start + self.sectors_per_fat + at, &second[i]);
+        if (seen) |room| {
+            m.checked = true;
+            m.health[0] = try self.check(room, {}, ignoreFinding);
+            var first: [max_weighed_sectors][sector_size]u8 = undefined;
+            for (differ[0..n_differ], 0..) |at, i| {
+                const held = fat[at * sector_size ..][0..sector_size];
+                first[i] = held.*;
+                held.* = second[i];
+            }
+            m.health[1] = try self.check(room, {}, ignoreFinding);
+            const better = m.health[1].problems < m.health[0].problems or
+                (m.health[1].problems == m.health[0].problems and m.health[1].leaked < m.health[0].leaked);
+            if (better) {
+                props.reachable(@src(), "fat: the second FAT copy checks cleaner than the first, and is the FAT", null);
+                m.trusted = 1;
+                // The kept free count was the first copy's (mount counts it):
+                // it moves with every entry the second copy changed.
+                const per = self.entriesPerSector();
+                for (differ[0..n_differ], 0..) |at, i| {
+                    var e: u32 = 0;
+                    while (e < per) : (e += 1) {
+                        const c = at * per + e;
+                        if (c < 2 or c > self.max_cluster) continue;
+                        const was = self.entryIn(&first[i], e);
+                        const now = self.entryIn(&second[i], e);
+                        if (was == 0 and now != 0) self.free_clusters -|= 1;
+                        if (was != 0 and now == 0) self.free_clusters += 1;
+                    }
+                }
+            } else {
+                for (differ[0..n_differ], 0..) |at, i| fat[at * sector_size ..][0..sector_size].* = first[i];
+            }
+        }
+        // The copy not trusted is written from the held FAT, sector by sector.
+        const into = if (m.trusted == 0) self.fat_start + self.sectors_per_fat else self.fat_start;
+        for (differ[0..n_differ]) |at| try self.writeSector(into + at, fat[at * sector_size ..][0..sector_size]);
+        m.repaired = @intCast(n_differ);
+        return m;
+    }
+
+    /// Every other copy written from the first where they differ.
+    fn mirrorFirst(self: *Volume, fat: []u8, run: *[run_sectors * sector_size]u8) Error!u32 {
         var repaired: u32 = 0;
         var copy: u32 = 1;
         while (copy < self.num_fats) : (copy += 1) {
@@ -507,7 +608,7 @@ pub const Volume = struct {
             while (s < self.sectors_per_fat) {
                 const n = @min(run_sectors, self.sectors_per_fat - s);
                 const at = self.fat_start + copy * self.sectors_per_fat + s;
-                try self.readSectors(at, n, &run);
+                try self.readSectors(at, n, run);
                 var k: u32 = 0;
                 while (k < n) : (k += 1) {
                     const first = fat[(s + k) * sector_size ..][0..sector_size];
@@ -518,9 +619,10 @@ pub const Volume = struct {
                 s += n;
             }
         }
-        self.fat = fat;
         return repaired;
     }
+
+    fn ignoreFinding(_: void, _: Finding) void {}
 
     /// Reads the boot sector and works out where everything is.
     ///
@@ -2485,13 +2587,18 @@ pub const Volume = struct {
                             differ += 1;
                         }
                     }
+                    // Leaks and the free count are the FAT the machine uses:
+                    // the one held, when it is held (a sector of the first
+                    // copy that reads wrong is not it, B26); the copies are
+                    // compared as the disk holds them.
+                    const entries: *const [sector_size]u8 = if (v.fat) |fat| fat[s * sector_size ..][0..sector_size] else &first;
                     var i: u32 = 0;
                     const per = v.entriesPerSector();
                     while (i < per) : (i += 1) {
                         const c = s * per + i;
                         if (c < 2) continue;
                         if (c > v.max_cluster) break;
-                        const value = v.entryIn(&first, i);
+                        const value = v.entryIn(entries, i);
                         if (value == 0) free += 1;
                         const leaked = !self.stopped_short and value != 0 and value != v.badMark() and !self.held(@intCast(c));
                         if (leaked) {

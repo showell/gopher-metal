@@ -211,8 +211,12 @@ pub const Disk = struct {
     dir_keys: [61]u32 = undefined,
     dir_data: [61 * fat16.sector_size]u8 = undefined,
     vol: fat16.Volume = undefined,
-    /// FAT sectors the last mount's `cacheFat` brought into line.
+    /// FAT sectors the last mount's `cacheFatChecked` brought into line, and
+    /// which copy it trusted.
     repaired: u32 = 0,
+    trusted: u32 = 0,
+    /// Room for the mount's check of each FAT copy, as gopher.zig gives it.
+    check_room: ?[]u8 = null,
 
     /// Formats `shape` into a fresh disk and mounts it, holding its FAT in
     /// memory if `cached`. Heap-allocated: the volume points at the block and
@@ -231,9 +235,15 @@ pub const Disk = struct {
         d.vol = try fat16.Volume.mount(&d.blk, &d.scratch, 0);
         if (d.fat_cache) |c| testing.allocator.free(c);
         d.fat_cache = null;
+        if (d.check_room) |r| testing.allocator.free(r);
+        d.check_room = null;
         if (cached) {
             d.fat_cache = try testing.allocator.alloc(u8, d.vol.fatBytes());
-            d.repaired = try d.vol.cacheFat(d.fat_cache.?);
+            if (d.check_room) |r| testing.allocator.free(r);
+            d.check_room = try testing.allocator.alloc(u8, d.vol.checkBytes());
+            const m = try d.vol.cacheFatChecked(d.fat_cache.?, d.check_room.?);
+            d.repaired = m.repaired;
+            d.trusted = m.trusted;
             d.vol.dir_burst = &d.dir_burst;
             d.vol.cacheDirs(&d.dir_keys, &d.dir_data);
         }
@@ -253,6 +263,7 @@ pub const Disk = struct {
         }
         if (d.images_dir.len > 0) d.keep() catch |e| std.debug.panic("writing {s}: {s}", .{ d.label, @errorName(e) });
         if (d.fat_cache) |c| testing.allocator.free(c);
+        if (d.check_room) |r| testing.allocator.free(r);
         testing.allocator.free(d.bytes);
         testing.allocator.destroy(d);
     }
