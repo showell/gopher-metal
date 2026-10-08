@@ -391,3 +391,14 @@ fn runSeed(seed: u64) !void {
 test "angry-gopher's store on Linux and on metal answers as the model, step by step" {
     for (1..201) |seed| try runSeed(seed);
 }
+
+test "a file larger than the model's buffer is still a file on the way, and is not listed (metal-vmm QUEUE 104)" {
+    var w = try World.make(testing.allocator);
+    defer w.deinit();
+    const big = try testing.allocator.alloc(u8, 2 << 20); // past model_buf's 1 MiB
+    defer testing.allocator.free(big);
+    @memset(big, 'x');
+    try w.model.store_().write("big", big);
+    try testing.expectEqual(Said.through_file, (try onModel(&w, .write, "big/x", "y", 0)).said);
+    try testing.expectEqual(Said.through_file, (try onModel(&w, .list, "big", "", 0)).said);
+}
