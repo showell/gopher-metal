@@ -32,11 +32,19 @@ var gate: serial_gate.Gate = .{};
 const patience: u32 = 100_000;
 
 const Com1 = struct {
+    /// **A 16550's TRANSMIT FIFO HOLDS 16** (enabled by `init`: FCR 0xC7).
+    /// The status bit `ready` reads says the FIFO is empty, so that many may
+    /// follow it, sent in one instruction: one exit for sixteen bytes on a
+    /// hypervisor, where a status read and a write a byte was two each.
+    pub const burst = 16;
     pub fn ready(_: Com1) bool {
         return inb(com1 + 5) & 0x20 != 0;
     }
     pub fn write(_: Com1, b: u8) void {
         outb(com1, b);
+    }
+    pub fn writeBurst(_: Com1, bytes: []const u8) void {
+        port.outsb(com1, bytes);
     }
 };
 

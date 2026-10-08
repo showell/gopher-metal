@@ -16,6 +16,22 @@ pub fn outb(port: u16, value: u8) void {
     );
 }
 
+/// **`bytes` TO ONE PORT IN ONE INSTRUCTION** (`rep outsb`): a hypervisor
+/// sees one exit for all of them, where `outb` in a loop is one each.
+pub fn outsb(port: u16, bytes: []const u8) void {
+    if (@import("builtin").is_test) @panic("port I/O in a host test");
+    if (bytes.len == 0) return;
+    var src: usize = @intFromPtr(bytes.ptr);
+    var left: usize = bytes.len;
+    asm volatile ("rep outsb"
+        : [s] "={rsi}" (src),
+          [c] "={rcx}" (left),
+        : [p] "{dx}" (port),
+          [si] "{rsi}" (src),
+          [cx] "{rcx}" (left),
+        : .{ .memory = true });
+}
+
 pub fn inb(port: u16) u8 {
     if (@import("builtin").is_test) @panic("port I/O in a host test");
     return asm volatile ("inb %[p], %[r]"

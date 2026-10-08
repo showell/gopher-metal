@@ -581,6 +581,32 @@ test "the check finds FAT copies that differ" {
     }
 }
 
+test "the check reads the FAT in runs: a leak across a run's edge and a difference past the first run are found where they are" {
+    for (both) |cached| {
+        const d = try Disk.make("damaged-check-runs", test_disk.small32, cached);
+        defer d.deinit();
+        const l = Layout.of(d.bytes);
+        const per: usize = test_disk.sector / 4;
+        // The check reads 64 sectors a request: the FAT must span several.
+        try testing.expect(d.vol.sectors_per_fat > 64);
+        // Two clusters nothing holds, in both copies, either side of the edge
+        // between the FAT's 64th and 65th sectors: one leaked run of two.
+        const edge = 64 * per;
+        for (0..2) |copy| {
+            l.set(d.bytes, copy, edge - 1, l.end());
+            l.set(d.bytes, copy, edge, l.end());
+        }
+        try d.mount(cached); // a held FAT holds them too
+        // The second copy apart from the first in the 66th sector only.
+        l.set(d.bytes, 1, edge + per + 5, l.end());
+        const r = try d.check();
+        try r.expect(&.{
+            .{ .problem = .leaked, .cluster = @intCast(edge - 1), .count = 2 },
+            .{ .problem = .fats_differ, .cluster = @intCast(edge + per + 5), .count = 1 },
+        });
+    }
+}
+
 test "the check finds a . or .. that points elsewhere" {
     for (configs) |cfg| {
         const shape, const cached = .{ cfg.shape, cfg.cached };

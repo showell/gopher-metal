@@ -2574,59 +2574,74 @@ pub const Volume = struct {
             /// and every cluster in use against what the walk held.
             fn fatOnDisk(self: *Self) Error!void {
                 const v = self.vol;
-                var first: [sector_size]u8 align(16) = undefined;
-                var other: [sector_size]u8 align(16) = undefined;
+                // **IN RUNS, NOT A SECTOR A REQUEST**: each copy is read
+                // `run_sectors` at a time. A sector a request was two
+                // thousand requests a disk at every boot, the most of what a
+                // boot cost on metal-vmm.
+                var firsts: [run_sectors * sector_size]u8 align(16) = undefined;
+                var others: [run_sectors * sector_size]u8 align(16) = undefined;
                 var differ: u32 = 0;
                 var differ_at: Cluster = 0;
                 var run_start: Cluster = 0;
                 var run: u32 = 0;
                 var free: u32 = 0;
-                var s: u32 = 0;
-                while (s < v.sectors_per_fat) : (s += 1) {
-                    try v.readSector(v.fat_start + s, &first);
+                var base: u32 = 0;
+                while (base < v.sectors_per_fat) {
+                    const n = @min(run_sectors, v.sectors_per_fat - base);
+                    try v.readSectors(v.fat_start + base, n, &firsts);
                     var copy: u32 = 1;
                     while (copy < v.num_fats) : (copy += 1) {
-                        try v.readSector(v.fat_start + copy * v.sectors_per_fat + s, &other);
-                        if (!std.mem.eql(u8, &first, &other)) {
+                        try v.readSectors(v.fat_start + copy * v.sectors_per_fat + base, n, &others);
+                        var k: u32 = 0;
+                        while (k < n) : (k += 1) {
+                            const first = firsts[k * sector_size ..][0..sector_size];
+                            const other = others[k * sector_size ..][0..sector_size];
+                            if (std.mem.eql(u8, first, other)) continue;
                             if (differ == 0) {
                                 var i: usize = 0;
                                 while (first[i] == other[i]) i += 1;
-                                differ_at = @intCast(s * v.entriesPerSector() + i / v.entryBytes());
+                                differ_at = @intCast((base + k) * v.entriesPerSector() + i / v.entryBytes());
                             }
                             differ += 1;
                         }
                     }
-                    // Leaks and the free count are the FAT the machine uses:
-                    // the one held, when it is held (a sector of the first
-                    // copy that reads wrong is not it, B26); the copies are
-                    // compared as the disk holds them.
-                    const entries: *const [sector_size]u8 = if (v.fat) |fat| fat[s * sector_size ..][0..sector_size] else &first;
-                    var i: u32 = 0;
-                    const per = v.entriesPerSector();
-                    while (i < per) : (i += 1) {
-                        const c = s * per + i;
-                        if (c < 2) continue;
-                        if (c > v.max_cluster) break;
-                        const value = v.entryIn(entries, i);
-                        if (value == 0) free += 1;
-                        const leaked = !self.stopped_short and value != 0 and value != v.badMark() and !self.held(@intCast(c));
-                        if (leaked) {
-                            if (run == 0) run_start = @intCast(c);
-                            run += 1;
-                        } else if (run > 0) {
-                            self.leak(run_start, run);
-                            run = 0;
+                    var k: u32 = 0;
+                    while (k < n) : (k += 1) {
+                        const s = base + k;
+                        // Leaks and the free count are the FAT the machine
+                        // uses: the one held, when it is held (a sector of
+                        // the first copy that reads wrong is not it, B26);
+                        // the copies are compared as the disk holds them.
+                        const entries: *const [sector_size]u8 = if (v.fat) |fat| fat[s * sector_size ..][0..sector_size] else firsts[k * sector_size ..][0..sector_size];
+                        var i: u32 = 0;
+                        const per = v.entriesPerSector();
+                        while (i < per) : (i += 1) {
+                            const c = s * per + i;
+                            if (c < 2) continue;
+                            if (c > v.max_cluster) break;
+                            const value = v.entryIn(entries, i);
+                            if (value == 0) free += 1;
+                            const leaked = !self.stopped_short and value != 0 and value != v.badMark() and !self.held(@intCast(c));
+                            if (leaked) {
+                                if (run == 0) run_start = @intCast(c);
+                                run += 1;
+                            } else if (run > 0) {
+                                self.leak(run_start, run);
+                                run = 0;
+                            }
                         }
                     }
+                    base += n;
                 }
                 if (run > 0) self.leak(run_start, run);
                 if (differ > 0) self.report(.fats_differ, differ_at, differ);
                 if (v.kind == .fat32 and v.fsinfo_sector != 0 and v.fsinfo_sector < v.fat_start) {
-                    try v.readSector(v.fsinfo_sector, &first);
-                    if (le32(first[0..4]) == 0x4161_5252 and le32(first[484..488]) == 0x6141_7272) {
+                    var fsinfo: [sector_size]u8 align(16) = undefined;
+                    try v.readSector(v.fsinfo_sector, &fsinfo);
+                    if (le32(fsinfo[0..4]) == 0x4161_5252 and le32(fsinfo[484..488]) == 0x6141_7272) {
                         self.path_len = 0;
-                        const count = le32(first[488..492]);
-                        const hint = le32(first[492..496]);
+                        const count = le32(fsinfo[488..492]);
+                        const hint = le32(fsinfo[492..496]);
                         if (count != 0xFFFF_FFFF and count != free) self.report(.fsinfo, 0, count);
                         if (hint != 0xFFFF_FFFF and !v.inData(hint)) self.report(.fsinfo, hint, 0);
                     }
