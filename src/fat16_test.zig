@@ -1126,6 +1126,21 @@ test "copies apart and a directory that cannot be read: the volume mounts, and n
     }
 }
 
+test "a name past ASCII is refused, not written to read back as another (metal-vmm QUEUE 104)" {
+    // A long name holds each byte as one UTF-16 unit, and a unit past ASCII
+    // read back as '?': "café" (UTF-8) was written, and then found under
+    // no name it was given, so a second write made a second file.
+    for (configs) |cfg| {
+        const d = try Disk.make("non-ascii", cfg.shape, cfg.cached);
+        defer d.deinit();
+        try d.vol.writeFile("data/plain", "x");
+        try testing.expectError(fat16.Error.BadName, d.vol.writeFile("data/caf\xc3\xa9", "x"));
+        try testing.expectError(fat16.Error.BadName, d.vol.writeFile("data/\xe2\x82\xac/f", "x")); // a folder made on the way
+        try testing.expectError(fat16.Error.BadName, d.vol.rename("data/plain", "data/na\xefve"));
+        try d.expectFile("data/plain", "x"); // a refused rename keeps what it would have moved
+    }
+}
+
 // ---- the kept free count (QUEUE item 14) -------------------------------------
 
 test "the kept free count follows every operation, the refused and failed ones included" {
