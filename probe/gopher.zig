@@ -1169,6 +1169,10 @@ fn mountFat(blk: *virtio.Block, scratch: *[fat16.sector_size]u8, what: []const u
     var vol = fat16.Volume.mount(blk, scratch, part.first_lba) catch |e| {
         serial.put("  ");
         serial.put(what);
+        if (e == error.ReadFailed) {
+            serial.put(": its first partition cannot be read\n");
+            serial.fail("a disk's partition cannot be read");
+        }
         serial.put(": its first partition is not a FAT this machine takes (");
         serial.put(@errorName(e));
         serial.put(")\n");
