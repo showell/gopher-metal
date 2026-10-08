@@ -1702,7 +1702,7 @@ pub fn runWith(tape: *explore.Tape) !void {
         .full => {
             sim.withCrowd(Crowd.chooseFull(r), r);
             try runCrowded(sim);
-            if (sim.table.refused > 0) props.reachable(@src(), "tcp_sim: a crowd the size of the kernel's table fills it, and a SYN finds no room", .{ .slots = sim.crowd.?.slots });
+            fullTableRefused(sim);
         },
     }
 }
@@ -1744,6 +1744,13 @@ pub fn runFullSeed(seed: u64) !void {
     defer std.testing.allocator.destroy(sim);
     sim.initFull(seed);
     try runCrowded(sim);
+    fullTableRefused(sim);
+}
+
+/// One coverage site for both ways a full table is run (`runFullSeed`,
+/// `runWith`): a second site with the same message is a second property, and
+/// one that only the soak reaches leaves long.sh's floor short of it.
+fn fullTableRefused(sim: *const Sim) void {
     if (sim.table.refused > 0) props.reachable(@src(), "tcp_sim: a crowd the size of the kernel's table fills it, and a SYN finds no room", .{ .slots = sim.crowd.?.slots });
 }
 
