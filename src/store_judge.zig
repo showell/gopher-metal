@@ -218,6 +218,13 @@ fn onMetal(w: *World, op: Op, rel: []const u8, bytes: []const u8, offset: u64) !
     return .{ .said = .ok };
 }
 
+/// Whether the model holds a file at `rel`, at any size: a read into
+/// `model_buf` (1 MiB) said no for a larger one (metal-vmm QUEUE 104).
+fn isFile(w: *World, rel: []const u8) bool {
+    const st = w.model.stat(rel) catch return false;
+    return st.kind == .file;
+}
+
 /// **THE MODEL, SPEAKING THE SEAM'S CONTRACT** (STORE.md): it is
 /// gopher-metal's Store, whose answers differ from angry-gopher's store.zig
 /// where the contract is the seam's: a remove of what is absent is done, a
@@ -226,13 +233,6 @@ fn onMetal(w: *World, op: Op, rel: []const u8, bytes: []const u8, offset: u64) !
 /// not there. A write the model refuses as a bad name whose every part is a
 /// name FAT holds is a write through a file. Until the model is the seam's
 /// (STORE.md, open question 1), this is where the two meet.
-/// Whether the model holds a file at `rel`, at any size: a read into
-/// `model_buf` (1 MiB) said no for a larger one (metal-vmm QUEUE 104).
-fn isFile(w: *World, rel: []const u8) bool {
-    const st = w.model.stat(rel) catch return false;
-    return st.kind == .file;
-}
-
 fn onModel(w: *World, op: Op, rel: []const u8, bytes: []const u8, offset: u64) !Answer {
     const a = w.arena.allocator();
     const s: Store = w.model.store_();
