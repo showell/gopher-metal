@@ -113,6 +113,10 @@ if [ "$want" != sim ]; then
     # page in $OUT/page. The judged kernel unless another is named.
     run() {
         cp "$SITE" "$OUT/run.img"
+        # A page is this run's or none: metal-vmm writes none for an answer
+        # it kept only in part, and a page left by the run before would be
+        # judged in its place.
+        rm -f "$OUT/page"
         TRANSPORT=pci WIRE_LATENCY_US="$LATENCY_US" WIRE_EAT="$1" PEER_BODY="$OUT/page" \
             timeout 120 "$VMM/zig-out/bin/metal-vmm" "${3:-$JUDGED}" "$OUT/run.img" "" "$2" \
             > "$OUT/run.out" 2> "$OUT/run.err"
@@ -127,11 +131,12 @@ if [ "$want" != sim ]; then
         # Frame 9999 is never sent: the unhurt run, whose page every other must match.
         run 9999 "$route" "$COUNTED"
         run 9999 "$route"
-        cp "$OUT/page" "$OUT/unhurt.page"
+        rm -f "$OUT/unhurt.page"
+        cp "$OUT/page" "$OUT/unhurt.page" 2>/dev/null
         unhurt_status=$status
         total=${sent:-0}
-        if [ "$code" != 0 ] || [ -z "$status" ] || [ "$total" = 0 ]; then
-            echo "  $route: the unhurt run failed (exit $code, status '${status}'); see $OUT/run.out"
+        if [ "$code" != 0 ] || [ -z "$status" ] || [ "$total" = 0 ] || [ ! -f "$OUT/unhurt.page" ]; then
+            echo "  $route: the unhurt run failed (exit $code, status '${status}', page $([ -f "$OUT/unhurt.page" ] && echo written || echo 'not written')); see $OUT/run.out and run.err"
             failed+=("metal $route")
             continue
         fi
