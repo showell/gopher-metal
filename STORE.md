@@ -48,7 +48,7 @@ At any point in the operation, then the next boot's mount:
 
 | operation | after a cut |
 |---|---|
-| `write` | old, new, or gone |
+| `write` | old, new, or gone (on this machine: old or new) |
 | `append` | old or new |
 | **`replace`** | **wholly old or wholly new** |
 | `remove` | there or gone |
@@ -56,7 +56,13 @@ At any point in the operation, then the next boot's mount:
 | `removeTree` | some of the tree gone, the rest whole; never a file half removed *(not yet judged)* |
 
 And when the volume is full (`NoSpaceLeft`): a replaced or appended file is
-old; a written one is old or gone.
+old; a written one is old or gone (on this machine: old).
+
+**On this machine a `write` over a file is as safe as a `replace`**
+(`fat16.writeFileIn`'s `overwrite`): the new bytes go into a chain of their
+own and one sector write moves the entry onto it, so it needs room for both
+copies, as `replace` does. The contract above stays the weaker one, since
+angry-gopher's `write` on Linux empties the file and then fills it.
 
 `replace` is the one to use where losing the old file would matter; `write`
 is the cheap one. That is the whole difference. **Today `store_sim` holds
