@@ -96,13 +96,13 @@ What the run itself shows:
 | S1 | src/store.zig:127 | `part.len > max_part` | `part.len > max_part + 1` | killed | `store`: paths: empty parts ignored, FAT's rules kept, the Store's prefix refused |
 | S2 | src/store.zig:131 | `c < 0x20 or c == 0x7F` | `c < 0x20` | survived, now killed | store test, `051941b` |
 | S3 | src/store.zig:135 | `last == '.' or last == ' '` | `last == '.'` | killed | `store`: paths: empty parts ignored, FAT's rules kept, the Store's prefix refused |
-| S4 | src/store_fat.zig:52 | `error.Full, error.DirectoryFull => Error.NoSpace` | `error.DirectoryFull => Error.NoSpace` | killed | `store_sim`: store_sim: a handful of seeds |
+| S4 | src/store_fat.zig:52 | `error.Full, error.DirectoryFull => Error.NoSpace` | `error.DirectoryFull => Error.NoSpace` | killed | `store_sim`: store_sim: three seeds (properties: 1..1000) |
 | S5 | src/store_fat.zig:133 | `if (f.vol.blk.flush() != ` | `if (false and f.vol.blk.flush() != ` | survived, now killed | store_test, a write cache that wrote back only the root's sectors, `6298c0c` |
 | S6 | src/store_fat.zig:135 | `f.vol.remove(temp) catch {};` | `_ = &f;` | survived, now killed | store_test, a root with no room for the new name, `6298c0c` |
 | S7 | src/store_fat.zig:109 | `f.vol.writeInto(p, e.size, bytes)` | `f.vol.writeInto(p, e.size -\| 1, bytes)` | killed | `store_test`: the model and the FAT store agree on every operation, and every error |
 | S8 | src/store_fat.zig:119 | `if (e.isDirectory()) return Error.IsDirectory;` | `if (e.isDirectory() and false) return Error.IsDirectory;` | killed | `store_test`: the model and the FAT store agree on every operation, and every error |
 | S9 | src/store_fat.zig:153 | `if (store.hidden(name)) continue;` | `if (false) continue;` | killed | `store_test`: the model and the FAT store agree on every operation, and every error |
-| S10 | src/store_fat.zig:92 | `if (e.isDirectory()) return Error.IsDirectory;` | `if (false) return Error.IsDirectory;` | killed | `store_sim`: store_sim: a handful of seeds |
+| S10 | src/store_fat.zig:92 | `if (e.isDirectory()) return Error.IsDirectory;` | `if (false) return Error.IsDirectory;` | killed | `store_sim`: store_sim: three seeds (properties: 1..1000) |
 | S11 | src/store_fat.zig:50 | `if (writing) Error.BadName else Error.NotFound` | `if (writing and false) Error.BadName else Error.NotFound` | survived, equivalent in effect | see below |
 | L1 | src/log_ring.zig:104 | `self.total < self.buf.len` | `self.total <= self.buf.len` | killed | `pure_sim`: log_ring: a ring holding exactly its capacity reads back what it holds |
 | L2 | src/log_ring.zig:99 | `self.total -\| self.buf.len` | `self.total -\| (self.buf.len + 1)` | killed | `log_ring`: once bytes are lost, a read starts at the first whole line |
@@ -132,11 +132,11 @@ What the run itself shows:
 | F2 | src/fat16.zig:1117 | `looked == clusters` | `looked == clusters + 1` | survived | see below |
 | F3 | src/fat16.zig:1871 | `.kept => try self.readSector(lba, self.scratch),` | `.kept => @memset(self.scratch, 0),` | killed | `io_test`: the page cache is the disk: every change interleaved with reads, under evictions and failed writes |
 | F4 | src/fat16.zig:1835 | `at + have >= bytes.len` | `at + have > bytes.len` | survived | see below |
-| F5 | src/fat16.zig:1837 | `next != last + 1` | `next != last + 2` | killed | `store_sim`: store_sim: a handful of seeds |
+| F5 | src/fat16.zig:1837 | `next != last + 1` | `next != last + 2` | killed | `store_sim`: store_sim: three seeds (properties: 1..1000) |
 | F6 | src/fat16.zig:1872 | `.zeros => @memset(self.scratch, 0),` | `.zeros => try self.readSector(lba, self.scratch),` | survived, now killed | fat16_test: a file ending inside a sector leaves zeros past its end, not what a file before it left (mutant F6) |
 | F7 | src/fat16.zig:1717 | `offset > entry.size` | `offset > entry.size + 1` | killed | `floor_sim`: floor_sim: GPT, built field by field with one field wrong, a handful of seeds |
 | F8 | src/fat16.zig:1753 | `need > end.clusters` | `need > end.clusters + 1` | killed | `fat16_faults_test`: every operation stopped after every write leaves an outcome its doc names, and at worst leaked clusters |
-| F9 | src/fat16.zig:2016 | `if (d.first_cluster >= 2) try self.freeChain(d.first_cluster);` | `if (false) try self.freeChain(d.first_cluster);` | killed | `fat_sim`: the same, with probes of what the volume must refuse, a handful of seeds |
+| F9 | src/fat16.zig:2016 | `if (d.first_cluster >= 2) try self.freeChain(d.first_cluster);` | `if (false) try self.freeChain(d.first_cluster);` | killed | `fat_sim`: the same, with probes of what the volume must refuse, two seeds (properties: 1..20) |
 | F10 | src/fat16.zig:2483 | `offset >= entry.size` | `offset > entry.size` | survived, now killed | fat16_test: reading at a file's very end reads nothing, even where its chain ends there too (mutant F10) |
 | F11 | src/fat16.zig:2533 | `got + have >= want` | `got + have > want` | survived | see below |
 | F12 | src/fat16.zig:2410 | `entry.size > out.len` | `entry.size > out.len + 1` | killed | `floor_sim`: floor_sim: GPT, built field by field with one field wrong, a handful of seeds |
