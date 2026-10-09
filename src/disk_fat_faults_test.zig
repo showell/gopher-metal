@@ -1029,6 +1029,16 @@ test "a request that fails or lies leaves no cluster lost uncounted, its commit 
                     op.run(&d.vol) catch {};
                     d.blk.fault = null;
                     const counted = d.vol.cleanups_failed;
+                    // **AND A HELD FAT'S FIRST COPY ON THE DISK IS THE HELD
+                    // FAT, OR COUNTED APART**: an unchecked mount mirrors it
+                    // over the others, so one left behind comes back.
+                    if (d.vol.fat) |held| {
+                        const copy0 = d.bytes[d.vol.fat_start * test_disk.sector ..][0..held.len];
+                        if (!std.mem.eql(u8, copy0, held) and d.vol.fat_copies_failed == 0) {
+                            std.debug.print("{s} ({t}, then {d} failed): request {d} of {d}; the first FAT copy on the disk is not the held FAT, and nothing counted\n", .{ op.name, kind, fault.then_fail, n, total });
+                            return error.TestUnexpectedResult;
+                        }
+                    }
                     const fat_free = (try d.vol.derive()).free;
                     if (fat_free != d.vol.free_clusters and counted == 0) {
                         std.debug.print("{s} (FAT {s}, {t}, then {d} failed): request {d} of {d}; the kept free count is {d}, the FAT's {d}, and nothing counted\n", .{ op.name, if (cfg.cached) "held" else "on disk", kind, fault.then_fail, n, total, d.vol.free_clusters, fat_free });

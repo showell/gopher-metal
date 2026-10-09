@@ -338,7 +338,7 @@ pub const Volume = struct {
     /// is judged by what it leaves free once its old chain is gone, so one
     /// that frees as much as it takes always goes.
     reserve_clusters: u32 = 0,
-    /// Writes of a FAT copy past the first that failed (`copyApart`).
+    /// Writes of a FAT copy that failed and were left apart (`copyApart`).
     fat_copies_failed: u64 = 0,
     /// The volume serial number (BS_VolID), or null on a boot sector without
     /// one. `blkid` shows it as the UUID, high half first.
@@ -1232,8 +1232,17 @@ pub const Volume = struct {
                     // Taken as written: the held entry and the count keep
                     // the value, and the other copies are written as after
                     // a write that answered.
-                    .landed, .unknown => {
+                    .landed => {
                         self.keepCount(old, value);
+                        self.writeCopies(in_sector, sector);
+                    },
+                    // And the first copy is written again, once: left as
+                    // the disk had it, an unchecked mount (`cacheFat`) would
+                    // mirror it over the others. A second failure leaves it
+                    // counted apart.
+                    .unknown => {
+                        self.keepCount(old, value);
+                        self.writeSector(self.fat_start + in_sector, sector) catch self.copyApart();
                         self.writeCopies(in_sector, sector);
                     },
                 }
@@ -1289,11 +1298,12 @@ pub const Volume = struct {
         }
     }
 
-    /// A FAT copy past the first that could not be written: apart until a
-    /// later write of that sector or the next mount mends it.
+    /// A FAT copy that could not be written (one past the first, or the
+    /// first written again after a failure): apart until a later write of
+    /// that sector or the next mount mends it.
     fn copyApart(self: *Volume) void {
         self.fat_copies_failed +%= 1;
-        props.reachable(@src(), "fat: a FAT copy past the first fails to write, and is left apart", .{ .count = self.fat_copies_failed });
+        props.reachable(@src(), "fat: a FAT copy fails to write, and is left apart", .{ .count = self.fat_copies_failed });
     }
 
     /// **FSINFO'S FREE COUNT AND NEXT-FREE HINT, MARKED UNKNOWN**
