@@ -594,6 +594,31 @@ test "a repeated SYN is answered again, from the same starting number" {
     try testing.expectEqual(@as(usize, 1), f.table.inUse()); // not a second connection
 }
 
+test "a segment ahead, before the handshake's ACK, is answered with what we expect and opens nothing" {
+    var f: Fixture = .{};
+    f.init();
+    var p = Peer{ .ip = .{ 10, 0, 2, 2 }, .port = 40000 };
+    var buf: [1600]u8 = undefined;
+    _ = handle(&f.table, &f.wire, p.frame(&buf, flag_syn, p.seq, ""), 1);
+    const synack = f.wire.last();
+    p.seq +%= 1;
+    p.ack = synack.seq +% 1;
+    // Its first data segment is lost; the second, 10 bytes on, comes first.
+    const sent = f.wire.count;
+    const r = handle(&f.table, &f.wire, p.frame(&buf, flag_psh | flag_ack, p.seq +% 10, "later"), 2);
+    try testing.expectEqual(Event.nothing, r.event);
+    try testing.expectEqual(State.syn_received, f.table.conns[0].state);
+    try testing.expectEqual(sent + 1, f.wire.count);
+    const answer = f.wire.last();
+    try testing.expectEqual(flag_ack, answer.flags); // a bare ACK
+    try testing.expectEqual(p.seq, answer.ack); // naming the byte it still waits for
+    try testing.expectEqual(@as(usize, 0), answer.payload.len);
+    // The ACK in order opens it, and the early bytes were not taken.
+    const opened = handle(&f.table, &f.wire, p.frame(&buf, flag_ack, p.seq, ""), 3);
+    try testing.expectEqual(Event.opened, opened.event);
+    try testing.expectEqual(@as(usize, 0), f.table.conns[0].pending().len);
+}
+
 test "every initial sequence number comes from the supplied source" {
     var f: Fixture = .{};
     f.init();
