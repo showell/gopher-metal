@@ -771,7 +771,7 @@ QUICK = bool(os.environ.get("JUDGE_QUICK"))
 # uploads) runs that gate and nothing else. An unknown name is an error, not a
 # silently complete run.
 GATES = ["cases", "members", "uids", "caps", "lynrummy", "streams-linux", "streams-metal", "budget", "churn",
-         "bulk", "uploads", "slow", "lagging", "concurrent",
+         "bulk", "uploads", "lagging", "concurrent",
          "damaged", "endurance", "stamina", "admin-reset", "throttle", "retire", "secret"]
 # The boots that exist to be long. The quick tier leaves them out; asking for
 # one by name still runs it.
@@ -2914,131 +2914,6 @@ def small_socket(port: int):
     return sock
 
 
-def read_all(sock, pause_after: int = None, pause: float = 0.0) -> bytes:
-    got = b""
-    paused = pause_after is None
-    while True:
-        if not paused and len(got) >= pause_after:
-            time.sleep(pause)
-            paused = True
-        chunk = sock.recv(4096)
-        if not chunk:
-            return got
-        got += chunk
-
-
-def linux_writes_bulk(linux_bin, content, work, mnt, messages: int) -> str:
-    """**THE LINUX BUILD WRITES THE BIG TRANSCRIPT; THE MACHINE SERVES IT.**
-    A hundred 40 KB messages posted to the machine take most of a minute;
-    posted to Linux, a second. The result is a disk image holding the site with
-    that conversation already in it."""
-    root = tempfile.mkdtemp(dir=work)
-    tree_root = os.path.join(root, "content")
-    shutil.copytree(content, tree_root)
-    server = LinuxServer(linux_bin, tree_root, os.path.join(root, "linux.log"))
-    try:
-        cookie = login_cookie(server.port, root)
-        for n in range(1, messages + 1):
-            a = send_live(server.port, root, cookie, "bulk", bulk_text(n), f"b{n}")
-            if a.get("status") != 204:
-                raise RuntimeError(f"Linux would not take bulk message {n}: {a}")
-    finally:
-        server.stop()
-    os.remove(os.path.join(tree_root, "gopher.conf"))
-    image = os.path.join(root, "bulk.img")
-    build_disk(image, tree_root, mnt)
-    return image
-
-
-def slow_reader_failures(elf, linux_bin, content, work, mnt, report) -> int:
-    """**A CLIENT THAT READS SLOWLY GETS EVERY BYTE; ONE THAT STOPS IS LET GO,
-    AND HOLDS NO ONE ELSE UP.** The transcript is fetched three ways from one
-    boot: at full speed; by a client that stops twice along the way; and by
-    one that never reads at all. The second must get exactly what the first
-    got, with the machine probing a shut window while it waited. While the
-    third is stalled, the next request must be answered at once, well inside
-    the idle time (QUEUE item 90: a response the send queue has no room for
-    is kept, and the handler returns); the third must then be let go after
-    the idle timeout, and say so."""
-    label = "slow readers"
-    # A pause must outlast the first retransmission timeout (a second) for the
-    # window to be probed. The idle time must outlast the SECOND probe, which
-    # comes three seconds after the window shut: at three seconds, a reader
-    # that had only paused was let go.
-    idle_ms, pause = 5000, 2.0
-    # **BIG ENOUGH TO GET PAST THE HOST'S BUFFERS.** A loopback socket with a
-    # 2 KB receive buffer still lets its sender queue over a megabyte, and
-    # slirp holds more; a smaller answer never shuts the machine's window, and
-    # the gate below says so rather than passing.
-    messages = 100
-    requests = 1 + 3 + 1
-    bulk_image = linux_writes_bulk(linux_bin, content, work, mnt, messages)
-    scratch, qemu, port, serial = boot_with(elf, bulk_image, work, mnt, requests,
-                                            idle_timeout_ms=idle_ms)
-    failures = 0
-
-    def fail(msg):
-        nonlocal failures
-        failures += 1
-        report(f"FAIL  {label}: {msg}")
-
-    path = "/chat/c/1_2/bulk/raw"
-    stalled = None
-    after = {}
-    try:
-        cookie = login_cookie(port, scratch)
-        fast = socket.create_connection(("127.0.0.1", port), timeout=60)
-        get_on_socket(fast, path, cookie)
-        quick = parse_raw_response(read_all(fast))
-        fast.close()
-
-        slow = small_socket(port)
-        get_on_socket(slow, path, cookie)
-        time.sleep(pause)
-        patient = parse_raw_response(read_all(slow, pause_after=2_000_000, pause=pause))
-        slow.close()
-
-        if quick.get("status") != 200 or len(quick.get("body", b"")) < messages * 30_000:
-            fail(f"the transcript at full speed was {quick.get('status')} with "
-                 f"{len(quick.get('body', b''))} bytes")
-        elif patient.get("body") != quick["body"]:
-            fail(f"the slow reader got {len(patient.get('body', b''))} bytes "
-                 f"({patient.get('error', 'status ' + str(patient.get('status')))}), "
-                 f"the fast one {len(quick['body'])}, and they differ")
-
-        stalled = small_socket(port)
-        get_on_socket(stalled, path, cookie)
-        started = time.time()
-        after = ask(port, step("the request after", "GET", "/nope"), scratch, patience=60)
-        waited = time.time() - started
-    finally:
-        # The stalled reader stays open until the kernel is done with it: the
-        # boot's last request is served, and a response still unread is let
-        # go after the idle time, which is what is checked below.
-        code, log = finish_kernel(qemu, serial)
-        if stalled is not None:
-            stalled.close()
-    if after.get("status") != 404:
-        fail(f"the request after the stalled reader answered {after.get('status') or after.get('error')}")
-    elif waited >= idle_ms / 2000:
-        fail(f"the request after the stalled reader waited {waited:.1f} s: a reader that "
-             f"stopped held the machine (the idle time is {idle_ms} ms)")
-    if code != 1:
-        fail(f"the kernel exited {code}")
-    if "the client stopped taking the response" not in log:
-        fail("the kernel never said it let the stalled reader go")
-    counts = tcp_counts(log)
-    if counts is None or counts["probes"] == 0:
-        fail(f"the machine sent no window probes ({counts}) — the slow reader's window never shut, "
-             f"so this proved nothing")
-    if not failures:
-        report(f"ok    {label}: a reader that paused twice got all {len(quick['body'])} bytes, "
-               f"with {counts['probes']} window probes sent while it paused; one that never read "
-               f"was let go and the next request answered {waited:.1f} s later")
-    shutil.rmtree(scratch, ignore_errors=True)
-    return failures
-
-
 def lagging_stream_failures(elf, pristine, work, mnt, report) -> int:
     """**A TAB THAT STOPS READING LOSES ITS STREAM, NOT THE SITE.** Two streams
     on one conversation; one is read all along, the other is read once and then
@@ -3440,9 +3315,7 @@ def main() -> int:
     if running("secret"):
         failures += secret_failures(elf, linux_bin, content, pristine, work, mnt, gopher_root, print)
         lap("the session secret in auth/")
-    if running("slow"):
-        failures += slow_reader_failures(elf, linux_bin, content, work, mnt, print)
-        lap("slow readers")
+    # ── slow and stalled readers: metal-vmm's timeouts.sh (gates.sh) ─────────
     if running("lagging"):
         failures += lagging_stream_failures(elf, pristine, work, mnt, print)
         lap("a lagging stream")
