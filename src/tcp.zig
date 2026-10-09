@@ -1097,7 +1097,10 @@ pub const Table = struct {
                 c.dupacks = 0;
                 c.resent_early = false;
             } else if (bare and number == c.una and c.wnd == held and c.wnd != 0 and c.highest() != c.una) {
-                c.dupacks += 1;
+                // Counted to the resend and no further: a peer repeating
+                // itself forever must not overflow the count.
+                if (c.dupacks < dupacks_before_resend) c.dupacks += 1;
+                props.alwaysLessThanOrEqualTo(@src(), c.dupacks, dupacks_before_resend, "tcp: duplicate ACKs are counted to the resend and no further", null);
                 if (c.dupacks == dupacks_before_resend and !c.resent_early) self.resend(wire, i, now);
             }
         }

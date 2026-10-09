@@ -1348,6 +1348,21 @@ test "a duplicate acknowledgement names SND.UNA: an older one, or one of data ne
     try testing.expectEqual(@as(u64, 1), f.table.fast_retransmits);
 }
 
+test "a peer that keeps repeating its duplicate acknowledgement is answered by one fast retransmit, and its count cannot overflow" {
+    var f: Fixture = .{};
+    f.init();
+    var p = Peer{ .ip = .{ 10, 0, 2, 2 }, .port = 40000, .window = 8192 };
+    const i = try p.connect(&f.table, &f.wire, ms);
+    var body: [3000]u8 = undefined;
+    _ = f.table.queue(i, pattern(&body));
+    transmit(&f.table, &f.wire, 2 * ms);
+    const una = f.table.conns[i].una;
+    // Far more than a u8 counts, every one naming SND.UNA, none moving it.
+    for (0..600) |_| _ = p.ackUpTo(&f.table, &f.wire, una, 3 * ms);
+    try testing.expectEqual(@as(u64, 1), f.table.fast_retransmits);
+    try testing.expectEqual(una, f.table.conns[i].una);
+}
+
 test "a fast retransmit restarts the timer, so the timeout does not follow on its heels" {
     var f: Fixture = .{};
     f.init();
