@@ -160,7 +160,10 @@ VMM="${METAL_VMM:-$HOME/showell_repos/metal-vmm}"
 (cd "$VMM" && ./check.sh 2>&1 | tail -2; exit "${PIPESTATUS[0]}") || failed+=(vmm-check)
 (cd "$VMM" && ./same.sh 2>&1 | tail -2; exit "${PIPESTATUS[0]}") || failed+=(vmm-same)
 (cd "$VMM" && ./pc_vs_microvm.sh all 2>&1 | tail -2; exit "${PIPESTATUS[0]}") || failed+=(vmm-pc)
-lap "metal-vmm check, same and rest"
+# **TIMEOUTS, IN THE MACHINE'S TIME**: what a setting governs, proved by
+# moving it, read off metal-vmm's clock rather than waited out on the box's.
+(cd "$VMM" && ./timeouts.sh 2>&1 | tail -3; exit "${PIPESTATUS[0]}") || failed+=(vmm-timeouts)
+lap "metal-vmm check, same, rest and timeouts"
 
 if [ ${#failed[@]} = 0 ]; then
     [ "$mode" = full ] && python3 tools/verdicts.py record gates PASS

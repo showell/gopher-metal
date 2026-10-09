@@ -1069,47 +1069,6 @@ class Accelerator(unittest.TestCase):
             G.kvm_usable = real
 
 
-class SilentClient(unittest.TestCase):
-    """The judge's worst client: connects, says half a request, and holds."""
-
-    def test_it_connects_and_leaves_the_socket_open(self):
-        listener = socket.socket()
-        listener.bind(("127.0.0.1", 0))
-        listener.listen(1)
-        try:
-            sock = G.silent_client(listener.getsockname()[1], b"GET / HTTP/1.1\r\n")
-            accepted, _ = listener.accept()
-            try:
-                self.assertEqual(accepted.recv(64), b"GET / HTTP/1.1\r\n")
-                # Still open: the point is that it does NOT hang up, which is
-                # the case the kernel already handles.
-                accepted.settimeout(0.2)
-                with self.assertRaises(TimeoutError):
-                    accepted.recv(64)
-            finally:
-                accepted.close()
-                sock.close()
-        finally:
-            listener.close()
-
-    def test_it_can_say_nothing_at_all(self):
-        listener = socket.socket()
-        listener.bind(("127.0.0.1", 0))
-        listener.listen(1)
-        try:
-            sock = G.silent_client(listener.getsockname()[1], b"")
-            accepted, _ = listener.accept()
-            accepted.settimeout(0.2)
-            try:
-                with self.assertRaises(TimeoutError):
-                    accepted.recv(64)
-            finally:
-                accepted.close()
-                sock.close()
-        finally:
-            listener.close()
-
-
 class Resolution(unittest.TestCase):
     """FAT16 stores a modification time in whole EVEN seconds; ext4 stores
     nanoseconds. Wherever a story judges the ORDER of two writes, it has to put

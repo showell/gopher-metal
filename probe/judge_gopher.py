@@ -759,21 +759,6 @@ def set_request_limit(image: str, n: int, mnt: str, **conf) -> None:
     disk_write(image, mnt, "gopher-metal.conf", request_limit_text(image, n, **conf))
 
 
-def silent_client(port: int, payload: bytes):
-    """**A CLIENT THAT CONNECTS AND THEN SAYS (ALMOST) NOTHING.** This server
-    takes one connection at a time, so this is the request that holds the whole
-    site: half a request line and then silence, with the socket left open. The
-    kernel must let it go on its own and answer the next caller.
-
-    Returns the open socket, which the caller closes when it is done proving
-    the point — closing it early would be the polite hangup the kernel already
-    handled."""
-    sock = socket.create_connection(("127.0.0.1", port), timeout=5)
-    if payload:
-        sock.sendall(payload)
-    return sock
-
-
 # **THE QUICK TIER.** With JUDGE_QUICK set, the machine's waits are
 # test-sized — a three-second stream keepalive, sub-second silent-client
 # timeouts — and the boots that exist to be long are left out. The full run
@@ -786,7 +771,7 @@ QUICK = bool(os.environ.get("JUDGE_QUICK"))
 # uploads) runs that gate and nothing else. An unknown name is an error, not a
 # silently complete run.
 GATES = ["cases", "members", "uids", "caps", "lynrummy", "streams-linux", "streams-metal", "budget", "churn",
-         "bulk", "uploads", "slow", "lagging", "concurrent", "timeouts",
+         "bulk", "uploads", "slow", "lagging", "concurrent",
          "damaged", "endurance", "stamina", "admin-reset", "throttle", "retire", "secret"]
 # The boots that exist to be long. The quick tier leaves them out; asking for
 # one by name still runs it.
@@ -1683,88 +1668,6 @@ def missing_marks(steps, answers, report, label) -> int:
             failures += 1
             report(f"FAIL  {label}: {s['name']}: {len(gone)} of {len(s['expect'])} marks are not in "
                    f"the {len(body)}-byte body it returned, first {gone[0].decode()}")
-    return failures
-
-
-def held_open(elf, pristine, work, mnt, ms: int):
-    """One boot, one client that connects and then says nothing, and one caller
-    beside it. Returns (how long the caller waited for its answer, when the
-    kernel closed the silent socket, the caller's answer, what the silent socket
-    read at the end, the serial log) — times in seconds from the moment the
-    silent client connected."""
-    scratch = tempfile.mkdtemp(dir=work)
-    image = os.path.join(scratch, "disk.img")
-    shutil.copy(pristine, image)
-    set_request_limit(image, 2, mnt, idle_timeout_ms=ms)
-    qemu, port, serial = start_kernel(elf, image, scratch)
-    held = silent_client(port, b"GET / HTTP/1.1\r\n")  # half a request, then silence
-    began = time.time()
-    answer = ask(port, step("the caller beside the silent one", "GET", "/"),
-                 os.path.join(scratch, "after"), patience=60)
-    answered = time.time() - began
-    # The kernel closes the silent connection when it lets it go; the socket
-    # then reads end-of-stream.
-    held.settimeout(ms / 1000 + 30)
-    try:
-        rest = held.recv(64)
-    except OSError:
-        rest = None
-    let_go = time.time() - began
-    held.close()
-    code, log = finish_kernel(qemu, serial)
-    shutil.rmtree(scratch, ignore_errors=True)
-    return answered, let_go, answer, rest, log, code
-
-
-def timeout_failures(elf, pristine, work, mnt, report) -> int:
-    """**A CLIENT THAT SAYS NOTHING NO LONGER HOLDS ANYONE UP — AND IS STILL LET
-    GO.** When the machine held one connection at a time, this gate proved that
-    a caller queued behind a silent client waited out the timeout (6 s at a
-    2-second setting, 18 s at 6). With a table of connections the caller must
-    NOT wait: it is answered while the silent one sits in the table. The silent
-    one is still closed by the kernel once it has been quiet for the setting.
-
-    Two boots with two `idle_timeout_ms`, because "it was let go" is not the
-    claim: the claim is that the setting decides WHEN, and the only way to show
-    that is to change it and watch the close move."""
-    failures = 0
-    let_go_at = {}
-    low, high = (500, 2000) if QUICK else (2000, 6000)
-    for ms in (low, high):
-        answered, let_go, answer, rest, log, code = held_open(elf, pristine, work, mnt, ms)
-        if code != 1:
-            failures += 1
-            report(f"FAIL  timeout: with idle_timeout_ms={ms} the kernel exited {code}, not at its request limit")
-        let_go_at[ms] = let_go
-        if answer.get("status") != 200:
-            failures += 1
-            report(f"FAIL  timeout: with idle_timeout_ms={ms} the caller beside a silent client "
-                   f"got {answer.get('status', answer.get('error'))}, not 200")
-        if answered >= ms / 1000:
-            failures += 1
-            report(f"FAIL  timeout: with idle_timeout_ms={ms} the caller waited {answered:.1f}s — "
-                   f"as long as the silent client was allowed; it was held up behind it")
-        if rest != b"":
-            failures += 1
-            report(f"FAIL  timeout: with idle_timeout_ms={ms} the silent client was never closed "
-                   f"by the kernel (its socket read {rest!r})")
-        elif not (0.8 * ms / 1000 <= let_go <= ms / 1000 + 5):
-            failures += 1
-            report(f"FAIL  timeout: with idle_timeout_ms={ms} the silent client was let go after "
-                   f"{let_go:.1f}s")
-        if "the client stopped sending" not in log:
-            failures += 1
-            report(f"FAIL  timeout: with idle_timeout_ms={ms} the kernel never said it let the "
-                   f"silent client go: {' | '.join(log.splitlines()[-3:])}")
-    moved = let_go_at[high] - let_go_at[low]
-    if moved < 0.8 * (high - low) / 1000:
-        failures += 1
-        report(f"FAIL  timeout: raising the setting by {(high - low) / 1000:g}s moved the close by only "
-               f"{moved:.1f}s — the setting does not govern it")
-    if not failures:
-        report(f"ok    a silent client holds nobody up and is still let go when the volume says: "
-               f"closed after {let_go_at[low]:.1f}s at {low} ms and {let_go_at[high]:.1f}s at {high} ms, "
-               f"with the caller beside it answered first both times")
     return failures
 
 
@@ -3549,10 +3452,8 @@ def main() -> int:
         failures += concurrent_failures(elf, linux_bin, content, pristine, work, mnt, print)
         lap("many clients")
 
-    # ── the client that says nothing ─────────────────────────────────────────
-    if running("timeouts"):
-        failures += timeout_failures(elf, pristine, work, mnt, print)
-        lap("silent clients")
+    # ── the client that says nothing: metal-vmm's timeouts.sh, in the
+    # machine's time (gates.sh) ──────────────────────────────────────────────
     # ── endurance: the writes, read back every round ─────────────────────────
     if running("endurance"):
         f, log, answers, files = run_story(elf, linux_bin, content, pristine, work, mnt,
