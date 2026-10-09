@@ -458,6 +458,7 @@ test "an entry whose first cluster is past the volume is a broken chain, and rem
 
         var out: [64]u8 = undefined;
         try testing.expectError(disk_fat.Error.BadChain, d.vol.readFile(try d.vol.open("f"), &out));
+        try testing.expectError(disk_fat.Error.BadChain, d.vol.layout(try d.vol.open("f")));
         try testing.expectError(disk_fat.Error.BadChain, d.vol.writeInto("f", 2, "x"));
         try testing.expectError(disk_fat.Error.BadChain, d.vol.open("data/x"));
         var buf: [64]u8 = undefined;
@@ -1877,4 +1878,507 @@ test "remove refuses a directory, and leaves the volume clean" {
     defer d.deinit();
     try d.vol.writeFile("data/dir/inside.txt", "under the directory");
     try testing.expectError(disk_fat.Error.IsDirectory, d.vol.remove("data/dir"));
+}
+
+// ---- the paths the tests above leave untried (coverage, 2026-10-09) ----------
+
+const dirent = @import("disk_fat_dirent.zig");
+
+const IgnoreFindings = struct {
+    fn each(_: void, _: disk_fat.Finding) void {}
+};
+
+/// The byte offset of the root directory's first sector, from the BPB.
+fn rootAt(d: *const test_disk.Disk) usize {
+    const l = Layout.of(d.bytes);
+    return switch (l.kind) {
+        .fat16 => l.fat_start + 2 * l.fat_bytes,
+        .fat32 => (l.data_sector + (l.root_cluster - 2) * d.bytes[13]) * test_disk.sector,
+    };
+}
+
+/// A long-name part of `chars` (at most thirteen), numbered `seq`, opening a
+/// name (`last`, the 0x40 flag) or continuing one, tied to checksum `sum`.
+fn longPart(e: *[32]u8, seq: u8, last: bool, sum: u8, chars: []const u8) void {
+    @memset(e, 0xFF);
+    e[0] = seq | @as(u8, if (last) 0x40 else 0);
+    e[11] = 0x0F;
+    e[12] = 0;
+    e[13] = sum;
+    e[26] = 0;
+    e[27] = 0;
+    for (dirent.long_offsets, 0..) |off, i| {
+        const c: u16 = if (i < chars.len) chars[i] else if (i == chars.len) 0 else 0xFFFF;
+        e[off] = @truncate(c);
+        e[off + 1] = @truncate(c >> 8);
+    }
+}
+
+/// Makes `path` a directory holding `count` empty files, one 8.3 entry each,
+/// named by `nameOf`, after "." and "..": laid onto the disk as
+/// `fullDirectory` lays them, the rest of its last cluster free.
+fn layEntries(d: *test_disk.Disk, cached: bool, path: []const u8, count: usize, comptime nameOf: fn (usize, *[11]u8) void) !void {
+    const first = try d.vol.makePath(path);
+    const l = Layout.of(d.bytes);
+    try testing.expectEqual(@as(u8, 1), d.bytes[13]);
+    const per = test_disk.sector / 32;
+    const clusters = (count + 2 + per - 1) / per;
+    var last: usize = first;
+    var candidate: usize = 2;
+    for (1..clusters) |_| {
+        while (l.get(d.bytes, 0, candidate) != 0) candidate += 1;
+        for (0..2) |copy| {
+            l.set(d.bytes, copy, last, @intCast(candidate));
+            l.set(d.bytes, copy, candidate, l.end());
+        }
+        last = candidate;
+    }
+    var c: usize = first;
+    var k: usize = 0;
+    for (0..clusters) |i| {
+        const sector = d.bytes[(l.data_sector + c - 2) * test_disk.sector ..][0..test_disk.sector];
+        for (0..per) |slot| {
+            if (i == 0 and slot < 2) continue; // "." and ".."
+            const e = sector[slot * 32 ..][0..32];
+            @memset(e, 0);
+            if (k < count) {
+                nameOf(k, e[0..11]);
+                e[11] = 0x20;
+                k += 1;
+            }
+        }
+        c = l.get(d.bytes, 0, c);
+    }
+    try d.mount(cached);
+}
+
+test "a FAT whose copies differ in more sectors than are weighed is held as the first, and the others are written from it, or left apart if the disk refuses" {
+    const d = try Disk.make("fats-apart-past-weighing", test_disk.small32, false);
+    defer d.deinit();
+    try d.vol.writeFile("data/f", "x");
+    const buf = try testing.allocator.alloc(u8, d.vol.fatBytes());
+    defer testing.allocator.free(buf);
+    const room = try testing.allocator.alloc(u8, d.vol.checkBytes());
+    defer testing.allocator.free(room);
+    // The requests before the copies are mended: the first read, and the
+    // second compared with it. Copies that agree take the same reads.
+    try d.mount(false);
+    const r0 = d.blk.requests;
+    try testing.expectEqual(@as(u32, 0), try d.vol.cacheFat(buf));
+    const before = d.blk.requests - r0;
+
+    // The second copy apart from the first in one entry of each of its first
+    // sectors, more of them than are weighed: clusters nothing holds.
+    const l = Layout.of(d.bytes);
+    const per = test_disk.sector / 4;
+    const apart = disk_fat.Volume.max_weighed_sectors + 6;
+    try testing.expect(d.vol.sectors_per_fat > apart);
+    for (0..apart) |s| l.set(d.bytes, 1, s * per + 100, l.end());
+
+    // The first mending write fails: the run of the second copy that holds
+    // sector 0 is read, then sector 0 is written. The FAT is held, the
+    // mount goes on, and the copies are left as far apart as they were.
+    try d.mount(false);
+    d.blk.fault = .{ .at = d.blk.requests + before + 1, .kind = .fails };
+    const m = try d.vol.cacheFatChecked(buf, room);
+    d.blk.fault = null;
+    try testing.expect(m.repair_failed);
+    try testing.expect(!m.checked);
+    try testing.expectEqual(@as(u32, 0), m.repaired);
+    try testing.expectEqual(l.end(), l.get(d.bytes, 1, 100));
+    try testing.expect(!d.fatsAgree());
+
+    // The next mount writes every differing sector from the first, unweighed.
+    try d.mount(true);
+    try testing.expectEqual(@as(u32, apart), d.repaired);
+    try testing.expectEqual(@as(u32, 0), d.trusted);
+    try testing.expect(d.fatsAgree());
+    try testing.expectEqual(@as(u32, 0), l.get(d.bytes, 1, 100));
+    try d.expectFile("data/f", "x");
+    const r = try d.check();
+    try r.expect(&.{});
+}
+
+test "copies apart whose second weighing cannot run: the first copy is held as it reads, and neither is written over" {
+    for (formats) |shape| {
+        const d = try Disk.make("damaged-weigh-second-unreadable", shape, false);
+        defer d.deinit();
+        try d.vol.writeFile("data/f", "x");
+        const l = Layout.of(d.bytes);
+        var c: usize = 2;
+        var last: usize = 0;
+        while (c <= l.end() and c < 1000) : (c += 1) {
+            if (l.get(d.bytes, 0, c) != 0) last = c;
+        }
+        try testing.expect(last >= 3);
+        const was = l.get(d.bytes, 1, last);
+        l.set(d.bytes, 0, last, 0);
+        const damaged = try testing.allocator.dupe(u8, d.bytes);
+        defer testing.allocator.free(damaged);
+        const buf = try testing.allocator.alloc(u8, d.vol.fatBytes());
+        defer testing.allocator.free(buf);
+        const room = try testing.allocator.alloc(u8, d.vol.checkBytes());
+        defer testing.allocator.free(room);
+
+        // The requests before the first check, and what one check takes:
+        // the second takes as many, the volume's directories and copies
+        // being the same.
+        try d.mount(false);
+        const r0 = d.blk.requests;
+        const unweighed = try d.vol.cacheFatChecked(buf, null);
+        const before_check = d.blk.requests - r0 - unweighed.repaired;
+        const c0 = d.blk.requests;
+        _ = try d.vol.check(room, {}, IgnoreFindings.each);
+        const one_check = d.blk.requests - c0;
+        @memcpy(d.bytes, damaged);
+
+        // The first check runs; the second's first read fails.
+        try d.mount(false);
+        d.blk.fault = .{ .at = d.blk.requests + before_check + one_check, .kind = .fails };
+        const m = try d.vol.cacheFatChecked(buf, room);
+        d.blk.fault = null;
+        try testing.expect(m.unweighed);
+        try testing.expect(!m.checked);
+        try testing.expectEqual(@as(u32, 0), m.repaired);
+        // The held FAT is the first copy as the disk has it, the second's
+        // sectors weighed in it put back; neither copy is written.
+        try testing.expectEqualSlices(u8, d.bytes[l.fat_start..][0..d.vol.fatBytes()], d.vol.fat.?);
+        try testing.expectEqual(@as(u32, 0), l.get(d.bytes, 0, last));
+        try testing.expectEqual(was, l.get(d.bytes, 1, last));
+    }
+}
+
+test "what the FAT says afresh, from a held FAT or the disk, is what its first copy on the disk says" {
+    for (configs) |cfg| {
+        const d = try Disk.make("derive", cfg.shape, cfg.cached);
+        defer d.deinit();
+        var data: [3000]u8 = undefined;
+        try d.vol.writeFile("data/a", pattern(&data, 1));
+        try d.vol.writeFile("data/b", pattern(&data, 2));
+        try d.vol.remove("data/a");
+        try testing.expectEqual(cfg.cached, d.vol.fat != null);
+        const got = try d.vol.derive();
+        try testing.expectEqual(@as(u32, @intCast(d.free())), got.free);
+        const l = Layout.of(d.bytes);
+        var lowest: usize = 2;
+        while (l.get(d.bytes, 0, lowest) != 0) lowest += 1;
+        try testing.expectEqual(@as(?disk_fat.Cluster, @intCast(lowest)), got.first_free);
+    }
+}
+
+test "a boot sector whose FAT sizes overflow 32 bits, or that cannot be read, is refused at mount" {
+    const bytes = try testing.allocator.alloc(u8, test_disk.small32.sectors * test_disk.sector);
+    defer testing.allocator.free(bytes);
+    var blk = virtio.Block.inMemory(bytes);
+    var scratch: [test_disk.sector]u8 align(16) = undefined;
+    // FAT32's sectors per FAT (BPB_FATSz32, at 36), as two FATs and the 32
+    // reserved sectors before them make it overflow.
+    const cases = [_]struct { what: []const u8, per_fat: u32 }{
+        .{ .what = "a FAT of no sectors", .per_fat = 0 },
+        .{ .what = "two FATs of more than 2^32 sectors", .per_fat = 0x8000_0000 },
+        .{ .what = "two FATs and the reserved sectors past 2^32", .per_fat = 0x7FFF_FFFF },
+    };
+    for (cases) |c| {
+        test_disk.format(bytes, test_disk.small32);
+        std.mem.writeInt(u32, bytes[36..40], c.per_fat, .little);
+        testing.expectError(disk_fat.Error.BadBootSector, disk_fat.Volume.mount(&blk, &scratch, 0)) catch |e| {
+            std.debug.print("refusing {s}\n", .{c.what});
+            return e;
+        };
+    }
+    test_disk.format(bytes, test_disk.small32);
+    blk.fail_after = blk.requests;
+    try testing.expectError(disk_fat.Error.ReadFailed, disk_fat.Volume.mount(&blk, &scratch, 0));
+}
+
+test "an entry is dated by the volume's clock, and a clock with no answer writes no date rather than a wrong one" {
+    const Clocks = struct {
+        fn known() ?i64 {
+            return 1789641533; // 2026-09-17T10:38:53Z, an odd second
+        }
+        fn unknown() ?i64 {
+            return null;
+        }
+    };
+    for (configs) |cfg| {
+        const d = try Disk.make("clock", cfg.shape, cfg.cached);
+        defer d.deinit();
+        d.vol.clock = &Clocks.known;
+        try d.vol.writeFile("data/dated", "x");
+        try testing.expectEqual(@as(i64, 1789641532), (try d.vol.open("data/dated")).mtime_unix);
+        d.vol.clock = &Clocks.unknown;
+        try d.vol.writeFile("data/undated", "x");
+        try testing.expectEqual(@as(i64, 0), (try d.vol.open("data/undated")).mtime_unix);
+        // A rewrite moves the modification time, to none.
+        try d.vol.writeFile("data/dated", "y");
+        try testing.expectEqual(@as(i64, 0), (try d.vol.open("data/dated")).mtime_unix);
+    }
+}
+
+test "a volume label in the root is passed over: a name after it is written, found and removed, and the check calls it clean" {
+    for (configs) |cfg| {
+        const d = try Disk.make("label", cfg.shape, cfg.cached);
+        defer d.deinit();
+        // As mkfs.vfat -n writes one: the label's eleven bytes, attribute 0x08.
+        const root = rootAt(d);
+        @memcpy(d.bytes[root..][0..11], "GOPHER     ");
+        d.bytes[root + 11] = 0x08;
+        try d.mount(cfg.cached);
+        try d.vol.writeFile("after-the-label.md", "x");
+        try d.expectFile("after-the-label.md", "x");
+        var buf: [64]u8 = undefined;
+        try testing.expectEqualStrings("after-the-label.md", try d.names(0, &buf));
+        try d.vol.remove("after-the-label.md");
+        try testing.expectError(disk_fat.Error.NotFound, d.vol.open("after-the-label.md"));
+        try testing.expectEqualStrings("GOPHER     ", d.bytes[root..][0..11]);
+        const r = try d.check();
+        try r.expect(&.{});
+    }
+}
+
+test "more orphan long-name parts in a row than a name has: the ones before a new entry are tombstoned, and it is listed under its own name" {
+    for (both) |cached| {
+        // FAT16's root, a fixed run of sectors: 21 live parts in a row, as
+        // no name leaves them, then free entries.
+        const d = try Disk.make("orphans-past-a-name", small, cached);
+        defer d.deinit();
+        const root = rootAt(d);
+        for (0..21) |k| longPart(d.bytes[root + k * 32 ..][0..32], 1, true, 0x77, "orphan");
+        try d.mount(cached);
+        try d.vol.writeFile("new-name.md", "fresh");
+        try d.expectFile("new-name.md", "fresh");
+        var buf: [64]u8 = undefined;
+        try testing.expectEqualStrings("new-name.md", try d.names(0, &buf));
+        // The twenty just before the new entry are tombstoned; the first,
+        // as many parts back as a name can have, is left, behind them.
+        for (1..21) |k| try testing.expectEqual(@as(u8, 0xE5), d.bytes[root + k * 32]);
+        try testing.expectEqual(@as(u8, 0x41), d.bytes[root]);
+    }
+}
+
+test "a long name of more parts than FAT allows is found, and its remove is refused whole, taking nothing" {
+    for (both) |cached| {
+        const d = try Disk.make("long-name-too-many-parts", small, cached);
+        defer d.deinit();
+        try d.vol.writeFile("ABC", "hello"); // one short entry, the root's first
+        const root = rootAt(d);
+        var short: [32]u8 = d.bytes[root..][0..32].*;
+        // Twenty-one parts before it, each of the name "a-long-name": the
+        // first opens the name, the rest repeat its only part.
+        const sum = dirent.shortChecksum(short[0..11].*);
+        for (0..21) |k| longPart(d.bytes[root + k * 32 ..][0..32], 1, k == 0, sum, "a-long-name");
+        @memcpy(d.bytes[root + 21 * 32 ..][0..32], &short);
+        try d.mount(cached);
+        const before = d.free();
+        const e = try d.vol.open("a-long-name");
+        try testing.expectEqualStrings("a-long-name", e.text());
+        try testing.expectError(disk_fat.Error.BadName, d.vol.remove("a-long-name"));
+        try d.expectFile("a-long-name", "hello");
+        try testing.expectEqual(before, d.free());
+        for (0..22) |k| try testing.expect(d.bytes[root + k * 32] != 0xE5);
+    }
+}
+
+test "a FAT16 root that is full refuses a new name and a new directory, and takes nothing" {
+    for (both) |cached| {
+        // A root of one sector: sixteen entries.
+        const d = try Disk.make("root-full", .{ .sectors = 8192, .root_entries = 16 }, cached);
+        defer d.deinit();
+        var name: [8]u8 = undefined;
+        for (0..16) |k| try d.vol.writeFile(try std.fmt.bufPrint(&name, "F{d}", .{k}), "x");
+        const before = d.free();
+        try testing.expectError(disk_fat.Error.DirectoryFull, d.vol.writeFile("ONE.MOR", "x"));
+        try testing.expectError(disk_fat.Error.DirectoryFull, d.vol.writeFile("a-longer-name.md", "x"));
+        try testing.expectError(disk_fat.Error.DirectoryFull, d.vol.makePath("DIR"));
+        try testing.expectEqual(before, d.free());
+        // A name already there is still rewritten in place.
+        try d.vol.writeFile("F3", "rewritten");
+        try d.expectFile("F3", "rewritten");
+    }
+}
+
+test "a name whose every 8.3 alias is taken is refused, and takes nothing" {
+    const Alias = struct {
+        /// ABCDEF~1 to ABCDEF~9, ABCDE~10 to ABCDE~99, ABCD~100 to ABCD~999:
+        /// every alias of a name beginning "abcdefgh" with no extension.
+        fn of(k: usize, out: *[11]u8) void {
+            @memset(out, ' ');
+            var tail: [4]u8 = undefined;
+            const t = std.fmt.bufPrint(&tail, "~{d}", .{k + 1}) catch unreachable;
+            const keep = 8 - t.len;
+            @memcpy(out[0..keep], "ABCDEFGH"[0..keep]);
+            @memcpy(out[keep..][0..t.len], t);
+        }
+    };
+    for (configs) |cfg| {
+        const d = try Disk.make("aliases-taken", cfg.shape, cfg.cached);
+        defer d.deinit();
+        try layEntries(d, cfg.cached, "data/many", 999, Alias.of);
+        _ = try d.vol.open("data/many/ABCD~999");
+        const before = d.free();
+        try testing.expectError(disk_fat.Error.BadName, d.vol.writeFile("data/many/abcdefghij", "x"));
+        try testing.expectEqual(before, d.free());
+        try testing.expectError(disk_fat.Error.NotFound, d.vol.open("data/many/abcdefghij"));
+        // A name of another beginning still has its aliases.
+        try d.vol.writeFile("data/many/zyxwvutsrq", "x");
+        try testing.expectEqualStrings("ZYXWVU~1", (try d.vol.open("data/many/zyxwvutsrq")).alias());
+    }
+}
+
+test "a path through a file, too deep, or with no name, and a directory written into, are refused with their own errors" {
+    for (configs) |cfg| {
+        const d = try Disk.make("refused-paths", cfg.shape, cfg.cached);
+        defer d.deinit();
+        try d.vol.writeFile("data/f", "a file");
+        const before = d.free();
+        try testing.expectError(disk_fat.Error.BadName, d.vol.makePath("data/f/sub"));
+        try testing.expectError(disk_fat.Error.BadName, d.vol.writeFile("data/f/sub/x", "x"));
+        // A parent that is a file: NotFat16, as parentOf names it.
+        try testing.expectError(disk_fat.Error.NotFat16, d.vol.remove("data/f/x"));
+        try testing.expectError(disk_fat.Error.NotFat16, d.vol.rename("data/f/x", "data/f/y"));
+        try testing.expectError(disk_fat.Error.BadName, d.vol.writeInto("data", 0, "x"));
+        for ([_][]const u8{ "", "/", "///" }) |p| {
+            try testing.expectError(disk_fat.Error.BadName, d.vol.remove(p));
+            try testing.expectError(disk_fat.Error.BadName, d.vol.rename(p, "data/g"));
+        }
+        try testing.expectEqual(before, d.free());
+        try d.expectFile("data/f", "a file");
+        // Sixteen levels: the fifteen the check walks are made, the
+        // sixteenth refused.
+        try testing.expectError(disk_fat.Error.BadName, d.vol.makePath("d/" ** 15 ++ "d"));
+        try testing.expect((try d.vol.open("d/" ** 14 ++ "d")).isDirectory());
+        try testing.expectError(disk_fat.Error.NotFound, d.vol.open("d/" ** 15 ++ "d"));
+    }
+}
+
+test "a tree deeper than removeTree walks is refused, and nothing in it is removed; the same tree from one level down goes" {
+    for (configs) |cfg| {
+        const d = try Disk.make("limit-remove-deep", cfg.shape, cfg.cached);
+        defer d.deinit();
+        // Seventeen levels: makePath makes fifteen, the rest by hand, as
+        // another program with no such limit would.
+        var dir = try d.vol.makePath("d/" ** 14 ++ "d");
+        dir = try d.vol.makeDirIn(dir, "d");
+        dir = try d.vol.makeDirIn(dir, "d");
+        try d.vol.writeFileIn(dir, "f", "deep");
+        const before = d.free();
+        try testing.expectError(disk_fat.Error.BadChain, d.vol.removeTree("d"));
+        try testing.expectEqual(before, d.free());
+        try d.expectFile("d/" ** 17 ++ "f", "deep");
+        // Sixteen levels, counted from "d/d": within the walk.
+        try d.vol.removeTree("d/d");
+        try testing.expectError(disk_fat.Error.NotFound, d.vol.open("d/d"));
+        try testing.expect((try d.vol.open("d")).isDirectory());
+        const r = try d.check();
+        try r.expect(&.{});
+    }
+}
+
+test "a read at an offset inside a sector, across sectors and clusters, answers exactly the file's bytes there" {
+    const shapes = formats ++ [_]Shape{.{ .sectors = 65536, .sectors_per_cluster = 4, .suffix = "-spc4" }};
+    for (shapes) |shape| {
+        for (both) |cached| {
+            const d = try Disk.make("read-at", shape, cached);
+            defer d.deinit();
+            var data: [5000]u8 = undefined;
+            _ = pattern(&data, 13);
+            // Another file between its two halves, so its chain breaks.
+            try d.vol.writeFile("data/f", data[0..2500]);
+            try d.vol.writeFile("data/between", "x" ** 700);
+            try d.vol.writeInto("data/f", 2500, data[2500..]);
+            const e = try d.vol.open("data/f");
+            var out: [5000]u8 = undefined;
+            for ([_]u32{ 1, 100, 511, 513, 700, 1023, 2047, 2600, 4999 }) |off| {
+                for ([_]usize{ 1, 5, 600, 1500, 5000 }) |len| {
+                    const n = try d.vol.readAt(e, off, out[0..len]);
+                    try testing.expectEqual(@min(len, data.len - off), n);
+                    try testing.expectEqualSlices(u8, data[off..][0..n], out[0..n]);
+                }
+            }
+        }
+    }
+}
+
+test "a directory read as a file, and a file larger than the room given it, are refused" {
+    for (configs) |cfg| {
+        const d = try Disk.make("read-refused", cfg.shape, cfg.cached);
+        defer d.deinit();
+        try d.vol.writeFile("data/f", "0123456789");
+        const dir = try d.vol.open("data");
+        var out: [16]u8 = undefined;
+        try testing.expectError(disk_fat.Error.NotFound, d.vol.readFile(dir, &out));
+        try testing.expectError(disk_fat.Error.NotFound, d.vol.readAt(dir, 0, &out));
+        const f = try d.vol.open("data/f");
+        try testing.expectError(disk_fat.Error.TooBig, d.vol.readFile(f, out[0..9]));
+        try testing.expectEqual(@as(usize, 10), try d.vol.readFile(f, &out));
+        try testing.expectEqualStrings("0123456789", out[0..10]);
+    }
+}
+
+test "a file whose chain ends before its size is a broken chain, read from its start or from past its end" {
+    for (configs) |cfg| {
+        const d = try Disk.make("damaged-chain-ends-early", cfg.shape, cfg.cached);
+        defer d.deinit();
+        var data: [1500]u8 = undefined; // three clusters
+        try d.vol.writeFile("f", pattern(&data, 8));
+        const e = try d.vol.open("f");
+        const l = Layout.of(d.bytes);
+        // Its first cluster is made its last.
+        try damageFat(d, cfg.cached, e.first_cluster, l.end());
+        var out: [1500]u8 = undefined;
+        try testing.expectError(disk_fat.Error.BadChain, d.vol.readAt(e, 1200, &out));
+        try testing.expectError(disk_fat.Error.BadChain, d.vol.readAt(e, 0, &out));
+        try testing.expectError(disk_fat.Error.BadChain, d.vol.readFile(e, &out));
+        // What the chain does hold still reads.
+        try testing.expectEqual(@as(usize, 512), try d.vol.readAt(e, 0, out[0..512]));
+        try testing.expectEqualSlices(u8, data[0..512], out[0..512]);
+        const r = try d.check();
+        try r.expect(&.{
+            .{ .problem = .short, .path = "/f", .cluster = e.first_cluster, .count = 1 },
+            .{ .problem = .leaked, .cluster = e.first_cluster + 1, .count = 2 },
+        });
+    }
+}
+
+test "a directory's growth stopped at any request before its commit is an error, and every cluster it leaves taken is counted" {
+    for (formats) |shape| {
+        // The FAT on the disk, so a stop fails the read-backs as well.
+        const d = try Disk.make("limit-grow-stopped", shape, false);
+        defer d.deinit();
+        _ = try d.vol.makePath("data/full");
+        var name: [32]u8 = undefined;
+        for (0..14) |k| try d.vol.writeFile(try std.fmt.bufPrint(&name, "data/full/F{d}", .{k}), "x");
+        const before = try testing.allocator.dupe(u8, d.bytes);
+        defer testing.allocator.free(before);
+        try d.mount(false);
+        const r0 = d.blk.requests;
+        try d.vol.writeFile("data/full/NEXT", "x"); // grows the directory
+        const total = d.blk.requests - r0;
+        var n: u64 = 0;
+        while (n < total) : (n += 1) {
+            @memcpy(d.bytes, before);
+            try d.mount(false);
+            d.blk.fail_after = d.blk.requests + n;
+            try testing.expect(std.meta.isError(d.vol.writeFile("data/full/NEXT", "x")));
+            const counted = d.vol.cleanups_failed;
+            d.blk.fail_after = null;
+            try d.mount(false);
+            const r = try d.check();
+            for (r.found[0..r.len]) |f| {
+                if (f.problem != .leaked and f.problem != .fats_differ) {
+                    std.debug.print("stopped after {d} requests: {s} at {s}\n", .{ n, @tagName(f.problem), f.text() });
+                    return error.TestUnexpectedResult;
+                }
+            }
+            // The last request is the entry's write, the commit: a chain
+            // it leaves may be the file's, and is not counted. Before it,
+            // what is not given back is counted.
+            if (n + 1 < total and r.health.leaked > 0 and counted == 0) {
+                std.debug.print("{s}: stopped after {d} of {d} requests: {d} clusters leaked at {d}, none counted\n", .{ @tagName(shape.kind), n, total, r.health.leaked, r.found[0].cluster });
+                return error.TestUnexpectedResult;
+            }
+        }
+        @memcpy(d.bytes, before);
+        try d.mount(false);
+    }
 }

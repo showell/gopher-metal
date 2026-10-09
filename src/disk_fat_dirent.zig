@@ -438,3 +438,39 @@ test "every name the writer accepts, the reader reads back whole" {
         try testing.expectEqualStrings(name, long[0..long_len]);
     }
 }
+
+test "a long-name part numbered 0, or past the parts a max_name name needs, spoils the name it is in" {
+    // A name of "ab", written as one part; a part of another number before
+    // it on the disk is damage, and the name it opens is not believed.
+    var entries: [1][32]u8 = undefined;
+    _ = longEntriesFor("ab", 0x5A, &entries);
+    for ([_]u8{ 0, (max_name + 12) / 13 + 1 }) |seq| {
+        var long: [max_name]u8 = undefined;
+        var long_len: usize = 0;
+        var sum: u8 = 0;
+        var ok = true;
+        var e = entries[0];
+        e[0] = 0x40 | seq;
+        takeLongPart(&e, &long, &long_len, &sum, &ok);
+        try testing.expect(!ok);
+        try testing.expectEqual(@as(usize, 0), long_len);
+    }
+}
+
+test "a last part whose thirteen characters run past max_name spoils the name, not the buffer" {
+    // The highest part a max_name name has, full: its characters reach past
+    // max_name, which no name this filesystem writes does.
+    const seq: u8 = (max_name + 12) / 13;
+    try testing.expect(@as(usize, seq) * 13 > max_name);
+    var e = [_]u8{0} ** 32;
+    e[0] = 0x40 | seq;
+    e[11] = attr_long_name;
+    e[13] = 0x5A;
+    for (long_offsets) |off| e[off] = 'z';
+    var long: [max_name]u8 = undefined;
+    var long_len: usize = 0;
+    var sum: u8 = 0;
+    var ok = false;
+    takeLongPart(&e, &long, &long_len, &sum, &ok);
+    try testing.expect(!ok);
+}
