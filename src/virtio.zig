@@ -738,6 +738,8 @@ pub const Block = struct {
     /// A host test's lie, told once, at request number `at` (counted as
     /// `requests` counts) on a disk in memory (QUEUE.md item 80).
     fault: ?Fault = null,
+    /// The sector the fault's write went to, for `then_garbage`.
+    fault_lba: ?u64 = null,
 
     /// **A HOST TEST'S WRITE CACHE** (metal-vmm QUEUE 112), on a disk in
     /// memory: told of every write as it lands in `memory`, which is what
@@ -777,9 +779,10 @@ pub const Block = struct {
         /// with other bytes, as a device that wrote part of it may. What a
         /// caller does when its read-back of a failed write fails as well.
         then_fail: u8 = 0,
-        /// The request after `at`, a read, answers OK with other bytes: rot
-        /// on the read-back of a failed write (metal-vmm QUEUE 134(h)).
-        then_garbage: bool = false,
+        /// This many reads after `at`, of the sector `at` wrote, answer OK
+        /// with other bytes: rot on the read-backs of a failed write
+        /// (metal-vmm QUEUE 134(h), 138(b)).
+        then_garbage: u8 = 0,
     };
 
     /// A disk of `bytes.len / 512` sectors held in `bytes`, which the caller
@@ -816,7 +819,7 @@ pub const Block = struct {
             }
             return blk_s_ioerr;
         };
-        if (self.fault) |f| if (f.then_garbage and number == f.at + 1 and kind == blk_t_in) {
+        if (self.fault) |f| if (kind == blk_t_in and self.fault_lba == lba and number > f.at and number - f.at <= f.then_garbage) {
             for (here[0..len], 0..) |*b, i| b.* = @truncate(i *% 167 +% f.seed);
             return blk_s_ok;
         };
@@ -825,6 +828,7 @@ pub const Block = struct {
                 .fails => return blk_s_ioerr,
                 .lands_nothing => if (kind != blk_t_in) return blk_s_ok,
                 .lands_and_fails => if (kind != blk_t_in) {
+                    self.fault_lba = lba;
                     @memcpy(there, here[0..len]);
                     if (self.cache) |c| c.wrote(c.context, lba, there);
                     return blk_s_ioerr;

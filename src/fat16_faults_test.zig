@@ -806,7 +806,8 @@ test "a write that lands and answers failure, its read-back rotten: the kept fre
         while (n < total) : (n += 1) {
             @memcpy(d.bytes, before);
             try d.mount(cfg.cached);
-            d.blk.fault = .{ .at = d.blk.requests + n, .kind = .lands_and_fails, .then_garbage = true, .seed = @truncate(n) };
+            d.blk.fault_lba = null;
+            d.blk.fault = .{ .at = d.blk.requests + n, .kind = .lands_and_fails, .then_garbage = 1, .seed = @truncate(n) };
             d.vol.writeFile("data/BIG.DAT", &big) catch {};
             d.blk.fault = null;
             var held_free: u32 = 0;
@@ -818,7 +819,50 @@ test "a write that lands and answers failure, its read-back rotten: the kept fre
                 std.debug.print("request {d} of {d} landed and failed, its read-back rotten: the kept free count is {d}, the held FAT's {d}\n", .{ n, total, d.vol.free_clusters, held_free });
                 return error.TestUnexpectedResult;
             }
+            // **AND THE ROT IS NOT TAKEN IN** (QUEUE 138(a)): the held FAT
+            // is the authority for every entry but the one in doubt. The
+            // machine goes on, on this mount, and the next boot finds
+            // nothing worse than a stop leaves.
+            d.vol.writeFile("data/after", &after_bytes) catch {};
+            try d.mount(cfg.cached);
+            const r = try d.check();
+            try onlyAllowed(&r, &allowed, "a new file", "FAT16", "write that landed and failed, its read-back rotten", n);
         }
+    }
+}
+
+test "a write that lands and answers failure, with the FAT on the disk and its read-backs rotten: nothing is given back on a read-back that is not exact (metal-vmm QUEUE 138(b))" {
+    // A cluster was given back when a read-back said anything but what was
+    // hoped; a rotted nonzero one sent freeChain into another file's chain.
+    const coverage = @import("coverage");
+    const big = [_]u8{'b'} ** (6 * 512 + 100);
+    const d = try Disk.makeUnkept("limit-rot-on-disk", test_disk.small, false);
+    defer d.deinit();
+    try d.vol.writeFile("data/KEEP.DAT", &big); // another file's chain, nearby
+    const before = try testing.allocator.dupe(u8, d.bytes);
+    defer testing.allocator.free(before);
+    try d.mount(false);
+    const r0 = d.blk.requests;
+    try d.vol.writeFile("data/BIG.DAT", &big);
+    const total = d.blk.requests - r0;
+    var n: u64 = 0;
+    while (n < total) : (n += 1) {
+        @memcpy(d.bytes, before);
+        try d.mount(false);
+        coverage.reset();
+        d.blk.fault_lba = null;
+        d.blk.fault = .{ .at = d.blk.requests + n, .kind = .lands_and_fails, .then_garbage = 2, .seed = @truncate(n *% 7 +% 1) };
+        d.vol.writeFile("data/BIG.DAT", &big) catch {};
+        d.blk.fault = null;
+        var it = coverage.catalog();
+        while (it.next()) |site| if (site.broken()) {
+            std.debug.print("request {d} of {d}: broken: {s}\n", .{ n, total, std.mem.span(site.message) });
+            return error.TestUnexpectedResult;
+        };
+        try d.mount(false);
+        try d.expectFile("data/KEEP.DAT", &big);
+        const r = try d.check();
+        try onlyAllowed(&r, &allowed, "a new file beside another", "FAT16", "write that landed and failed, its read-backs rotten", n);
     }
 }
 
