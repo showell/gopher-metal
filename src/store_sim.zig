@@ -64,8 +64,12 @@ fn isVariant(path: []const u8) bool {
 
 const Failure = error{SimulationFailed};
 
+/// Failures not printed: for a test that expects some, whose output would
+/// otherwise read as a failure of its own.
+var quiet = false;
+
 fn fail(seed: u64, comptime fmt: []const u8, args: anytype) Failure {
-    std.debug.print("store_sim seed {d}: " ++ fmt ++ "\n", .{seed} ++ args);
+    if (!quiet) std.debug.print("store_sim seed {d}: " ++ fmt ++ "\n", .{seed} ++ args);
     return error.SimulationFailed;
 }
 
@@ -461,6 +465,19 @@ test "a run under a tape replays exactly: the same draws, the same choices" {
     }
 }
 
-test "store_sim: on a disk with a write cache, a handful of seeds (RED, metal-vmm QUEUE 112)" {
-    for (1..41) |seed| try runSeedCached(seed);
+// **FAT16 HERE NEEDS A DISK THAT WRITES THROUGH** (metal-vmm QUEUE 112):
+// its crash safety is the order of its writes, and a write cache keeps no
+// order between flushes, so on one a cut breaks the promises `runSeed`
+// holds. Boot turns the volume's cache off for that (`scsi.turnCacheOff`,
+// Steve's choice over write barriers, 2026-10-09). This holds the reason:
+// if fat16 ever orders its writes with barriers instead, these seeds pass,
+// this fails, and the choice is worth making again.
+test "store_sim: on a disk with a write cache, a cut breaks fat16's promises (why boot turns the cache off)" {
+    var broken: u32 = 0;
+    quiet = true;
+    defer quiet = false;
+    for (1..41) |seed| runSeedCached(seed) catch {
+        broken += 1;
+    };
+    try std.testing.expect(broken > 0);
 }
