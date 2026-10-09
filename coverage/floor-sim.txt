@@ -297,4 +297,5 @@ rtc: an hour, minute or second out of range
 
 # A SYN's options (metal-vmm QUEUE item 93, mutant T16): floor_sim builds them one by one.
 floor_sim: a SYN's option has a length under 2
+floor_sim: a quoted secret the line ends before it closes keeps the line's CRLF
 floor_sim: a SYN's options carry an MSS

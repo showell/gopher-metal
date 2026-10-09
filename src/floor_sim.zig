@@ -266,10 +266,15 @@ pub fn redactSeed(seed: u64) Failure!void {
     const empty = quote != null and r.boolean();
     var secret: [12]u8 = undefined;
     for (&secret) |*c| c.* = "QWXZJ"[r.uintLessThan(usize, 5)];
+    // Now and then a quoted value the line ends before it closes, with a
+    // CRLF: the `\r` ends the value and is kept (MUTATION.md L7).
+    const unclosed = quote != null and !empty and r.uintLessThan(u8, 4) == 0;
     if (quote) |q| put.s(&line, &n, &.{q});
     if (!empty) put.s(&line, &n, &secret);
-    if (quote) |q| put.s(&line, &n, &.{q});
-    put.s(&line, &n, " done\n");
+    if (unclosed) put.s(&line, &n, "\r\n") else {
+        if (quote) |q| put.s(&line, &n, &.{q});
+        put.s(&line, &n, " done\n");
+    }
     var buf: [256]u8 = undefined;
     var ring = log_ring.Ring.init(&buf);
     ring.write(line[0..n]);
@@ -279,7 +284,10 @@ pub fn redactSeed(seed: u64) Failure!void {
         if (!std.mem.eql(u8, got, line[0..n])) return fail(seed, "an empty quoted value changed the line: {s} became {s}", .{ line[0..n], got });
     } else if (std.mem.indexOf(u8, got, &secret) != null) {
         return fail(seed, "a secret came out: {s}", .{got});
+    } else if (unclosed and !std.mem.endsWith(u8, got, "\r\n")) {
+        return fail(seed, "an unclosed value's CRLF did not come out whole: {s}", .{got});
     }
+    if (unclosed) props.reachable(@src(), "floor_sim: a quoted secret the line ends before it closes keeps the line's CRLF", null);
 }
 
 // ── FAT on a damaged volume ─────────────────────────────────────────────────

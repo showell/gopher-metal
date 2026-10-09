@@ -21,17 +21,20 @@ in memory), and every fat16 survivor's line is still there unchanged.
 | tcp | 17 | 10 | 12 | 2 (T1, T7) | 12 / 17 |
 | durable | 7 | 7 | 7 | 0 | 7 / 7 |
 | ready | 10 | 9 | 10 | 0 | 10 / 10 |
-| Store (`store`, `store_fat`) | 11 | 7 | 8 | 0 | 8 / 11 |
-| log_ring | 11 | 8 | 8 | 2 (L6, L10) | 8 / 11 |
-| page_cache | 13 | 10 | 10 | 0 | 10 / 13 |
+| Store (`store`, `store_fat`) | 11 | 7 | 10 | 1 (S11 in effect) | 10 / 11 |
+| log_ring | 11 | 8 | 9 | 2 (L6, L10) | 9 / 11 |
+| page_cache | 13 | 10 | 11 | 0 | 11 / 13 |
 | fat16 | 16 | 8 | 12 | 4 (F2, F13; F4, F11 in effect) | 12 / 16 |
-| **all** | **85** | **59** | **67** | **8** | **67 / 85** |
+| **all** | **85** | **59** | **71** | **9** | **71 / 85** |
 
-"Killed now" counts the eight survivors that later got an oracle: T14, T16,
-R6 and S2 (item 93), and F6, F10, F14 and F15 (fat16_test, item 107, the
-tests named in the tables below, each re-planted and killed). Leaving out
-the eight equivalent mutants, which no oracle could kill, the score is 67 of
-77, and fat16's is 12 of 12.
+"Killed now" counts the twelve survivors that later got an oracle: T14, T16,
+R6 and S2 (item 93); F6, F10, F14 and F15 (fat16_test, item 107); S5 and S6
+(store_test, with a disk that has a write cache, item 112); and L7 and P1
+(floor_sim and page_sim, their generators widened, item 115). Each is named
+in the tables below, and each was re-planted and killed. S11 turned out
+equivalent in effect (item 115). Leaving out the nine equivalent mutants,
+which no oracle could kill, the score is 71 of 76; fat16's is 12 of 12, and
+the Store's 10 of 10.
 
 What the run itself shows:
 
@@ -94,25 +97,25 @@ What the run itself shows:
 | S2 | src/store.zig:131 | `c < 0x20 or c == 0x7F` | `c < 0x20` | survived, now killed | store test, `051941b` |
 | S3 | src/store.zig:135 | `last == '.' or last == ' '` | `last == '.'` | killed | `store`: paths: empty parts ignored, FAT's rules kept, the Store's prefix refused |
 | S4 | src/store_fat.zig:52 | `error.Full, error.DirectoryFull => Error.NoSpace` | `error.DirectoryFull => Error.NoSpace` | killed | `store_sim`: store_sim: a handful of seeds |
-| S5 | src/store_fat.zig:133 | `if (f.vol.blk.flush() != ` | `if (false and f.vol.blk.flush() != ` | survived | see below |
-| S6 | src/store_fat.zig:135 | `f.vol.remove(temp) catch {};` | `_ = &f;` | survived | see below |
+| S5 | src/store_fat.zig:133 | `if (f.vol.blk.flush() != ` | `if (false and f.vol.blk.flush() != ` | survived, now killed | store_test, a write cache that wrote back only the root's sectors, `6298c0c` |
+| S6 | src/store_fat.zig:135 | `f.vol.remove(temp) catch {};` | `_ = &f;` | survived, now killed | store_test, a root with no room for the new name, `6298c0c` |
 | S7 | src/store_fat.zig:109 | `f.vol.writeInto(p, e.size, bytes)` | `f.vol.writeInto(p, e.size -\| 1, bytes)` | killed | `store_test`: the model and the FAT store agree on every operation, and every error |
 | S8 | src/store_fat.zig:119 | `if (e.isDirectory()) return Error.IsDirectory;` | `if (e.isDirectory() and false) return Error.IsDirectory;` | killed | `store_test`: the model and the FAT store agree on every operation, and every error |
 | S9 | src/store_fat.zig:153 | `if (store.hidden(name)) continue;` | `if (false) continue;` | killed | `store_test`: the model and the FAT store agree on every operation, and every error |
 | S10 | src/store_fat.zig:92 | `if (e.isDirectory()) return Error.IsDirectory;` | `if (false) return Error.IsDirectory;` | killed | `store_sim`: store_sim: a handful of seeds |
-| S11 | src/store_fat.zig:50 | `if (writing) Error.BadName else Error.NotFound` | `if (writing and false) Error.BadName else Error.NotFound` | survived | see below |
+| S11 | src/store_fat.zig:50 | `if (writing) Error.BadName else Error.NotFound` | `if (writing and false) Error.BadName else Error.NotFound` | survived, equivalent in effect | see below |
 | L1 | src/log_ring.zig:104 | `self.total < self.buf.len` | `self.total <= self.buf.len` | killed | `pure_sim`: log_ring: a ring holding exactly its capacity reads back what it holds |
 | L2 | src/log_ring.zig:99 | `self.total -\| self.buf.len` | `self.total -\| (self.buf.len + 1)` | killed | `log_ring`: once bytes are lost, a read starts at the first whole line |
 | L3 | src/log_ring.zig:123 | `if (skip == self.len()) skip = 0;` | `if (false) skip = 0;` | killed | `log_ring`: a line longer than the ring keeps its tail, and is read whole as far as it is held |
 | L4 | src/log_ring.zig:118 | `skip = i + 1;` | `skip = i;` | killed | `log_ring`: once bytes are lost, a read starts at the first whole line |
 | L5 | src/log_ring.zig:133 | `var from = skip + (held - n);` | `var from = skip;` | killed | `log_ring`: what is written is read back, oldest first |
 | L6 | src/log_ring.zig:136 | `from >= piece.len` | `from > piece.len` | survived | see below |
-| L7 | src/log_ring.zig:225 | `b != self.quote and b != '\n' and b != '\r'` | `b != self.quote and b != '\n'` | survived | see below |
+| L7 | src/log_ring.zig:225 | `b != self.quote and b != '\n' and b != '\r'` | `b != self.quote and b != '\n'` | survived, now killed | floor_sim `redactSeed`, `230e4cf` |
 | L8 | src/log_ring.zig:229 | `' ', '\t', '"', '\'', '&', ';', ',', '\n', '\r' => self.state = .plain,` | `' ', '\t', '"', '\'', ';', ',', '\n', '\r' => self.state = .plain,` | killed | `log_ring`: a value after a key naming a secret is taken out, in a query string and in JSON |
 | L9 | src/log_ring.zig:233 | `'.', '/', '?', ' ', '\t', '"', '\n', '\r' => self.state = .plain,` | `'/', '?', ' ', '\t', '"', '\n', '\r' => self.state = .plain,` | killed | `log_ring`: an upload's id is taken out of its path, and its extension kept |
 | L10 | src/log_ring.zig:246 | `if (b == '\n') self.window = @splat(0);` | `if (false) self.window = @splat(0);` | survived | see below |
 | L11 | src/log_ring.zig:245 | `std.ascii.toLower(b)` | `b` | killed | `log_ring`: a value after a key naming a secret is taken out, in a query string and in JSON |
-| P1 | src/page_cache.zig:85 | `n + part.len > max_key` | `n + part.len > max_key + 1` | survived | see below |
+| P1 | src/page_cache.zig:85 | `n + part.len > max_key` | `n + part.len > max_key + 1` | survived, now killed | page_sim, a lone part of `max_key + 1` bytes, `230e4cf` |
 | P2 | src/page_cache.zig:118 | `self.used[i] = self.clock;` | `self.used[i] = self.used[i];` | killed | `page_cache`: the budget holds: the least recently used go first, and a file larger than largest is never kept |
 | P3 | src/page_cache.zig:146 | `self.used[i] < self.used[oldest.?]` | `self.used[i] > self.used[oldest.?]` | killed | `page_cache`: the budget holds: the least recently used go first, and a file larger than largest is never kept |
 | P4 | src/page_cache.zig:155 | `k == self.count - 1` | `k == self.count` | survived | see below |
@@ -167,13 +170,13 @@ on). There are three verdicts:
 | T16 | unreached; **now killed** | No test had an option of length 1 before an MSS. | floor_sim `mssSeed`, `9745fd1` | done |
 | R6 | reached, unchecked; **now killed** | Every chunked request ready_sim made had no Content-Length. | ready_sim: a chunked body that also gives a length, `1a3fbc4` | done |
 | S2 | unreached; **now killed** | No test named a path with DEL (0x7F) in it. | the Store's path test, `051941b` | done |
-| S5 | reached, unchecked | No disk in any test loses a write it hasn't flushed, so `replace` without its flush acts the same. 18 test runs reach it. | a disk that holds writes until a flush and drops them at a cut, under `store_sim`: after a cut, a replaced file is old or new, never torn | mine (`store_sim`, a test disk with a write cache) |
-| S6 | reached, unchecked | When `replace`'s rename fails, the hidden temp file stays and its clusters leak. `list` hides it, and the model never counts clusters. 8 test runs reach it. | `store_sim`'s filling tier: free clusters after a failed `replace` equal those before it | mine (`store_sim`) |
-| S11 | unreached | FAT never answers `NotFat16` to a write: no test or sweep writes under a path whose parent is a file, so that mapping's write branch never runs. | `store_test`: write `a/b` where `a` is a file, and expect `BadName` | mine (Store) |
+| S5 | reached, unchecked; **now killed** | No disk in any test lost a write it hadn't flushed, so `replace` without its flush acted the same. | `test_disk.Cache`, a disk that holds writes until a flush; `store_test` cuts it after a `replace` with only the root's sectors written back, `6298c0c`. (Under `store_sim`, item 112's cached run fails on fat16 itself first; see QUEUE.md.) | done |
+| S6 | reached, unchecked; **now killed** | When `replace`'s rename fails, the hidden temp file stays and its clusters leak. `list` hides it, and the model never counts clusters. | `store_test`: a root with room for the hidden copy and none for the new name; free clusters after the refusal equal those before, `6298c0c` | done |
+| S11 | equivalent in effect | Every write that meets a file as a parent meets it in fat16's `makeDirIn` first, which answers `BadName` itself; `rename` is only reached once the parent was made. So `map` never sees `NotFat16` for a write. | nothing can; `store_test` pins the answer, `230e4cf` | none |
 | L6 | equivalent | When `from == piece.len`, the mutant copies 0 bytes and sets `from = 0`, which is what skipping the piece does. | nothing can | none |
-| L7 | unreached | No line ends a quoted secret with a bare `\r` before its closing quote. There the mutant drops the `\r`, which over-redacts and does not leak. | floor_sim `redactSeed`: an unterminated quoted value ended by `\r\n`, and the `\r` comes out | mine (`floor_sim`) |
+| L7 | unreached; **now killed** | No line ended a quoted secret with a bare `\r` before its closing quote. There the mutant drops the `\r`, which over-redacts and does not leak. | floor_sim `redactSeed`: now and then a quoted value its line ends with `\r\n` before it closes, and the `\r\n` comes out, `230e4cf` | done |
 | L10 | equivalent | Every key is matched as contiguous bytes, and `\n` is not in any key, so a stale window before a newline can never match. | nothing can | none |
-| P1 | unreached | `page_sim`'s over-long paths always have a prefix part, so `n + part.len` is never exactly `max_key + 1`. There the mutant writes `out[256]`, out of bounds. | `page_sim`: now and then a single part of exactly `max_key + 1` bytes | mine (`page_sim`) |
+| P1 | unreached; **now killed** | `page_sim`'s over-long paths always had a prefix part, so `n + part.len` was never exactly `max_key + 1`. There the mutant writes `out[256]`, out of bounds. | `page_sim`: one too-long path in eight is a lone part of exactly `max_key + 1` bytes, `230e4cf` | done |
 | P4 | reached, unchecked | When a growing copy is the last slot and an eviction moves it, the mutant loses track of it (8 test runs reach this). It survives because the copy is never also the oldest left, so it is never the next one evicted. | already there: `wrote`'s `self.find(key).?` panics, and `page_sim`'s model disagrees. **For the explorer.** | explorer |
 | P5 | unreached | `page_sim`'s budgets are whole pages and sizes are rounded to pages, so `size == budget + 1` can't occur. | already there (`props.unreachable` "no room for a file within the budget"), once a budget can be one byte short of a page multiple | mine (`page_sim`'s budget) |
 | F2 | equivalent | Looking once more at the first candidate, already found taken, changes nothing. | nothing can | none |
@@ -245,12 +248,12 @@ the explorer gets there first.
    This is a test of whether steering can open a choice blind seeds never
    make, so it needs the budget's alternatives widened first.
 
-3. **T6 and S6 are not targets yet.** They are reached today, but nothing
-   fails when they differ. They become targets once the oracles in the table
-   above exist (`queue`'s room in `tcp_sim`, clusters after a failed
-   `replace` in `store_sim`).
+3. **T6 is not a target yet.** It is reached today, but nothing fails when
+   it differs. It becomes one once `tcp_sim` checks `queue`'s room. (S6 was
+   here too; `store_test` kills it now.)
 
-The unreached survivors (T3, T15, L7, P1, F10, S11) aren't on this list for
+The unreached survivors (T3 and T15; L7, P1 and F10 are killed now, and S11
+is equivalent) aren't on this list for
 a different reason: no generator makes their state at all, so steering has
 nothing to choose. Each needs its generator widened, as the table says.
 
