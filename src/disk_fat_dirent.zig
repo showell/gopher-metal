@@ -136,39 +136,84 @@ pub fn shortChecksum(short: [11]u8) u8 {
 /// LDIR_Name2 and LDIR_Name3, around the fields a short entry uses.
 pub const long_offsets = [_]u8{ 1, 3, 5, 7, 9, 14, 16, 18, 20, 22, 24, 28, 30 };
 
-/// Takes one long-name entry. They arrive last part first, so each is
-/// written at its sequence number's place.
-pub fn takeLongPart(e: []const u8, out: *[max_name]u8, len: *usize, sum: *u8, ok: *bool) void {
-    const seq = e[0] & 0x1F;
-    // As many parts as a `max_name` name needs, rounded UP.
-    if (seq == 0 or seq > (max_name + 12) / 13) {
-        ok.* = false;
-        return;
-    }
-    if (e[0] & 0x40 != 0) { // the last part, which arrives first
-        len.* = 0;
-        sum.* = e[13];
-        ok.* = true;
-    } else if (!ok.* or sum.* != e[13]) {
-        ok.* = false;
-        return;
-    }
+/// **A LONG NAME BEING READ.** Its parts arrive before the short entry that
+/// closes it, last part first, each written at its sequence number's place;
+/// the checksum ties the run to that entry.
+pub const LongName = struct {
+    stands: Stands = .none,
+    buf: [max_name]u8 = undefined,
+    len: usize = 0,
+    sum: u8 = 0,
 
-    const base = (@as(usize, seq) - 1) * 13;
-    for (long_offsets, 0..) |off, i| {
-        const c = @as(u16, e[off]) | (@as(u16, e[off + 1]) << 8);
-        if (c == 0x0000 or c == 0xFFFF) break;
-        const at = base + i;
-        if (at >= out.len) {
-            ok.* = false;
+    pub const Stands = enum {
+        /// No run open: none begun, or the last one closed or let go.
+        none,
+        /// A run whose parts so far agree; `sum` is theirs.
+        collecting,
+        /// A run gone wrong (a part numbered out of range, a checksum that
+        /// differs, a character past `max_name`): nothing closes it. Only a
+        /// new last part opens another.
+        spoiled,
+    };
+
+    /// Takes one long-name entry.
+    pub fn take(self: *LongName, e: []const u8) void {
+        const seq = e[0] & 0x1F;
+        // As many parts as a `max_name` name needs, rounded UP.
+        if (seq == 0 or seq > (max_name + 12) / 13) {
+            self.stands = .spoiled;
             return;
         }
-        // **ASCII ONLY**: a character past it reads as '?' (and `aliasFor`
-        // refuses to write one).
-        out[at] = if (c < 128) @intCast(c) else '?';
-        if (at + 1 > len.*) len.* = at + 1;
+        if (e[0] & 0x40 != 0) { // the last part, which arrives first
+            self.len = 0;
+            self.sum = e[13];
+            self.stands = .collecting;
+        } else if (self.stands != .collecting or self.sum != e[13]) {
+            self.stands = .spoiled;
+            return;
+        }
+
+        const base = (@as(usize, seq) - 1) * 13;
+        for (long_offsets, 0..) |off, i| {
+            const c = @as(u16, e[off]) | (@as(u16, e[off + 1]) << 8);
+            if (c == 0x0000 or c == 0xFFFF) break;
+            const at = base + i;
+            if (at >= self.buf.len) {
+                self.stands = .spoiled;
+                return;
+            }
+            // **ASCII ONLY**: a character past it reads as '?' (and `aliasFor`
+            // refuses to write one).
+            self.buf[at] = if (c < 128) @intCast(c) else '?';
+            if (at + 1 > self.len) self.len = at + 1;
+        }
     }
-}
+
+    /// An entry that is no part of a run (deleted, a volume label) ends it.
+    pub fn letGo(self: *LongName) void {
+        self.stands = .none;
+        self.len = 0;
+    }
+
+    /// **THE SHORT ENTRY THAT CLOSES THE RUN**, which ends either way: the
+    /// long name onto `entry` if the run is whole and its checksum matches.
+    /// A run whose checksum does not match is an orphan, and using it would
+    /// put the wrong name on the wrong bytes. Answers whether it was put.
+    pub fn close(self: *LongName, entry: *Entry) bool {
+        const whole = self.stands == .collecting and self.len > 0 and self.sum == shortChecksum(entry.short);
+        if (whole) {
+            entry.long_len = @intCast(@min(self.len, entry.long.len));
+            @memcpy(entry.long[0..entry.long_len], self.buf[0..entry.long_len]);
+        }
+        self.letGo();
+        return whole;
+    }
+
+    /// The name so far.
+    pub fn text(self: *const LongName) []const u8 {
+        return self.buf[0..self.len];
+    }
+};
 
 /// A directory entry's first cluster, both halves: DIR_FstClusLO at 26..28,
 /// DIR_FstClusHI at 20..22. On FAT16 the high half is always 0, as the
@@ -429,13 +474,10 @@ test "every name the writer accepts, the reader reads back whole" {
         const name = buf[0..len];
         var entries: [8][32]u8 = undefined;
         const n = longEntriesFor(name, 0x5A, &entries);
-        var long: [max_name]u8 = undefined;
-        var long_len: usize = 0;
-        var sum: u8 = 0;
-        var ok = false;
-        for (entries[0..n]) |*e| takeLongPart(e, &long, &long_len, &sum, &ok);
-        try testing.expect(ok);
-        try testing.expectEqualStrings(name, long[0..long_len]);
+        var long: LongName = .{};
+        for (entries[0..n]) |*e| long.take(e);
+        try testing.expectEqual(LongName.Stands.collecting, long.stands);
+        try testing.expectEqualStrings(name, long.text());
     }
 }
 
@@ -445,15 +487,12 @@ test "a long-name part numbered 0, or past the parts a max_name name needs, spoi
     var entries: [1][32]u8 = undefined;
     _ = longEntriesFor("ab", 0x5A, &entries);
     for ([_]u8{ 0, (max_name + 12) / 13 + 1 }) |seq| {
-        var long: [max_name]u8 = undefined;
-        var long_len: usize = 0;
-        var sum: u8 = 0;
-        var ok = true;
+        var long: LongName = .{ .stands = .collecting };
         var e = entries[0];
         e[0] = 0x40 | seq;
-        takeLongPart(&e, &long, &long_len, &sum, &ok);
-        try testing.expect(!ok);
-        try testing.expectEqual(@as(usize, 0), long_len);
+        long.take(&e);
+        try testing.expectEqual(LongName.Stands.spoiled, long.stands);
+        try testing.expectEqual(@as(usize, 0), long.len);
     }
 }
 
@@ -467,10 +506,7 @@ test "a last part whose thirteen characters run past max_name spoils the name, n
     e[11] = attr_long_name;
     e[13] = 0x5A;
     for (long_offsets) |off| e[off] = 'z';
-    var long: [max_name]u8 = undefined;
-    var long_len: usize = 0;
-    var sum: u8 = 0;
-    var ok = false;
-    takeLongPart(&e, &long, &long_len, &sum, &ok);
-    try testing.expect(!ok);
+    var long: LongName = .{};
+    long.take(&e);
+    try testing.expectEqual(LongName.Stands.spoiled, long.stands);
 }

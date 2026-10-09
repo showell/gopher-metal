@@ -55,7 +55,7 @@ pub const Dos = dirent.Dos;
 pub const Entry = dirent.Entry;
 const shortChecksum = dirent.shortChecksum;
 const long_offsets = dirent.long_offsets;
-const takeLongPart = dirent.takeLongPart;
+const LongName = dirent.LongName;
 const putCluster = dirent.putCluster;
 const putLe16 = dirent.putLe16;
 const putDos = dirent.putDos;
@@ -996,12 +996,9 @@ pub const Volume = struct {
         at: usize = 0,
         loaded: bool = false,
         done: bool = false,
-        // A long name arrives before its entry, last part first: collected
-        // here, handed over with the short entry that closes it.
-        long: [max_name]u8 = undefined,
-        long_len: usize = 0,
-        long_sum: u8 = 0,
-        long_ok: bool = false,
+        // A long name arrives before its entry: collected here, handed over
+        // with the short entry that closes it.
+        long: LongName = .{},
         /// Set by `find` alone (the volume's `dir_burst`): sectors are read
         /// up to a stretch at a time, and `burst_n` of them from `burst_lba`
         /// are held.
@@ -1057,29 +1054,21 @@ pub const Volume = struct {
                         return null;
                     }
                     if (e[0] == 0xE5) {
-                        self.long_ok = false;
+                        self.long.letGo();
                         continue;
                     }
                     if (e[11] == attr_long_name) {
-                        takeLongPart(e, &self.long, &self.long_len, &self.long_sum, &self.long_ok);
+                        self.long.take(e);
                         continue;
                     }
                     if (e[11] & attr_volume_label != 0) {
-                        self.long_ok = false;
+                        self.long.letGo();
                         continue;
                     }
                     var entry = self.walk.vol.entryFrom(e);
                     entry.lba = self.walk.lba;
                     entry.slot = @intCast(at);
-                    // **THE CHECKSUM TIES A LONG NAME TO ITS ENTRY.** A run
-                    // whose checksum does not match is an orphan, and using
-                    // it would put the wrong name on the wrong bytes.
-                    if (self.long_ok and self.long_len > 0 and self.long_sum == shortChecksum(e[0..11].*)) {
-                        entry.long_len = @intCast(@min(self.long_len, entry.long.len));
-                        @memcpy(entry.long[0..entry.long_len], self.long[0..entry.long_len]);
-                    }
-                    self.long_ok = false;
-                    self.long_len = 0;
+                    _ = self.long.close(&entry);
                     return entry;
                 }
                 if (!(try self.walk.next())) {
@@ -1652,13 +1641,12 @@ pub const Volume = struct {
     fn unlinkEntry(self: *Volume, dir_cluster: Cluster, name: []const u8, then: enum { free_chain, keep_chain }) Error!void {
         const Pos = struct { lba: u32, at: u32 };
         var walk = try Walk.start(self, dir_cluster);
+        // Where the open run's parts sit, to mark each deleted with its
+        // entry: `kept` says whether every one fit in `parts`.
         var parts: [max_long_parts]Pos = undefined;
         var part_count: usize = 0;
-        var parts_overflowed = false;
-        var long_sum: u8 = 0;
-        var long_ok = false;
-        var long_buf: [max_name]u8 = undefined;
-        var long_len: usize = 0;
+        var kept: enum { every_part, too_many } = .every_part;
+        var long: LongName = .{};
 
         while (true) {
             try self.readSector(walk.lba, self.scratch);
@@ -1666,45 +1654,34 @@ pub const Volume = struct {
             while (at + dirent_size <= sector_size) : (at += dirent_size) {
                 const e = self.scratch[at..][0..dirent_size];
                 if (e[0] == 0x00) return; // nothing further in this directory
-                if (e[0] == 0xE5) {
-                    long_ok = false;
-                    long_len = 0;
+                if (e[0] == 0xE5 or (e[11] != attr_long_name and e[11] & attr_volume_label != 0)) {
+                    long.letGo();
                     part_count = 0;
-                    parts_overflowed = false;
+                    kept = .every_part;
                     continue;
                 }
                 if (e[11] == attr_long_name) {
                     // The part flagged 0x40 (LAST_LONG_ENTRY) opens a run.
                     if (e[0] & 0x40 != 0) {
                         part_count = 0;
-                        parts_overflowed = false;
+                        kept = .every_part;
                     }
                     if (part_count < parts.len) {
                         parts[part_count] = .{ .lba = walk.lba, .at = at };
                         part_count += 1;
-                    } else parts_overflowed = true;
-                    takeLongPart(e, &long_buf, &long_len, &long_sum, &long_ok);
-                    continue;
-                }
-                if (e[11] & attr_volume_label != 0) {
-                    long_ok = false;
-                    long_len = 0;
-                    part_count = 0;
+                    } else kept = .too_many;
+                    long.take(e);
                     continue;
                 }
 
                 var entry = self.entryFrom(e);
-                const has_long = long_ok and long_len > 0 and long_sum == shortChecksum(e[0..11].*);
-                if (has_long) {
-                    entry.long_len = @intCast(@min(long_len, entry.long.len));
-                    @memcpy(entry.long[0..entry.long_len], long_buf[0..entry.long_len]);
-                }
+                const has_long = long.close(&entry);
 
                 if (eqlFold(entry.text(), name)) {
                     const chain = entry.first_cluster;
                     const short_lba = walk.lba;
                     const run = parts[0..part_count];
-                    if (has_long and parts_overflowed) { // cannot remove what cannot be found whole
+                    if (has_long and kept == .too_many) { // cannot remove what cannot be found whole
                         props.reachable(@src(), "fat: a long name of more parts than FAT allows cannot be removed", null);
                         return Error.BadName;
                     }
@@ -1724,10 +1701,8 @@ pub const Volume = struct {
                     if (then == .free_chain and chain >= 2) self.afterCommit(self.freeChain(chain));
                     return;
                 }
-                long_ok = false;
-                long_len = 0;
                 part_count = 0;
-                parts_overflowed = false;
+                kept = .every_part;
             }
             if (!(try walk.next())) return;
         }
@@ -1860,7 +1835,7 @@ pub const Volume = struct {
     /// is free.
     fn aliasFor(self: *Volume, dir_cluster: Cluster, name: []const u8) Error![11]u8 {
         // **A NEW NAME IS ASCII.** A long name holds a byte as one UTF-16
-        // unit, and `takeLongPart` reads a unit past ASCII as '?', so such a
+        // unit, and `LongName.take` reads a unit past ASCII as '?', so such a
         // name would be found under no name it was given. Every name made
         // here comes through this before anything changes.
         for (name) |c| if (c >= 0x80) {
@@ -2677,10 +2652,7 @@ pub const Volume = struct {
                 // **A SECTOR OF ITS OWN**: without a held FAT, each entry's
                 // chain is read through `scratch`.
                 var sector: [sector_size]u8 align(16) = undefined;
-                var long: [max_name]u8 = undefined;
-                var long_len: usize = 0;
-                var long_sum: u8 = 0;
-                var long_ok = false;
+                var long: LongName = .{};
 
                 const fixed_root = cluster == 0 and v.kind == .fat16;
                 const sectors: u32 = if (fixed_root) v.root_sectors else clusters * v.sectors_per_cluster;
@@ -2697,24 +2669,19 @@ pub const Volume = struct {
                         const e = sector[at..][0..dirent_size];
                         if (e[0] == 0x00) return; // nothing further in this directory
                         if (e[0] == 0xE5) {
-                            long_ok = false;
+                            long.letGo();
                             continue;
                         }
                         if (e[11] == attr_long_name) {
-                            takeLongPart(e, &long, &long_len, &long_sum, &long_ok);
+                            long.take(e);
                             continue;
                         }
                         if (e[11] & attr_volume_label != 0) {
-                            long_ok = false;
+                            long.letGo();
                             continue;
                         }
                         var entry = v.entryFrom(e);
-                        if (long_ok and long_len > 0 and long_sum == shortChecksum(e[0..11].*)) {
-                            entry.long_len = @intCast(@min(long_len, entry.long.len));
-                            @memcpy(entry.long[0..entry.long_len], long[0..entry.long_len]);
-                        }
-                        long_ok = false;
-                        long_len = 0;
+                        _ = long.close(&entry);
                         try self.entryIn(entry, cluster, parent, depth);
                     }
                 }
