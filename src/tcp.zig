@@ -719,6 +719,7 @@ pub const Table = struct {
             if (!backoff(c, now)) return self.giveUp(wire, i);
             self.retransmits += 1;
             props.reachable(@src(), "tcp: a lost SYN-ACK is sent again", .{ .conn = i });
+            c.timed_at = null; // Karn: no telling which copy the ACK answers
             self.emit(wire, i, flag_syn | flag_ack, c.una, "");
             return;
         }
@@ -1013,6 +1014,7 @@ pub const Table = struct {
         // a challenge ACK (RFC 9293, after RFC 5961 §4).
         if (flags & flag_syn != 0) {
             if (c.state == .syn_received) {
+                c.timed_at = null; // Karn, as when the timer sends it again
                 self.emit(wire, i, flag_syn | flag_ack, c.una, "");
             } else self.emit(wire, i, flag_ack, c.highest(), "");
             return .{ .event = .nothing };

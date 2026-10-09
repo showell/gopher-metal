@@ -619,6 +619,32 @@ test "a segment ahead, before the handshake's ACK, is answered with what we expe
     try testing.expectEqual(@as(usize, 0), f.table.conns[0].pending().len);
 }
 
+test "a SYN-ACK sent again is not timed: the handshake's ACK takes no sample (Karn), whichever way it was sent again" {
+    for ([_]bool{ true, false }) |by_timer| {
+        var f: Fixture = .{};
+        f.init();
+        var p = Peer{ .ip = .{ 10, 0, 2, 2 }, .port = 40000 };
+        var buf: [1600]u8 = undefined;
+        _ = handle(&f.table, &f.wire, p.frame(&buf, flag_syn, p.seq, ""), 1);
+        const synack = f.wire.last();
+        const sent = f.wire.count;
+        if (by_timer) {
+            transmit(&f.table, &f.wire, 1 + rto); // the timer sends it again
+        } else {
+            _ = handle(&f.table, &f.wire, p.frame(&buf, flag_syn, p.seq, ""), 1 + rto); // so does a repeated SYN
+        }
+        try testing.expectEqual(sent + 1, f.wire.count);
+        try testing.expectEqual(flag_syn | flag_ack, f.wire.last().flags);
+        // The ACK answers one copy or the other; no telling which.
+        p.seq +%= 1;
+        p.ack = synack.seq +% 1;
+        const r = handle(&f.table, &f.wire, p.frame(&buf, flag_ack, p.seq, ""), 2 + rto);
+        try testing.expectEqual(Event.opened, r.event);
+        try testing.expectEqual(@as(u64, 0), f.table.conns[r.index].srtt_ns);
+        try testing.expectEqual(@as(u64, 0), f.table.samples);
+    }
+}
+
 test "every initial sequence number comes from the supplied source" {
     var f: Fixture = .{};
     f.init();
