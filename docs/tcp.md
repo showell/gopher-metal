@@ -202,17 +202,18 @@ turn of the loop — is a state machine like the receive side:
   rest of an answer is told.
 
 The state machine is tested on the host with a peer that sends windows and
-acknowledgements. On QEMU, three gates exercise what the others never could:
+acknowledgements. On QEMU, two gates exercise what the others never could:
 
 ```
 ok    bulk: 8 messages of 40 KB in, a 317376-byte transcript and a 4895-byte
       page out, all answered as Linux answered
 ok    bulk, losing one frame sent in seven: (the same), 122 frames lost,
       19 timeouts resent
-ok    slow readers: a reader that paused twice got all 3967477 bytes, with 10
-      window probes sent while it paused; one that never read was let go and
-      the next request answered 5.3 s later
 ```
+
+Slow and stalled readers are metal-vmm's `timeouts.sh`, in the machine's
+time: a reader that pauses just under the idle setting gets the whole page
+with its window probed, and one that pauses just over it is let go.
 
 **The loss switch loses only what this machine sends**
 (`lose_one_sent_in`). Losing what arrives as well made each 40 KB request
