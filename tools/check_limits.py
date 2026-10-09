@@ -10,7 +10,7 @@ them, so the next move cannot leave one behind.
 
     tools/check_limits.py [angry-gopher's zig-server/src]
 
-- the longest name: store.zig's `max_name` is disk_fat.zig's `max_name`;
+- the longest name: store.zig's `max_name` is disk_fat_dirent.zig's `max_name`;
 - the longest path: store.zig's `max_path` is io.zig's `max_path`;
 - the deepest file: store.zig's `max_depth` counts the parts of a path from
   the root's own name ("data") to the file, so a file `max_depth` parts deep
@@ -50,12 +50,13 @@ def const(path: str, name: str) -> int:
 
 def main() -> int:
     store = os.path.join(AG, "store.zig")
-    fat16 = os.path.join(ROOT, "src", "disk_fat.zig")
+    disk_fat = os.path.join(ROOT, "src", "disk_fat.zig")
+    dirent = os.path.join(ROOT, "src", "disk_fat_dirent.zig")
     io = os.path.join(ROOT, "src", "io.zig")
     pairs = [
-        ("the longest name", const(store, "max_name"), const(fat16, "max_name"), "store.zig max_name", "disk_fat.zig max_name"),
+        ("the longest name", const(store, "max_name"), const(dirent, "max_name"), "store.zig max_name", "disk_fat_dirent.zig max_name"),
         ("the longest path", const(store, "max_path"), const(io, "max_path"), "store.zig max_path", "io.zig max_path"),
-        ("the deepest file's folders", const(store, "max_depth") - 1, const(fat16, "max_path_depth"), "store.zig max_depth - 1", "disk_fat.zig max_path_depth"),
+        ("the deepest file's folders", const(store, "max_depth") - 1, const(disk_fat, "max_path_depth"), "store.zig max_depth - 1", "disk_fat.zig max_path_depth"),
     ]
     bad = 0
     for what, a, b, an, bn in pairs:
