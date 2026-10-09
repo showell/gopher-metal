@@ -26,6 +26,7 @@ const std = @import("std");
 const props = @import("coverage");
 const virtio = @import("virtio.zig");
 const tsc = @import("tsc.zig");
+const mode = @import("scsi_mode.zig");
 
 /// The virtio device type of a SCSI controller.
 pub const device_id: u32 = 8;
@@ -239,7 +240,9 @@ pub fn synchronize(b: *virtio.Block, at: Address) u8 {
 /// (SBC-3 §6.5.5, page 08h), current values, no block descriptors: its WCE
 /// bit says writes are answered from a cache. Null when the disk does not
 /// answer or the page is not there, which `Block.flush` treats as a cache.
-fn writeCache(b: *virtio.Block, at: Address, scratch: u64, page: []const u8) ?bool {
+/// `got` is how much of the answer the disk sent, for `turnCacheOff`.
+fn writeCache(b: *virtio.Block, at: Address, scratch: u64, page: []const u8, got: *usize) ?bool {
+    got.* = 0;
     const want: u16 = 8 + 20; // the mode parameter header, then the page
     const cdb = [10]u8{ 0x5A, 0x08, 0x08, 0, 0, 0, 0, @truncate(want >> 8), @truncate(want), 0 };
     const o = commandSettled(b, at, &cdb, .from_disk, scratch, want);
@@ -249,11 +252,11 @@ fn writeCache(b: *virtio.Block, at: Address, scratch: u64, page: []const u8) ?bo
     }
     // Only what the disk sent is its answer: the bytes past it in `page` are
     // whatever was there before.
-    const got = want -| o.residual;
-    if (got < 8) return null;
+    got.* = want -| o.residual;
+    if (got.* < 8) return null;
     const descriptors = (@as(usize, page[6]) << 8) | page[7];
     const p = 8 + descriptors;
-    if (p + 3 > got or page[p] & 0x3F != 0x08) {
+    if (p + 3 > got.* or page[p] & 0x3F != 0x08) {
         props.reachable(@src(), "scsi: a MODE SENSE answer without the caching page is taken to cache", null);
         return null;
     }
@@ -269,17 +272,14 @@ fn writeCache(b: *virtio.Block, at: Address, scratch: u64, page: []const u8) ?bo
 /// MODE SENSE just answered in `page`, with WCE cleared, the header's mode
 /// data length and device-specific byte zeroed, and no block descriptors
 /// (SPC-4 §6.13, as Linux's sd does). The caller reads the page again to
-/// know: a disk may take the command and keep caching.
-fn turnCacheOff(b: *virtio.Block, at: Address, scratch: u64, page: []u8) bool {
-    const descriptors = (@as(usize, page[6]) << 8) | page[7];
-    const p = 8 + descriptors;
-    const page_len: usize = 20;
-    if (p + page_len > page.len) return false;
-    std.mem.copyForwards(u8, page[8..][0..page_len], page[p..][0..page_len]);
-    @memset(page[0..8], 0);
-    page[8] &= 0x3F; // PS is reserved in MODE SELECT
-    page[10] &= ~@as(u8, 0x04); // WCE
-    const len: u16 = 8 + page_len;
+/// know: a disk may take the command and keep caching. Only a page as
+/// SBC-3 has it, whole within the `got` bytes the disk sent, is sent back
+/// (`scsi_mode.selectList`, metal-vmm QUEUE 130).
+fn turnCacheOff(b: *virtio.Block, at: Address, scratch: u64, page: []u8, got: usize) bool {
+    const len = mode.selectList(page, got) orelse {
+        props.reachable(@src(), "scsi: a caching page not as SBC-3 has it is not sent back", null);
+        return false;
+    };
     const cdb = [10]u8{ 0x55, 0x10, 0, 0, 0, 0, 0, @truncate(len >> 8), @truncate(len), 0 };
     const o = commandSettled(b, at, &cdb, .to_disk, scratch, len);
     if (!good(o)) {
@@ -300,14 +300,17 @@ fn recheckCache(b: *virtio.Block, at: Address) void {
     b.cache_rechecks +%= 1;
     const mem = b.scsi.?;
     const scratch = @intFromPtr(&mem.scratch);
-    const on = writeCache(b, at, scratch, &mem.scratch);
+    var got: usize = 0;
+    const on = writeCache(b, at, scratch, &mem.scratch, &got);
     if (on != true) {
-        b.write_cache = on;
+        const now = mode.sensedNotOn(.{ .write_cache = b.write_cache, .turned_off = b.cache_turned_off }, on);
+        b.write_cache = now.write_cache;
+        b.cache_turned_off = now.turned_off;
         return;
     }
     props.reachable(@src(), "scsi: a reset turned the write cache back on, and it is turned off again", null);
-    const taken = turnCacheOff(b, at, scratch, &mem.scratch);
-    b.write_cache = writeCache(b, at, scratch, &mem.scratch);
+    const taken = turnCacheOff(b, at, scratch, &mem.scratch, got);
+    b.write_cache = writeCache(b, at, scratch, &mem.scratch, &got);
     if (!taken or b.write_cache != false) {
         b.cache_turned_off = false;
         // Still caching: what it holds waits for io.durable's flush.
@@ -391,10 +394,11 @@ pub fn bring(device: virtio.Device, mem: *virtio.BlockMemory) Error!virtio.Block
             }
             b.capacity = @as(u64, last) + 1;
             b.address = at;
-            b.write_cache = writeCache(&b, at, scratch, &mem.scsi.scratch);
+            var got: usize = 0;
+            b.write_cache = writeCache(&b, at, scratch, &mem.scsi.scratch, &got);
             if (b.write_cache == true) {
-                b.cache_turned_off = turnCacheOff(&b, at, scratch, &mem.scsi.scratch);
-                b.write_cache = writeCache(&b, at, scratch, &mem.scsi.scratch);
+                b.cache_turned_off = turnCacheOff(&b, at, scratch, &mem.scsi.scratch, got);
+                b.write_cache = writeCache(&b, at, scratch, &mem.scsi.scratch, &got);
                 if (b.write_cache != false) b.cache_turned_off = false;
             }
             // The power-on attention of bring-up is answered just above.
