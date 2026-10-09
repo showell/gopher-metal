@@ -1261,6 +1261,15 @@ test "FAT copies that tie: the next change to a differing sector writes the held
     // sector to every copy, so the first change in a sector that differs
     // makes the second copy the first's there, entries the change never
     // touched among them: the tie postpones the choice, then makes it.
+    //
+    // **IT DOES NOT CHOOSE BETWEEN THE FIXES** (metal-vmm QUEUE 127(g)). The
+    // difference here is a bad-cluster mark against a free entry, and a tie
+    // needs a difference that neutral: rot that freed a cluster a file holds
+    // breaks that copy's chain, and the other copy wins outright. Under
+    // P124(f)'s "merge toward allocated" the mark is the nonzero side, so
+    // both copies end as here and this stays green; under "keep each copy's
+    // own" the second copy stays free at 900 and this goes red. A fix is
+    // judged by its own red test, not by this one.
     for (formats) |shape| {
         const d = try Disk.make("damaged-weigh-tie-written", shape, false);
         defer d.deinit();
