@@ -40,7 +40,10 @@
 #    `VOLUME_SITE`): `VOLUME_SEEDS` seeds (100), each a whole schedule drawn
 #    over the wire, the peer, the disk and the volume. A seed that fails, as
 #    sweep.sh judges it (a page its faults do not excuse, an exit, a disk or
-#    volume left unsound, a broken property), fails this tier.
+#    volume left unsound, a broken property), fails this tier. It runs the
+#    -Dcoverage kernel: sweep.sh refuses one that reports no property, since
+#    "no property broken" would hold of it vacuously (2026-10-09), and
+#    through metal-vmm's coverage door its pages are the release kernel's.
 #
 # Needs: metal-vmm and zig-coverage-sdk as sibling checkouts (METAL_VMM,
 # COVERAGE_SDK), the judge's site volume (probe/run.sh gopher builds it), and
@@ -237,9 +240,9 @@ EOF
     lap "rough peer"
 
     echo "── seeded fault schedules with a volume attached: $VOLUME_SEEDS seeds (metal-vmm's sweep.sh)"
-    VOLUME_SITE="$SITE" SITE="$SITE" KERNEL="$HERE/$JUDGED" "$VMM/sweep.sh" 1 "$VOLUME_SEEDS" > "$OUT/volume-sweep" 2>&1
+    VOLUME_SITE="$SITE" SITE="$SITE" KERNEL="$COUNTED" "$VMM/sweep.sh" 1 "$VOLUME_SEEDS" > "$OUT/volume-sweep" 2>&1
     code=$?
-    grep -E '^[0-9]+ seeds:|FAULT_SEED=[0-9]+: FAIL|nothing can be judged' "$OUT/volume-sweep"
+    grep -iE '^[0-9]+ seeds:|FAULT_SEED=[0-9]+: FAIL|nothing can be judged' "$OUT/volume-sweep"
     [ $code = 0 ] || { echo "  the volume sweep failed (exit $code): $OUT/volume-sweep"; failed+=(volume-sweep); }
     lap "volume sweep"
     python3 "$SDK/tools/report.py" "$OUT/sdk.jsonl" --floor coverage/floor-metal.txt > "$OUT/report" 2>&1
