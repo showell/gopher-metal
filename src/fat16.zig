@@ -1,62 +1,35 @@
-//! FAT16, read side: mount a volume, walk a directory, read a file.
+//! FAT16 and FAT32 (Microsoft's FAT specification, fatgen103): mount a
+//! volume, read and write whole files, append, rename, remove, list and make
+//! directories with VFAT long names, and check the volume as fsck would.
+//! Not supported: FAT12, and renaming a directory.
 //!
-//! This is the filesystem `Io.Dir` will sit on, and it is FAT16 for two
-//! reasons. The application above it asks only for whole-file reads, whole-file
-//! writes and directory listings — eleven operations, none of them needing
-//! seeks or partial writes — which is exactly what FAT16 is good at. And there
-//! is already a FAT16 next door in `roc-apps/floor`, written in Roc and green
-//! against these same fixtures, which makes it an oracle rather than a second
-//! opinion.
+//! **NOTHING HERE ALLOCATES.** The caller supplies every buffer, because a
+//! buffer the device reads or writes must be identity-mapped physical memory.
 //!
-//! **NOTHING HERE ALLOCATES.** The caller supplies every buffer, because the
-//! buffers a sector lands in must be identity-mapped physical memory for the
-//! device to write into them. That constraint comes all the way up from
-//! virtio, and hiding it behind an allocator would only move the day it bites.
-//!
-//! **LONG NAMES AND SUBDIRECTORIES ARE SUPPORTED**, because the application's
-//! own storage layout needs both: it writes `auth/<id>/api-key`, and
-//! `_session_secret`, `upload-bytes` and `last-seen` are all names 8.3 refuses.
-//! A volume that cannot hold them cannot hold the data we already have.
-//!
-//! The long-name format is VFAT's: a run of entries with attribute 0x0F before
-//! the short one, in REVERSE order, each holding thirteen UCS-2 characters and
-//! a checksum of the short alias that follows them. The checksum is what ties
-//! the run to its entry, and it is the classic place to get this wrong:
-//!
-//!     sum = (((sum & 1) << 7) | ((sum & 0xfe) >> 1)) + short[i]
-//!
-//! over all eleven bytes, wrapping. `fsck.vfat` is what checks we got it right;
-//! `probe/run.sh` runs it over the volume this code writes.
-//!
-//! **WHAT A `Volume` HOLDS IN MEMORY, AND WHOSE COPY IT IS.** The disk is the
-//! source of every fact here. Everything a `Volume` holds is reconstructable:
-//! the next mount rebuilds it from the disk, and nothing promised lives only
-//! here. Each copy has a role, and a rule for when it disagrees with the disk:
+//! **WHAT A `Volume` HOLDS IN MEMORY.** The disk is the source of every fact
+//! here; nothing promised lives only in memory, and the next mount rebuilds
+//! all of it. Each copy has a role, and a rule for when it disagrees:
 //!
 //! - the geometry (`fat_start` .. `data_start`, `kind`, `root_cluster`,
 //!   `serial`): a cache of the boot sector, read once at `mount`. Nothing on
 //!   this machine writes the boot sector, so it cannot go stale.
-//! - `fat`, the held FAT: a cache of the FAT's first copy (or of the copy
-//!   `cacheFatChecked` weighed cleaner), read whole at mount. Every change is
-//!   made in it, written whole-sector to each copy on the disk, and kept only
-//!   if the first copy's write is answered. So once mounted it is what the
-//!   disk's copies are written FROM: in practice the source of each sector a
-//!   change touches (`fatSet`).
+//! - `fat`, the held FAT: a mirror of the FAT, read whole at mount from the
+//!   copy `cacheFatChecked` trusts. A change is made in it and written as the
+//!   whole sector to every copy (`fatSet`), so where the copies disagree with
+//!   it, the next change to that sector writes them over.
 //! - `free_clusters`: derived from the FAT. Counted at mount, then moved
-//!   entry by entry (`keepCount`); never recounted while the machine runs.
-//! - `alloc_hint`: a hint for allocation. Wrong costs a longer search, never
-//!   a wrong cluster (`allocChain`).
-//! - `fsinfo_unknown`: a cache of one fact about the disk, "FSInfo's hints say
-//!   unknown". False at every mount, so each mount writes them once.
-//! - `dirs`: a cache of directory sectors, exact or absent: a write that
-//!   succeeds updates what it holds, a write that fails drops it.
-//! - `scratch`, `dir_burst`, a `Lister`'s sector: buffers in motion. What
-//!   they hold means nothing past the operation that filled them.
+//!   entry by entry (`keepCount`); `derive()` recomputes it.
+//! - `alloc_hint`: a hint. Wrong costs a longer search or a different free
+//!   cluster, never a used one (`allocChain`).
+//! - `fsinfo_unknown`: a cache of "FSInfo's hints say unknown on the disk".
+//!   False at every mount, so each mount writes FSInfo once.
+//! - `dirs`: a cache of sectors, exact or absent: a write that succeeds
+//!   updates what it holds, a write that fails drops it.
+//! - `scratch`, `dir_burst`, a `Lister`'s sector: buffers in motion, meaning
+//!   nothing past the operation that filled them.
 //!
-//! FSInfo's own free count and next-free cluster, on the disk, are hints
-//! for other systems. This machine never reads them for its own use.
-//!
-//! What is still missing: FAT12, and renaming a directory.
+//! FSInfo's free count and next-free hint are for other systems; this
+//! machine never reads them for its own use.
 
 const std = @import("std");
 const virtio = @import("virtio.zig");
@@ -84,14 +57,13 @@ pub const Error = error{
     Full,
     DirectoryFull,
     /// FAT32 with mirroring off (BPB_ExtFlags bit 7): one FAT is live and the
-    /// rest stale, and this machine writes every copy (FAT32.md §3).
+    /// rest stale, and this machine writes every copy.
     NotMirrored,
     /// A FAT32 version this machine does not know (BPB_FSVer is not 0).
     FatVersion,
     /// A FAT32 root cluster outside the data region.
     BadRoot,
-    /// A volume that runs past sector 2^32: this machine's sector numbers are
-    /// 32 bits (FAT32.md §10).
+    /// A volume that runs past sector 2^32: sector numbers here are 32 bits.
     VolumeTooLarge,
     /// More clusters than FAT32's 28-bit cluster numbers can name.
     TooManyClusters,
@@ -99,34 +71,33 @@ pub const Error = error{
     IsDirectory,
 };
 
-/// **WHICH FAT A VOLUME IS**, decided as Microsoft's specification decides
-/// it: by its count of clusters, never by what the boot sector calls itself.
-/// Fewer than 4,085 is FAT12, which this machine does not take; fewer than
-/// 65,525 is FAT16; more is FAT32.
+/// **WHICH FAT A VOLUME IS**, decided as the specification decides it: by
+/// its count of clusters, never by what the boot sector calls itself.
+/// Fewer than 4,085 is FAT12 (refused); fewer than 65,525 is FAT16; more is
+/// FAT32.
 pub const Kind = enum { fat16, fat32 };
 
-/// A directory entry as it sits on disk.
 const dirent_size: u32 = 32;
 const attr_read_only: u8 = 0x01;
 const attr_hidden: u8 = 0x02;
 const attr_system: u8 = 0x04;
 const attr_volume_label: u8 = 0x08;
 const attr_directory: u8 = 0x10;
-/// A long-name fragment: read-only, hidden, system and volume label all at
-/// once, which no real entry is. Skipping these is what makes a volume with
-/// long names still readable through its 8.3 aliases.
+/// A long-name part: read-only, hidden, system and volume label at once,
+/// which no real entry is (ATTR_LONG_NAME).
 const attr_long_name: u8 = 0x0F;
 
-/// The first cluster number that means "no more". FAT16 reserves 0xFFF8 and up.
-/// **A CLUSTER NUMBER**, and a FAT entry's value: 32 bits, so that FAT32's
-/// 28-bit clusters fit (FAT32.md §1). FAT16's are the low 16.
+/// A cluster number, and a FAT entry's value: 32 bits, so that FAT32's
+/// 28-bit entries fit. FAT16's are the low 16.
 pub const Cluster = u32;
 
+/// The first end-of-chain mark: 0xFFF8 and up ends a FAT16 chain.
 const chain_end: Cluster = 0xFFF8;
-/// The FAT's mark for a cluster the disk cannot hold data in. It is in use,
-/// by nothing, and is not a leak.
+/// The bad-cluster mark. Such a cluster is in use by nothing, and is not a
+/// leak.
 const bad_cluster: Cluster = 0xFFF7;
-/// FAT32's: its entries are 28 bits, so its marks are too.
+/// FAT32's entries are 28 bits; the top four are reserved, and its marks
+/// are 28-bit too.
 const fat32_mask: Cluster = 0x0FFF_FFFF;
 const fat32_chain_end: Cluster = 0x0FFF_FFF8;
 const fat32_bad_cluster: Cluster = 0x0FFF_FFF7;
@@ -139,26 +110,19 @@ fn le32(b: *const [4]u8) u32 {
     return std.mem.readInt(u32, b, .little);
 }
 
-/// The longest name this filesystem will hold. VFAT allows 255. The
-/// application's longest is 96: `<sid>.reactions.jsonl` at a session id of
-/// 80, which it allows (MIGRATION.md). At 64 such a file could be written by
-/// Linux and then found here only under its 8.3 alias. A buffer per entry is
-/// a buffer on a machine with a bump allocator, so it is the application's
-/// longest and no more: 8 long-name parts.
+/// The longest name this filesystem holds (VFAT allows 255): the
+/// application's longest, `<sid>.reactions.jsonl` at an 80-character session
+/// id (MIGRATION.md). Every entry carries a buffer this long, so it is no
+/// longer than needed: 8 long-name parts.
 pub const max_name: usize = 96;
 
-/// **A FAT16 DIRECTORY ENTRY CARRIES A DATE, AND THIS MACHINE WRITES IT.**
+/// **A DIRECTORY ENTRY'S DATE**: two 16-bit fields, packed, the year counted
+/// from 1980 and the seconds in TWOS. A time written here reads back rounded
+/// DOWN to an even second, the resolution of every modification time above.
 ///
-/// It is the only timestamp the format has: two 16-bit fields, packed, with the
-/// year counted from 1980 and the seconds counted in TWOS. So a time written
-/// here reads back rounded DOWN to an even second, and that is the resolution
-/// of everything above — chat's "recent activity" sorts conversations by file
-/// modification time, and two messages in the same two seconds sort by name.
-///
-/// **UTC, and no time zone anywhere.** DOS dates are local time by convention
-/// and the Linux VFAT driver applies the mount's `tz` to them; nothing on this
-/// machine has a time zone, and the application renders Eastern from a Unix
-/// time. So these are UTC, and a Linux mount that wants to agree says `tz=UTC`.
+/// **UTC, and no time zone anywhere.** DOS dates are local time by
+/// convention, but nothing on this machine has a time zone, so these are
+/// UTC; a Linux mount that wants to agree says `tz=UTC`.
 ///
 /// Out of range is `none` rather than a wrong date: before 1980 there is no
 /// representation, and after 2107 the year field wraps.
@@ -166,11 +130,10 @@ pub const Dos = struct {
     date: u16,
     time: u16,
 
-    /// No date: what an entry written by something that had no clock carries,
-    /// and what `toUnix` reports as zero rather than as 1980.
+    /// No date: what an entry written without a clock carries, and what
+    /// `toUnix` reports as zero rather than as 1980.
     pub const none = Dos{ .date = 0, .time = 0 };
 
-    /// The first and last instants the format can hold.
     pub const first_unix: i64 = 315532800; // 1980-01-01T00:00:00Z
     pub const last_unix: i64 = 4354819199; // 2107-12-31T23:59:59Z
 
@@ -184,9 +147,7 @@ pub const Dos = struct {
         };
     }
 
-    /// Unix seconds, or 0 for an entry with no date. A date field of zero is
-    /// what "nobody wrote one" looks like on disk, and answering 1980 for it
-    /// would be a timestamp nobody meant.
+    /// Unix seconds, or 0 for an entry with no date (a date field of zero).
     pub fn toUnix(self: Dos) i64 {
         if (self.date == 0) return 0;
         const c = civil.Civil{
@@ -218,15 +179,12 @@ pub const Entry = struct {
     attr: u8,
     first_cluster: Cluster,
     size: u32,
-    /// When the file was last written, from the entry's own date fields; 0 when
-    /// nothing ever wrote one.
+    /// The entry's write time; 0 when it has none.
     mtime_unix: i64 = 0,
 
-    /// **WHERE THIS ENTRY SITS.** A file's length lives in its directory entry,
-    /// so anything that changes the length has to write that entry back — and
-    /// finding it again means re-walking the directory and re-matching the long
-    /// name. `list` knows the location at the moment it decodes, so it records
-    /// it here and appendTo can write one sector instead.
+    /// **WHERE THIS ENTRY SITS**, recorded by `Lister` as it decodes, so a
+    /// change of size or chain (`setEntry`, `rename`) writes this one sector
+    /// without walking the directory again.
     lba: u32 = 0,
     slot: u32 = 0,
 
@@ -235,7 +193,6 @@ pub const Entry = struct {
         return if (self.long_len > 0) self.long[0..self.long_len] else self.name[0..self.name_len];
     }
 
-    /// The 8.3 alias, always.
     pub fn alias(self: *const Entry) []const u8 {
         return self.name[0..self.name_len];
     }
@@ -279,10 +236,10 @@ pub const Problem = enum {
     too_deep,
 
     /// **DAMAGE, OR WHAT A STOP LEAVES.** A machine stopped part-way may
-    /// leave clusters leaked (a write's), a chain long (an append's), the
-    /// FAT's copies apart (`cacheFat` mends them at the next mount), or
-    /// FSInfo's count stale; and `too_deep` is the check's limit. The rest
-    /// is damage no stop of this driver leaves.
+    /// leave clusters leaked, a chain long (an append's), the FAT's copies
+    /// apart (the next mount mends them), or FSInfo's count stale; and
+    /// `too_deep` is the check's limit. The rest no stop of this driver
+    /// leaves.
     pub fn damage(p: Problem) bool {
         return switch (p) {
             .broken, .crossed, .short, .bad_dot => true,
@@ -294,7 +251,7 @@ pub const Problem = enum {
 pub const Finding = struct {
     problem: Problem,
     /// Where it was found, from the root ("/data/chat/plan.md"); empty for
-    /// the volume as a whole. It points into the checker, so a caller that
+    /// the volume as a whole. It points into the checker: a caller that
     /// keeps it copies it.
     path: []const u8,
     cluster: Cluster = 0,
@@ -315,9 +272,9 @@ pub const Health = struct {
     }
 };
 
-/// **DIRECTORY SECTORS, HELD** (`Volume.dirs`): direct-mapped, one sector a
-/// slot, a slot's key the sector's LBA plus one (0: empty). A sector put
-/// where another is held replaces it.
+/// **SECTORS, HELD** (`Volume.dirs`): direct-mapped, one sector a slot, a
+/// slot's key the sector's LBA plus one (0: empty). A sector put where
+/// another is held replaces it.
 pub const DirCache = struct {
     keys: []u32,
     data: []u8,
@@ -365,8 +322,8 @@ pub const DirCache = struct {
         return true;
     }
 
-    /// `n` sectors from `lba` were written from `from`: each one held is
-    /// what was written now.
+    /// `n` sectors from `lba` were written from `from`: each one held takes
+    /// what was written.
     fn wrote(c: *DirCache, lba: u32, n: u32, from: [*]const u8) void {
         var k: u32 = 0;
         while (k < n) : (k += 1) {
@@ -375,7 +332,7 @@ pub const DirCache = struct {
         }
     }
 
-    /// `n` sectors from `lba` are no longer known: a write to them failed.
+    /// A write to `n` sectors from `lba` failed: what they hold is unknown.
     fn drop(c: *DirCache, lba: u32, n: u32) void {
         var k: u32 = 0;
         while (k < n) : (k += 1) {
@@ -386,10 +343,8 @@ pub const DirCache = struct {
 };
 
 /// **WHAT A VOLUME'S FAT SAYS, WORKED OUT AFRESH** (`Volume.derive`): its
-/// free clusters, and the first of them. The volume keeps the first as
-/// `free_clusters` (derived: moved in step with the FAT) and holds the
-/// second only as a hint (`alloc_hint`, never above a free cluster); a
-/// coverage build holds both to this after every request.
+/// free clusters, and the first of them. `free_clusters` must equal the
+/// first; `alloc_hint`, a hint, must never be above the second.
 pub const Derived = struct {
     free: u32,
     /// None when the volume is full.
@@ -399,20 +354,17 @@ pub const Derived = struct {
 pub const Volume = struct {
     blk: *virtio.Block,
 
-    /// **WHERE THE DATES ON THIS VOLUME COME FROM.** The filesystem has no
-    /// clock of its own and must not invent one, so the host hands it the
-    /// machine's: io.zig points this at the wall clock once the RTC has been
-    /// read. It answers null until then — a probe kernel that never sets a
-    /// clock writes entries with no date rather than a plausible wrong one.
+    /// **WHERE THE DATES COME FROM**: the host's wall clock (io.zig sets it
+    /// once the RTC is read). Null, or answering null, writes entries with
+    /// no date rather than a plausible wrong one.
     clock: ?*const fn () ?i64 = null,
-    /// One sector of identity-mapped scratch, which the device writes into.
-    /// **IN MOTION, NOT A COPY**: one operation's sector at a time, never read
-    /// for what an earlier operation left in it.
+    /// One sector of identity-mapped scratch. **IN MOTION, NOT A COPY**: one
+    /// step's sector at a time, never read for what an earlier one left.
     scratch: *[sector_size]u8,
 
-    /// Where this volume starts on the disk. **Every sector number below is
-    /// relative to the volume**, and this is the only place the disk's own
-    /// numbering appears -- a GPT partition rarely starts at zero.
+    /// Where this volume starts on the disk. **Every other sector number is
+    /// relative to the volume**; this is the only place the disk's own
+    /// numbering appears.
     start_lba: u32,
 
     sectors_per_cluster: u32,
@@ -424,138 +376,89 @@ pub const Volume = struct {
     root_entries: u32,
     data_start: u32,
     kind: Kind = .fat16,
-    /// FAT32's root is a chain, from here. Cluster 0 still means "the root"
-    /// everywhere in this file's API, as a `..` entry spells it on both kinds;
-    /// `dirStart` turns it into this.
+    /// FAT32's root is a chain, from here (BPB_RootClus). Cluster 0 still
+    /// means "the root" throughout this file's API, as a `..` entry spells
+    /// it on both kinds; `dirStart` turns it into this.
     root_cluster: Cluster = 0,
-    /// FAT32's FSInfo sector, and the backup boot sector (its FSInfo copy is
-    /// the sector after it), relative to the volume.
+    /// FAT32's FSInfo sector (BPB_FSInfo) and backup boot sector
+    /// (BPB_BkBootSec, its FSInfo copy the sector after it).
     fsinfo_sector: u32 = 0,
     backup_boot: u32 = 0,
-    /// Whether this mount has marked FSInfo's free count and next-free hint
-    /// unknown yet: done on the first change to the FAT (FAT32.md §7).
-    /// **A CACHE OF A FACT ON THE DISK**, set only once both FSInfo writes have
-    /// landed, and never re-read: nothing else on this machine writes FSInfo.
-    /// Lost, it is false again at the next mount, which writes FSInfo once more.
+    /// **A CACHE OF A FACT ON THE DISK**: this mount has marked FSInfo's
+    /// hints unknown (`forgetFsInfo`). Set only once the writes have landed;
+    /// never re-read, since nothing else on this machine writes FSInfo.
     fsinfo_unknown: bool = false,
     /// The highest cluster number the data region holds.
     max_cluster: Cluster,
-    /// **HOW MANY CLUSTERS ARE FREE, KEPT** (QUEUE.md item 14): counted once
-    /// at mount, then moved by `fatSet`, the one place a FAT entry changes,
-    /// whenever an entry goes from free to used or back. So every path that
-    /// takes or gives back clusters keeps it, the failure paths included, and
-    /// `space` is a field read instead of a walk of the FAT per request.
+    /// **HOW MANY CLUSTERS ARE FREE: DERIVED, AND MOVED.** Derived from the
+    /// FAT at mount, then moved by `keepCount` as each entry goes from free
+    /// to used or back, the failure paths included, so `space` is a field
+    /// read. A count gone wrong stays wrong until the next mount;
+    /// `countFreeAgain` recounts, for tests and simulators.
     ///
-    /// **ONE COPY OF A VOLUME WRITES.** A `Volume` is a value, and its copies
-    /// share the held FAT (a slice) but not this count. So two copies that
-    /// both wrote would each count only their own writes. On this machine
-    /// only io.zig's copy writes once it has one (`mount`, `keepData`).
-    ///
-    /// **DERIVED, AND STORED.** Its source is the FAT; mount derives it, and
-    /// from then on it is moved, not re-derived: `countFreeAgain` recounts,
-    /// and only the tests and simulators call it. A count gone wrong stays
-    /// wrong until the next mount derives it again.
+    /// **ONE COPY OF A VOLUME WRITES.** Copies of a `Volume` share the held
+    /// FAT (a slice) but not this count, so two that both wrote would each
+    /// count only their own writes. Only io.zig's copy writes.
     free_clusters: u32 = 0,
-    /// **WHERE THE NEXT ALLOCATION STARTS LOOKING** (FAT32.md §8). Every
-    /// cluster below it is in use: it starts at 2, moves only past clusters
-    /// an allocation took or found taken, and moves back to any cluster
-    /// `freeChain` gives back. So the first free cluster from here is the
-    /// first free cluster on the volume, the one a search from 2 would find,
-    /// and allocation chooses exactly what it chose before, without
-    /// re-reading every entry below on each small file. On FAT32's millions
-    /// of clusters that scan is the cost.
-    ///
-    /// **A HINT.** Allocation reads the FAT at every candidate, so a cursor
-    /// past a free cluster costs only the choice: a cluster further on, or a
-    /// wrap. 2 at every mount.
+    /// **WHERE THE NEXT ALLOCATION STARTS LOOKING** (FAT32.md §8): a hint,
+    /// 2 at every mount. Every cluster below it is in use: it moves up only
+    /// past clusters an allocation took or found taken, and down to any
+    /// cluster `freeChain` gives back. So allocation chooses the cluster a
+    /// search from 2 would, without rescanning FAT32's millions of entries.
+    /// Allocation reads the FAT at every candidate, so a hint past a free
+    /// cluster costs only the choice: a cluster further on, or a wrap.
     alloc_hint: Cluster = 2,
-    /// **CLEANUPS AFTER A COMMIT THAT FAILED** (metal-vmm QUEUE 131,
-    /// kernel-facts #3 and #6): a chain given back, or a long name's parts
-    /// cleared, once the one write that decides the operation was asked.
-    /// The operation is done; what was not cleaned is a leak the boot's
-    /// check reports and the box's #4 reclaims. Counted here, said by a
-    /// property, never swallowed and never the operation's error.
+    /// **CLEANUPS THAT FAILED**: clusters given back on an error, a chain or
+    /// long-name parts cleared after a commit, or a failed write's entry that
+    /// could not be read exactly. Each leaves a leak the boot's check
+    /// reports; counted here and said by a property, never the operation's
+    /// error.
     cleanups_failed: u64 = 0,
-    /// **A RESERVE FOR SMALL WRITES** (metal-vmm QUEUE 132, Steve 2026-10-09:
-    /// "a little breathing room for emergencies"): clusters a file larger
-    /// than `small_bytes` may not take. 64 MiB of clusters, or a sixteenth of
-    /// a volume too small for that, set at mount. A bulk write (an upload, a
-    /// long append) is refused `Full` first, while small records and a
-    /// directory's growth still go, and a remove always does. The kernel
-    /// decides by size alone, so the application needs no policy.
+    /// **A RESERVE FOR SMALL WRITES**: clusters a file larger than
+    /// `small_bytes` may not take, set at mount to the lesser of
+    /// `reserve_bytes` and a sixteenth of the volume. A bulk write is
+    /// refused `Full` first, while small files and a directory's growth
+    /// still go, and a remove always does.
     ///
-    /// **JUDGED BY THE FILE, IN BYTES** (metal-vmm QUEUE 138(e)): "small" is
-    /// the same 64 KiB whatever the cluster size, and an append is judged by
-    /// the file it makes, not the bytes it adds, so a log grown a cluster at
-    /// a time spends the reserve no more than one write of it would. An
-    /// overwrite is judged by what it leaves free once its old chain is
-    /// gone, so one that frees as much as it takes goes, near the reserve or
-    /// in it (if the clusters for its new chain are there to take).
+    /// **JUDGED BY THE FILE, IN BYTES**: an append is judged by the file it
+    /// makes, not the bytes it adds, so a log grown a cluster at a time
+    /// spends the reserve no more than one write of it would. An overwrite
+    /// is judged by what it leaves free once its old chain is gone, so one
+    /// that frees as much as it takes always goes.
     reserve_clusters: u32 = 0,
     /// Writes of a FAT copy past the first that failed (`copyApart`).
     fat_copies_failed: u64 = 0,
-    /// **WHICH VOLUME THIS IS**: the serial number mkfs chose at random when it
-    /// formatted it (the extended boot record's volume ID, offset 39), or null
-    /// on a boot sector without one. Linux's `blkid` shows it as the UUID,
-    /// `92DE-8831`, high half first.
+    /// The volume serial number (BS_VolID), or null on a boot sector without
+    /// one. `blkid` shows it as the UUID, high half first.
     serial: ?u32 = null,
 
-    /// **THE FAT, HELD IN MEMORY**, once the host has given it somewhere to
-    /// live. Without it every FAT lookup is a device read — and a soak of
-    /// five thousand chat requests showed what that costs: the free-cluster
-    /// search starts at cluster 2 every time, so every small file replaced
-    /// walked past every cluster the growing transcript held, one block read
-    /// apiece, and the machine's own time to answer rose from 10 ms to over
-    /// 150 ms while nothing about the request changed. Held here, a lookup is a
-    /// memory read and a set is a memory write plus one sector per FAT copy.
-    ///
-    /// Null is still a working volume: the probes that judge the uncached path
-    /// leave it that way.
-    ///
-    /// **A CACHE OF THE FAT THAT THE DISK'S COPIES ARE WRITTEN FROM.** Read at
-    /// mount from the copy `cacheFatChecked` trusts, it is never read from the
-    /// disk again while the machine runs: a lookup answers from it alone. A
-    /// change is made here first and written as the whole held sector to every
-    /// copy (`fatSet`), so a sector of it that is wrong is written over the
-    /// disk's at the next change to that sector. Lost, the next mount reads
-    /// and weighs the copies again.
+    /// **THE FAT, HELD IN MEMORY** once the host gives it room: a mirror of
+    /// the FAT, read at mount from the copy `cacheFatChecked` trusts and
+    /// never read from the disk again, so a lookup is a memory read. A
+    /// change is made here and written as the whole sector to every copy
+    /// (`fatSet`). Without it every lookup is a device read, and allocation
+    /// from 2 costs a read per cluster in use; null is still a working
+    /// volume, and the probes of that path leave it null.
     fat: ?[]u8 = null,
 
-    /// **WHERE `find` READS A DIRECTORY, MANY SECTORS AT A REQUEST**, once the
-    /// host has given it memory: a whole multiple of the sector, and
-    /// identity-mapped, since the device writes it. Without it a lookup reads
-    /// a directory a sector per request, and a picture six directories deep on
-    /// a droplet's volume (32 KB clusters, network storage) took about 290
-    /// requests to find before its 64 of data were read (QUEUE.md item 90).
-    /// Only `find` uses it: nothing writes while a lookup reads, so a burst it
-    /// has read cannot go stale under it. A listing the application holds
-    /// open keeps its sector of its own (`Lister`).
+    /// **WHERE `find` READS A DIRECTORY, MANY SECTORS A REQUEST**, once the
+    /// host gives it identity-mapped room (whole sectors). Only `find` uses
+    /// it, and nothing writes while a lookup reads, so a burst cannot go
+    /// stale under it.
     dir_burst: ?[]u8 = null,
 
-    /// **DIRECTORY SECTORS HELD IN MEMORY** (`cacheDirs`), once the host has
-    /// given it memory. A chat message touches five or six files, each
-    /// found folder by folder; with only the burst, a send cost about 400
-    /// sector reads, and a droplet's volume answered each in 3 to 5 ms
-    /// (2026-10-07: sends of a second, Recent of three). Held here, a lookup
-    /// that has been made before reads memory.
-    ///
-    /// **WHAT IT HOLDS IS ALWAYS THE DISK'S**: a directory read puts its
-    /// sectors here, every sector read looks here first, and every write
-    /// that succeeds updates the copy of each sector it wrote, so a sector
-    /// held is the sector on the disk whoever wrote it (a directory's
-    /// cluster freed and given to a file included). A write that fails drops
-    /// its sectors, since what the disk holds then is not known.
-    ///
-    /// **A CACHE: EXACT, OR ABSENT.** Never written back; a slot replaced or
-    /// dropped is read from the disk again when next asked for. Holding it
-    /// exact needs every write to go through `writeSector`/`writeSectors`,
-    /// and every one in this file does. `readSectors` neither looks here nor
-    /// puts here (a `Lister` does both around it), which is safe because what
-    /// is held is exact.
+    /// **SECTORS HELD IN MEMORY** (`cacheDirs`), once the host gives it room,
+    /// so a lookup made before reads memory. A cache, **EXACT OR ABSENT**:
+    /// a listing puts the sectors it reads, `readSector` looks here first,
+    /// every write that succeeds updates each sector it held, and a write
+    /// that fails drops them, since what the disk holds is then unknown.
+    /// Never written back. Exact needs every write to go through
+    /// `writeSector`/`writeSectors`, and every one does. `readSectors`
+    /// neither looks nor puts, which is safe because what is held is exact.
     dirs: ?DirCache = null,
 
-    /// Holds directory sectors in `keys.len` slots of `data` from now on
-    /// (`dirs`). `data` is `keys.len` sectors.
+    /// Holds sectors in `keys.len` slots of `data` (`dirs`); `data` is
+    /// `keys.len` sectors.
     pub fn cacheDirs(self: *Volume, keys: []u32, data: []u8) void {
         std.debug.assert(data.len == keys.len * sector_size and keys.len > 0);
         @memset(keys, 0);
@@ -584,18 +487,17 @@ pub const Volume = struct {
         /// The copies differed and checked alike: the first is held, and
         /// neither is written over, since nothing says which is right.
         ///
-        /// Here and when `unweighed`, **NEITHER IS WRITTEN AT MOUNT, NOT FOR
-        /// THE REST OF THE BOOT**: the first change to an entry in a sector
-        /// that differs writes the held sector, the first copy's, whole over
-        /// the second (`fatSet`).
+        /// Here and when `unweighed`, **NEITHER IS WRITTEN AT MOUNT**: the
+        /// first change to an entry in a differing sector writes the held
+        /// sector, the first copy's, whole over the second (`fatSet`).
         tied: bool = false,
         /// The disk refused a repair's write: the mount goes on with the FAT
         /// held, and the copies are as far apart as the writes left them.
         repair_failed: bool = false,
     };
 
-    /// The most differing sectors that are weighed copy against copy; past
-    /// it the first copy is the FAT, as before the choice was made.
+    /// The most differing sectors weighed copy against copy; past it the
+    /// first copy is the FAT, and the others are written from it.
     pub const max_weighed_sectors = 64;
 
     /// `cacheFatChecked` without a check: the first copy is the FAT.
@@ -603,29 +505,22 @@ pub const Volume = struct {
         return (try self.cacheFatChecked(buf, null)).repaired;
     }
 
-    /// Reads the FAT into `buf` and uses it from then on, and brings its
+    /// Reads the FAT into `buf` (identity-mapped: the device writes FAT
+    /// sectors straight out of it), holds it from then on, and brings the
     /// copies into line where they differ.
     ///
-    /// **COPIES APART ARE BROUGHT INTO LINE, NOT REFUSED.** Every change here
-    /// writes the first copy, then the others (`fatSet`), so a machine
-    /// stopped between the two leaves them apart by a sector. Refusing such a
-    /// volume stopped the boot, and the machine could never boot again
-    /// (QUEUE.md item 80). From here a change is written to each copy as the
-    /// whole held sector, so a copy left apart would be overwritten
-    /// piecemeal anyway, saying nothing; the count is the caller's to report.
+    /// **COPIES APART ARE BROUGHT INTO LINE, NOT REFUSED.** A machine stopped
+    /// between a change's writes to the first copy and the second leaves
+    /// them a sector apart, and refusing such a volume would stop every boot.
     ///
-    /// `buf` must be identity-mapped, because the device writes FAT sectors
-    /// straight out of it.
-    ///
-    /// **WHICH COPY IS THE FAT** (B26, Steve 2026-10-08). Where the copies
-    /// differ, and `seen` is given (room for `check`), the volume is checked
-    /// with each copy's sectors, and the copy with fewer problems, then fewer
-    /// leaked clusters, is the FAT; the other is written from it. A tie is
-    /// the first copy. A machine stopped between the copies' writes leaves
-    /// them apart, and the check keeps whichever agrees with the directories;
-    /// a sector of the first copy that reads wrong (silent rot) is no longer
-    /// written over the good one. More than `max_weighed_sectors` differing
-    /// is the first copy, unweighed.
+    /// **WHICH COPY IS THE FAT.** Where the copies differ and `seen` is given
+    /// (room for `check`), the volume is checked with each copy's sectors;
+    /// the copy with fewer problems, then fewer leaked clusters, is the FAT,
+    /// and the other is written from it. So a stop keeps whichever copy
+    /// agrees with the directories, and a first copy that reads wrong is not
+    /// written over a good second. A tie, or a check that cannot run, holds
+    /// the first and writes neither. Without `seen`, or with more than
+    /// `max_weighed_sectors` differing, the first is the FAT.
     pub fn cacheFatChecked(self: *Volume, buf: []u8, seen: ?[]u8) Error!Mirrors {
         if (buf.len < self.fatBytes()) {
             props.reachable(@src(), "fat: a FAT cache buffer too small for the FAT is refused", null);
@@ -633,8 +528,7 @@ pub const Volume = struct {
         }
         const fat = buf[0..self.fatBytes()];
         try self.readSectors(self.fat_start, self.sectors_per_fat, fat.ptr);
-        // The other copies are compared in runs, not a sector at a time: a
-        // FAT32 FAT of 12.5 MiB is 25,600 sectors (FAT32.md §9).
+        // Compared in runs: a FAT32 FAT can be tens of thousands of sectors.
         var run: [run_sectors * sector_size]u8 align(16) = undefined;
         var differ: [max_weighed_sectors]u32 = undefined;
         var n_differ: usize = 0;
@@ -671,12 +565,10 @@ pub const Volume = struct {
         var second: [max_weighed_sectors][sector_size]u8 = undefined;
         for (differ[0..n_differ], 0..) |at, i| try self.readSector(self.fat_start + self.sectors_per_fat + at, &second[i]);
         if (seen) |room| {
-            // **A WEIGHING THAT CANNOT RUN LEAVES THE CHOICE UNMADE** (CC,
-            // metal-vmm QUEUE 103): the check reads every directory, and one
-            // that fails to read would fail the mount, where copies apart
-            // used to mount. The first copy is held, and neither is written
-            // over, so the second, perhaps the good one, is there for a boot
-            // that can weigh.
+            // **A WEIGHING THAT CANNOT RUN LEAVES THE CHOICE UNMADE**: a
+            // directory that fails to read must not fail the mount. The
+            // first copy is held and neither is written, so the second,
+            // perhaps the good one, is there for a boot that can weigh.
             const first_health = self.check(room, {}, ignoreFinding) catch {
                 unweighed();
                 return .{ .unweighed = true };
@@ -699,8 +591,8 @@ pub const Volume = struct {
             if (better) {
                 props.reachable(@src(), "fat: the second FAT copy checks cleaner than the first, and is the FAT", null);
                 m.trusted = 1;
-                // The kept free count was the first copy's (mount counts it):
-                // it moves with every entry the second copy changed.
+                // Mount counted the first copy's free clusters: move the
+                // count by every entry the second differs in.
                 const per = self.entriesPerSector();
                 for (differ[0..n_differ], 0..) |at, i| {
                     var e: u32 = 0;
@@ -715,10 +607,8 @@ pub const Volume = struct {
                 }
             } else {
                 for (differ[0..n_differ], 0..) |at, i| fat[at * sector_size ..][0..sector_size].* = first[i];
-                // **A TIE WRITES NEITHER** (the night of 2026-10-08, seed
-                // 16341): a first copy that read wrong but checked as well
-                // as the second was written over the good one, and the disk
-                // left differing where it had not.
+                // **A TIE WRITES NEITHER**: a first copy that reads wrong can
+                // check as well as the good second.
                 if (m.health[0].problems == m.health[1].problems and m.health[0].leaked == m.health[1].leaked) {
                     props.reachable(@src(), "fat: FAT copies apart check alike, and neither is written over", null);
                     m.tied = true;
@@ -726,11 +616,9 @@ pub const Volume = struct {
                 }
             }
         }
-        // The copy not trusted is written from the held FAT, sector by sector.
-        // **A REPAIR THE DISK REFUSES DOES NOT STOP THE MOUNT** (the night of
-        // 2026-10-08, seed 18771: one refused write, and the boot stopped):
-        // the FAT is held either way, and later changes write each sector
-        // they touch to every copy.
+        // The copy not trusted is written from the held FAT. **A REPAIR THE
+        // DISK REFUSES DOES NOT STOP THE MOUNT**: the FAT is held either way,
+        // and later changes write each sector they touch to every copy.
         const into = if (m.trusted == 0) self.fat_start + self.sectors_per_fat else self.fat_start;
         for (differ[0..n_differ]) |at| {
             self.writeSector(into + at, fat[at * sector_size ..][0..sector_size]) catch {
@@ -778,11 +666,11 @@ pub const Volume = struct {
         props.reachable(@src(), "fat: FAT copies apart cannot be weighed (the check failed), and neither is written over", null);
     }
 
-    /// Reads the boot sector and works out where everything is.
+    /// Reads the boot sector (the BPB) and works out where everything is.
     ///
-    /// **A BOOT SECTOR IS NOT TRUSTED.** Every field it names is checked before
-    /// it is used to compute an offset, because a sector of zeros or of someone
-    /// else's filesystem would otherwise send reads anywhere.
+    /// **A BOOT SECTOR IS NOT TRUSTED.** Every field is checked before it
+    /// computes an offset: a sector of zeros or of another filesystem would
+    /// otherwise send reads anywhere.
     pub fn mount(blk: *virtio.Block, scratch: *[sector_size]u8, start_lba: u32) Error!Volume {
         if (blk.read(start_lba, @intFromPtr(scratch)) != virtio.blk_s_ok) {
             props.reachable(@src(), "fat: a mount cannot read the boot sector", null);
@@ -842,8 +730,6 @@ pub const Volume = struct {
             return Error.BadBootSector;
         }
 
-        // The kind is how many clusters the data region holds, not anything
-        // the boot sector says about itself.
         const clusters = (total - data_start) / sectors_per_cluster;
         if (clusters < 4085) {
             props.reachable(@src(), "fat: a mount refuses a volume too small for FAT16", null);
@@ -851,10 +737,8 @@ pub const Volume = struct {
         }
         const kind: Kind = if (clusters < 65525) .fat16 else .fat32;
         // **FAT32'S CLUSTER NUMBERS ARE 28 BITS**, and from 0x0FFFFFF7 up they
-        // are marks (a bad cluster, the end of a chain). A volume with more
-        // clusters than numbers below the marks would have chains that end
-        // where they should go on. Refused, rather than read as far as the
-        // disk lets it (QUEUE.md item 69).
+        // are marks: a volume with more clusters than numbers below the marks
+        // would have chains that end where they should go on.
         if (kind == .fat32 and clusters > 0x0FFF_FFF5) {
             props.reachable(@src(), "fat: a mount refuses a FAT32 volume with more clusters than its numbers", null);
             return Error.TooManyClusters;
@@ -866,7 +750,8 @@ pub const Volume = struct {
                 return Error.BadBootSector;
             },
             .fat32 => {
-                // FAT32's own fields, checked like every other (FAT32.md §3).
+                // BPB_RootEntCnt and BPB_FATSz16 are 0; BPB_ExtFlags,
+                // BPB_FSVer and BPB_RootClus are checked like every other.
                 if (root_entries != 0 or fat16_sectors != 0) {
                     props.reachable(@src(), "fat: a mount refuses FAT32 with FAT16's fields set", null);
                     return Error.BadBootSector;
@@ -911,24 +796,23 @@ pub const Volume = struct {
             .root_cluster = root_cluster,
             .fsinfo_sector = if (kind == .fat32) le16(b[48..50]) else 0,
             .backup_boot = if (kind == .fat32) le16(b[50..52]) else 0,
-            // 0x29 says the extended boot record, and with it the serial, is
-            // there: at 38 on FAT16, at 66 on FAT32.
+            // BS_BootSig 0x29 says BS_VolID is there: at 38 on FAT16, at 66
+            // on FAT32.
             .serial = switch (kind) {
                 .fat16 => if (b[38] == 0x29) le32(b[39..43]) else null,
                 .fat32 => if (b[66] == 0x29) le32(b[67..71]) else null,
             },
         };
-        // The count is the FAT's; the hint starts at 2, which every hint
-        // satisfies, as it always has.
+        // Derived from the first copy on the disk (no FAT is held yet); the
+        // hint starts at 2, below every free cluster.
         vol.free_clusters = (try vol.derive()).free;
         vol.reserve_clusters = @min(reserve_bytes / (vol.sectors_per_cluster * sector_size), (vol.max_cluster - 1) / 16);
         return vol;
     }
 
     /// **WHAT THE FAT SAYS, AFRESH**: its free clusters, and the first of
-    /// them. From the held
-    /// FAT when there is one, else from the first copy on the disk, a run
-    /// of sectors at a time: `sectors_per_fat` reads, not one per cluster.
+    /// them. From the held FAT when there is one, else from the first copy
+    /// on the disk, a run of sectors at a time.
     pub fn derive(self: *Volume) Error!Derived {
         return self.deriveFrom(if (self.fat != null) .held else .disk);
     }
@@ -963,11 +847,10 @@ pub const Volume = struct {
         return .{ .free = free, .first_free = first };
     }
 
-    /// How many sectors a FAT is read in at a time, where it is read whole:
+    /// How many sectors a FAT is read in at a time where it is read whole:
     /// a buffer of this many on the stack.
     const run_sectors = 64;
 
-    /// Bytes a FAT entry takes: 2 on FAT16, 4 on FAT32.
     fn entryBytes(self: *const Volume) u32 {
         return if (self.kind == .fat32) 4 else 2;
     }
@@ -976,8 +859,8 @@ pub const Volume = struct {
         return sector_size / self.entryBytes();
     }
 
-    /// The `i`th FAT entry in a sector of the FAT: its value, which on FAT32
-    /// is the low 28 bits (the top four are reserved).
+    /// The `i`th entry in a FAT sector; on FAT32 the low 28 bits (the top
+    /// four are reserved).
     fn entryIn(self: *const Volume, sector: []const u8, i: u32) Cluster {
         return switch (self.kind) {
             .fat16 => le16(sector[i * 2 ..][0..2]),
@@ -985,17 +868,16 @@ pub const Volume = struct {
         };
     }
 
-    /// The first value that ends a chain, on this kind.
+    /// The first end-of-chain value, on this kind.
     fn chainEndValue(self: *const Volume) Cluster {
         return if (self.kind == .fat32) fat32_chain_end else chain_end;
     }
 
-    /// What a chain's last entry is written as.
+    /// What a chain's last entry is written as (EOC).
     fn endMark(self: *const Volume) Cluster {
         return if (self.kind == .fat32) 0x0FFF_FFFF else 0xFFFF;
     }
 
-    /// Whether an entry is a chain's end, any of the marks FAT reserves.
     fn isEnd(self: *const Volume, v: Cluster) bool {
         return v >= (if (self.kind == .fat32) fat32_chain_end else chain_end);
     }
@@ -1004,15 +886,14 @@ pub const Volume = struct {
         return if (self.kind == .fat32) fat32_bad_cluster else bad_cluster;
     }
 
-    /// The cluster a directory starts at: on FAT32, cluster 0 (the root, as
-    /// this file's API and a `..` entry spell it) is `root_cluster`.
+    /// The cluster a directory starts at: on FAT32, cluster 0 (the root) is
+    /// `root_cluster`.
     fn dirStart(self: *const Volume, dir_cluster: Cluster) Cluster {
         return if (dir_cluster == 0 and self.kind == .fat32) self.root_cluster else dir_cluster;
     }
 
-    /// An entry decoded, with FAT32's high cluster half (bytes 20..22). On
-    /// FAT16 those bytes belonged to OS/2's extended attributes, and are not a
-    /// cluster.
+    /// An entry decoded, with FAT32's DIR_FstClusHI (bytes 20..22). On FAT16
+    /// those bytes are not a cluster, and are ignored.
     fn entryFrom(self: *const Volume, e: []const u8) Entry {
         var entry = decode(e);
         if (self.kind == .fat32) {
@@ -1033,9 +914,8 @@ pub const Volume = struct {
         }
     }
 
-    /// `count` whole sectors straight into `into`, in as few requests as the
-    /// driver allows. `into` must be identity-mapped, which on this machine
-    /// everything is: the device writes it directly.
+    /// `count` whole sectors straight into `into` (identity-mapped), in as
+    /// few requests as the driver allows. Bypasses `dirs`.
     fn readSectors(self: *Volume, lba: u32, count: u32, into: [*]u8) Error!void {
         var done: u32 = 0;
         while (done < count) {
@@ -1049,19 +929,16 @@ pub const Volume = struct {
         }
     }
 
-    /// The sector a cluster starts at. Cluster numbering starts at 2, which is
-    /// the oldest off-by-two in computing.
+    /// The sector a cluster starts at; the data region's first cluster is 2.
     fn clusterSector(self: *Volume, cluster: Cluster) u32 {
         return self.data_start + (@as(u32, cluster) - 2) * self.sectors_per_cluster;
     }
 
     /// The next cluster in a chain, or null at its end.
     ///
-    /// **A LINK PAST THE LAST CLUSTER IS A BROKEN CHAIN**, not a cluster: the
-    /// FAT has no entry for it (a held FAT would be indexed past its end) and
-    /// `clusterSector` would put it past the volume, where a write lands on
-    /// whatever the disk holds next. That includes 0xFFF7, the bad-cluster
-    /// mark, which nothing should be chained through.
+    /// **A LINK OUTSIDE THE DATA REGION IS A BROKEN CHAIN** (BadChain): 0
+    /// (free), 1, the bad-cluster mark, or past the last cluster, where the
+    /// FAT has no entry and `clusterSector` points past the volume.
     fn nextCluster(self: *Volume, cluster: Cluster) Error!?Cluster {
         const v = try self.fatGet(cluster);
         if (v >= self.chainEndValue()) return null;
@@ -1072,23 +949,18 @@ pub const Volume = struct {
         return v;
     }
 
-    /// A cluster the data region holds: 2 to `max_cluster`.
     fn inData(self: *const Volume, cluster: Cluster) bool {
         return cluster >= 2 and cluster <= self.max_cluster;
     }
 
-    /// **A CHAIN THAT COMES BACK TO A CLUSTER IT PASSED GOES ROUND FOR EVER**:
-    /// a FAT damaged into a loop would hang every walk along it. A walk hands
+    /// **A CHAIN THAT LOOPS WOULD HANG EVERY WALK ALONG IT.** A walk hands
     /// each cluster it reaches to `pass`, which answers BadChain once the
-    /// chain has repeated one.
-    ///
-    /// It is Brent's cycle finding, in four words of state: remember one
-    /// cluster, and remember a later one each time the steps since reach the
-    /// next power of two. A loop is found within about two laps of it, so a
-    /// looped directory hands out each name at most a few times before its
-    /// listing fails, not once for every cluster on the volume.
+    /// chain has repeated one: Brent's cycle finding, remembering one cluster
+    /// and a later one each time the steps since reach the next power of
+    /// two. A loop is found within about two laps, so a looped directory
+    /// hands out each name a few times at most before its listing fails.
     const Loop = struct {
-        /// The cluster remembered. Zero is never in a chain.
+        /// Zero is never in a chain.
         seen: Cluster = 0,
         power: u32 = 1,
         steps: u32 = 0,
@@ -1107,28 +979,23 @@ pub const Volume = struct {
         }
     };
 
-    /// Where a directory's next sector is. The root is a fixed run outside the
-    /// data region; everything else is a cluster chain. Keeping the difference
-    /// in one place is what lets `list`, `slotFor` and `grow` all work on
-    /// either.
+    /// Where a directory's next sector is: FAT16's root is a fixed run before
+    /// the data region, every other directory a chain. `Lister`, `findRun`
+    /// and `unlinkEntry` walk either through this.
     const Walk = struct {
         vol: *Volume,
         lba: u32,
         where: union(enum) {
-            /// FAT16's root: a fixed run of sectors before the data region,
-            /// with no chain and nothing to loop.
             fixed_root: struct { left: u32 },
             /// Any other directory, FAT32's root among them.
             chain: struct {
                 cluster: Cluster,
                 in_cluster: u32 = 0,
-                /// So that a looped chain ends the walk.
                 loop: Loop,
             },
         },
 
         fn start(vol: *Volume, dir_cluster: Cluster) Error!Walk {
-            // FAT32's root is a chain like any other directory's.
             const first = vol.dirStart(dir_cluster);
             if (first == 0) return .{ .vol = vol, .lba = vol.root_start, .where = .{ .fixed_root = .{ .left = vol.root_sectors } } };
             if (!vol.inData(first)) {
@@ -1177,26 +1044,22 @@ pub const Volume = struct {
         }
     };
 
-    /// **A DIRECTORY, ONE ENTRY AT A TIME**, from a sector of its own: what
-    /// io.zig's directory iterator hands the application. It used to be
-    /// `list` into a fixed array of 256 entries, and a directory past that
-    /// stopped the machine. The application makes such folders: a player may
-    /// keep 500 game sessions (angry-gopher's game_limits.zig), and nothing
-    /// bounds how many players there are. A cursor has no ceiling, and its
-    /// memory is one sector and one long name, however long the directory.
+    /// **A DIRECTORY, ONE ENTRY AT A TIME**: what io.zig's directory iterator
+    /// hands the application. No ceiling on the directory's length; its
+    /// memory is one sector and one long name.
     ///
     /// Its sector is its own, not `scratch`, so whatever the volume does
-    /// between two `next` calls cannot change what it is reading. What the
-    /// directory itself holds is read as it is reached: an entry written
-    /// meanwhile, past where the cursor is, is seen.
+    /// between two `next` calls cannot change what it is reading. Sectors
+    /// are read as they are reached: an entry written meanwhile, past the
+    /// cursor, is seen.
     pub const Lister = struct {
         walk: Walk,
         sector: [sector_size]u8 = undefined,
         at: usize = 0,
         loaded: bool = false,
         done: bool = false,
-        // A long name arrives before its entry, in reverse order, so it is
-        // collected here and handed over with the short entry that closes it.
+        // A long name arrives before its entry, last part first: collected
+        // here, handed over with the short entry that closes it.
         long: [max_name]u8 = undefined,
         long_len: usize = 0,
         long_sum: u8 = 0,
@@ -1208,9 +1071,8 @@ pub const Volume = struct {
         burst_lba: u32 = 0,
         burst_n: u32 = 0,
 
-        /// Reads the walk's sector, unless the burst already holds it; the
-        /// volume's directory cache answers what it holds, and keeps what is
-        /// read (`Volume.dirs`).
+        /// Reads the walk's sector, unless the burst already holds it; `dirs`
+        /// answers what it holds, and keeps what is read.
         fn load(self: *Lister) Error!void {
             const vol = self.walk.vol;
             const lba = self.walk.lba;
@@ -1271,11 +1133,9 @@ pub const Volume = struct {
                     var entry = self.walk.vol.entryFrom(e);
                     entry.lba = self.walk.lba;
                     entry.slot = @intCast(at);
-                    // **THE CHECKSUM IS WHAT TIES A LONG NAME TO ITS ENTRY.** A
-                    // run whose checksum does not match the short name it
-                    // precedes belongs to a file that was deleted and partly
-                    // overwritten, and using it would put the wrong name on the
-                    // wrong bytes.
+                    // **THE CHECKSUM TIES A LONG NAME TO ITS ENTRY.** A run
+                    // whose checksum does not match is an orphan, and using
+                    // it would put the wrong name on the wrong bytes.
                     if (self.long_ok and self.long_len > 0 and self.long_sum == shortChecksum(e[0..11].*)) {
                         entry.long_len = @intCast(@min(self.long_len, entry.long.len));
                         @memcpy(entry.long[0..entry.long_len], self.long[0..entry.long_len]);
@@ -1294,9 +1154,7 @@ pub const Volume = struct {
         }
     };
 
-    /// A cursor over a directory's entries. Cluster 0 means the root
-    /// directory, which on FAT16 is a fixed run of sectors outside the data
-    /// region rather than a chain.
+    /// A cursor over a directory's entries; cluster 0 is the root.
     pub fn lister(self: *Volume, dir_cluster: Cluster) Error!Lister {
         return .{ .walk = try Walk.start(self, dir_cluster) };
     }
@@ -1313,9 +1171,8 @@ pub const Volume = struct {
         while (try l.next()) |entry| each(context, entry);
     }
 
-    /// The entry named `name` in a directory, or null. Case-insensitive, as
-    /// 8.3 names are. **IT STOPS AT THE NAME**: the rest of the directory is
-    /// not read, and is read in bursts up to that point (`dir_burst`).
+    /// The entry named `name` in a directory, or null; case-insensitive, as
+    /// FAT names are. It stops at the name, reading in bursts (`dir_burst`).
     pub fn find(self: *Volume, dir_cluster: Cluster, name: []const u8) Error!?Entry {
         var l = try self.lister(dir_cluster);
         l.burst = self.dir_burst;
@@ -1332,9 +1189,7 @@ pub const Volume = struct {
             var end = at;
             while (end < path.len and path[end] != '/') end += 1;
             if (end > at) {
-                // **NOT THROUGH A FILE.** `a/b` with `a` a file read a's bytes
-                // as directory entries, and could find in them whatever they
-                // spelled. A path through a file names nothing.
+                // **NOT THROUGH A FILE**: its bytes would be read as entries.
                 if (result) |r| if (!r.isDirectory()) {
                     props.reachable(@src(), "fat: a path through a file names nothing", null);
                     return Error.NotFound;
@@ -1357,13 +1212,9 @@ pub const Volume = struct {
         if (self.dirs) |*c| c.wrote(lba, 1, from);
     }
 
-    /// `count` whole sectors straight from `from`, as one request. `from` is
-    /// the caller's buffer, which the device reads directly.
-    ///
-    /// **ONE REQUEST, NOT A LOOP.** writeRuns never asks for more than one
-    /// request's worth — a run is capped there — and nothing else writes in
-    /// bulk, so a loop that split a longer write would be code no test could
-    /// reach. Asking for more is an error instead.
+    /// `count` whole sectors straight from `from`, as **ONE REQUEST**:
+    /// `writeRuns`, the only bulk writer, caps a run at one request, so
+    /// asking for more is an error, not a loop no test could reach.
     fn writeSectors(self: *Volume, lba: u32, count: u32, from: [*]const u8) Error!void {
         if (count > virtio.Block.max_sectors) {
             props.@"unreachable"(@src(), "fat: a write of more sectors than one request", null);
@@ -1377,18 +1228,16 @@ pub const Volume = struct {
         if (self.dirs) |*c| c.wrote(lba, count, from);
     }
 
-    /// How many bytes the data region holds, and how many of them no file
-    /// has: the kept count (`free_clusters`), so a field read.
+    /// The data region's bytes, and how many are free (`free_clusters`).
     pub fn space(self: *Volume) Error!struct { total: u64, free: u64 } {
         const cluster_bytes: u64 = @as(u64, self.sectors_per_cluster) * sector_size;
         return .{ .total = (@as(u64, self.max_cluster) - 1) * cluster_bytes, .free = @as(u64, self.free_clusters) * cluster_bytes };
     }
 
-    /// The free count afresh, from the FAT on the disk: what `free_clusters`
-    /// must always equal. For tests, and for a check that wants to say so.
-    /// It counts the FIRST COPY on the disk, not the held FAT: where
-    /// `cacheFatChecked` trusted the second copy and the repair was refused,
-    /// the kept count follows the held FAT and this does not.
+    /// The free count afresh from the FIRST COPY on the disk, not the held
+    /// FAT, for tests and simulators. It equals `free_clusters` except where
+    /// the disk's first copy and the held FAT differ: the second copy trusted
+    /// and its repair refused, or a failed write taken as landed that did not.
     pub fn countFreeAgain(self: *Volume) Error!u32 {
         return (try self.deriveFrom(.disk)).free;
     }
@@ -1405,8 +1254,8 @@ pub const Volume = struct {
     }
 
     /// Puts `value` into the entry at byte `at` of a FAT sector. **On FAT32
-    /// the top four bits of the entry are kept**: the spec reserves them, and
-    /// another tool may have set them (FAT32.md §4).
+    /// the top four bits are kept**: the spec reserves them, and another tool
+    /// may have set them.
     fn putEntry(self: *const Volume, sector: []u8, at: u32, value: Cluster) void {
         switch (self.kind) {
             .fat16 => {
@@ -1420,28 +1269,13 @@ pub const Volume = struct {
         }
     }
 
-    /// Sets the FAT entry for a cluster, **in every copy of the FAT**. A
-    /// volume whose second FAT disagrees with its first is one that other
-    /// tools will quietly repair, or quietly believe.
-    ///
-    /// **WHAT IS HELD MOVES ONLY WITH THE FIRST COPY.** The kept free count,
-    /// and the FAT when it is held, change once the first copy's write has
-    /// landed, and not when it fails: they moved first, and a write the device
-    /// refused left them saying a cluster had changed that had not, for as
-    /// long as the machine ran (QUEUE.md item 80). Once the first copy has
-    /// landed it is the FAT (cacheFat), so a later copy's failure is an
-    /// error and changes nothing held.
-    /// **WHAT A FAILED WRITE OF THE FIRST COPY LEFT, FOR THE ONE ENTRY IN
-    /// DOUBT** (metal-vmm QUEUE 138(a), (b)). Read back from the disk, into
-    /// scratch: the entry exactly as it was (`old`) says the write did not
-    /// land. Anything else (the value written; rot; a read-back that failed
-    /// too) is taken as the value written. Never the read-back's other
-    /// entries, nor its own rot: the held FAT stays the authority for every
-    /// entry (the mount may have trusted copy 1 over a rejected copy 0, and a
-    /// read-back can rot), and the next write of the sector carries it to
-    /// every copy. So a cluster goes back only on an exact "not landed", and
-    /// "landed" or "not known" leave it taken: at worst a leak, never a
-    /// cluster freed under a link, nor a free chain walked through rot.
+    /// **WHETHER A FAILED WRITE OF THE FIRST COPY LANDED, FOR THE ONE ENTRY
+    /// IN DOUBT.** Read back into scratch: the entry exactly as it was
+    /// (`old`) says it did not land; anything else (the value written, rot,
+    /// a read-back that failed too) is taken as landed. Only that entry is
+    /// read: the held FAT stays the mirror for every other. So a cluster goes
+    /// back only on an exact "not landed"; "landed" or "not known" leave it
+    /// taken, at worst a leak, never a cluster freed under a link.
     fn landed(self: *Volume, lba: u32, at: u32, old: Cluster) bool {
         const width = self.entryBytes();
         self.readSector(lba, self.scratch) catch {
@@ -1453,32 +1287,30 @@ pub const Volume = struct {
         return true;
     }
 
+    /// Sets a cluster's FAT entry **in every copy of the FAT**, the one place
+    /// a FAT entry changes after mount, and moves `free_clusters` with it.
+    ///
+    /// **THE FIRST COPY'S WRITE IS THE CHANGE**: its failure is the caller's
+    /// error, and the held entry and the count stand or go back by what
+    /// `landed` reads. A later copy that fails is counted apart (`copyApart`)
+    /// for the next mount to mend, not the operation's failure.
     fn fatSet(self: *Volume, cluster: Cluster, value: Cluster) Error!void {
         try self.forgetFsInfo();
         const width = self.entryBytes();
         const at = @as(u32, cluster) * width;
         const in_sector = at / sector_size;
-        // **THE FIRST COPY DECIDES** (QUEUE 131, kernel-facts #7). Every read
-        // here follows it, so its write is the change: a failure there is
-        // the caller's. What it left is read back for the one entry in doubt
-        // (`landed`). A later copy that fails is copies apart, which the next
-        // mount brings into line with the first (cacheFat): counted and
-        // said, not the operation's failure.
         if (self.fat) |fat| {
-            // The cached sector is the truth — cacheFat brought every copy
-            // into line with it — so it is written to each copy whole, and no
-            // copy is read back first. Where cacheFat left the copies apart
-            // (a tie, a weighing that could not run, a repair refused), this
-            // write is what brings them into line, with the held sector.
+            // The held sector is written whole to each copy, none read back
+            // first; where the mount left the copies apart (a tie, a weighing
+            // that could not run, a repair refused), this write mends them.
             const sector = fat[in_sector * sector_size ..][0..sector_size];
             const old = self.entryIn(sector, at % sector_size / width);
             self.putEntry(sector, at % sector_size, value);
             self.writeSector(self.fat_start + in_sector, sector) catch |e| {
                 if (self.landed(self.fat_start + in_sector, at, old)) {
-                    // Taken as written: the held entry stays the value, the
-                    // count with it, and the copies past the first are
-                    // written with the held sector, as a write that answered
-                    // would have (a refused one counted apart).
+                    // Taken as written: the held entry and the count keep
+                    // the value, and the other copies are written as after
+                    // a write that answered.
                     self.keepCount(old, value);
                     self.writeCopies(in_sector, sector);
                 } else self.putEntry(sector, at % sector_size, old);
@@ -1493,16 +1325,13 @@ pub const Volume = struct {
             const lba = self.fat_start + copy * self.sectors_per_fat + in_sector;
             if (copy == 0) {
                 try self.readSector(lba, self.scratch);
-                // The first copy is the one every read here follows.
+                // Without a held FAT, every read follows the disk's first copy.
                 const old = self.entryIn(self.scratch, at % sector_size / width);
                 self.putEntry(self.scratch, at % sector_size, value);
                 self.writeSector(lba, self.scratch) catch |e| {
-                    // The count by what the one entry read back says, as
-                    // above: not landed only when it is exactly the old
-                    // value; a read-back that fails is taken as written,
-                    // never as old (QUEUE 138(f)). The copies past the first
-                    // are left, and counted apart: the disk's first copy is
-                    // this path's truth, and the next mount weighs them.
+                    // The count by what `landed` reads, as above. If landed,
+                    // the other copies are left and counted apart, for the
+                    // next mount to weigh.
                     if (self.landed(lba, at, old)) {
                         self.keepCount(old, value);
                         self.copyApart();
@@ -1530,23 +1359,21 @@ pub const Volume = struct {
         }
     }
 
-    /// A FAT copy past the first that could not be written: apart from the
-    /// first until the next mount brings it into line (QUEUE 131, #7).
+    /// A FAT copy past the first that could not be written: apart until a
+    /// later write of that sector or the next mount mends it.
     fn copyApart(self: *Volume) void {
         self.fat_copies_failed +%= 1;
         props.reachable(@src(), "fat: a FAT copy past the first fails to write, and is left apart", .{ .count = self.fat_copies_failed });
     }
 
-    /// **FSINFO'S FREE COUNT AND NEXT-FREE HINT, MARKED UNKNOWN** on the first
-    /// change to a FAT32 volume's FAT after mount, in FSInfo and in the backup
-    /// boot sector's copy of it (FAT32.md §7). Both are hints, which Linux
-    /// recomputes when they say 0xFFFFFFFF; one left set and wrong is what
-    /// fsck.fat reports. One sector write a copy, once a mount.
+    /// **FSINFO'S FREE COUNT AND NEXT-FREE HINT, MARKED UNKNOWN**
+    /// (0xFFFFFFFF) before the first change to a FAT32 volume's FAT after
+    /// mount, in FSInfo and in the backup boot sector's copy (FAT32.md §7).
+    /// Linux recomputes a hint that says unknown; one set and wrong is what
+    /// fsck.fat reports. A sector without FSInfo's signatures is skipped.
     ///
-    /// Marked done once both writes have landed: marked first, a write the
-    /// device refused left a count set and wrong for as long as the machine
-    /// ran (QUEUE.md item 80). A failure is an error, and the next change
-    /// tries again.
+    /// `fsinfo_unknown` is set only after every write has landed; a failure
+    /// is the change's error, and the next change tries again.
     fn forgetFsInfo(self: *Volume) Error!void {
         if (self.kind != .fat32 or self.fsinfo_unknown) return;
         for ([_]u32{ self.fsinfo_sector, self.backup_boot + 1 }) |lba| {
@@ -1561,48 +1388,42 @@ pub const Volume = struct {
         self.fsinfo_unknown = true;
     }
 
-    /// Moves the kept free count for one FAT entry going from `old` to `new`.
-    /// Saturating: a count that went wrong must not stop the machine; the
-    /// host tests compare it with a fresh one after every operation.
-    /// **THE DERIVED VALUE, MOVED IN STEP WITH ITS SOURCE**, not recomputed
-    /// from it: the next mount's count is the reconcile.
+    /// Moves `free_clusters` for one FAT entry going from `old` to `new`:
+    /// **THE DERIVED VALUE, MOVED IN STEP WITH ITS SOURCE**; the next mount
+    /// re-derives it. Saturating: a count gone wrong must not stop the
+    /// machine; the host tests compare it with a fresh one.
     fn keepCount(self: *Volume, old: Cluster, new: Cluster) void {
         if (old == 0 and new != 0) props.always(@src(), self.free_clusters > 0, "fat: the kept free count never runs below zero", null);
-        // The fewest free clusters any run left (zig-coverage-sdk's
-        // comparisons): a property only, beside the one above.
+        // Records the fewest free clusters any run left.
         if (old == 0 and new != 0) props.alwaysGreaterThan(@src(), self.free_clusters, 0, "fat: a cluster is taken with one free", null);
         if (old == 0 and new != 0) self.free_clusters -|= 1;
         if (old != 0 and new == 0) self.free_clusters += 1;
     }
 
-    /// A chain of `count` clusters, linked and terminated. Answers its first.
-    /// A count of zero answers cluster 0, which is what an empty file holds.
+    /// A chain of `count` clusters, linked and terminated; answers its first.
+    /// A count of zero answers cluster 0, an empty file's.
     ///
-    /// **A FAILED ALLOCATION LEAVES NOTHING BEHIND.** If the volume runs out
-    /// part way, what was taken is given back before the error is returned,
-    /// because a half-built chain nothing points at is a leak no `fsck` here
-    /// would ever find.
+    /// **A FAILED ALLOCATION GIVES BACK WHAT IT TOOK**, on every error, since
+    /// nothing points at the chain yet. Where a failed write leaves an entry
+    /// that cannot be read exactly, the chain is left a counted leak instead
+    /// (`leftLeaked`), never walked through rot.
     fn allocChain(self: *Volume, count: u32, spend: Spend) Error!Cluster {
         if (count == 0) return 0;
-        // **THE RESERVE** (`reserve_clusters`, QUEUE 132, 138(e)): an
-        // allocation for a large file that would leave less free than the
-        // reserve, once what the operation frees after it is back, is
-        // refused before it takes anything; a small file's may go into it.
-        // One that takes no more than it frees spends nothing.
+        // **THE RESERVE** (`reserve_clusters`): an allocation for a large
+        // file that would leave less free than the reserve, once what the
+        // operation frees after it is back, is refused before it takes
+        // anything. One that takes no more than it frees spends nothing.
         if (spend.bytes > small_bytes and count > spend.frees and self.free_clusters + spend.frees < @as(u64, count) + self.reserve_clusters) {
             props.reachable(@src(), "fat: a large allocation is refused to keep the reserve for small writes", .{ .count = count, .free = self.free_clusters, .bytes = spend.bytes });
             return Error.Full;
         }
         var first: Cluster = 0;
         var previous: Cluster = 0;
-        // **WHAT IT TOOK GOES BACK ON EVERY ERROR** (QUEUE 131, #6), not only
-        // on a full volume: a FAT read or write that fails part-way leaked
-        // the chain so far. Nothing points at it yet.
         errdefer if (first != 0) self.giveBack(first);
         var taken: u32 = 0;
         var candidate: Cluster = @max(self.alloc_hint, 2);
-        // Once round the whole volume at most: a cursor that was wrong (a FAT
-        // changed under it) costs a wrap, not a wrong answer.
+        // Once round the volume at most: a wrong hint costs a wrap, not a
+        // wrong answer.
         var looked: u32 = 0;
         const clusters: u32 = self.max_cluster - 1;
 
@@ -1623,9 +1444,9 @@ pub const Volume = struct {
                 candidate += 1;
                 continue;
             }
-            // Its own mark may land and still fail: given back if it did, and
-            // only if it reads exactly as written (QUEUE 138(b)): anything
-            // else is a counted leak, never a chain walked through rot.
+            // Its own mark may land and still fail: given back only if it
+            // reads exactly as written; free, nothing to do; anything else a
+            // counted leak.
             self.fatSet(candidate, self.endMark()) catch |e| { // the end, until something follows
                 const now = self.fatGet(candidate) catch {
                     self.leftLeaked();
@@ -1634,17 +1455,12 @@ pub const Volume = struct {
                 if (now == self.endMark()) self.giveBack(candidate) else if (now != 0) self.leftLeaked();
                 return e;
             };
-            // Taken and not yet linked: given back on its own if the link
-            // failed and did not land, as the chain before it is by the
-            // errdefer. **IF IT LANDED, THE CHAIN HAS IT** (QUEUE 134(c)):
-            // the errdefer frees it with the rest, and freeing it here too
-            // freed one cluster twice. Not known (the read-back failed): a
-            // leak, never a free.
-            //
-            // Exactly as written: the chain has it. Exactly as it was (the
-            // end): it goes back alone. Anything else (rot, or not read): the
-            // candidate and the chain are a counted leak, and the errdefer
-            // does not walk a chain whose link reads wrong (QUEUE 138(b)).
+            // A failed link, by what it reads now. Exactly as written: the
+            // chain has the candidate, and the errdefer frees both (freeing
+            // it here too would free it twice). An end mark (not landed):
+            // the candidate goes back alone, the chain by the errdefer.
+            // Anything else (rot, or not read): candidate and chain are a
+            // counted leak, and the errdefer does not walk them.
             if (previous != 0) self.fatSet(previous, candidate) catch |e| {
                 const now = self.fatGet(previous) catch candidate +% 1;
                 if (now == candidate) return e;
@@ -1665,8 +1481,8 @@ pub const Volume = struct {
         return first;
     }
 
-    /// A cleanup after the commit (`cleanups_failed`): its failure is a
-    /// leak, counted, not the operation's error.
+    /// A cleanup after the commit: its failure is a counted leak
+    /// (`cleanups_failed`), not the operation's error.
     fn afterCommit(self: *Volume, done: Error!void) void {
         done catch {
             self.cleanups_failed +%= 1;
@@ -1674,29 +1490,27 @@ pub const Volume = struct {
         };
     }
 
-    /// The reserve's size (`reserve_clusters`), and the largest allocation
-    /// it lets through.
+    /// The reserve's most (`reserve_clusters`), and the largest file that may
+    /// spend it.
     pub const reserve_bytes: u32 = 64 << 20;
     pub const small_bytes: u32 = 64 << 10;
 
-    /// What an allocation is for, as the reserve judges it (138(e)): the
-    /// size of the file it makes (a new file's bytes, an appended file's
-    /// size after; zero for a directory's growth), and the clusters the
-    /// operation gives back after it (an overwrite's old chain).
+    /// What an allocation is for, as the reserve judges it: the size of the
+    /// file it makes (an appended file's size after; zero for a directory's
+    /// growth), and the clusters the operation frees after it (an
+    /// overwrite's old chain).
     const Spend = struct { bytes: u64, frees: u64 = 0 };
 
-    /// Clusters taken and not yet pointed at, given back on an error before
-    /// the commit (QUEUE 131, #6). A give-back that fails is counted with the
-    /// cleanups (`cleanups_failed`), never swallowed: the clusters are a
-    /// leak the boot's check reports.
-    /// Clusters left taken because what a failed write left could not be read
-    /// exactly (QUEUE 138(b)): counted with the cleanups, a leak the check
-    /// reports.
+    /// Clusters left taken because what a failed write left could not be
+    /// read exactly: a counted leak (`cleanups_failed`).
     fn leftLeaked(self: *Volume) void {
         self.cleanups_failed +%= 1;
         props.reachable(@src(), "fat: clusters left taken, what a failed write left not read exactly", .{ .count = self.cleanups_failed });
     }
 
+    /// Clusters taken and not yet pointed at, given back on an error before
+    /// the commit. A give-back that fails is a counted leak
+    /// (`cleanups_failed`), never swallowed.
     fn giveBack(self: *Volume, first: Cluster) void {
         self.freeChain(first) catch {
             self.cleanups_failed +%= 1;
@@ -1710,49 +1524,32 @@ pub const Volume = struct {
             const next = try self.fatGet(cluster);
             props.always(@src(), next != 0, "fat: every cluster freed was in use", .{ .cluster = cluster });
             // **THE HINT IS LOWERED FIRST.** A lower hint is always sound,
-            // and a fatSet that fails after the first copy landed has freed
-            // the cluster all the same: lowered after it, the hint would sit
-            // above a free cluster until the next mount.
+            // and a fatSet that fails may still have freed the cluster.
             if (cluster < self.alloc_hint) self.alloc_hint = cluster;
             try self.fatSet(cluster, 0);
             cluster = next;
         }
     }
 
-    /// Writes `bytes` into a chain that is already long enough. The last
-    /// sector is padded with zeros: a cluster is written whole, and the
-    /// directory's size field is what says how much of it is the file.
+    /// Writes `bytes` into a chain already long enough, the last sector
+    /// padded with zeros: the entry's size says how much is the file.
     fn writeChain(self: *Volume, first: Cluster, bytes: []const u8) Error!void {
         return self.writeRuns(first, 0, bytes, .zeros);
     }
 
-    /// A run of `needed` consecutive free entries in a directory, growing it if
-    /// there is no room. Answers where the run starts.
-    ///
-    /// **A LONG NAME NEEDS A RUN, NOT A SLOT.** Its parts must sit immediately
-    /// before the short entry with nothing between them, so a directory with
-    /// plenty of scattered free entries can still have nowhere to put one.
-    /// Where one directory entry sits: a sector the WALK reached, and an offset
-    /// in it.
+    /// Where one directory entry sits: a sector the walk reached, and an
+    /// offset in it.
     const Slot = struct { lba: u32, at: u32 };
 
-    /// **A RUN IS THE SLOTS THEMSELVES, NOT A START AND A LENGTH.** It used to be
-    /// a start, and writeEntry stepped `lba += 1` to reach the next sector. That
-    /// holds inside a cluster and nowhere else: a subdirectory grows by taking
-    /// the first free cluster, which is rarely the one after its last, so "the
-    /// next sector" past a cluster edge is usually some other file's data. A long
-    /// name whose parts straddled the edge wrote its tail there. findRun already
-    /// walked the directory properly; now it hands over what it walked.
+    /// **A RUN IS THE SLOTS THEMSELVES, NOT A START AND A LENGTH**: a
+    /// directory's next cluster is rarely the one after its last, so the
+    /// sector after a cluster edge is usually another file's data.
     ///
-    /// **AND THE ORPHANS JUST BEFORE IT.** A long name's parts must be followed
-    /// at once by their short entry, so live parts followed by a free slot are
-    /// an orphan: what a write or a remove that failed or stopped part-way
-    /// leaves. Harmless while the slot after them stays free; but the reader
-    /// ties a long name to the entry after it by an 8-bit checksum, so a new
-    /// entry written there whose short name happens to sum the same (1 in
-    /// 256: `B` and `C~1` do) is listed under the orphan's name and lost
-    /// under its own (QUEUE.md item 87, found by the page cache's test).
-    /// writeEntry tombstones them first.
+    /// **AND THE ORPHANS JUST BEFORE IT.** Live long-name parts followed by
+    /// a free slot are an orphan, what a write or remove that failed or
+    /// stopped part-way leaves. A new entry written after them whose alias
+    /// happens to share their 8-bit checksum (1 in 256) would be listed
+    /// under the orphan's name, so writeEntry tombstones them first.
     const Run = struct {
         slots: [max_long_parts + 1]Slot = undefined,
         len: u32 = 0,
@@ -1760,16 +1557,21 @@ pub const Volume = struct {
         orphans_len: u32 = 0,
     };
 
+    /// `needed` consecutive free entries in a directory, growing it if there
+    /// is no room. **A LONG NAME NEEDS A RUN, NOT A SLOT**: its parts sit
+    /// immediately before the short entry, so scattered free entries are not
+    /// enough.
     fn findRun(self: *Volume, dir_cluster: Cluster, needed: u32) Error!Run {
         if (needed == 0 or needed > max_long_parts + 1) {
-            // Names stop at `max_name` (96), 8 parts: a guard, not a refusal.
+            // `writeFileIn` and `rename` bound names at `max_name` (9 slots);
+            // `makeDirIn` does not, and a name past 260 lands here.
             props.@"unreachable"(@src(), "fat: a name needing more long-name parts than FAT allows", null);
             return Error.BadName;
         }
         var walk = try Walk.start(self, dir_cluster);
         var run = Run{};
-        // Live long-name parts since the last other entry: the last of them,
-        // in order, as many as a name has.
+        // The live long-name parts since the last other entry, at most as
+        // many as a name has.
         var parts: [max_long_parts]Slot = undefined;
         var parts_len: u32 = 0;
 
@@ -1802,14 +1604,12 @@ pub const Volume = struct {
                     } else parts_len = 0;
                 }
             }
-            // A run MAY straddle sectors and clusters: the walk says where the
-            // next entry is, and each slot records the sector it was found in.
+            // A run may straddle sectors and clusters; each slot records its
+            // own sector.
             if (!(try walk.next())) break;
         }
 
-        // **THE ROOT DIRECTORY CANNOT GROW.** On FAT16 it is a fixed run of
-        // sectors sized when the volume was made, which is the one hard limit
-        // this filesystem has that a caller can hit in normal use.
+        // **FAT16'S ROOT CANNOT GROW**: a fixed run of BPB_RootEntCnt entries.
         if (dir_cluster == 0 and self.kind == .fat16) {
             props.reachable(@src(), "fat: a FAT16 root directory is full", .{ .needed = needed });
             return Error.DirectoryFull;
@@ -1821,25 +1621,21 @@ pub const Volume = struct {
     /// Adds one zeroed cluster to the end of a directory's chain.
     fn grow(self: *Volume, dir_cluster: Cluster) Error!void {
         const end = try self.chainEnd(self.dirStart(dir_cluster));
-        // **FAT'S LIMIT ON A DIRECTORY: 65,536 ENTRIES**, 2 MiB. Past it
-        // fsck.fat calls the directory broken, and Linux, which would have to
-        // read the volume after this machine wrote it, may refuse it. So a
-        // directory stops growing there, and the write that needed the room
-        // is refused as a full directory, as a full root is.
+        // **FAT'S LIMIT ON A DIRECTORY: 65,536 ENTRIES** (`max_dir_entries`).
+        // Past it fsck.fat calls the directory broken, so it is refused as
+        // full, as a full root is.
         const per_cluster = self.sectors_per_cluster * (sector_size / dirent_size);
         if ((end.clusters + 1) * per_cluster > max_dir_entries) {
             props.reachable(@src(), "fat: a directory reaches FAT's most entries", null);
             return Error.DirectoryFull;
         }
         props.reachable(@src(), "fat: a directory grows by a cluster", .{ .clusters = end.clusters });
-        // The largest directory any run grew, against FAT's most.
         props.alwaysLessThanOrEqualTo(@src(), (end.clusters + 1) * per_cluster, max_dir_entries, "fat: a directory grown stays within FAT's most entries", null);
         const last = end.last;
 
         const fresh = try self.allocChain(1, .{ .bytes = 0 });
         // Given back on a failure before the link that makes it the
-        // directory's (QUEUE 131, #6); not after, since that write may have
-        // landed (#2).
+        // directory's; not after, since that write may have landed.
         var committing = false;
         errdefer if (!committing) self.giveBack(fresh);
         var s: u32 = 0;
@@ -1849,10 +1645,9 @@ pub const Volume = struct {
         }
         committing = true;
         self.fatSet(last, fresh) catch |e| {
-            // The link failed: what the FAT says now, read again (#7), tells
-            // whether it landed. If not, nothing points at the cluster.
-            // Given back only when it reads exactly as it was, the end;
-            // anything else is a counted leak (QUEUE 138(b)).
+            // The link failed. Reading as an end mark (not landed): the
+            // cluster goes back. Reading as `fresh`: the directory has it.
+            // Anything else: a counted leak.
             const now = self.fatGet(last) catch {
                 self.leftLeaked();
                 return e;
@@ -1862,8 +1657,8 @@ pub const Volume = struct {
         };
     }
 
-    /// The most entries a directory may hold (Microsoft's FAT specification:
-    /// a directory is at most 2 MiB, of 32-byte entries).
+    /// The most entries a directory may hold: the specification's 2 MiB of
+    /// 32-byte entries.
     pub const max_dir_entries: u32 = 65536;
 
     /// The most parts a VFAT long name can have: 255 characters, 13 per part.
@@ -1873,27 +1668,16 @@ pub const Volume = struct {
     ///
     /// **THE ORDER IS THE WHOLE FUNCTION.**
     ///
-    ///   1. Tombstone the short entry — `self.scratch` holds its sector right now.
-    ///   2. Tombstone each long-name part, at the sector the WALK found it in.
-    ///   3. Only then free the cluster chain.
+    ///   1. Tombstone the short entry while `scratch` holds its sector: the
+    ///      commit. (freeChain reads FAT sectors through `scratch`, so after
+    ///      it the "directory sector" would be a FAT sector.)
+    ///   2. Tombstone each long-name part, at the sector the walk found it in
+    ///      (a directory's clusters need not be adjacent).
+    ///   3. Only then free the chain.
     ///
-    /// It used to free the chain first. freeChain reads and writes FAT sectors
-    /// through the same one-sector scratch buffer, so the "directory sector"
-    /// written back next was a FAT sector with one byte changed: removing any
-    /// file that had data destroyed its directory. Every `writeFile` that
-    /// REPLACES a file goes through here, and the application replaces files
-    /// constantly — each id counter rewrites its file on every bump. fsck.vfat
-    /// and the Linux driver caught it; this machine's own reader did not.
-    ///
-    /// Freeing last is also the crash-safe order. A machine that stops between
-    /// the steps has leaked some clusters, which fsck reclaims; the other order
-    /// leaves an entry pointing at clusters already given away.
-    ///
-    /// **THE LONG-NAME PARTS ARE LOCATED BY THE WALK**, not by stepping sector
-    /// numbers. A subdirectory's next cluster need not be adjacent to its last,
-    /// so "the sector after this one" can be another file's data. A run that
-    /// straddles a cluster edge needs a directory of sixty-odd entries, and a
-    /// player's session folder can have that.
+    /// Freeing last is the crash-safe order: a stop between the steps leaks
+    /// clusters, where the other order leaves an entry pointing at clusters
+    /// already given away. A name not in the directory is no error.
     fn removeEntry(self: *Volume, dir_cluster: Cluster, name: []const u8) Error!void {
         return self.unlinkEntry(dir_cluster, name, .free_chain);
     }
@@ -1905,8 +1689,8 @@ pub const Volume = struct {
         try self.writeSector(lba, self.scratch);
     }
 
-    /// removeEntry's work. With `.keep_chain` the entry goes and its chain stays
-    /// allocated, for `rename`, which hands the chain to another entry.
+    /// removeEntry's work. With `.keep_chain` the chain stays allocated, for
+    /// `rename` to hand to another entry.
     fn unlinkEntry(self: *Volume, dir_cluster: Cluster, name: []const u8, then: enum { free_chain, keep_chain }) Error!void {
         const Pos = struct { lba: u32, at: u32 };
         var walk = try Walk.start(self, dir_cluster);
@@ -1932,8 +1716,7 @@ pub const Volume = struct {
                     continue;
                 }
                 if (e[11] == attr_long_name) {
-                    // The part flagged 0x40 opens a run (it is the last part
-                    // logically, and comes first on disk).
+                    // The part flagged 0x40 (LAST_LONG_ENTRY) opens a run.
                     if (e[0] & 0x40 != 0) {
                         part_count = 0;
                         parts_overflowed = false;
@@ -1969,10 +1752,8 @@ pub const Volume = struct {
                     }
 
                     // 1. the short entry, while its sector is in scratch: the
-                    // commit. From here the entry is gone, and what follows
-                    // is cleanup whose failure leaves orphaned long-name
-                    // parts or a leaked chain, what a stop leaves, not the
-                    // operation's error (QUEUE 131, #3).
+                    // commit. What follows is cleanup, whose failure leaves
+                    // orphaned parts or a leaked chain, not the error.
                     self.scratch[at] = 0xE5;
                     try self.writeSector(short_lba, self.scratch);
 
@@ -1994,7 +1775,6 @@ pub const Volume = struct {
         }
     }
 
-    /// Writes the long-name run and the short entry that closes it.
     /// The date to stamp on an entry being written now.
     fn stamp(self: *Volume) Dos {
         const clock = self.clock orelse return .none;
@@ -2002,6 +1782,8 @@ pub const Volume = struct {
         return Dos.fromUnix(now);
     }
 
+    /// Tombstones the run's orphans, then writes the long-name parts and the
+    /// short entry that closes them.
     fn writeEntry(
         self: *Volume,
         run: Run,
@@ -2011,8 +1793,8 @@ pub const Volume = struct {
         first: Cluster,
         size: u32,
         /// Set true just before the short entry's write, the commit: a
-        /// caller undoes nothing after it (QUEUE 131, #2), and may give back
-        /// what it took on a failure before it (#6).
+        /// caller may give back what it took on a failure before it, and
+        /// undoes nothing after.
         committing: ?*bool,
     ) Error!void {
         const parts = longParts(name);
@@ -2022,8 +1804,7 @@ pub const Volume = struct {
             return Error.BadName;
         }
 
-        // An orphan just before the run goes first (see Run): a stop after
-        // this leaves it gone and the run still free.
+        // Orphans first (see Run): a stop after leaves the run still free.
         for (run.orphans[0..run.orphans_len]) |o| {
             try self.readSector(o.lba, self.scratch);
             self.scratch[o.at] = 0xE5;
@@ -2062,8 +1843,7 @@ pub const Volume = struct {
         @memset(e, 0);
         @memcpy(e[0..11], &short);
         e[11] = attr;
-        // Created now, written now, read now: a file this machine is creating
-        // has one moment, and all three fields say so.
+        // Created, written and accessed: one moment.
         const when = self.stamp();
         putDos(e[14..18], when); // creation time, creation date
         putLe16(e[18..20], when.date); // last access date
@@ -2077,14 +1857,14 @@ pub const Volume = struct {
         try self.writeSector(slot.lba, self.scratch);
     }
 
-    /// An 8.3 alias for a name. A name that already fits is its own alias; one
-    /// that does not gets SESSIO~1, SESSIO~2, and so on until one is free.
+    /// An 8.3 alias for a name. A name that reads back as itself in 8.3 is
+    /// its own alias, unchecked against the directory; any other gets
+    /// SESSIO~1, SESSIO~2, and so on until one is free.
     fn aliasFor(self: *Volume, dir_cluster: Cluster, name: []const u8) Error![11]u8 {
-        // **A NEW NAME IS ASCII** (metal-vmm QUEUE 104). A long name holds a
-        // byte as one UTF-16 unit, and `takeLongPart` reads a unit past ASCII
-        // as '?': a name past it would be written, then found under no name
-        // it was given. Every name made here comes through this, before
-        // anything is changed (`writeFileIn`, `makeDirIn`, `rename`).
+        // **A NEW NAME IS ASCII.** A long name holds a byte as one UTF-16
+        // unit, and `takeLongPart` reads a unit past ASCII as '?', so such a
+        // name would be found under no name it was given. Every name made
+        // here comes through this before anything changes.
         for (name) |c| if (c >= 0x80) {
             props.reachable(@src(), "fat: a name past ASCII is refused", null);
             return Error.BadName;
@@ -2113,8 +1893,7 @@ pub const Volume = struct {
                 tail_len += 1;
             }
 
-            // The base: what fits before the tail, skipping dots and spaces,
-            // which an 8.3 field cannot hold.
+            // The base: what fits before the tail, without dots and spaces.
             const keep = 8 - tail_len;
             var w: usize = 0;
             for (name) |c| {
@@ -2161,14 +1940,13 @@ pub const Volume = struct {
 
     /// Writes a whole file into `dir_cluster`, replacing one of the same name.
     ///
-    /// **A REWRITE KEEPS THE NAME THE FILE HAS.** Names are matched without
-    /// case, so `PLAN.md` replaces `plan.md`; the file stays `plan.md`, with
-    /// the same 8.3 alias, as an append keeps it and as Linux's vfat keeps it
-    /// on a truncating open. Only a new file takes the case it was given.
+    /// **A REWRITE KEEPS THE NAME THE FILE HAS.** Names match without case,
+    /// so `PLAN.md` replaces `plan.md` and the file stays `plan.md`, alias
+    /// and all, as Linux's vfat keeps it on a truncating open. Only a new
+    /// file takes the case it was given.
     ///
-    /// **A DIRECTORY OF THAT NAME IS REFUSED, NOT REPLACED.** Removing its
-    /// entry would orphan everything in it, and say nothing; Linux refuses
-    /// the same write (EISDIR, std's `IsDir`), and so does this.
+    /// **A DIRECTORY OF THAT NAME IS REFUSED** (`IsDirectory`, Linux's
+    /// EISDIR): replacing its entry would orphan everything in it.
     pub fn writeFileIn(self: *Volume, dir_cluster: Cluster, given: []const u8, bytes: []const u8) Error!void {
         if (given.len == 0 or given.len > max_name) {
             props.reachable(@src(), "fat: a write's name is empty or too long", null);
@@ -2194,36 +1972,31 @@ pub const Volume = struct {
         const run = try self.findRun(dir_cluster, parts + 1);
 
         const first = try self.allocChain(clusters, .{ .bytes = bytes.len });
-        // A failure before the entry gives the chain back (QUEUE 131, #6); a
-        // failure of the entry's write may have landed, and leaves it (#2).
+        // A failure before the entry gives the chain back; a failure of the
+        // entry's write may have landed, and leaves it.
         var committing = false;
         errdefer if (!committing) self.giveBack(first);
         if (bytes.len > 0) try self.writeChain(first, bytes);
 
-        // The entry goes last: until it is written, nothing points at the data,
-        // so a machine that stops here has lost a file rather than corrupted one.
-        // `committing` is set at its short entry's write.
+        // The entry goes last: a stop before it loses the new file and
+        // corrupts nothing.
         try self.writeEntry(run, if (needs_long) name else name[0..0], short, 0x20, first, @intCast(bytes.len), &committing);
     }
 
-    /// **AN OVERWRITE IS ONE SECTOR WRITE** (essay kernel-facts #1). The new
-    /// bytes go into a chain of their own, one write of the entry's sector
-    /// points the file at it, and then the old chain is freed. A machine
-    /// stopped anywhere leaves the old file or the new one, never neither;
-    /// a volume without room for both refuses the write and keeps the old.
-    /// The entry keeps its name, its alias and its long-name parts.
+    /// **AN OVERWRITE COMMITS IN ONE SECTOR WRITE.** The new bytes go into a
+    /// chain of their own, one write of the entry's sector points the file at
+    /// it, and then the old chain is freed. A stop anywhere leaves the old
+    /// file or the new, never neither; a volume without room for both
+    /// refuses the write and keeps the old. The entry keeps its names.
     ///
-    /// **NO UNDO ONCE THE ENTRY'S WRITE IS ASKED.** A write the disk failed
-    /// may still have landed, and freeing a chain the entry points at would
-    /// give one cluster to two files. So a failure there leaves the new
-    /// chain allocated (a leak at worst), and the boot's disk check says it.
-    /// A failure freeing the old chain after it is no failure of the write:
-    /// the file is the new one, and the old chain a leak (`afterCommit`,
-    /// QUEUE 131, #3).
+    /// **NO UNDO ONCE THE ENTRY'S WRITE IS ASKED**: a write the disk failed
+    /// may still have landed, and freeing the chain it points at would give
+    /// one cluster to two files. So a failure there leaves the new chain
+    /// taken (a leak at worst). A failure freeing the old chain after is a
+    /// counted leak (`afterCommit`), not the write's error.
     fn overwrite(self: *Volume, old: Entry, clusters: u32, bytes: []const u8) Error!void {
-        // What the old chain gives back after, counted from its size: a
-        // chain longer than its size (a stop between an append's link and
-        // its entry) gives back more, never less.
+        // Counted from the old size: a chain longer than its size gives back
+        // more, never less.
         const per_cluster: u64 = @as(u64, self.sectors_per_cluster) * sector_size;
         const frees = (@as(u64, old.size) + per_cluster - 1) / per_cluster;
         const first = try self.allocChain(clusters, .{ .bytes = bytes.len, .frees = frees });
@@ -2235,17 +2008,14 @@ pub const Volume = struct {
         self.afterCommit(self.freeChain(old.first_cluster));
     }
 
-    /// Makes a directory in `dir_cluster`. Its first cluster holds `.` and `..`,
-    /// which every directory but the root has and which `fsck` checks for.
-    /// The entry goes last, so a machine stopped before it leaves no
-    /// directory and a leaked cluster.
+    /// Makes a directory in `dir_cluster`, or answers the one already there.
+    /// Its first cluster holds `.` and `..`, which every directory but the
+    /// root has. The entry goes last, so a stop before it leaves no directory
+    /// and a leaked cluster.
     ///
-    /// **ROOM FOR THE ENTRY IS FOUND BEFORE THE CLUSTER IS TAKEN.** Taken
-    /// first, a parent with no room left (a full FAT16 root: `DirectoryFull`)
-    /// returned the error with the cluster still allocated and nothing
-    /// pointing at it, a leak on every try (fat_sim, 2026-10-05). The run
-    /// stays free while the cluster is taken and written: neither touches
-    /// the parent's sectors.
+    /// **ROOM FOR THE ENTRY IS FOUND BEFORE THE CLUSTER IS TAKEN**, so a
+    /// parent with no room (`DirectoryFull`) takes nothing. The run stays
+    /// free meanwhile: taking and writing the cluster touch no parent sector.
     pub fn makeDirIn(self: *Volume, dir_cluster: Cluster, name: []const u8) Error!Cluster {
         if ((try self.find(dir_cluster, name))) |e| {
             if (e.isDirectory()) return e.first_cluster;
@@ -2259,15 +2029,11 @@ pub const Volume = struct {
         const run = try self.findRun(dir_cluster, parts + 1);
 
         const cluster = try self.allocChain(1, .{ .bytes = 0 });
-        // A write refused before the commit gives the cluster back; a machine
-        // that stops leaves it leaked, which the check reports.
-        //
-        // **NO ROLLBACK ONCE THE COMMIT IS TRIED** (metal-vmm QUEUE 131,
-        // kernel-facts #2): the entry write that points at the cluster may
-        // land and still answer an error, and the cluster freed under it is
-        // one the next file takes, two in one cluster. So from `writeEntry`
-        // on, a failure leaves the cluster taken: a leak if the entry did not
-        // land, which the check reports and the boot reclaims (the box's #4).
+        // A failure before the commit gives the cluster back. **NO ROLLBACK
+        // ONCE THE COMMIT IS TRIED**: the entry's write may land and still
+        // fail, and a cluster freed under it would be given to two. So a
+        // failure from there leaves it taken, a leak if the entry did not
+        // land.
         var committing = false;
         errdefer if (!committing) self.giveBack(cluster);
         @memset(self.scratch, 0);
@@ -2276,8 +2042,7 @@ pub const Volume = struct {
             try self.writeSector(self.clusterSector(cluster) + s, self.scratch);
         }
 
-        // `.` points at this directory and `..` at its parent, with the root
-        // spelled as cluster zero.
+        // `..` spells the root as cluster zero.
         @memset(self.scratch, 0);
         const dot = self.scratch[0..dirent_size];
         @memcpy(dot[0..11], ".          ");
@@ -2293,13 +2058,11 @@ pub const Volume = struct {
         return cluster;
     }
 
-    /// Walks a slash-separated path, making each directory that is missing, and
-    /// answers the cluster of the last one.
+    /// Walks a slash-separated path, making each missing directory, and
+    /// answers the last one's cluster.
     ///
-    /// **NO DEEPER THAN THE CHECK WALKS** (`max_path_depth`): a directory
-    /// past it is one `check` calls `too_deep`, so this code would make a
-    /// volume its own check cannot vouch for. Refused as a name too long,
-    /// which is what Linux says of a path past its limit.
+    /// **NO DEEPER THAN THE CHECK WALKS** (`max_path_depth`): deeper would
+    /// make a volume its own check calls `too_deep`. Refused `BadName`.
     pub fn makePath(self: *Volume, path: []const u8) Error!Cluster {
         var cluster: Cluster = 0;
         var at: usize = 0;
@@ -2333,29 +2096,19 @@ pub const Volume = struct {
         return self.writeFileIn(0, path, bytes);
     }
 
-    /// A whole file into `out`. Answers how many bytes it was.
-    /// A whole file into `out`. Answers how many bytes it was.
-    /// **THE ONE WRITE `writeFile` CANNOT EXPRESS.** The application appends:
-    /// every chat message, every game action, every uploaded chunk is
-    /// `createFile(truncate=false)` then a positional write at the current end.
-    /// Whole-file rewriting would answer it — read it all back, concatenate,
-    /// write it all out — and would make a conversation of N messages cost
-    /// N-squared bytes written, on a machine whose disk is a virtqueue. So this
-    /// walks to the end, fills the partial cluster that is already there, and
-    /// links on only what it still needs.
+    /// **A POSITIONAL WRITE INTO AN EXISTING FILE**: the append `writeFile`
+    /// cannot express without rewriting the whole file (N messages costing
+    /// N-squared bytes). It fills the partial cluster already there and links
+    /// on only what it still needs.
     ///
-    /// `offset` is where the write lands. It may be the end (an append, which is
-    /// every call the application makes) or inside the file (an overwrite). It
-    /// may NOT be past the end: FAT has no sparse files, so a hole would be
-    /// whatever those clusters last held, and answering with stale bytes is
-    /// worse than refusing.
+    /// `offset` may be the end (an append) or inside the file. It may NOT be
+    /// past the end: FAT has no sparse files, and a hole would be whatever
+    /// those clusters last held.
     ///
-    /// The file must exist; `Dir.createFile` is what creates an empty one.
-    ///
-    /// A machine stopped part-way leaves the old file, whole: the data lands
-    /// past its size, and the size moves last. What else it may leave:
-    /// leaked clusters, or a chain longer than the size (see below), which
-    /// the next append fills.
+    /// An append stopped part-way leaves the old file whole, since the data
+    /// lands past its size and the size moves last; it may also leave leaked
+    /// clusters, or a chain longer than the size, which the next append
+    /// fills. A write inside the file overwrites in place, not atomically.
     pub fn writeInto(self: *Volume, path: []const u8, offset: u32, bytes: []const u8) Error!void {
         if (bytes.len == 0) return;
         const entry = try self.open(path);
@@ -2378,22 +2131,17 @@ pub const Volume = struct {
         const new_size: u32 = @max(old_size, @as(u32, @intCast(reach)));
 
         // **IN 64 BITS**: rounding a size near 4 GiB up to whole clusters
-        // overflows 32, which panicked where it should answer TooBig
-        // (REVIEW-restart-fat32.md F1).
+        // overflows 32.
         const have: u32 = @intCast((@as(u64, old_size) + cluster_bytes - 1) / cluster_bytes);
         const need: u32 = @intCast((@as(u64, new_size) + cluster_bytes - 1) / cluster_bytes);
 
-        // An empty file has no chain at all (first_cluster 0), so the first
-        // append is also the allocation.
+        // An empty file has no chain (first_cluster 0): the first append is
+        // also the allocation.
         //
         // **A FILE'S CLUSTERS ARE COUNTED IN ITS CHAIN, NOT FROM ITS SIZE.**
-        // An append links its new clusters on, then writes the data, then
-        // the entry's size: the FAT and the entry are different sectors, so a
-        // machine stopped between the link and the entry leaves the old file,
-        // whole, on a chain longer than its size needs (the check's `long`;
-        // QUEUE.md item 79). Counted from the size, the next append linked
-        // more clusters past those, and the file stayed long for good;
-        // counted in the chain, it fills them first.
+        // An append links, then writes the data, then the entry's size, so a
+        // stop between leaves a chain longer than the size (the check's
+        // `long`). Counted in the chain, the next append fills those first.
         var first = entry.first_cluster;
         if (have == 0 and first == 0) {
             first = try self.allocChain(need, .{ .bytes = new_size });
@@ -2428,27 +2176,22 @@ pub const Volume = struct {
         return .{ .last = cluster, .clusters = clusters };
     }
 
-    /// Writes `bytes` into a chain at byte `offset`, which the chain must
-    /// already be long enough to hold.
-    ///
-    /// **THE FIRST SECTOR IS READ BEFORE IT IS WRITTEN**, because an append
-    /// almost never lands on a sector boundary: the bytes already in that
-    /// sector are the end of the file, and writing a fresh sector over them
-    /// would erase back to the last boundary. So is the last, for an overwrite
-    /// inside the file.
+    /// Writes `bytes` into a chain already long enough, at byte `offset`.
+    /// **A SECTOR THE WRITE STARTS OR ENDS INSIDE IS READ FIRST**: an append
+    /// rarely starts on a sector boundary, and the bytes before it are the
+    /// file's.
     fn writeAt(self: *Volume, first: Cluster, offset: u32, bytes: []const u8) Error!void {
         return self.writeRuns(first, offset, bytes, .kept);
     }
 
-    /// What goes in a sector a write ends inside: what was there already, or
-    /// zeros. A new file's tail is zeroed, so nothing a deleted file left in
-    /// that sector is carried along.
+    /// What fills the rest of a sector a write ends inside: what was there,
+    /// or zeros (a new file's, so a deleted file's bytes are not carried).
     const Tail = enum { kept, zeros };
 
-    /// **A FILE IS WRITTEN AS RUNS**, the way it is read: a run is a cluster
-    /// and every cluster after it whose number is one more. Whole sectors go
-    /// straight from `bytes` to the device, one request per run; only a sector
-    /// the write starts or ends inside goes through the scratch sector.
+    /// **A FILE IS WRITTEN AS RUNS**, as it is read (`readAt`): whole sectors
+    /// go straight from `bytes`, one request per run of consecutive clusters
+    /// (at most `max_sectors`); only a sector the write starts or ends inside
+    /// goes through `scratch`.
     fn writeRuns(self: *Volume, first: Cluster, offset: u32, bytes: []const u8, tail: Tail) Error!void {
         if (bytes.len == 0) return;
         const cluster_bytes: u32 = self.sectors_per_cluster * sector_size;
@@ -2539,8 +2282,8 @@ pub const Volume = struct {
         }
     }
 
-    /// Writes a file's length and first cluster back into its directory entry,
-    /// in place. `entry.lba`/`entry.slot` are where `list` found it.
+    /// Writes a file's size and first cluster into its entry, in place, at
+    /// `entry.lba`/`entry.slot`: the commit of an append or an overwrite.
     fn setEntry(self: *Volume, entry: Entry, first_cluster: Cluster, size: u32) Error!void {
         if (entry.lba == 0) { // never located; refuse to guess
             props.@"unreachable"(@src(), "fat: an entry never located is written back", null);
@@ -2548,9 +2291,8 @@ pub const Volume = struct {
         }
         try self.readSector(entry.lba, self.scratch);
         const e = self.scratch[entry.slot..][0..dirent_size];
-        // **A WRITE MOVES THE MODIFICATION TIME.** This is the one path that
-        // changes a file that already exists — every append and every replace
-        // lands here — and chat's "recent activity" IS this field.
+        // **A WRITE MOVES THE MODIFICATION TIME** (and the access date);
+        // the creation time stays.
         const when = self.stamp();
         putDos(e[22..26], when);
         putLe16(e[18..20], when.date);
@@ -2562,13 +2304,11 @@ pub const Volume = struct {
         try self.writeSector(entry.lba, self.scratch);
     }
 
-    /// The cluster of a path's PARENT directory, plus the final component.
+    /// The cluster of a path's parent directory, plus the final component:
     /// "a/b/c" -> (cluster of a/b, "c"). A path with no slash is in the root.
     const Parent = struct { cluster: Cluster, name: []const u8 };
 
     fn parentOf(self: *Volume, path: []const u8) Error!Parent {
-        // This file imports nothing, not even std: it is the driver, and the
-        // two loops below are cheaper than the dependency.
         var end = path.len;
         while (end > 0 and path[end - 1] == '/') end -= 1;
         const trimmed = path[0..end];
@@ -2592,26 +2332,24 @@ pub const Volume = struct {
         return .{ .cluster = dir.first_cluster, .name = trimmed[at + 1 ..] };
     }
 
-    /// **RENAMES A FILE WITHIN ITS DIRECTORY, OVER ANY FILE OF THE NEW NAME.**
-    /// It is how a whole file is replaced without a moment when neither the
-    /// old nor the new is there: the new is written under another name, then
-    /// renamed over the old (angry-gopher's `store.replace`).
+    /// **RENAMES A FILE WITHIN ITS DIRECTORY, OVER ANY FILE OF THE NEW NAME**:
+    /// how a file is replaced with no moment when neither old nor new is
+    /// there (write the new under another name, rename it over the old).
     ///
-    /// The order, and what a machine that stops at each point leaves:
-    ///   1. `from`'s entry goes; its chain stays allocated. Stopped here: `to`
-    ///      is the old file, whole, and `from`'s clusters are leaked (the disk
-    ///      check reports them).
-    ///   2. when `to` exists, its short entry is pointed at `from`'s chain and
-    ///      size, in one sector write. Stopped here: `to` is the new file,
-    ///      whole, and its old clusters are leaked.
-    ///   3. and only now `to`'s old chain is freed.
-    /// When `to` does not exist, step 2 writes a new entry instead, and a
-    /// machine that stops before it has lost a file nobody had yet.
-    /// Never two entries on one chain, never a `to` that is neither file.
+    /// The order, and what a stop after each step leaves:
+    ///   1. `from`'s entry goes; its chain stays taken. `to` is the old file,
+    ///      whole, and `from`'s clusters are leaked.
+    ///   2. an existing `to`'s short entry is pointed at `from`'s chain and
+    ///      size, in one sector write. `to` is the new file, whole, and its
+    ///      old clusters are leaked.
+    ///   3. only then is `to`'s old chain freed.
+    /// When `to` does not exist, step 2 writes a new entry, and a stop
+    /// before it loses `from`. Never two entries on one chain.
     ///
-    /// `to` keeps the name it has (as a whole-file write does); a new `to`
-    /// takes the case it is given. Both must be files in the same directory:
-    /// a directory as `to` is `IsDirectory`, as on Linux; as `from`, `BadName`.
+    /// An existing `to` keeps its name; a new one takes the case given; a
+    /// name that differs from `from`'s only in case is a no-op. Both must be
+    /// files in one directory: a directory as `to` is `IsDirectory`, as
+    /// `from` `BadName`.
     pub fn rename(self: *Volume, from: []const u8, to: []const u8) Error!void {
         const a = try self.parentOf(from);
         const b = try self.parentOf(to);
@@ -2635,11 +2373,9 @@ pub const Volume = struct {
             return Error.IsDirectory;
         };
 
-        // **A NEW `to` HAS ITS ROOM BEFORE `from` IS UNLINKED.** Unlinked
-        // first, a directory with no room left (a full FAT16 root) returned
-        // `DirectoryFull` with `from` gone and its chain leaked: a lost file,
-        // on an error, not a stop (fat_sim, 2026-10-05). So a rename that
-        // would fit only in the slots `from` frees is refused as full.
+        // **A NEW `to` HAS ITS ROOM BEFORE `from` IS UNLINKED**, so a full
+        // directory refuses with `from` intact. A rename that would fit only
+        // in the slots `from` frees is refused as full.
         var room: ?struct { short: [11]u8, run: Run } = null;
         if (dst == null) {
             const short = try self.aliasFor(b.cluster, b.name);
@@ -2662,8 +2398,7 @@ pub const Volume = struct {
             putLe16(e[18..20], when.date); // last access date
             putDos(e[22..26], when); // write time, write date
             try self.writeSector(d.lba, self.scratch);
-            // The commit: `to` is the file now. The old chain freed after it
-            // is cleanup (QUEUE 131, #3).
+            // The commit; freeing the old chain after it is cleanup.
             if (d.first_cluster >= 2) self.afterCommit(self.freeChain(d.first_cluster));
             return;
         }
@@ -2672,15 +2407,11 @@ pub const Volume = struct {
         try self.writeEntry(r.run, if (needsLongName(b.name)) b.name else b.name[0..0], r.short, 0x20, src.first_cluster, src.size, null);
     }
 
-    /// Deletes one file. removeEntry does the real work: it frees the
-    /// cluster chain and tombstones both the short entry and the long-name
-    /// run in front of it.
+    /// Deletes one file (`removeEntry`).
     ///
     /// **A DIRECTORY IS REFUSED** (`IsDirectory`), empty or not, as Linux's
-    /// unlink refuses one (EISDIR). It once took a directory's entry like a
-    /// file's and left everything under it allocated and reachable from
-    /// nothing, a leak `check` reported (metal-vmm QUEUE B22, found by the
-    /// cloud session's item 77). `removeTree` is how a directory goes.
+    /// unlink refuses one: taking its entry would leak everything under it.
+    /// `removeTree` is how a directory goes.
     pub fn remove(self: *Volume, path: []const u8) Error!void {
         const p = try self.parentOf(path);
         const e = (try self.find(p.cluster, p.name)) orelse {
@@ -2694,35 +2425,25 @@ pub const Volume = struct {
         try self.removeEntry(p.cluster, p.name);
     }
 
-    /// max_tree_depth bounds removeTree's recursion. The application's deepest
-    /// tree is a player's game data, five levels down; this is generous, and it
-    /// is a CAP rather than a guess because the recursion runs on a kernel
-    /// stack with no guard page under it.
+    /// Bounds the recursion of `removeTree` and `check`, which run on a
+    /// kernel stack with no guard page. The application's deepest tree is
+    /// five levels.
     const max_tree_depth: u32 = 16;
 
-    /// The deepest directory `makePath` makes, counted from the root: `check`
-    /// walks the root at depth 0 and calls a directory at `max_tree_depth`
-    /// too deep, so the last it walks is one above that. `removeTree` counts
-    /// from the directory it removes, so it takes any tree this allows.
+    /// The deepest directory `makePath` makes, counted from the root: the
+    /// deepest `check` walks. `removeTree` counts from the directory it
+    /// removes, so it takes any tree this allows.
     const max_path_depth: u32 = max_tree_depth - 1;
 
-    /// Deletes a directory and everything under it. A missing path is not an
-    /// error: every caller in the application spells this `catch {}`, because
-    /// deleting what is not there is what it wanted.
+    /// Deletes a directory and everything under it, or a file.
     ///
-    /// **ONE ENTRY AT A TIME, RE-LISTING EACH ROUND.** The obvious shape — list
-    /// the directory, then delete what the list held — cannot work here: `list`
-    /// hands entries to a callback *while* a sector sits in `self.scratch`, and
-    /// there is one scratch buffer for the whole machine, so deleting from
-    /// inside that callback would pull the sector out from under the walk. And
-    /// there is no allocator to copy the listing into. So each round takes the
-    /// FIRST removable entry and starts over. Quadratic in the number of
-    /// entries, on an operation the application performs when a person deletes
-    /// their account.
+    /// **ONE ENTRY AT A TIME, RE-LISTING EACH ROUND.** `list`'s callback
+    /// cannot fail, so it cannot remove, and there is no allocator to copy
+    /// a listing into; so each round finds the FIRST entry, removes it, and
+    /// lists again. Quadratic in the entries.
     ///
-    /// **ONLY ABSENCE IS FINE.** Every other error is the caller's: a disk
-    /// that stopped answering used to read as "nothing there", and an account
-    /// deletion that removed nothing answered done (QUEUE.md item 79).
+    /// **ONLY ABSENCE IS FINE**: a missing path is success; every other
+    /// error is the caller's.
     pub fn removeTree(self: *Volume, path: []const u8) Error!void {
         const entry = self.open(path) catch |e| switch (e) {
             Error.NotFound => return,
@@ -2730,8 +2451,7 @@ pub const Volume = struct {
         };
         if (!entry.isDirectory()) return self.remove(path);
         try self.removeTreeAt(entry.first_cluster, 0);
-        // The directory itself, emptied: by its entry, as removeTreeAt takes
-        // each one under it (`remove` refuses a directory).
+        // The emptied directory, by its entry (`remove` refuses one).
         const p = try self.parentOf(path);
         try self.removeEntry(p.cluster, p.name);
     }
@@ -2751,7 +2471,6 @@ pub const Volume = struct {
             fn each(s: *@This(), e: Entry) void {
                 if (s.found) return;
                 const text = e.text();
-                // "." and ".." are this directory and its parent.
                 if (eqlBytes(text, ".") or eqlBytes(text, "..")) return;
                 s.len = @min(text.len, max_name);
                 @memcpy(s.name[0..s.len], text[0..s.len]);
@@ -2770,6 +2489,8 @@ pub const Volume = struct {
             try self.removeEntry(dir_cluster, first.name[0..first.len]);
         }
         props.reachable(@src(), "fat: a tree with more entries than a volume holds is refused as broken", null);
+        // Not only a broken one: 4,096 rounds is below `max_dir_entries`, so
+        // a larger valid directory is refused too.
         return Error.DirectoryFull; // more entries than this is a broken volume
     }
 
@@ -2781,32 +2502,25 @@ pub const Volume = struct {
     }
 
     /// **THE BOOT-TIME CHECK: WHAT IS WRONG WITH THIS VOLUME, SAID AND NEVER
-    /// MENDED.** It walks the tree from the root and follows every chain,
-    /// marking each cluster it holds in `seen` (`checkBytes` long, borrowed
-    /// for the call). Then it reads the FAT on the disk for clusters in use
-    /// that nothing holds, and compares the FAT's copies. Each thing wrong
-    /// goes to `each` as a `Finding`, with the path it was found at; the
-    /// answer counts what was walked and how many findings there were.
+    /// MENDED.** It walks the tree from the root and follows every chain
+    /// (through the held FAT when there is one), marking each cluster in
+    /// `seen` (`checkBytes` long). Then it finds clusters in use that nothing
+    /// holds, by the held FAT when there is one, and compares the copies on
+    /// the disk. Each thing wrong goes to `each` as a `Finding`; the answer
+    /// counts what was walked and the findings.
     ///
-    /// **IT WRITES NOTHING.** A repair is a decision about whose data wins
-    /// (which of two files sharing a cluster keeps it, whether a leaked run
-    /// was a file the crash had not yet named), and fsck.vfat on a copy is
-    /// where that decision belongs, made by a person, not by a machine
+    /// **IT WRITES NOTHING.** A repair decides whose data wins, and that
+    /// belongs to a person running fsck.vfat on a copy, not a machine
     /// halfway through booting.
     ///
-    /// **THE MARKING IS WHAT ENDS THE WALK.** A chain that reaches a cluster
-    /// already marked has crossed another chain, or looped back on itself,
-    /// and it is followed no further; so every step marks a new cluster and
-    /// the walk is at most as long as the volume. A directory whose chain
-    /// crosses is not listed past the crossing, so a directory that points at
-    /// its own ancestor is reported, not descended into for ever.
+    /// **THE MARKING ENDS THE WALK.** A chain that reaches a marked cluster
+    /// has crossed another or looped, and is followed no further, so the walk
+    /// is at most as long as the volume, and a directory pointing at its own
+    /// ancestor is reported, not descended into for ever.
     ///
-    /// The tree is walked `max_tree_depth` deep, as removeTree is: the
-    /// recursion runs on a kernel stack with no guard page under it, and each
-    /// level holds a sector.
-    ///
-    /// Errors are the disk's (ReadFailed), or `seen` too short (TooBig). A
-    /// damaged volume is not an error: it is the answer.
+    /// Walked `max_tree_depth` deep; each level holds a sector of stack.
+    /// Errors are the disk's (ReadFailed), or `seen` too short (TooBig); a
+    /// damaged volume is not an error but the answer.
     pub fn check(
         self: *Volume,
         seen: []u8,
@@ -2820,7 +2534,6 @@ pub const Volume = struct {
         const len = self.checkBytes();
         @memset(seen[0..len], 0);
         var c = Checker(@TypeOf(context), each){ .vol = self, .seen = seen[0..len], .context = context };
-        // FAT32's root is a chain, held like any directory's.
         const root_clusters: u32 = if (self.kind == .fat32) try c.chain(self.root_cluster, null) else 0;
         if (self.kind == .fat16 or root_clusters > 0) try c.directory(0, 0, root_clusters, 0);
         try c.fatOnDisk();
@@ -2834,9 +2547,9 @@ pub const Volume = struct {
             context: Context,
             health: Health = .{},
             /// Some directory was not walked, so a leak cannot be told from
-            /// what it holds.
+            /// what it holds, and none is reported.
             stopped_short: bool = false,
-            /// The path being walked, for the findings: a name for each level.
+            /// The path being walked, for the findings.
             path: [max_tree_depth * (max_name + 1)]u8 = undefined,
             path_len: usize = 0,
 
@@ -2861,13 +2574,12 @@ pub const Volume = struct {
 
             /// Follows the chain from `first`, marking it, and answers how
             /// many clusters it holds before anything went wrong. `size` is a
-            /// file's length, which its chain must match; null for a directory.
+            /// file's, which its chain must match; null for a directory.
             fn chain(self: *Self, first: Cluster, size: ?u32) Error!u32 {
                 const v = self.vol;
                 const cluster_bytes = v.sectors_per_cluster * sector_size;
                 const need: u32 = if (size) |n| (n + cluster_bytes - 1) / cluster_bytes else 0;
                 if (first == 0) {
-                    // An empty file has no chain. A directory always has one.
                     if (size == null or need > 0) self.report(if (size == null) .broken else .short, 0, 0);
                     return 0;
                 }
@@ -2887,8 +2599,6 @@ pub const Volume = struct {
                     const next = try v.fatGet(cluster);
                     if (next >= v.chainEndValue()) break;
                     if (!v.inData(next)) {
-                        // Into a free cluster, past the last one, or into the
-                        // bad-cluster mark. `cluster` is the last one held.
                         self.report(.broken, cluster, 0);
                         self.health.used += n;
                         return n;
@@ -2913,20 +2623,19 @@ pub const Volume = struct {
                 return was;
             }
 
-            /// Lists the directory at `cluster` (0: the root), over the first
-            /// `clusters` clusters of its chain, which `chain` has already
-            /// followed and found sound, and checks everything in it.
+            /// Checks everything in the directory at `cluster` (0: the root),
+            /// over the first `clusters` clusters of its chain, which `chain`
+            /// has followed and found sound.
             fn directory(self: *Self, cluster: Cluster, parent: Cluster, clusters: u32, depth: u32) Error!void {
                 const v = self.vol;
-                // **A SECTOR OF ITS OWN**, not the volume's scratch: the walk
-                // of each entry's chain reads the FAT through the scratch.
+                // **A SECTOR OF ITS OWN**: without a held FAT, each entry's
+                // chain is read through `scratch`.
                 var sector: [sector_size]u8 align(16) = undefined;
                 var long: [max_name]u8 = undefined;
                 var long_len: usize = 0;
                 var long_sum: u8 = 0;
                 var long_ok = false;
 
-                // Only FAT16's root is a fixed run; FAT32's is a chain.
                 const fixed_root = cluster == 0 and v.kind == .fat16;
                 const sectors: u32 = if (fixed_root) v.root_sectors else clusters * v.sectors_per_cluster;
                 var at_cluster = v.dirStart(cluster);
@@ -2995,14 +2704,11 @@ pub const Volume = struct {
                 }
             }
 
-            /// The FAT as it sits on the disk: every copy against the first,
-            /// and every cluster in use against what the walk held.
+            /// Every copy on the disk against the first, every cluster in use
+            /// against what the walk held, and FSInfo's count against the
+            /// free clusters. Read `run_sectors` at a time.
             fn fatOnDisk(self: *Self) Error!void {
                 const v = self.vol;
-                // **IN RUNS, NOT A SECTOR A REQUEST**: each copy is read
-                // `run_sectors` at a time. A sector a request was two
-                // thousand requests a disk at every boot, the most of what a
-                // boot cost on metal-vmm.
                 var firsts: [run_sectors * sector_size]u8 align(16) = undefined;
                 var others: [run_sectors * sector_size]u8 align(16) = undefined;
                 var differ: u32 = 0;
@@ -3033,10 +2739,9 @@ pub const Volume = struct {
                     var k: u32 = 0;
                     while (k < n) : (k += 1) {
                         const s = base + k;
-                        // Leaks and the free count are the FAT the machine
-                        // uses: the one held, when it is held (a sector of
-                        // the first copy that reads wrong is not it, B26);
-                        // the copies are compared as the disk holds them.
+                        // Leaks and the free count by the FAT the machine
+                        // uses, the held one when there is one; the copies
+                        // were compared as the disk holds them.
                         const entries: *const [sector_size]u8 = if (v.fat) |fat| fat[s * sector_size ..][0..sector_size] else firsts[k * sector_size ..][0..sector_size];
                         var i: u32 = 0;
                         const per = v.entriesPerSector();
@@ -3081,11 +2786,9 @@ pub const Volume = struct {
         };
     }
 
-    /// A whole file into `out`, which must be large enough to hold it.
-    ///
-    /// It is readAt from zero, so that every probe that reads a whole file —
-    /// fat16, vfat, restore, stdio, append — also exercises the positional
-    /// read the application uses for Range requests.
+    /// A whole file into `out`, which must hold it; answers its size. It is
+    /// `readAt` from zero, so every whole-file read exercises the positional
+    /// read too.
     pub fn readFile(self: *Volume, entry: Entry, out: []u8) Error!usize {
         if (entry.isDirectory()) {
             props.reachable(@src(), "fat: a directory read as a file is refused, reading a file whole", null);
@@ -3097,21 +2800,13 @@ pub const Volume = struct {
         }
         const n = try self.readAt(entry, 0, out[0..entry.size]);
         if (n != entry.size) { // the chain ended before the size did
-            // `readAt` refuses a chain that ends early before it answers.
+            // `readAt` refuses a chain that ends early.
             props.@"unreachable"(@src(), "fat: a file's chain ends before its size, reading a file whole", null);
             return Error.BadChain;
         }
         return n;
     }
 
-    /// Up to `out.len` bytes starting at byte `offset`, stopping at the end of
-    /// the file. Answers how many were read: fewer than asked means the end was
-    /// reached, and an offset at or past the end reads nothing.
-    ///
-    /// The shape is `std.Io.File.readPositionalAll`, which chat_upload uses to
-    /// answer an HTTP Range request — a browser seeking in an image, or resuming
-    /// one. It walks the chain to the cluster `offset` falls in rather than
-    /// reading the file from the start and discarding.
     /// How a file sits on the disk.
     pub const Layout = struct {
         clusters: u32,
@@ -3121,9 +2816,8 @@ pub const Volume = struct {
         longest: u32,
     };
 
-    /// **FOR A PROBE TO CHECK ITS OWN COVERAGE**, and for telemetry: readAt
-    /// takes a different path at every break in a chain, and a probe whose
-    /// files happen to be contiguous is not testing that path at all.
+    /// **FOR A PROBE TO CHECK ITS OWN COVERAGE**: readAt takes another path
+    /// at every break in a chain, which contiguous files never test.
     pub fn layout(self: *Volume, entry: Entry) Error!Layout {
         var out = Layout{ .clusters = 0, .runs = 0, .longest = 0 };
         var cluster = entry.first_cluster;
@@ -3145,8 +2839,8 @@ pub const Volume = struct {
             out.longest = @max(out.longest, run);
             previous = cluster;
             cluster = (try self.nextCluster(cluster)) orelse break;
-            // A reserved cluster cannot come back from `nextCluster`; a
-            // loop can, and goes round until the count passes the volume.
+            // `nextCluster` refuses a reserved cluster; a loop goes round
+            // until the count passes the volume.
             if (cluster < 2) {
                 props.@"unreachable"(@src(), "fat: a file's layout finds a reserved cluster", null);
                 return Error.BadChain;
@@ -3159,6 +2853,10 @@ pub const Volume = struct {
         return out;
     }
 
+    /// Up to `out.len` bytes from byte `offset`, stopping at the file's end;
+    /// answers how many. An offset at or past the end reads nothing. The
+    /// shape of `std.Io.File.readPositionalAll`, for HTTP Range requests: it
+    /// walks the chain to `offset`'s cluster, reading nothing before it.
     pub fn readAt(self: *Volume, entry: Entry, offset: u32, out: []u8) Error!usize {
         if (entry.isDirectory()) {
             props.reachable(@src(), "fat: a directory read as a file is refused, reading at an offset", null);
@@ -3173,12 +2871,10 @@ pub const Volume = struct {
             props.reachable(@src(), "fat: a file's first cluster is outside the data", null);
             return Error.BadChain;
         }
-        // **A CHAIN THAT LOOPS IS REFUSED**, as a directory walk and an append
-        // refuse one. The read stops at the file's size, so without this a
-        // looped chain answers its earlier clusters' bytes again as the
-        // file's, with no error, to whoever asked for the file. `Loop` finds
-        // a loop within about two laps of it, so a file that ends inside
-        // those can still answer a repeated cluster: narrower, not closed.
+        // **A CHAIN THAT LOOPS IS REFUSED**: the read stops at the size, so a
+        // loop would answer earlier clusters' bytes again as the file's.
+        // `Loop` finds one within about two laps, so a file that ends inside
+        // those can still answer a repeated cluster.
         var loop = Loop{};
         try loop.pass(cluster);
         var skip = offset / cluster_bytes;
@@ -3195,18 +2891,15 @@ pub const Volume = struct {
             try loop.pass(cluster);
         }
 
-        // **A FILE IS READ AS RUNS.** A run is a cluster and every cluster
-        // after it whose number is one more than the last — the stretch of
-        // disk the file occupies without a gap. Whole sectors in a run go
-        // straight into `out` as one request; only a sector the read starts or
-        // ends inside goes through the scratch sector, because the device
-        // cannot deliver part of one.
+        // **A FILE IS READ AS RUNS** of consecutive clusters: whole sectors
+        // go straight into `out`, one request a run; only a sector the read
+        // starts or ends inside goes through `scratch`, since the device
+        // delivers whole sectors.
         var sector_in_cluster: u32 = (offset % cluster_bytes) / sector_size;
         var skip_in_sector: u32 = (offset % cluster_bytes) % sector_size;
         var got: usize = 0;
         const max_run = @max(1, virtio.Block.max_sectors / self.sectors_per_cluster);
         while (got < want) {
-            // How far this run goes, stopping once it holds all that is wanted.
             var run: u32 = 1;
             var last = cluster;
             var after: ?Cluster = null;
@@ -3267,13 +2960,13 @@ pub const Volume = struct {
     }
 };
 
-/// The write half.
+/// Empty, and used nowhere.
 pub const Writing = struct {};
 
-/// **THE CHECKSUM THAT TIES A LONG NAME TO ITS ENTRY.** Over the eleven bytes
-/// of the 8.3 alias, rotating right and adding, wrapping at each step. Getting
-/// this wrong produces a volume that looks fine to us and is rejected by every
-/// other reader, which is why `fsck.vfat` is in the check.
+/// **THE CHECKSUM THAT TIES A LONG NAME TO ITS ENTRY** (the specification's
+/// ChkSum): over the alias's eleven bytes, rotate right and add, wrapping.
+/// Wrong, a volume reads fine here and its long names are lost to every other
+/// reader; probe/run.sh has fsck.vfat judge it.
 fn shortChecksum(short: [11]u8) u8 {
     var sum: u8 = 0;
     for (short) |c| {
@@ -3282,18 +2975,15 @@ fn shortChecksum(short: [11]u8) u8 {
     return sum;
 }
 
-/// Where a long-name entry keeps its thirteen characters: three runs, because
-/// the layout has to dodge the fields a short entry uses.
+/// Where a long-name entry keeps its thirteen UCS-2 characters: LDIR_Name1,
+/// LDIR_Name2 and LDIR_Name3, around the fields a short entry uses.
 const long_offsets = [_]u8{ 1, 3, 5, 7, 9, 14, 16, 18, 20, 22, 24, 28, 30 };
 
-/// Takes one long-name entry. They arrive in reverse order -- the last part
-/// first -- so each is written at its sequence number's place.
+/// Takes one long-name entry. They arrive last part first, so each is
+/// written at its sequence number's place.
 fn takeLongPart(e: []const u8, out: *[max_name]u8, len: *usize, sum: *u8, ok: *bool) void {
     const seq = e[0] & 0x1F;
-    // As many parts as a name of max_name characters needs, which is what
-    // writeFileIn accepts: max_name / 13 rounded DOWN refused the last part
-    // of every name from 53 to 64 characters, so such a file was written and
-    // then found only under its 8.3 alias.
+    // As many parts as a `max_name` name needs, rounded UP.
     if (seq == 0 or seq > (max_name + 12) / 13) {
         ok.* = false;
         return;
@@ -3316,19 +3006,16 @@ fn takeLongPart(e: []const u8, out: *[max_name]u8, len: *usize, sum: *u8, ok: *b
             ok.* = false;
             return;
         }
-        // **ASCII ONLY.** Every name this filesystem has to hold is ASCII, and
-        // a character outside it is refused rather than mangled into one byte.
+        // **ASCII ONLY**: a character past it reads as '?' (and `aliasFor`
+        // refuses to write one).
         out[at] = if (c < 128) @intCast(c) else '?';
         if (at + 1 > len.*) len.* = at + 1;
     }
 }
 
-/// An on-disk 8.3 name, trimmed and dotted.
-/// A directory entry's first cluster, both halves: the low at 26..28 and the
-/// high at 20..22 (FAT32.md §6). On FAT16 the high half of every cluster is 0,
-/// which is also what the spec wants those bytes to hold there; so one
-/// writer serves both kinds, and a FAT32 file past cluster 65,535 is not the
-/// case that gets forgotten.
+/// A directory entry's first cluster, both halves: DIR_FstClusLO at 26..28,
+/// DIR_FstClusHI at 20..22. On FAT16 the high half is always 0, as the
+/// spec wants those bytes there, so one writer serves both kinds.
 fn putCluster(e: []u8, cluster: Cluster) void {
     e[26] = @truncate(cluster);
     e[27] = @truncate(cluster >> 8);
@@ -3341,12 +3028,14 @@ fn putLe16(out: *[2]u8, v: u16) void {
     out[1] = @truncate(v >> 8);
 }
 
-/// A time field then a date field, which is how both pairs sit on disk.
+/// A time field then a date field, as both pairs sit on disk.
 fn putDos(out: *[4]u8, d: Dos) void {
     putLe16(out[0..2], d.time);
     putLe16(out[2..4], d.date);
 }
 
+/// A short entry decoded: the 8.3 name trimmed and dotted. The FAT16 cluster
+/// half only; `Volume.entryFrom` adds FAT32's high half.
 fn decode(e: []const u8) Entry {
     var out: Entry = .{
         .name = [_]u8{0} ** 12,
@@ -3376,13 +3065,11 @@ fn decode(e: []const u8) Entry {
     }
     out.name_len = @intCast(n);
 
-    // **THE NT CASE BITS** (byte 12): Windows and mtools store a name that
-    // fits 8.3 in one case, `topic.md` or `TOPIC.md`, as its upper-case alias
-    // and no long name. Bit 3 says the base was lower case, bit 4 the
-    // extension. The name to show and to list is then that, put in `long`; a
-    // real long name, when `list` finds one, replaces it. `alias()` stays
-    // the alias. Linux's vfat writes a long name instead, and so does this
-    // file, so only a volume another system wrote has these.
+    // **THE NT CASE BITS** (DIR_NTRes): Windows and mtools store a name that
+    // fits 8.3 in one case per part, `topic.md`, as its upper-case alias and
+    // no long name; bit 3 says the base was lower case, bit 4 the extension.
+    // That name goes in `long`, and a real long name, if found, replaces it.
+    // This file writes a long name instead, as Linux's vfat does.
     const lower_base = e[12] & 0x08 != 0;
     const lower_ext = e[12] & 0x10 != 0;
     if (lower_base or lower_ext) {
@@ -3395,16 +3082,12 @@ fn decode(e: []const u8) Entry {
     return out;
 }
 
-/// A name as an 8.3 field: eight of base, three of extension, space padded and
-/// upper cased. A name that does not fit is refused rather than truncated --
-/// silently storing a different name than the one asked for is the classic
-/// FAT bug, and Cobblestone's own Fat16 carries a paragraph about having had
-/// it.
+/// A name as an 8.3 field: eight of base, three of extension, space padded
+/// and upper cased. A name that does not fit is refused, never truncated
+/// into a different name.
 ///
-/// **FITTING IS NOT ENOUGH; IT HAS TO SURVIVE THE ROUND TRIP.** `api-key` fits
-/// in eight characters and comes back as `API-KEY`, which is a different name.
-/// `needsLongName` is what decides, and it decides by asking whether the name
-/// reads back as itself.
+/// **FITTING IS NOT ENOUGH**: `api-key` fits and reads back as `API-KEY`.
+/// `needsLongName` decides, by whether the name reads back as itself.
 fn encode(name: []const u8) Error![11]u8 {
     var out = [_]u8{' '} ** 11;
     var dot: usize = name.len;
@@ -3424,9 +3107,8 @@ fn longParts(name: []const u8) u32 {
     return @intCast((name.len + 12) / 13);
 }
 
-/// Whether a name has to be stored as a long one. True when 8.3 cannot hold it
-/// at all, and true when 8.3 would hold something that reads back differently
-/// -- which is every name with a lowercase letter in it.
+/// Whether a name needs a long name: 8.3 cannot hold it, or would read back
+/// differently (any lower-case letter).
 fn needsLongName(name: []const u8) bool {
     const short = encode(name) catch return true;
     var dotted: [12]u8 = undefined;
@@ -3474,11 +3156,9 @@ fn eqlFold(a: []const u8, b: []const u8) bool {
 
 // ══ TESTS ════════════════════════════════════════════════════════════════════
 //
-// The pure half only — the packing of a date into the two 16-bit fields a
-// directory entry carries. **The expected on-disk words were computed by hand
-// from the format, and the round trip is checked against an INDEPENDENT
-// oracle**: probe/run.sh writes a volume on the machine and asks the Linux
-// VFAT driver what time it thinks those files were written.
+// The pure functions: DOS date packing, and long-name parts. The expected
+// words are computed by hand from the format; probe/run.sh checks the dates
+// against an independent oracle, the Linux VFAT driver.
 
 const testing = std.testing;
 
@@ -3548,10 +3228,8 @@ test "a date of zero is no date, whatever the time field says" {
 }
 
 test "on disk the time word comes first, then the date word" {
-    // The mutation this catches — the two words swapped — reads back through
-    // our own decoder as a date in 2023 and passes every test above. It is the
-    // Linux VFAT driver in probe/run.sh that noticed; this is the same
-    // question asked where it is cheap.
+    // The two words swapped read back through our own decoder as a date and
+    // pass every test above; this catches it.
     const when = Dos.fromUnix(1789641532);
     var e = [_]u8{0} ** dirent_size;
     putDos(e[22..26], when);
@@ -3588,8 +3266,6 @@ fn longEntriesFor(name: []const u8, sum: u8, out: [][32]u8) usize {
 }
 
 test "every name the writer accepts, the reader reads back whole" {
-    // writeFileIn takes names up to max_name; the reader must take as many
-    // long-name parts as such a name needs.
     var buf: [max_name]u8 = undefined;
     for (1..max_name + 1) |len| {
         for (buf[0..len], 0..) |*c, i| c.* = 'a' + @as(u8, @intCast(i % 26));
