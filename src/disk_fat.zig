@@ -1691,6 +1691,39 @@ pub const Volume = struct {
         return Dos.fromUnix(now);
     }
 
+    /// **WHERE AN OPERATION STANDS AGAINST ITS COMMIT**, the one sector write
+    /// of a directory entry. `before`: nothing the operation took is pointed
+    /// at, and a failure gives it back. `landed`: the entry is on the disk as
+    /// written. `unknown`: the commit's write was refused and the read that
+    /// would say whether it landed failed too, so what the operation took is
+    /// left taken, a counted leak (`leftLeaked`).
+    const Commit = enum { before, landed, unknown };
+
+    /// **A REFUSED COMMIT IS READ BACK, AND ONLY AN EXACT READ DECIDES.**
+    /// The disk may have taken a write it refused, and a caller cannot tell
+    /// from the answer. The entry at `at` in sector `lba` read back as
+    /// `written` landed; as `was`, it did not, and the operation is undone;
+    /// as anything else (rot, a read that failed) it is `unknown`, and what
+    /// the operation took is a counted leak, never given back under an entry
+    /// that may point at it.
+    fn commitRefused(self: *Volume, lba: u32, at: u32, was: *const [dirent_size]u8, written: *const [dirent_size]u8) Commit {
+        self.readSector(lba, self.scratch) catch {
+            self.leftLeaked();
+            return .unknown;
+        };
+        const now = self.scratch[at..][0..dirent_size];
+        if (std.mem.eql(u8, now, written)) {
+            props.reachable(@src(), "fat: a refused commit read back landed", null);
+            return .landed;
+        }
+        if (std.mem.eql(u8, now, was)) {
+            props.reachable(@src(), "fat: a refused commit read back did not land, and is undone", null);
+            return .before;
+        }
+        self.leftLeaked();
+        return .unknown;
+    }
+
     /// Tombstones the run's orphans, then writes the long-name parts and the
     /// short entry that closes them.
     fn writeEntry(
@@ -1701,10 +1734,10 @@ pub const Volume = struct {
         attr: u8,
         first: Cluster,
         size: u32,
-        /// Set true just before the short entry's write, the commit: a
-        /// caller may give back what it took on a failure before it, and
-        /// undoes nothing after.
-        committing: ?*bool,
+        /// Where the operation stands against the short entry's write, the
+        /// commit (`Commit`): the caller gives back what it took while it is
+        /// `before`, and undoes nothing once the entry landed.
+        commit: ?*Commit,
     ) Error!void {
         const parts = longParts(name);
         const sum = shortChecksum(short);
@@ -1749,6 +1782,7 @@ pub const Volume = struct {
         const slot = run.slots[next];
         try self.readSector(slot.lba, self.scratch);
         const e = self.scratch[slot.at..][0..dirent_size];
+        const was = e.*;
         @memset(e, 0);
         @memcpy(e[0..11], &short);
         e[11] = attr;
@@ -1762,8 +1796,12 @@ pub const Volume = struct {
         e[29] = @truncate(size >> 8);
         e[30] = @truncate(size >> 16);
         e[31] = @truncate(size >> 24);
-        if (committing) |c| c.* = true;
-        try self.writeSector(slot.lba, self.scratch);
+        const written = e.*;
+        self.writeSector(slot.lba, self.scratch) catch |err| {
+            if (commit) |c| c.* = self.commitRefused(slot.lba, slot.at, &was, &written);
+            return err;
+        };
+        if (commit) |c| c.* = .landed;
     }
 
     /// An 8.3 alias for a name. A name that reads back as itself in 8.3 is
@@ -1883,13 +1921,13 @@ pub const Volume = struct {
         const first = try self.allocChain(clusters, .{ .bytes = bytes.len });
         // A failure before the entry gives the chain back; a failure of the
         // entry's write may have landed, and leaves it.
-        var committing = false;
-        errdefer if (!committing) self.giveBack(first);
+        var commit: Commit = .before;
+        errdefer if (commit == .before) self.giveBack(first);
         if (bytes.len > 0) try self.writeChain(first, bytes);
 
         // The entry goes last: a stop before it loses the new file and
         // corrupts nothing.
-        try self.writeEntry(run, if (needs_long) name else name[0..0], short, 0x20, first, @intCast(bytes.len), &committing);
+        try self.writeEntry(run, if (needs_long) name else name[0..0], short, 0x20, first, @intCast(bytes.len), &commit);
     }
 
     /// **AN OVERWRITE COMMITS IN ONE SECTOR WRITE.** The new bytes go into a
@@ -1913,9 +1951,15 @@ pub const Volume = struct {
             self.giveBack(first);
             return err;
         };
-        var committing = false;
-        self.setEntry(old, first, @intCast(bytes.len), &committing) catch |err| {
-            if (!committing) self.giveBack(first);
+        var commit: Commit = .before;
+        self.setEntry(old, first, @intCast(bytes.len), &commit) catch |err| {
+            switch (commit) {
+                .before => self.giveBack(first),
+                // The entry points at the new chain: the old one is the
+                // cleanup, as after a commit that answered.
+                .landed => self.afterCommit(self.freeChain(old.first_cluster)),
+                .unknown => {},
+            }
             return err;
         };
         self.afterCommit(self.freeChain(old.first_cluster));
@@ -1947,8 +1991,8 @@ pub const Volume = struct {
         // fail, and a cluster freed under it would be given to two. So a
         // failure from there leaves it taken, a leak if the entry did not
         // land.
-        var committing = false;
-        errdefer if (!committing) self.giveBack(cluster);
+        var commit: Commit = .before;
+        errdefer if (commit == .before) self.giveBack(cluster);
         @memset(self.scratch, 0);
         var s: u32 = 0;
         while (s < self.sectors_per_cluster) : (s += 1) {
@@ -1967,7 +2011,7 @@ pub const Volume = struct {
         putCluster(dotdot, dir_cluster);
         try self.writeSector(self.clusterSector(cluster), self.scratch);
 
-        try self.writeEntry(run, if (needs_long) name else name[0..0], short, attr_directory, cluster, 0, &committing);
+        try self.writeEntry(run, if (needs_long) name else name[0..0], short, attr_directory, cluster, 0, &commit);
         return cluster;
     }
 
@@ -2059,8 +2103,8 @@ pub const Volume = struct {
         // A chain made here is the file's only once `setEntry` is tried (the
         // commit); before, a failure gives it back. After, nothing is undone.
         var fresh = false;
-        var committing = false;
-        errdefer if (fresh and !committing) self.giveBack(first);
+        var commit: Commit = .before;
+        errdefer if (fresh and commit == .before) self.giveBack(first);
         if (have == 0 and first == 0) {
             first = try self.allocChain(need, .{ .bytes = new_size });
             fresh = true;
@@ -2084,7 +2128,7 @@ pub const Volume = struct {
         }
 
         try self.writeAt(first, offset, bytes);
-        try self.setEntry(entry, first, new_size, &committing);
+        try self.setEntry(entry, first, new_size, &commit);
     }
 
     /// A chain's last cluster, and how many clusters it holds.
@@ -2213,15 +2257,16 @@ pub const Volume = struct {
 
     /// Writes a file's size and first cluster into its entry, in place, at
     /// `entry.lba`/`entry.slot`: the commit of an append or an overwrite.
-    /// `committing` turns true just before the sector write: a failure
-    /// before it (the read) is before the commit, and the caller may undo.
-    fn setEntry(self: *Volume, entry: Entry, first_cluster: Cluster, size: u32, committing: *bool) Error!void {
+    /// A failure of the read before it leaves `commit` `before`; a refused
+    /// write is read back (`commitRefused`).
+    fn setEntry(self: *Volume, entry: Entry, first_cluster: Cluster, size: u32, commit: *Commit) Error!void {
         if (entry.lba == 0) { // never located; refuse to guess
             props.@"unreachable"(@src(), "fat: an entry never located is written back", null);
             return Error.NotFound;
         }
         try self.readSector(entry.lba, self.scratch);
         const e = self.scratch[entry.slot..][0..dirent_size];
+        const was = e.*;
         // **A WRITE MOVES THE MODIFICATION TIME** (and the access date);
         // the creation time stays.
         const when = self.stamp();
@@ -2232,8 +2277,12 @@ pub const Volume = struct {
         e[29] = @truncate(size >> 8);
         e[30] = @truncate(size >> 16);
         e[31] = @truncate(size >> 24);
-        committing.* = true;
-        try self.writeSector(entry.lba, self.scratch);
+        const written = e.*;
+        self.writeSector(entry.lba, self.scratch) catch |err| {
+            commit.* = self.commitRefused(entry.lba, entry.slot, &was, &written);
+            return err;
+        };
+        commit.* = .landed;
     }
 
     /// The cluster of a path's parent directory, plus the final component:

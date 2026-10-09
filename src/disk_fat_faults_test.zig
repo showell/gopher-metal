@@ -927,76 +927,101 @@ test "a disk that lies (a write that lands nothing or half, a read of other byte
     try testing.expect(runs > 1000);
 }
 
-test "a request that fails as an append links its clusters leaves no lost cluster uncounted: given back, or counted a leak" {
-    // An append takes its new clusters, then links them on after the file's
-    // last. A refused link must not leave them allocated and unreferenced
-    // with nothing said: given back if the disk still ends the chain where
-    // it did, else counted (`cleanups_failed`), as grow's link does.
-    const first = [_]u8{'a'} ** 600;
-    const more = [_]u8{'m'} ** (3 * 512 + 100);
-    for (configs) |cfg| {
-        if (cfg.shape.kind != .fat16) continue;
-        const d = try Disk.makeUnkept("limit-append-link", cfg.shape, cfg.cached);
-        defer d.deinit();
-        _ = try d.vol.makePath("data");
-        try d.vol.writeFile("data/LOG", &first);
-        const before = try testing.allocator.dupe(u8, d.bytes);
-        defer testing.allocator.free(before);
-        try d.mount(cfg.cached);
-        const r0 = d.blk.requests;
-        try d.vol.writeInto("data/LOG", first.len, &more);
-        const total = d.blk.requests - r0;
-        var n: u64 = 0;
-        while (n < total) : (n += 1) {
-            @memcpy(d.bytes, before);
-            try d.mount(cfg.cached);
-            d.blk.fault = .{ .at = d.blk.requests + n, .kind = .fails };
-            d.vol.writeInto("data/LOG", first.len, &more) catch {};
-            d.blk.fault = null;
-            const counted = d.vol.cleanups_failed;
-            try d.mount(cfg.cached);
-            const r = try d.check();
-            if (r.health.leaked > 0 and counted == 0) {
-                std.debug.print("an append (FAT {s}): request {d} of {d} refused; {d} clusters lost and none counted\n", .{ if (cfg.cached) "held" else "on disk", n, total, r.health.leaked });
-                return error.TestUnexpectedResult;
-            }
-        }
-    }
-}
+/// One operation whose failure is judged for lost clusters: what it starts
+/// from (`setup`) and what it does (`run`).
+const LeakOp = struct {
+    name: []const u8,
+    setup: *const fn (v: *disk_fat.Volume) anyerror!void,
+    run: *const fn (v: *disk_fat.Volume) anyerror!void,
+};
 
-test "a request that fails as an empty file takes its first clusters leaves no lost cluster uncounted: given back before the entry points at them" {
-    // An empty file has no chain: its first write allocates one, writes the
-    // bytes into it, then points the entry at it (the commit). A failure
-    // before the commit must give the chain back.
-    const bytes = [_]u8{'e'} ** (2 * 512 + 100);
-    for (configs) |cfg| {
-        if (cfg.shape.kind != .fat16) continue;
-        const d = try Disk.makeUnkept("limit-empty-first", cfg.shape, cfg.cached);
-        defer d.deinit();
-        _ = try d.vol.makePath("data");
-        try d.vol.writeFile("data/EMPTY", "");
-        const before = try testing.allocator.dupe(u8, d.bytes);
-        defer testing.allocator.free(before);
-        try d.mount(cfg.cached);
-        const r0 = d.blk.requests;
-        try d.vol.writeInto("data/EMPTY", 0, &bytes);
-        const total = d.blk.requests - r0;
-        var n: u64 = 0;
-        while (n < total) : (n += 1) {
-            @memcpy(d.bytes, before);
-            try d.mount(cfg.cached);
-            d.blk.fault = .{ .at = d.blk.requests + n, .kind = .fails };
-            d.vol.writeInto("data/EMPTY", 0, &bytes) catch {};
-            d.blk.fault = null;
-            const counted = d.vol.cleanups_failed;
-            try d.mount(cfg.cached);
-            const r = try d.check();
-            // The last request is the commit's own write: refused, it may
-            // have landed, so nothing is undone, and what it leaves is what a
-            // stop there leaves, which the check finds.
-            if (r.health.leaked > 0 and counted == 0 and n != total - 1) {
-                std.debug.print("an empty file's first write (FAT {s}): request {d} of {d} refused; {d} clusters lost and none counted\n", .{ if (cfg.cached) "held" else "on disk", n, total, r.health.leaked });
-                return error.TestUnexpectedResult;
+const leak_first = [_]u8{'a'} ** 600;
+const leak_more = [_]u8{'m'} ** (3 * 512 + 100);
+
+const leak_ops = [_]LeakOp{
+    .{ .name = "a new file", .setup = struct {
+        fn f(v: *disk_fat.Volume) anyerror!void {
+            _ = try v.makePath("data");
+        }
+    }.f, .run = struct {
+        fn f(v: *disk_fat.Volume) anyerror!void {
+            try v.writeFile("data/NEW.DAT", &leak_more);
+        }
+    }.f },
+    .{ .name = "a new directory", .setup = struct {
+        fn f(v: *disk_fat.Volume) anyerror!void {
+            _ = try v.makePath("data");
+        }
+    }.f, .run = struct {
+        fn f(v: *disk_fat.Volume) anyerror!void {
+            _ = try v.makePath("data/sub");
+        }
+    }.f },
+    .{ .name = "an overwrite", .setup = struct {
+        fn f(v: *disk_fat.Volume) anyerror!void {
+            _ = try v.makePath("data");
+            try v.writeFile("data/LOG", &leak_first);
+        }
+    }.f, .run = struct {
+        fn f(v: *disk_fat.Volume) anyerror!void {
+            try v.writeFile("data/LOG", &leak_more);
+        }
+    }.f },
+    .{ .name = "an append", .setup = struct {
+        fn f(v: *disk_fat.Volume) anyerror!void {
+            _ = try v.makePath("data");
+            try v.writeFile("data/LOG", &leak_first);
+        }
+    }.f, .run = struct {
+        fn f(v: *disk_fat.Volume) anyerror!void {
+            try v.writeInto("data/LOG", leak_first.len, &leak_more);
+        }
+    }.f },
+    .{ .name = "an empty file's first write", .setup = struct {
+        fn f(v: *disk_fat.Volume) anyerror!void {
+            _ = try v.makePath("data");
+            try v.writeFile("data/EMPTY", "");
+        }
+    }.f, .run = struct {
+        fn f(v: *disk_fat.Volume) anyerror!void {
+            try v.writeInto("data/EMPTY", 0, &leak_more);
+        }
+    }.f },
+};
+
+test "a request that fails or lies leaves no cluster lost uncounted, its commit included" {
+    // Before the commit, what an operation took is given back; a refused
+    // commit is read back, and given back if it did not land; after it, a
+    // failed cleanup is counted (`cleanups_failed`). So a check after any
+    // one failed request finds no leaked cluster that was not counted.
+    for (leak_ops) |op| {
+        for ([_]@FieldType(@import("virtio.zig").Block.Fault, "kind"){ .fails, .lands_and_fails }) |kind| {
+            for (configs) |cfg| {
+                if (cfg.shape.kind != .fat16) continue;
+                const d = try Disk.makeUnkept("limit-no-lost", cfg.shape, cfg.cached);
+                defer d.deinit();
+                try op.setup(&d.vol);
+                const before = try testing.allocator.dupe(u8, d.bytes);
+                defer testing.allocator.free(before);
+                try d.mount(cfg.cached);
+                const r0 = d.blk.requests;
+                try op.run(&d.vol);
+                const total = d.blk.requests - r0;
+                var n: u64 = 0;
+                while (n < total) : (n += 1) {
+                    @memcpy(d.bytes, before);
+                    try d.mount(cfg.cached);
+                    d.blk.fault = .{ .at = d.blk.requests + n, .kind = kind };
+                    op.run(&d.vol) catch {};
+                    d.blk.fault = null;
+                    const counted = d.vol.cleanups_failed;
+                    try d.mount(cfg.cached);
+                    const r = try d.check();
+                    if (r.health.leaked > 0 and counted == 0) {
+                        std.debug.print("{s} (FAT {s}, {t}): request {d} of {d}; {d} clusters lost and none counted\n", .{ op.name, if (cfg.cached) "held" else "on disk", kind, n, total, r.health.leaked });
+                        return error.TestUnexpectedResult;
+                    }
+                }
             }
         }
     }
