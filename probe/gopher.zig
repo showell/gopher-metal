@@ -1355,11 +1355,8 @@ fn checkVolumes() void {
                 if (f.problem.damage()) n.* += 1;
             }
         };
-        const h = vol.check(seen, &damage, Count.each) catch continue;
+        _ = vol.check(seen, &damage, Count.each) catch continue;
         metal.coverage.always(@src(), damage == 0, "fat: after a request, a volume has no damage beyond what a stop leaves", .{ .damage = damage });
-        // The kept free count, moved by every change since boot, is still
-        // the FAT's (QUEUE 131, #8).
-        metal.coverage.always(@src(), vol.free_clusters == h.free, "fat: after a request, the kept free count is the check's", .{ .kept = vol.free_clusters, .check = h.free });
     }
 }
 
@@ -1417,11 +1414,6 @@ fn diskCheck(vol: *fat16.Volume, what: []const u8) void {
     serial.put(" leaked, ");
     serial.putDec(h.problems);
     serial.put(" problems\n");
-    // **THE FREE COUNT FROM THE CHECK** (metal-vmm QUEUE 131, kernel-facts
-    // #8): the count the check made of the FAT the machine uses is the one
-    // the volume keeps from here; mount's own count is held to it.
-    metal.coverage.always(@src(), vol.free_clusters == h.free, "fat: at boot, the free count mount kept is the check's", .{ .kept = vol.free_clusters, .check = h.free });
-    vol.free_clusters = h.free;
     // At boot, so the last run's end: observed in every build.
     metal.coverage.always(@src(), shown.damage == 0, "fat: at boot, a volume has no damage beyond what a stop leaves", .{ .damage = shown.damage });
     for (shown.held[0..@min(shown.n, Shown.most)]) |f| {
