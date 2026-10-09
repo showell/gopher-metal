@@ -209,6 +209,29 @@ test "a full disk refuses the write, and the refused write leaves nothing behind
     }
 }
 
+test "a full disk refuses a write over a file, and the old file stays whole" {
+    for (both) |cached| {
+        // Room for the old file's chain and not for a second one beside it:
+        // the overwrite needs both at once (essay kernel-facts #1).
+        const d = try Disk.make("full-overwrite", .{ .sectors = 4085 + 1 + 2 * 17 + 32 }, cached);
+        defer d.deinit();
+        const big = try testing.allocator.alloc(u8, 1 << 20);
+        defer testing.allocator.free(big);
+        _ = pattern(big, 3);
+        try d.vol.writeFile("one", big); // 2,048 clusters
+        const before = d.free();
+        _ = pattern(big, 4);
+        try testing.expectError(fat16.Error.Full, d.vol.writeFile("one", big));
+        try testing.expectEqual(before, d.free());
+        _ = pattern(big, 3);
+        try d.expectFile("one", big);
+        // A smaller one fits beside it, and takes the old one's place.
+        try d.vol.writeFile("one", big[0..1000]);
+        try d.expectFile("one", big[0..1000]);
+        try testing.expect(d.fatsAgree());
+    }
+}
+
 test "a chain that runs into a free cluster is a broken chain, not a short file" {
     for (configs) |cfg| {
         const shape, const cached = .{ cfg.shape, cfg.cached };
