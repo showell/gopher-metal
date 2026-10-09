@@ -21,8 +21,8 @@
 //!   entry by entry (`keepCount`); `derive()` recomputes it.
 //! - `alloc_hint`: a hint. Wrong costs a longer search or a different free
 //!   cluster, never a used one (`allocChain`).
-//! - `fsinfo_unknown`: a cache of "FSInfo's hints say unknown on the disk".
-//!   False at every mount, so each mount writes FSInfo once.
+//! - `fsinfo`: a cache of "FSInfo's hints say unknown on the disk".
+//!   `as_mounted` at every mount, so each mount writes FSInfo once.
 //! - `dirs`: a cache of sectors, exact or absent: a write that succeeds
 //!   updates what it holds, a write that fails drops it.
 //! - `scratch`, `dir_burst`, a `Lister`'s sector: buffers in motion, meaning
@@ -296,10 +296,11 @@ pub const Volume = struct {
     /// (BPB_BkBootSec, its FSInfo copy the sector after it).
     fsinfo_sector: u32 = 0,
     backup_boot: u32 = 0,
-    /// **A CACHE OF A FACT ON THE DISK**: this mount has marked FSInfo's
-    /// hints unknown (`forgetFsInfo`). Set only once the writes have landed;
-    /// never re-read, since nothing else on this machine writes FSInfo.
-    fsinfo_unknown: bool = false,
+    /// **A CACHE OF A FACT ON THE DISK**: whether this mount has marked
+    /// FSInfo's hints unknown (`forgetFsInfo`). `said_unknown` only once the
+    /// writes have landed; never re-read, since nothing else on this machine
+    /// writes FSInfo.
+    fsinfo: enum { as_mounted, said_unknown } = .as_mounted,
     /// The highest cluster number the data region holds.
     max_cluster: Cluster,
     /// **HOW MANY CLUSTERS ARE FREE: DERIVED, AND MOVED.** Derived from the
@@ -1325,10 +1326,10 @@ pub const Volume = struct {
     /// Linux recomputes a hint that says unknown; one set and wrong is what
     /// fsck.fat reports. A sector without FSInfo's signatures is skipped.
     ///
-    /// `fsinfo_unknown` is set only after every write has landed; a failure
+    /// `fsinfo` is `said_unknown` only after every write has landed; a failure
     /// is the change's error, and the next change tries again.
     fn forgetFsInfo(self: *Volume) Error!void {
-        if (self.kind != .fat32 or self.fsinfo_unknown) return;
+        if (self.kind != .fat32 or self.fsinfo == .said_unknown) return;
         for ([_]u32{ self.fsinfo_sector, self.backup_boot + 1 }) |lba| {
             if (lba == 0 or lba >= self.fat_start) continue; // no such sector in the reserved area
             try self.readSector(lba, self.scratch);
@@ -1338,7 +1339,7 @@ pub const Volume = struct {
             try self.writeSector(lba, self.scratch);
         }
         props.reachable(@src(), "fat: a FAT32 volume's FSInfo count is let go", null);
-        self.fsinfo_unknown = true;
+        self.fsinfo = .said_unknown;
     }
 
     /// Moves `free_clusters` for one FAT entry going from `old` to `new`:
