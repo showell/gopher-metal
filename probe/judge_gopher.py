@@ -997,6 +997,25 @@ def keep_coverage_lines(text: str):
                 f.write(l[len("coverage: "):].rstrip("\r") + "\n")
 
 
+def use_up_requests(qemu, port: int, at_most: int) -> None:
+    """**A BOOT ENDS AT ITS REQUEST LIMIT, NOT AT finish_kernel's 60 s.** A
+    story that sends fewer requests than its boot's `requests =` leaves the
+    guest serving, and finish_kernel then waits a minute and kills it, which
+    also hides a guest that hangs. After the story, this asks `/version` until
+    the guest stops on its own, at most `at_most` times; the gate then holds
+    the exit to 1, the clean stop."""
+    for _ in range(at_most):
+        if qemu.poll() is not None:
+            return
+        try:
+            conn = http.client.HTTPConnection("127.0.0.1", port, timeout=10)
+            conn.request("GET", "/version")
+            conn.getresponse().read()
+            conn.close()
+        except OSError:
+            return
+
+
 def finish_kernel(qemu, serial: str, damaged: bool = False):
     try:
         code = qemu.wait(timeout=60)
@@ -2321,12 +2340,14 @@ def login_throttle_failures(elf, linux_bin, content, pristine, work, mnt, report
         scratch = tempfile.mkdtemp(dir=work)
         image = os.path.join(scratch, "disk.img")
         shutil.copy(pristine, image)
-        disk_write(image, mnt, "gopher-metal.conf", request_limit_text(image, 60))
+        disk_write(image, mnt, "gopher-metal.conf", request_limit_text(image, 30))
         qemu, port, serial = start_kernel(elf, image, scratch)
         try:
             fn("metal", port)
+            use_up_requests(qemu, port, 30)
         finally:
-            finish_kernel(qemu, serial)
+            code, _ = finish_kernel(qemu, serial)
+        expect(code == 1, f"metal: the guest exited {code}, not at its request limit")
         shutil.rmtree(scratch, ignore_errors=True)
 
     def on_linux(fn):
@@ -2455,13 +2476,16 @@ def retire_failures(elf, linux_bin, content, pristine, work, mnt, gopher_root, r
         fixture(root)
         image = os.path.join(scratch, "disk.img")
         build_disk(image, root, os.path.join(scratch, "mnt"))
-        set_request_limit(image, 300, os.path.join(scratch, "mnt"), idle_timeout_ms=60000)
+        set_request_limit(image, 30, os.path.join(scratch, "mnt"), idle_timeout_ms=60000)
         qemu, port, serial = start_kernel(elf, image, scratch)
         try:
-            return drive("metal", port)
+            got = drive("metal", port)
+            use_up_requests(qemu, port, 30)
         finally:
-            finish_kernel(qemu, serial)
+            code, _ = finish_kernel(qemu, serial)
             shutil.rmtree(scratch, ignore_errors=True)
+        expect(code == 1, f"metal: the guest exited {code}, not at its request limit")
+        return got
 
     def on_linux():
         root = tempfile.mkdtemp(dir=work)
@@ -2533,10 +2557,13 @@ def secret_failures(elf, linux_bin, content, pristine, work, mnt, gopher_root, r
         set_request_limit(image, 5, os.path.join(scratch, "mnt"), idle_timeout_ms=60000)
         qemu, port, serial = start_kernel(elf, image, scratch)
         try:
-            return chat_status(port)
+            got = chat_status(port)
+            use_up_requests(qemu, port, 5)
         finally:
-            finish_kernel(qemu, serial)
+            code, _ = finish_kernel(qemu, serial)
             shutil.rmtree(scratch, ignore_errors=True)
+        expect(code == 1, f"metal: the guest exited {code}, not at its request limit")
+        return got
 
     def on_linux(where):
         root = tempfile.mkdtemp(dir=work)

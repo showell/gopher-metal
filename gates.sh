@@ -55,8 +55,11 @@ mkdir -p "$VERDICTS"
 # The limits angry-gopher's store copies from fat16.zig and io.zig: a
 # second, so first (tools/check_limits.py).
 python3 tools/check_limits.py "$GOPHER_ROOT/zig-server/src" || failed+=(limits)
-zig build test --summary all 2>&1 | grep -E "tests passed|error"
-[ "${PIPESTATUS[0]}" = 0 ] || failed+=(test)
+# The whole summary is kept: each test binary's time is in it, and this step
+# is the gates' longest.
+zig build test --summary all > "$VERDICTS/test-summary.txt" 2>&1
+[ $? = 0 ] || failed+=(test)
+grep -E "tests passed|error" "$VERDICTS/test-summary.txt"
 lap "zig build test"
 zig build kernels 2>&1 | grep error
 [ "${PIPESTATUS[0]}" = 0 ] || failed+=(kernels)
