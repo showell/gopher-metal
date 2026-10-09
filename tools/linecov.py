@@ -117,13 +117,15 @@ def main(argv: list) -> int:
     for b in binaries:
         table = line_table(b, source)
         if not table:
-            print(f"linecov: {b} has no lines of {source}")
-            return 2
+            continue  # another binary's tests reach this file, not this one's
         have |= {n for n in set().union(*table.values()) if text[n - 1].strip() != "}"}
         hit, code = run(b, table)
         ran |= hit
         if code != 0:
             print(f"linecov: {os.path.basename(b)} exited {code}: its coverage is short")
+    if not have:
+        print(f"linecov: none of the {len(binaries)} binaries has a line of {source}")
+        return 2
     ran &= have
     missed = sorted(have - ran)
     print(f"{source}: {len(ran)} of {len(have)} lines with code ran "

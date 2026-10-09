@@ -264,6 +264,13 @@ pub fn build(b: *std.Build) void {
     // tools/linecov.py; the lines with code that none of them ran are listed.
     const tcp_coverage = b.addSystemCommand(&.{ "python3", "tools/linecov.py", "src/tcp.zig" });
     b.step("tcp-coverage", "the lines of tcp.zig its unit tests never run").dependOn(&tcp_coverage.step);
+    // The same for the FAT: disk_fat.zig and disk_fat_dirent.zig, over their
+    // own tests, disk_fat_test and the faults and lies binaries.
+    const fat_coverage = b.addSystemCommand(&.{ "python3", "tools/linecov.py", "src/disk_fat.zig" });
+    const dirent_coverage = b.addSystemCommand(&.{ "python3", "tools/linecov.py", "src/disk_fat_dirent.zig" });
+    const fat_coverage_step = b.step("fat-coverage", "the lines of disk_fat.zig and disk_fat_dirent.zig their unit tests never run");
+    fat_coverage_step.dependOn(&fat_coverage.step);
+    fat_coverage_step.dependOn(&dirent_coverage.step);
     for ([_][]const u8{ "src/rtc.zig", "src/pit.zig", "src/stack.zig", "src/civil.zig", "src/disk_fat.zig", "src/disk_fat_dirent.zig", "src/pvh.zig", "src/pages.zig", "src/tcp.zig", "src/tcp_check.zig", "src/tcp_sim.zig", "src/fat_sim.zig", "src/page_sim.zig", "src/pure_sim.zig", "src/ready_sim.zig", "src/durable_sim.zig", "src/durable.zig", "src/scsi_mode.zig", "src/floor_sim.zig", "src/store.zig", "src/store_model.zig", "src/store_test.zig", "src/store_linux.zig", "src/store_sim.zig", "src/scratch_dir.zig", "src/io_test.zig", "src/log_ring.zig", "src/restart.zig", "src/kept_log.zig", "src/ready.zig", "src/request_heap.zig", "src/page_cache.zig", "src/admin_reset.zig", "droplet/image.zig", "src/dhcp.zig", "src/screen.zig", "src/serial_gate.zig", "src/net.zig" }) |path| {
         if (test_file) |only| if (!std.mem.eql(u8, only, path)) continue;
         test_file_found = true;
@@ -278,6 +285,10 @@ pub fn build(b: *std.Build) void {
             },
         }) });
         test_step.dependOn(&b.addRunArtifact(unit).step);
+        if (std.mem.eql(u8, path, "src/disk_fat.zig") or std.mem.eql(u8, path, "src/disk_fat_dirent.zig")) {
+            fat_coverage.addArtifactArg(unit);
+            dirent_coverage.addArtifactArg(unit);
+        }
     }
     // The test files built on their own, below.
     for ([_][]const u8{ "src/disk_fat_test.zig", "src/disk_fat_faults_test.zig", "src/tcp_test.zig" }) |path| {
@@ -453,6 +464,8 @@ pub fn build(b: *std.Build) void {
         }),
     });
     if (wanted(test_file, "src/disk_fat_test.zig")) test_step.dependOn(&b.addRunArtifact(disk_fat_unit).step);
+    fat_coverage.addArtifactArg(disk_fat_unit);
+    dirent_coverage.addArtifactArg(disk_fat_unit);
     // The stops and the lying disk (QUEUE.md items 79-80): hundreds of runs
     // each, so binaries of their own, run beside disk_fat_test's: one for the
     // stops and the failed requests, one for the lies. Every test in the file
@@ -477,6 +490,8 @@ pub fn build(b: *std.Build) void {
             }),
         });
         if (wanted(test_file, "src/disk_fat_faults_test.zig")) test_step.dependOn(&b.addRunArtifact(unit).step);
+        fat_coverage.addArtifactArg(unit);
+        dirent_coverage.addArtifactArg(unit);
     }
 
     const starts = [_]struct { isn: u32, peer: u32 }{
