@@ -47,6 +47,7 @@ pub fn build(b: *std.Build) void {
     // below, so an assertion in code nothing calls is still reported; every
     // module that compiles one of them imports both.
     const sdk = b.dependency("zig_coverage_sdk", .{});
+    pinnedSdk(b, sdk.builder.build_root.path orelse ".");
     const coverage = sdk.module("coverage");
     coverage.red_zone = false;
     // The seed explorer (zig-coverage-sdk's explore.zig): simulators only.
@@ -522,4 +523,30 @@ fn commitOf(b: *std.Build, dir: []const u8) []const u8 {
     const short = std.mem.trim(u8, head, " \n");
     const status = b.runAllowFail(&.{ "git", "-C", dir, "status", "--porcelain", "--untracked-files=no" }, &code, .ignore) catch return short;
     return if (std.mem.trim(u8, status, " \n").len == 0) short else b.fmt("{s}+dirty", .{short});
+}
+
+/// **THE COVERAGE SDK IS PINNED** (Steve, 2026-10-10): build.zig.zon names
+/// it by path, a sibling checkout, so a build used whatever commit that
+/// checkout held. A cloud session ran a day of tests against one from
+/// before `on_broken`, which fails a unit test at a property it breaks,
+/// and nothing said so. The checkout's HEAD must be this commit, or the
+/// build stops and names both. Moving the SDK is moving this line, in the
+/// same commit as whatever needed the move.
+/// `-Dcoverage-sdk-unpinned` builds against any commit, and says so.
+const coverage_sdk_pin = "c7baca92b046b2afb0ea059ef2662096871a2f66";
+
+fn pinnedSdk(b: *std.Build, sdk_path: []const u8) void {
+    const unpinned = b.option(bool, "coverage-sdk-unpinned", "build against whatever commit ../zig-coverage-sdk holds, not the one build.zig pins") orelse false;
+    var code: u8 = undefined;
+    const out = b.runAllowFail(&.{ "git", "-C", sdk_path, "rev-parse", "HEAD" }, &code, .ignore) catch |e| {
+        if (unpinned) return;
+        std.process.fatal("the coverage SDK at {s}: its commit cannot be read ({t}); build.zig pins {s} (-Dcoverage-sdk-unpinned builds without the check)", .{ sdk_path, e, coverage_sdk_pin });
+    };
+    const head = std.mem.trim(u8, out, " \t\r\n");
+    if (std.mem.eql(u8, head, coverage_sdk_pin)) return;
+    if (unpinned) {
+        std.debug.print("the coverage SDK at {s} is at {s}, not the pinned {s}: building anyway (-Dcoverage-sdk-unpinned)\n", .{ sdk_path, head, coverage_sdk_pin });
+        return;
+    }
+    std.process.fatal("the coverage SDK at {s} is at {s}, but build.zig pins {s}: `git -C {s} fetch && git -C {s} checkout {s}`, or move the pin with the change that needs it (-Dcoverage-sdk-unpinned builds anyway)", .{ sdk_path, head, coverage_sdk_pin, sdk_path, sdk_path, coverage_sdk_pin });
 }
