@@ -904,8 +904,10 @@ pub fn runSeed(seed: u64) !void {
     }
 }
 
-/// The seeds `zig build test` runs.
-const seeds = [_]u64{ 1, 2, 3, 4, 5, 6, 7, 8 };
+/// The seeds `zig build test` runs, plain and with probes. `zig build
+/// properties` sweeps 1..20 of both (it was 1..8 here until metal-vmm QUEUE
+/// 136: a quick test is a smoke test, and the sweep is the coverage).
+const seeds = [_]u64{ 1, 2 };
 
 /// **SEEDS THAT ONCE FAILED**, each under what it found. Run by
 /// `zig build properties` (src/properties.zig) on every sweep, not by
@@ -948,25 +950,34 @@ test "fat16: the deepest tree makePath makes is one check and removeTree take" {
     try testing.expect(after.health.clean());
 }
 
-test "the same, with probes of what the volume must refuse, a handful of seeds" {
-    for (1..9) |seed| try runProbeSeed(seed);
+test "the same, with probes of what the volume must refuse, two seeds (properties: 1..20)" {
+    for (seeds) |seed| try runProbeSeed(seed);
 }
 
-test "FAT16 and FAT32 against a random workload, a handful of seeds, both FAT paths" {
+test "FAT16 and FAT32 against a random workload, two seeds (properties: 1..20), both FAT paths" {
     for (seeds) |seed| try runSeed(seed);
 }
 
+/// **A RUN UNDER A TAPE REPLAYS EXACTLY**: the same draws, the same volume,
+/// for one seed. `zig build test` runs `replay_seeds`; `zig build properties`
+/// runs every seed to 40 at least, as `test` did until it cost 135 s of a
+/// Debug run (metal-vmm QUEUE 136).
+pub fn replaysExactly(seed: u64) !void {
+    var first = explore.Tape.init(testing.allocator, seed);
+    defer first.deinit();
+    const a = try runWith(&first);
+    var again = explore.Tape.branch(testing.allocator, &first, first.position(), seed +% 0x9999, null);
+    defer again.deinit();
+    const b = try runWith(&again);
+    try testing.expectEqual(a, b);
+    try testing.expect(!again.drifted);
+    try testing.expectEqualSlices(u8, first.bytes.items, again.bytes.items);
+    try testing.expectEqual(first.choices.items.len, again.choices.items.len);
+}
+
+/// The replays `zig build test` runs (`replaysExactly`).
+const replay_seeds = [_]u64{1};
+
 test "a run under a tape replays exactly: the same draws, the same volume" {
-    for (1..41) |seed| {
-        var first = explore.Tape.init(testing.allocator, seed);
-        defer first.deinit();
-        const a = try runWith(&first);
-        var again = explore.Tape.branch(testing.allocator, &first, first.position(), seed +% 0x9999, null);
-        defer again.deinit();
-        const b = try runWith(&again);
-        try testing.expectEqual(a, b);
-        try testing.expect(!again.drifted);
-        try testing.expectEqualSlices(u8, first.bytes.items, again.bytes.items);
-        try testing.expectEqual(first.choices.items.len, again.choices.items.len);
-    }
+    for (replay_seeds) |seed| try replaysExactly(seed);
 }

@@ -1334,7 +1334,10 @@ fn mountFat(blk: *virtio.Block, scratch: *[fat16.sector_size]u8, what: []const u
     serial.putDec(part.first_lba);
     serial.put(", FAT held in memory (");
     serial.putDec(vol.fatBytes());
-    serial.put(" bytes)\n");
+    serial.put(" bytes), ");
+    // The reserve for small writes (metal-vmm QUEUE 132).
+    serial.putDec(@as(u64, vol.reserve_clusters) * vol.sectors_per_cluster * 512 >> 20);
+    serial.put(" MB kept for small writes\n");
     diskCheck(&vol, what);
     return vol;
 }
@@ -1697,7 +1700,10 @@ fn addVolume(facts: *std.ArrayList(router.host_status.Fact), alloc: std.mem.Allo
     var serial_text: [9]u8 = undefined;
     const named = if (v.serial) |n| serialText(&serial_text, n) else "no serial";
     const value = if (v.space()) |sp|
-        try std.fmt.allocPrint(alloc, "{s}, serial {s}: {d} MB free of {d} MB", .{ kindName(v), named, sp.free >> 20, sp.total >> 20 })
+        try std.fmt.allocPrint(alloc, "{s}, serial {s}: {d} MB free of {d} MB, {d} MB of it kept for small writes; {d} cleanups after a commit failed (leaks), {d} FAT copy writes failed (copies apart)", .{
+            kindName(v),                                                      named,             sp.free >> 20,       sp.total >> 20,
+            @as(u64, v.reserve_clusters) * v.sectors_per_cluster * 512 >> 20, v.cleanups_failed, v.fat_copies_failed,
+        })
     else |e|
         try std.fmt.allocPrint(alloc, "{s}, serial {s}: free space unreadable ({s})", .{ kindName(v), named, @errorName(e) });
     try facts.append(alloc, .{ .label = label, .value = value });

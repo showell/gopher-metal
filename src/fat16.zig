@@ -476,6 +476,22 @@ pub const Volume = struct {
     /// check reports and the box's #4 reclaims. Counted here, said by a
     /// property, never swallowed and never the operation's error.
     cleanups_failed: u64 = 0,
+    /// **A RESERVE FOR SMALL WRITES** (metal-vmm QUEUE 132, Steve 2026-10-09:
+    /// "a little breathing room for emergencies"): clusters a file larger
+    /// than `small_bytes` may not take. 64 MiB of clusters, or a sixteenth of
+    /// a volume too small for that, set at mount. A bulk write (an upload, a
+    /// long append) is refused `Full` first, while small records and a
+    /// directory's growth still go, and a remove always does. The kernel
+    /// decides by size alone, so the application needs no policy.
+    ///
+    /// **JUDGED BY THE FILE, IN BYTES** (metal-vmm QUEUE 138(e)): "small" is
+    /// the same 64 KiB whatever the cluster size, and an append is judged by
+    /// the file it makes, not the bytes it adds, so a log grown a cluster at
+    /// a time spends the reserve no more than one write of it would. An
+    /// overwrite is judged by what it leaves free once its old chain is
+    /// gone, so one that frees as much as it takes goes, near the reserve or
+    /// in it (if the clusters for its new chain are there to take).
+    reserve_clusters: u32 = 0,
     /// Writes of a FAT copy past the first that failed (`copyApart`).
     fat_copies_failed: u64 = 0,
     /// **WHICH VOLUME THIS IS**: the serial number mkfs chose at random when it
@@ -905,6 +921,7 @@ pub const Volume = struct {
         // The count is the FAT's; the hint starts at 2, which every hint
         // satisfies, as it always has.
         vol.free_clusters = (try vol.derive()).free;
+        vol.reserve_clusters = @min(reserve_bytes / (vol.sectors_per_cluster * sector_size), (vol.max_cluster - 1) / 16);
         return vol;
     }
 
@@ -976,6 +993,11 @@ pub const Volume = struct {
     /// What a chain's last entry is written as.
     fn endMark(self: *const Volume) Cluster {
         return if (self.kind == .fat32) 0x0FFF_FFFF else 0xFFFF;
+    }
+
+    /// Whether an entry is a chain's end, any of the marks FAT reserves.
+    fn isEnd(self: *const Volume, v: Cluster) bool {
+        return v >= (if (self.kind == .fat32) fat32_chain_end else chain_end);
     }
 
     fn badMark(self: *const Volume) Cluster {
@@ -1375,7 +1397,9 @@ pub const Volume = struct {
     fn fatGet(self: *Volume, cluster: Cluster) Error!Cluster {
         const width = self.entryBytes();
         const at = @as(u32, cluster) * width;
-        if (self.fat) |fat| return self.entryIn(fat[at - at % sector_size ..][0..sector_size], at % sector_size / width);
+        if (self.fat) |fat| {
+            return self.entryIn(fat[at - at % sector_size ..][0..sector_size], at % sector_size / width);
+        }
         try self.readSector(self.fat_start + at / sector_size, self.scratch);
         return self.entryIn(self.scratch, at % sector_size / width);
     }
@@ -1407,6 +1431,28 @@ pub const Volume = struct {
     /// long as the machine ran (QUEUE.md item 80). Once the first copy has
     /// landed it is the FAT (cacheFat), so a later copy's failure is an
     /// error and changes nothing held.
+    /// **WHAT A FAILED WRITE OF THE FIRST COPY LEFT, FOR THE ONE ENTRY IN
+    /// DOUBT** (metal-vmm QUEUE 138(a), (b)). Read back from the disk, into
+    /// scratch: the entry exactly as it was (`old`) says the write did not
+    /// land. Anything else (the value written; rot; a read-back that failed
+    /// too) is taken as the value written. Never the read-back's other
+    /// entries, nor its own rot: the held FAT stays the authority for every
+    /// entry (the mount may have trusted copy 1 over a rejected copy 0, and a
+    /// read-back can rot), and the next write of the sector carries it to
+    /// every copy. So a cluster goes back only on an exact "not landed", and
+    /// "landed" or "not known" leave it taken: at worst a leak, never a
+    /// cluster freed under a link, nor a free chain walked through rot.
+    fn landed(self: *Volume, lba: u32, at: u32, old: Cluster) bool {
+        const width = self.entryBytes();
+        self.readSector(lba, self.scratch) catch {
+            props.reachable(@src(), "fat: a FAT sector whose write failed cannot be read again: taken as written", null);
+            return true;
+        };
+        const now = self.entryIn(self.scratch, at % sector_size / width);
+        if (now == old) return false;
+        return true;
+    }
+
     fn fatSet(self: *Volume, cluster: Cluster, value: Cluster) Error!void {
         try self.forgetFsInfo();
         const width = self.entryBytes();
@@ -1414,42 +1460,32 @@ pub const Volume = struct {
         const in_sector = at / sector_size;
         // **THE FIRST COPY DECIDES** (QUEUE 131, kernel-facts #7). Every read
         // here follows it, so its write is the change: a failure there is
-        // the caller's, and the sector is read again to learn what landed
-        // (a write the disk called failed may have), never assumed old. A
-        // later copy that fails is copies apart, which the next mount brings
-        // into line with the first (cacheFat): counted and said, not the
-        // operation's failure.
+        // the caller's. What it left is read back for the one entry in doubt
+        // (`landed`). A later copy that fails is copies apart, which the next
+        // mount brings into line with the first (cacheFat): counted and
+        // said, not the operation's failure.
         if (self.fat) |fat| {
             // The cached sector is the truth — cacheFat brought every copy
             // into line with it — so it is written to each copy whole, and no
             // copy is read back first. Where cacheFat left the copies apart
             // (a tie, a weighing that could not run, a repair refused), this
             // write is what brings them into line, with the held sector.
-            //
-            // A refused first write puts the old entry back: the held sector
-            // then says the disk kept the old one, which a refused write does
-            // not promise. `dirs` drops a sector in the same case; the FAT is
-            // held whole and has no "not known" to drop to. The next mount
-            // weighs the copies again.
             const sector = fat[in_sector * sector_size ..][0..sector_size];
             const old = self.entryIn(sector, at % sector_size / width);
             self.putEntry(sector, at % sector_size, value);
             self.writeSector(self.fat_start + in_sector, sector) catch |e| {
-                self.readSector(self.fat_start + in_sector, sector) catch {
-                    // Not even read: what the disk holds is unknown, and the
-                    // held sector goes on as it was, the old value.
-                    props.reachable(@src(), "fat: a FAT sector whose write failed cannot be read again", null);
-                    self.putEntry(sector, at % sector_size, old);
-                    return e;
-                };
-                self.keepCount(old, self.entryIn(sector, at % sector_size / width));
+                if (self.landed(self.fat_start + in_sector, at, old)) {
+                    // Taken as written: the held entry stays the value, the
+                    // count with it, and the copies past the first are
+                    // written with the held sector, as a write that answered
+                    // would have (a refused one counted apart).
+                    self.keepCount(old, value);
+                    self.writeCopies(in_sector, sector);
+                } else self.putEntry(sector, at % sector_size, old);
                 return e;
             };
             self.keepCount(old, value);
-            var c: u32 = 1;
-            while (c < self.num_fats) : (c += 1) {
-                self.writeSector(self.fat_start + c * self.sectors_per_fat + in_sector, sector) catch self.copyApart();
-            }
+            self.writeCopies(in_sector, sector);
             return;
         }
         var copy: u32 = 0;
@@ -1461,9 +1497,16 @@ pub const Volume = struct {
                 const old = self.entryIn(self.scratch, at % sector_size / width);
                 self.putEntry(self.scratch, at % sector_size, value);
                 self.writeSector(lba, self.scratch) catch |e| {
-                    // What landed, read again for the count.
-                    const now = if (self.readSector(lba, self.scratch)) |_| self.entryIn(self.scratch, at % sector_size / width) else |_| old;
-                    self.keepCount(old, now);
+                    // The count by what the one entry read back says, as
+                    // above: not landed only when it is exactly the old
+                    // value; a read-back that fails is taken as written,
+                    // never as old (QUEUE 138(f)). The copies past the first
+                    // are left, and counted apart: the disk's first copy is
+                    // this path's truth, and the next mount weighs them.
+                    if (self.landed(lba, at, old)) {
+                        self.keepCount(old, value);
+                        self.copyApart();
+                    }
                     return e;
                 };
                 self.keepCount(old, value);
@@ -1475,6 +1518,15 @@ pub const Volume = struct {
             };
             self.putEntry(self.scratch, at % sector_size, value);
             self.writeSector(lba, self.scratch) catch self.copyApart();
+        }
+    }
+
+    /// The held sector to every copy past the first; one that fails is
+    /// counted apart (`copyApart`).
+    fn writeCopies(self: *Volume, in_sector: u32, sector: *[sector_size]u8) void {
+        var c: u32 = 1;
+        while (c < self.num_fats) : (c += 1) {
+            self.writeSector(self.fat_start + c * self.sectors_per_fat + in_sector, sector) catch self.copyApart();
         }
     }
 
@@ -1530,8 +1582,17 @@ pub const Volume = struct {
     /// part way, what was taken is given back before the error is returned,
     /// because a half-built chain nothing points at is a leak no `fsck` here
     /// would ever find.
-    fn allocChain(self: *Volume, count: u32) Error!Cluster {
+    fn allocChain(self: *Volume, count: u32, spend: Spend) Error!Cluster {
         if (count == 0) return 0;
+        // **THE RESERVE** (`reserve_clusters`, QUEUE 132, 138(e)): an
+        // allocation for a large file that would leave less free than the
+        // reserve, once what the operation frees after it is back, is
+        // refused before it takes anything; a small file's may go into it.
+        // One that takes no more than it frees spends nothing.
+        if (spend.bytes > small_bytes and count > spend.frees and self.free_clusters + spend.frees < @as(u64, count) + self.reserve_clusters) {
+            props.reachable(@src(), "fat: a large allocation is refused to keep the reserve for small writes", .{ .count = count, .free = self.free_clusters, .bytes = spend.bytes });
+            return Error.Full;
+        }
         var first: Cluster = 0;
         var previous: Cluster = 0;
         // **WHAT IT TOOK GOES BACK ON EVERY ERROR** (QUEUE 131, #6), not only
@@ -1562,15 +1623,37 @@ pub const Volume = struct {
                 candidate += 1;
                 continue;
             }
-            // Its own mark may land and still fail: given back if it did.
+            // Its own mark may land and still fail: given back if it did, and
+            // only if it reads exactly as written (QUEUE 138(b)): anything
+            // else is a counted leak, never a chain walked through rot.
             self.fatSet(candidate, self.endMark()) catch |e| { // the end, until something follows
-                if (self.fatGet(candidate)) |now| if (now != 0) self.giveBack(candidate) else {} else |_| {}
+                const now = self.fatGet(candidate) catch {
+                    self.leftLeaked();
+                    return e;
+                };
+                if (now == self.endMark()) self.giveBack(candidate) else if (now != 0) self.leftLeaked();
                 return e;
             };
             // Taken and not yet linked: given back on its own if the link
-            // fails, as the chain before it is by the errdefer.
+            // failed and did not land, as the chain before it is by the
+            // errdefer. **IF IT LANDED, THE CHAIN HAS IT** (QUEUE 134(c)):
+            // the errdefer frees it with the rest, and freeing it here too
+            // freed one cluster twice. Not known (the read-back failed): a
+            // leak, never a free.
+            //
+            // Exactly as written: the chain has it. Exactly as it was (the
+            // end): it goes back alone. Anything else (rot, or not read): the
+            // candidate and the chain are a counted leak, and the errdefer
+            // does not walk a chain whose link reads wrong (QUEUE 138(b)).
             if (previous != 0) self.fatSet(previous, candidate) catch |e| {
-                self.giveBack(candidate);
+                const now = self.fatGet(previous) catch candidate +% 1;
+                if (now == candidate) return e;
+                if (self.isEnd(now)) {
+                    self.giveBack(candidate);
+                    return e;
+                }
+                self.leftLeaked();
+                first = 0;
                 return e;
             };
             if (first == 0) first = candidate;
@@ -1591,10 +1674,29 @@ pub const Volume = struct {
         };
     }
 
+    /// The reserve's size (`reserve_clusters`), and the largest allocation
+    /// it lets through.
+    pub const reserve_bytes: u32 = 64 << 20;
+    pub const small_bytes: u32 = 64 << 10;
+
+    /// What an allocation is for, as the reserve judges it (138(e)): the
+    /// size of the file it makes (a new file's bytes, an appended file's
+    /// size after; zero for a directory's growth), and the clusters the
+    /// operation gives back after it (an overwrite's old chain).
+    const Spend = struct { bytes: u64, frees: u64 = 0 };
+
     /// Clusters taken and not yet pointed at, given back on an error before
     /// the commit (QUEUE 131, #6). A give-back that fails is counted with the
     /// cleanups (`cleanups_failed`), never swallowed: the clusters are a
     /// leak the boot's check reports.
+    /// Clusters left taken because what a failed write left could not be read
+    /// exactly (QUEUE 138(b)): counted with the cleanups, a leak the check
+    /// reports.
+    fn leftLeaked(self: *Volume) void {
+        self.cleanups_failed +%= 1;
+        props.reachable(@src(), "fat: clusters left taken, what a failed write left not read exactly", .{ .count = self.cleanups_failed });
+    }
+
     fn giveBack(self: *Volume, first: Cluster) void {
         self.freeChain(first) catch {
             self.cleanups_failed +%= 1;
@@ -1734,7 +1836,7 @@ pub const Volume = struct {
         props.alwaysLessThanOrEqualTo(@src(), (end.clusters + 1) * per_cluster, max_dir_entries, "fat: a directory grown stays within FAT's most entries", null);
         const last = end.last;
 
-        const fresh = try self.allocChain(1);
+        const fresh = try self.allocChain(1, .{ .bytes = 0 });
         // Given back on a failure before the link that makes it the
         // directory's (QUEUE 131, #6); not after, since that write may have
         // landed (#2).
@@ -1749,7 +1851,13 @@ pub const Volume = struct {
         self.fatSet(last, fresh) catch |e| {
             // The link failed: what the FAT says now, read again (#7), tells
             // whether it landed. If not, nothing points at the cluster.
-            if (self.fatGet(last)) |now| if (now != fresh) self.giveBack(fresh) else {} else |_| {}
+            // Given back only when it reads exactly as it was, the end;
+            // anything else is a counted leak (QUEUE 138(b)).
+            const now = self.fatGet(last) catch {
+                self.leftLeaked();
+                return e;
+            };
+            if (self.isEnd(now)) self.giveBack(fresh) else if (now != fresh) self.leftLeaked();
             return e;
         };
     }
@@ -2085,7 +2193,7 @@ pub const Volume = struct {
         const parts: u32 = if (needs_long) longParts(name) else 0;
         const run = try self.findRun(dir_cluster, parts + 1);
 
-        const first = try self.allocChain(clusters);
+        const first = try self.allocChain(clusters, .{ .bytes = bytes.len });
         // A failure before the entry gives the chain back (QUEUE 131, #6); a
         // failure of the entry's write may have landed, and leaves it (#2).
         var committing = false;
@@ -2113,7 +2221,12 @@ pub const Volume = struct {
     /// the file is the new one, and the old chain a leak (`afterCommit`,
     /// QUEUE 131, #3).
     fn overwrite(self: *Volume, old: Entry, clusters: u32, bytes: []const u8) Error!void {
-        const first = try self.allocChain(clusters);
+        // What the old chain gives back after, counted from its size: a
+        // chain longer than its size (a stop between an append's link and
+        // its entry) gives back more, never less.
+        const per_cluster: u64 = @as(u64, self.sectors_per_cluster) * sector_size;
+        const frees = (@as(u64, old.size) + per_cluster - 1) / per_cluster;
+        const first = try self.allocChain(clusters, .{ .bytes = bytes.len, .frees = frees });
         if (bytes.len > 0) self.writeChain(first, bytes) catch |err| {
             self.giveBack(first);
             return err;
@@ -2145,7 +2258,7 @@ pub const Volume = struct {
         const parts: u32 = if (needs_long) longParts(name) else 0;
         const run = try self.findRun(dir_cluster, parts + 1);
 
-        const cluster = try self.allocChain(1);
+        const cluster = try self.allocChain(1, .{ .bytes = 0 });
         // A write refused before the commit gives the cluster back; a machine
         // that stops leaves it leaked, which the check reports.
         //
@@ -2283,12 +2396,12 @@ pub const Volume = struct {
         // counted in the chain, it fills them first.
         var first = entry.first_cluster;
         if (have == 0 and first == 0) {
-            first = try self.allocChain(need);
+            first = try self.allocChain(need, .{ .bytes = new_size });
         } else {
             const end = try self.chainEnd(first);
             if (need > end.clusters) {
                 props.reachable(@src(), "fat: an append links clusters onto a file", .{ .need = need, .have = end.clusters });
-                const extra = try self.allocChain(need - end.clusters);
+                const extra = try self.allocChain(need - end.clusters, .{ .bytes = new_size });
                 try self.fatSet(end.last, extra);
             }
         }

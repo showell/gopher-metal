@@ -209,6 +209,94 @@ test "a full disk refuses the write, and the refused write leaves nothing behind
     }
 }
 
+test "a reserve is kept for small writes: a large one that would leave less free is refused, a small one is not (metal-vmm QUEUE 132)" {
+    for (configs) |cfg| {
+        const d = try Disk.make("reserve", cfg.shape, cfg.cached);
+        defer d.deinit();
+        const reserve = d.vol.reserve_clusters;
+        // 64 MiB, or a sixteenth of a volume too small for that.
+        const per_cluster = d.vol.sectors_per_cluster * 512;
+        try testing.expectEqual(@min((64 << 20) / per_cluster, (d.vol.max_cluster - 1) / 16), reserve);
+        try testing.expect(reserve > 3);
+        // A write one byte past small (`small_bytes`), whatever its count
+        // of clusters.
+        const large_clusters = (fat16.Volume.small_bytes + 1 + per_cluster - 1) / per_cluster;
+        // Filled to leave the reserve and one large write more (its folder
+        // made first: it takes a cluster).
+        _ = try d.vol.makePath("data");
+        const fill = (d.free() - reserve - large_clusters) * per_cluster;
+        const big = try testing.allocator.alloc(u8, @max(fill, fat16.Volume.small_bytes + 1));
+        defer testing.allocator.free(big);
+        _ = pattern(big, 5);
+        try d.vol.writeFile("data/bulk", big[0..fill]);
+        try testing.expectEqual(reserve + large_clusters, @as(u32, @intCast(d.free())));
+        // A large write that leaves exactly the reserve: taken.
+        const four = big[0 .. fat16.Volume.small_bytes + 1];
+        try d.vol.writeFile("data/first", four);
+        try testing.expectEqual(reserve, @as(u32, @intCast(d.free())));
+        // Another would leave less: refused, nothing taken.
+        try testing.expectError(fat16.Error.Full, d.vol.writeFile("data/four", four));
+        try testing.expectEqual(reserve, @as(u32, @intCast(d.free())));
+        // Now a small record still goes, into the reserve.
+        try d.vol.writeFile("data/small", big[0..fat16.Volume.small_bytes]);
+        try d.vol.writeFile("data/smaller", "x");
+        try d.expectFile("data/smaller", "x");
+        // A large one does not, and a remove always does.
+        try testing.expectError(fat16.Error.Full, d.vol.writeFile("data/four", four));
+        try d.vol.remove("data/bulk");
+        try d.vol.writeFile("data/four", four);
+        try testing.expect(d.fatsAgree());
+    }
+}
+
+test "the reserve is judged in bytes, an append by its file's size, and an overwrite by what it frees (metal-vmm QUEUE 138(e))" {
+    const small_bytes = fat16.Volume.small_bytes;
+    for (configs) |cfg| {
+        const d = try Disk.make("reservebytes", cfg.shape, cfg.cached);
+        defer d.deinit();
+        const reserve = d.vol.reserve_clusters;
+        const per_cluster = d.vol.sectors_per_cluster * 512;
+        const small_clusters = (small_bytes + per_cluster - 1) / per_cluster;
+        // Room in the reserve for a small write, and then the clusters for an
+        // overwrite of twice that, on both shapes.
+        try testing.expect(reserve > 3 * small_clusters + 1);
+        _ = try d.vol.makePath("data");
+        const buf = try testing.allocator.alloc(u8, @max(2 * small_bytes, (d.free() - reserve) * per_cluster));
+        defer testing.allocator.free(buf);
+        _ = pattern(buf, 9);
+        const mid = buf[0 .. 2 * small_bytes];
+        try d.vol.writeFile("data/mid", mid);
+        // Filled to leave the reserve and one cluster more.
+        try d.vol.writeFile("data/bulk", buf[0 .. (d.free() - reserve - 1) * per_cluster]);
+        try testing.expectEqual(reserve + 1, @as(u32, @intCast(d.free())));
+        // One byte past small: refused, nothing taken.
+        try testing.expectError(fat16.Error.Full, d.vol.writeFile("data/large", buf[0 .. small_bytes + 1]));
+        try testing.expectEqual(reserve + 1, @as(u32, @intCast(d.free())));
+        // Small, in bytes, whatever its count of clusters: into the reserve.
+        try d.vol.writeFile("data/record", buf[0..small_bytes]);
+        try d.expectFile("data/record", buf[0..small_bytes]);
+        const after_record = d.free();
+        // **AN APPEND IS JUDGED BY THE FILE IT MAKES**: a file grown past
+        // small by appends of a cluster each spends the reserve no more than
+        // one write of it would. Refused, and nothing taken.
+        try testing.expectError(fat16.Error.Full, d.vol.writeInto("data/record", small_bytes, buf[0..per_cluster]));
+        try testing.expectEqual(after_record, d.free());
+        try d.expectFile("data/record", buf[0..small_bytes]);
+        // A small file's append that stays small still goes.
+        try d.vol.writeFile("data/note", "x");
+        try d.vol.writeInto("data/note", 1, "y");
+        try d.expectFile("data/note", "xy");
+        // **AN OVERWRITE IS JUDGED BY WHAT IT LEAVES**: one that frees as
+        // much as it takes goes, though the new chain is taken first.
+        const before = d.free();
+        std.mem.reverse(u8, mid);
+        try d.vol.writeFile("data/mid", mid);
+        try d.expectFile("data/mid", mid);
+        try testing.expectEqual(before, d.free());
+        try testing.expect(d.fatsAgree());
+    }
+}
+
 test "a full disk refuses a write over a file, and the old file stays whole" {
     for (both) |cached| {
         // Room for the old file's chain and not for a second one beside it:

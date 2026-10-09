@@ -108,6 +108,19 @@ test "the properties over a sweep of seeds" {
         if (!ok) failed_seeds += 1;
         at.always(@src(), ok, "durable_sim: every oracle holds for every seed", .{ .seed = seed });
     }
+    // A FAT run under a tape replays exactly, every seed to 40 at least (the
+    // 40 `zig build test` ran before metal-vmm QUEUE 136 kept four there).
+    for (1..@max(options.fat_seeds, 40) + 1) |seed| {
+        const ok = if (fat_sim.replaysExactly(seed)) true else |_| false;
+        if (!ok) failed_seeds += 1;
+        at.always(@src(), ok, "fat_sim: a run under a tape replays exactly", .{ .seed = seed });
+    }
+    // And a store run, the 20 seeds `zig build test` ran (QUEUE 136).
+    for (1..21) |seed| {
+        const ok = if (store_sim.replaysExactly(seed)) true else |_| false;
+        if (!ok) failed_seeds += 1;
+        at.always(@src(), ok, "store_sim: a run under a tape replays exactly", .{ .seed = seed });
+    }
     // Every sweep, whatever its size: they are the regression tests.
     for (fat_sim.regressions) |seed| {
         const ok = if (fat_sim.runSeed(seed)) true else |_| false;

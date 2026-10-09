@@ -657,6 +657,215 @@ test "a write that lands and answers failure is an error, and leaves nothing wor
     }
 }
 
+test "a write that lands and answers failure, and the read after it fails too, leaves nothing worse than a stop, on the same mount and the next (metal-vmm QUEUE 134)" {
+    // The read-back that tells what a failed FAT write left can fail as
+    // well, its buffer filled with whatever a device left in it. The held
+    // FAT must not take that in, nor a cluster be freed on a read-back that
+    // said nothing: the machine goes on writing on this mount, and what it
+    // writes next into the same FAT sector reaches every copy.
+    var buf: [8192]u8 = undefined;
+    for (stopped_ops) |op| {
+        for (configs) |cfg| {
+            if (cfg.shape.kind == .fat32) continue; // the same code; FAT32's disk is 35 MB
+            const kind = "FAT16";
+            const total = try requestsOf(op, cfg);
+            const d = try Disk.makeUnkept("limit-lands-fails-twice", cfg.shape, cfg.cached);
+            defer d.deinit();
+            try op.setup(&d.vol);
+            setFsInfo(d);
+            const before = try testing.allocator.dupe(u8, d.bytes);
+            defer testing.allocator.free(before);
+            var n: u64 = 0;
+            while (n < total) : (n += 1) {
+                @memcpy(d.bytes, before);
+                try d.mount(cfg.cached);
+                d.blk.fault = .{ .at = d.blk.requests + n, .kind = .lands_and_fails, .then_fail = 1, .seed = @truncate(n) };
+                op.run(&d.vol) catch {};
+                d.blk.fault = null;
+                // The machine goes on, on the same mount: a new file, near
+                // where the operation took its clusters.
+                d.vol.writeFile("data/after", &after_bytes) catch {};
+                try d.mount(cfg.cached);
+                for (op.want) |w| {
+                    const got = try stateOf(d, w.path, &buf);
+                    for (w.any) |st| {
+                        if (sameState(st, got)) break;
+                    } else {
+                        std.debug.print("{s} ({s}): request {d} landed and failed, and the next failed; {s} is {s}, not an outcome named\n", .{ op.name, kind, n, w.path, describe(got) });
+                        return error.TestUnexpectedResult;
+                    }
+                }
+                const r = try d.check();
+                try onlyAllowed(&r, if (op.appends != null) &allowed_append else &allowed, op.name, kind, "write that landed and failed, and the next request failed", n);
+            }
+        }
+    }
+}
+
+test "a write that lands and answers failure, its read-back failing too, while a directory grows: no cluster freed that the disk links (metal-vmm QUEUE 134(b))" {
+    // grow's link (the directory's last cluster pointing at the fresh one)
+    // may land and answer failure, and the read that would say so fail too.
+    // Taken for "not linked", the fresh cluster was given back while the
+    // disk links it: the next allocation takes it, in two chains at once.
+    const big = [_]u8{'b'} ** (3 * 512 + 100);
+    for (configs) |cfg| {
+        if (cfg.shape.kind != .fat16) continue;
+        const d = try Disk.makeUnkept("limit-grow-twice", cfg.shape, cfg.cached);
+        defer d.deinit();
+        _ = try d.vol.makePath("data/full");
+        const slots = d.vol.sectors_per_cluster * (512 / 32) - 2;
+        var i: u32 = 0;
+        var name: [32]u8 = undefined;
+        while (i < slots) : (i += 1) try d.vol.writeFile(try std.fmt.bufPrint(&name, "data/full/F{d}", .{i}), "x");
+        const before = try testing.allocator.dupe(u8, d.bytes);
+        defer testing.allocator.free(before);
+        try d.mount(cfg.cached);
+        const r0 = d.blk.requests;
+        try d.vol.writeFile("data/full/BIG.DAT", &big);
+        const total = d.blk.requests - r0;
+        var n: u64 = 0;
+        while (n < total) : (n += 1) {
+            @memcpy(d.bytes, before);
+            try d.mount(cfg.cached);
+            d.blk.fault = .{ .at = d.blk.requests + n, .kind = .lands_and_fails, .then_fail = 1, .seed = @truncate(n) };
+            d.vol.writeFile("data/full/BIG.DAT", &big) catch {};
+            d.blk.fault = null;
+            // On, on the same mount: what it takes next must be free.
+            d.vol.writeFile("data/after", &after_bytes) catch {};
+            try d.mount(cfg.cached);
+            const r = try d.check();
+            try onlyAllowed(&r, &allowed, "a new file, growing its directory", "FAT16", "write that landed and failed, and the next request failed", n);
+        }
+    }
+}
+
+test "a write that lands and answers failure, as an allocation links its chain, frees nothing twice (metal-vmm QUEUE 134(c))" {
+    // The link (the cluster before pointing at the next) lands and answers
+    // failure: the next cluster was given back on its own, and then the
+    // errdefer freed the chain the disk now links it into, freeing it again.
+    // The disk ended right; "every cluster freed was in use" broke falsely.
+    const coverage = @import("coverage");
+    const big = [_]u8{'b'} ** (6 * 512 + 100);
+    for (configs) |cfg| {
+        if (cfg.shape.kind != .fat16) continue;
+        const d = try Disk.makeUnkept("limit-link-lands", cfg.shape, cfg.cached);
+        defer d.deinit();
+        _ = try d.vol.makePath("data");
+        const before = try testing.allocator.dupe(u8, d.bytes);
+        defer testing.allocator.free(before);
+        try d.mount(cfg.cached);
+        const r0 = d.blk.requests;
+        try d.vol.writeFile("data/BIG.DAT", &big);
+        const total = d.blk.requests - r0;
+        var n: u64 = 0;
+        while (n < total) : (n += 1) {
+            @memcpy(d.bytes, before);
+            try d.mount(cfg.cached);
+            coverage.reset();
+            d.blk.fault = .{ .at = d.blk.requests + n, .kind = .lands_and_fails };
+            d.vol.writeFile("data/BIG.DAT", &big) catch {};
+            d.blk.fault = null;
+            var broke = false;
+            var it = coverage.catalog();
+            while (it.next()) |site| {
+                if (site.broken()) {
+                    std.debug.print("  broken: {s}\n", .{std.mem.span(site.message)});
+                    broke = true;
+                }
+            }
+            if (broke) {
+                std.debug.print("a new file (FAT {s}): request {d} of {d} landed and failed, and a property broke\n", .{ if (cfg.cached) "held" else "on disk", n, total });
+                return error.TestUnexpectedResult;
+            }
+            try d.mount(cfg.cached);
+            const r = try d.check();
+            try onlyAllowed(&r, &allowed, "a new file", "FAT16", "write that landed and failed", n);
+        }
+    }
+}
+
+test "a write that lands and answers failure, its read-back rotten: the kept free count is moved for every entry the read-back changes (metal-vmm QUEUE 134(h))" {
+    // The held sector is replaced whole by the read-back of a failed write.
+    // Where that differs from what was held in more than the one entry
+    // written (rot on the read-back; a weighing that trusted the second copy
+    // and whose repair was refused), the count moved for the one entry
+    // only, and was wrong after.
+    const big = [_]u8{'b'} ** (3 * 512 + 100);
+    for (configs) |cfg| {
+        if (cfg.shape.kind != .fat16 or !cfg.cached) continue;
+        const d = try Disk.makeUnkept("limit-read-back-rots", cfg.shape, cfg.cached);
+        defer d.deinit();
+        _ = try d.vol.makePath("data");
+        const before = try testing.allocator.dupe(u8, d.bytes);
+        defer testing.allocator.free(before);
+        try d.mount(cfg.cached);
+        const r0 = d.blk.requests;
+        try d.vol.writeFile("data/BIG.DAT", &big);
+        const total = d.blk.requests - r0;
+        var n: u64 = 0;
+        while (n < total) : (n += 1) {
+            @memcpy(d.bytes, before);
+            try d.mount(cfg.cached);
+            d.blk.fault_lba = null;
+            d.blk.fault = .{ .at = d.blk.requests + n, .kind = .lands_and_fails, .then_garbage = 1, .seed = @truncate(n) };
+            d.vol.writeFile("data/BIG.DAT", &big) catch {};
+            d.blk.fault = null;
+            var held_free: u32 = 0;
+            var c: u32 = 2;
+            while (c <= d.vol.max_cluster) : (c += 1) {
+                if (std.mem.readInt(u16, d.vol.fat.?[c * 2 ..][0..2], .little) == 0) held_free += 1;
+            }
+            if (held_free != d.vol.free_clusters) {
+                std.debug.print("request {d} of {d} landed and failed, its read-back rotten: the kept free count is {d}, the held FAT's {d}\n", .{ n, total, d.vol.free_clusters, held_free });
+                return error.TestUnexpectedResult;
+            }
+            // **AND THE ROT IS NOT TAKEN IN** (QUEUE 138(a)): the held FAT
+            // is the authority for every entry but the one in doubt. The
+            // machine goes on, on this mount, and the next boot finds
+            // nothing worse than a stop leaves.
+            d.vol.writeFile("data/after", &after_bytes) catch {};
+            try d.mount(cfg.cached);
+            const r = try d.check();
+            try onlyAllowed(&r, &allowed, "a new file", "FAT16", "write that landed and failed, its read-back rotten", n);
+        }
+    }
+}
+
+test "a write that lands and answers failure, with the FAT on the disk and its read-backs rotten: nothing is given back on a read-back that is not exact (metal-vmm QUEUE 138(b))" {
+    // A cluster was given back when a read-back said anything but what was
+    // hoped; a rotted nonzero one sent freeChain into another file's chain.
+    const coverage = @import("coverage");
+    const big = [_]u8{'b'} ** (6 * 512 + 100);
+    const d = try Disk.makeUnkept("limit-rot-on-disk", test_disk.small, false);
+    defer d.deinit();
+    try d.vol.writeFile("data/KEEP.DAT", &big); // another file's chain, nearby
+    const before = try testing.allocator.dupe(u8, d.bytes);
+    defer testing.allocator.free(before);
+    try d.mount(false);
+    const r0 = d.blk.requests;
+    try d.vol.writeFile("data/BIG.DAT", &big);
+    const total = d.blk.requests - r0;
+    var n: u64 = 0;
+    while (n < total) : (n += 1) {
+        @memcpy(d.bytes, before);
+        try d.mount(false);
+        coverage.reset();
+        d.blk.fault_lba = null;
+        d.blk.fault = .{ .at = d.blk.requests + n, .kind = .lands_and_fails, .then_garbage = 2, .seed = @truncate(n *% 7 +% 1) };
+        d.vol.writeFile("data/BIG.DAT", &big) catch {};
+        d.blk.fault = null;
+        var it = coverage.catalog();
+        while (it.next()) |site| if (site.broken()) {
+            std.debug.print("request {d} of {d}: broken: {s}\n", .{ n, total, std.mem.span(site.message) });
+            return error.TestUnexpectedResult;
+        };
+        try d.mount(false);
+        try d.expectFile("data/KEEP.DAT", &big);
+        const r = try d.check();
+        try onlyAllowed(&r, &allowed, "a new file beside another", "FAT16", "write that landed and failed, its read-backs rotten", n);
+    }
+}
+
 test "a disk that lies (a write that lands nothing or half, a read of other bytes) never stops the machine, and the next boot mounts and checks it" {
     const virtio = @import("virtio.zig");
     // What `Volume.check` found across every run, by problem: the boot's
