@@ -2142,12 +2142,12 @@ pub const Volume = struct {
         var first = entry.first_cluster;
         // A chain made here is the file's only once `setEntry` is tried (the
         // commit); before, a failure gives it back. After, nothing is undone.
-        var fresh = false;
+        var chain: enum { the_files, made_here } = .the_files;
         var commit: Landing = .before;
-        errdefer if (fresh and commit == .before) self.giveBack(first);
+        errdefer if (chain == .made_here and commit == .before) self.giveBack(first);
         if (have == 0 and first == 0) {
             first = try self.allocChain(need, .{ .bytes = new_size });
-            fresh = true;
+            chain = .made_here;
         } else {
             const end = try self.chainEnd(first);
             if (need > end.clusters) {
