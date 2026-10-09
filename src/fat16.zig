@@ -28,7 +28,35 @@
 //! over all eleven bytes, wrapping. `fsck.vfat` is what checks we got it right;
 //! `probe/run.sh` runs it over the volume this code writes.
 //!
-//! What is still missing: FAT12/FAT32, and renaming.
+//! **WHAT A `Volume` HOLDS IN MEMORY, AND WHOSE COPY IT IS.** The disk is the
+//! source of every fact here. Everything a `Volume` holds is reconstructable:
+//! the next mount rebuilds it from the disk, and nothing promised lives only
+//! here. Each copy has a role, and a rule for when it disagrees with the disk:
+//!
+//! - the geometry (`fat_start` .. `data_start`, `kind`, `root_cluster`,
+//!   `serial`): a cache of the boot sector, read once at `mount`. Nothing on
+//!   this machine writes the boot sector, so it cannot go stale.
+//! - `fat`, the held FAT: a cache of the FAT's first copy (or of the copy
+//!   `cacheFatChecked` weighed cleaner), read whole at mount. Every change is
+//!   made in it, written whole-sector to each copy on the disk, and kept only
+//!   if the first copy's write is answered. So once mounted it is what the
+//!   disk's copies are written FROM: in practice the source of each sector a
+//!   change touches (`fatSet`).
+//! - `free_clusters`: derived from the FAT. Counted at mount, then moved
+//!   entry by entry (`keepCount`); never recounted while the machine runs.
+//! - `next_free`: a hint for allocation. Wrong costs a longer search, never
+//!   a wrong cluster (`allocChain`).
+//! - `fsinfo_unknown`: a cache of one fact about the disk, "FSInfo's hints say
+//!   unknown". False at every mount, so each mount writes them once.
+//! - `dirs`: a cache of directory sectors, exact or absent: a write that
+//!   succeeds updates what it holds, a write that fails drops it.
+//! - `scratch`, `dir_burst`, a `Lister`'s sector: buffers in motion. What
+//!   they hold means nothing past the operation that filled them.
+//!
+//! FSInfo's own free count and next-free cluster, on the disk, are hints
+//! for other systems. This machine never reads them for its own use.
+//!
+//! What is still missing: FAT12, and renaming a directory.
 
 const std = @import("std");
 const virtio = @import("virtio.zig");
@@ -367,6 +395,8 @@ pub const Volume = struct {
     /// clock writes entries with no date rather than a plausible wrong one.
     clock: ?*const fn () ?i64 = null,
     /// One sector of identity-mapped scratch, which the device writes into.
+    /// **IN MOTION, NOT A COPY**: one operation's sector at a time, never read
+    /// for what an earlier operation left in it.
     scratch: *[sector_size]u8,
 
     /// Where this volume starts on the disk. **Every sector number below is
@@ -393,6 +423,9 @@ pub const Volume = struct {
     backup_boot: u32 = 0,
     /// Whether this mount has marked FSInfo's free count and next-free hint
     /// unknown yet: done on the first change to the FAT (FAT32.md §7).
+    /// **A CACHE OF A FACT ON THE DISK**, set only once both FSInfo writes have
+    /// landed, and never re-read: nothing else on this machine writes FSInfo.
+    /// Lost, it is false again at the next mount, which writes FSInfo once more.
     fsinfo_unknown: bool = false,
     /// The highest cluster number the data region holds.
     max_cluster: Cluster,
@@ -406,6 +439,11 @@ pub const Volume = struct {
     /// share the held FAT (a slice) but not this count. So two copies that
     /// both wrote would each count only their own writes. On this machine
     /// only io.zig's copy writes once it has one (`mount`, `keepData`).
+    ///
+    /// **DERIVED, AND STORED.** Its source is the FAT; mount derives it, and
+    /// from then on it is moved, not re-derived: `countFreeAgain` recounts,
+    /// and only the tests and simulators call it. A count gone wrong stays
+    /// wrong until the next mount derives it again.
     free_clusters: u32 = 0,
     /// **WHERE THE NEXT ALLOCATION STARTS LOOKING** (FAT32.md §8). Every
     /// cluster below it is in use: it starts at 2, moves only past clusters
@@ -415,6 +453,10 @@ pub const Volume = struct {
     /// and allocation chooses exactly what it chose before, without
     /// re-reading every entry below on each small file. On FAT32's millions
     /// of clusters that scan is the cost.
+    ///
+    /// **A HINT.** Allocation reads the FAT at every candidate, so a cursor
+    /// past a free cluster costs only the choice: a cluster further on, or a
+    /// wrap. 2 at every mount.
     next_free: Cluster = 2,
     /// **CLEANUPS AFTER A COMMIT THAT FAILED** (metal-vmm QUEUE 131,
     /// kernel-facts #3 and #6): a chain given back, or a long name's parts
@@ -442,6 +484,14 @@ pub const Volume = struct {
     ///
     /// Null is still a working volume: the probes that judge the uncached path
     /// leave it that way.
+    ///
+    /// **A CACHE OF THE FAT THAT THE DISK'S COPIES ARE WRITTEN FROM.** Read at
+    /// mount from the copy `cacheFatChecked` trusts, it is never read from the
+    /// disk again while the machine runs: a lookup answers from it alone. A
+    /// change is made here first and written as the whole held sector to every
+    /// copy (`fatSet`), so a sector of it that is wrong is written over the
+    /// disk's at the next change to that sector. Lost, the next mount reads
+    /// and weighs the copies again.
     fat: ?[]u8 = null,
 
     /// **WHERE `find` READS A DIRECTORY, MANY SECTORS AT A REQUEST**, once the
@@ -468,6 +518,13 @@ pub const Volume = struct {
     /// held is the sector on the disk whoever wrote it (a directory's
     /// cluster freed and given to a file included). A write that fails drops
     /// its sectors, since what the disk holds then is not known.
+    ///
+    /// **A CACHE: EXACT, OR ABSENT.** Never written back; a slot replaced or
+    /// dropped is read from the disk again when next asked for. Holding it
+    /// exact needs every write to go through `writeSector`/`writeSectors`,
+    /// and every one in this file does. `readSectors` neither looks here nor
+    /// puts here (a `Lister` does both around it), which is safe because what
+    /// is held is exact.
     dirs: ?DirCache = null,
 
     /// Holds directory sectors in `keys.len` slots of `data` from now on
@@ -499,6 +556,11 @@ pub const Volume = struct {
         unweighed: bool = false,
         /// The copies differed and checked alike: the first is held, and
         /// neither is written over, since nothing says which is right.
+        ///
+        /// Here and when `unweighed`, **NEITHER IS WRITTEN AT MOUNT, NOT FOR
+        /// THE REST OF THE BOOT**: the first change to an entry in a sector
+        /// that differs writes the held sector, the first copy's, whole over
+        /// the second (`fatSet`).
         tied: bool = false,
         /// The disk refused a repair's write: the mount goes on with the FAT
         /// held, and the copies are as far apart as the writes left them.
@@ -1262,6 +1324,9 @@ pub const Volume = struct {
 
     /// The free count afresh, from the FAT on the disk: what `free_clusters`
     /// must always equal. For tests, and for a check that wants to say so.
+    /// It counts the FIRST COPY on the disk, not the held FAT: where
+    /// `cacheFatChecked` trusted the second copy and the repair was refused,
+    /// the kept count follows the held FAT and this does not.
     pub fn countFreeAgain(self: *Volume) Error!u32 {
         return self.countFree();
     }
@@ -1317,7 +1382,15 @@ pub const Volume = struct {
         if (self.fat) |fat| {
             // The cached sector is the truth — cacheFat brought every copy
             // into line with it — so it is written to each copy whole, and no
-            // copy is read back first.
+            // copy is read back first. Where cacheFat left the copies apart
+            // (a tie, a weighing that could not run, a repair refused), this
+            // write is what brings them into line, with the held sector.
+            //
+            // A refused first write puts the old entry back: the held sector
+            // then says the disk kept the old one, which a refused write does
+            // not promise. `dirs` drops a sector in the same case; the FAT is
+            // held whole and has no "not known" to drop to. The next mount
+            // weighs the copies again.
             const sector = fat[in_sector * sector_size ..][0..sector_size];
             const old = self.entryIn(sector, at % sector_size / width);
             self.putEntry(sector, at % sector_size, value);
@@ -1399,6 +1472,8 @@ pub const Volume = struct {
     /// Moves the kept free count for one FAT entry going from `old` to `new`.
     /// Saturating: a count that went wrong must not stop the machine; the
     /// host tests compare it with a fresh one after every operation.
+    /// **THE DERIVED VALUE, MOVED IN STEP WITH ITS SOURCE**, not recomputed
+    /// from it: the next mount's count is the reconcile.
     fn keepCount(self: *Volume, old: Cluster, new: Cluster) void {
         if (old == 0 and new != 0) props.always(@src(), self.free_clusters > 0, "fat: the kept free count never runs below zero", null);
         // The fewest free clusters any run left (zig-coverage-sdk's
@@ -1493,6 +1568,10 @@ pub const Volume = struct {
             const next = try self.fatGet(cluster);
             props.always(@src(), next != 0, "fat: every cluster freed was in use", .{ .cluster = cluster });
             try self.fatSet(cluster, 0);
+            // A fatSet that fails after the first copy landed leaves this
+            // cluster free behind the cursor: "every cluster below it is in
+            // use" no longer holds until the next mount, and allocation
+            // passes the cluster by.
             if (cluster < self.next_free) self.next_free = cluster;
             cluster = next;
         }

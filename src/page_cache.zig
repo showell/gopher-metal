@@ -16,6 +16,13 @@
 //! because after a failed write the disk may hold the old file, the new, or
 //! neither (fat16's docs), and the next read must ask the disk which.
 //!
+//! **A CACHE, IN THE LEXICON'S SENSE.** The disk is the source of every file
+//! it holds; a kept copy is never written back, and when it cannot be kept
+//! exact it is dropped and read again. Its loss costs only reads: every byte
+//! of it is reconstructable, which is what lets it be bounded and evicted.
+//! A change is applied to the copy from the bytes io.zig wrote, not read
+//! back from the disk: exact because the disk answered that it took them.
+//!
 //! **BOUNDED.** At most `budget` bytes, counted in whole pages as the
 //! allocator hands them out, so the count is the memory; at most `slots`
 //! files; nothing larger than `largest`, so a big upload is read from the

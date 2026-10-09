@@ -13,9 +13,8 @@
 //! - **The model.** Every file the model holds reads back byte for byte, and
 //!   every directory opens as one. An operation that fails for want of room
 //!   (`Full`, `DirectoryFull`) may leave what it touched as it was or as it
-//!   would have been, nothing else: a replace may lose the old file (fat16.zig
-//!   removes it first, as Linux's truncate does), an append keeps the old
-//!   file whole.
+//!   would have been, nothing else: a write over a file and an append each
+//!   keep the old file whole.
 //! - **The volume.** `Volume.check` finds nothing: no leaked cluster, no
 //!   chain shared, no orphaned long name. The kept free count is the count
 //!   of the FAT on the disk, the volume's own recount agrees, and the FAT
@@ -760,7 +759,9 @@ const Sim = struct {
     fn settle(s: *Sim, path: []const u8, before: ?[]const u8, after: ?[]const u8) !void {
         const got = s.disk.read(path) catch |e| switch (e) {
             fat16.Error.NotFound => {
-                // Absent is allowed: a replace removes the old file first.
+                // Absent only where there was no file: a write over one is
+                // old or new, never gone (essay kernel-facts #1).
+                if (before != null) return s.fault("an operation that found no room lost the file it was writing over");
                 s.model.dropFile(path);
                 return;
             },

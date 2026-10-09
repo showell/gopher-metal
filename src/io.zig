@@ -71,6 +71,10 @@ pub fn random(_: Self, buf: []u8) void {
 ///
 /// With no data volume, the data directories are on the site's volume, as
 /// they were when the machine had one disk.
+///
+/// **THESE ARE THE COPIES OF EACH `Volume` THAT WRITE** (fat16's
+/// `free_clusters`): the host's copy shares the held FAT and the folder
+/// cache's memory, and must not write once it has handed a volume here.
 var site: ?fat16.Volume = null;
 var data: ?fat16.Volume = null;
 var data_dirs: []const []const u8 = &.{};
@@ -106,6 +110,12 @@ pub fn keepData(dirs: []const []const u8, on: ?fat16.Volume) void {
 /// QUEUE.md item 87): from here on a data file is read from `pc` when it is
 /// there, and every change io makes to a data file is told to it. Null:
 /// none kept (the probes, and a host that gives it no memory).
+///
+/// **IO.ZIG IS THE ONE DOOR**: every change to a data file goes through this
+/// file, and each one tells the cache, so it stays exact. A write or rename
+/// that fails drops its paths (`forget`). A remove and a tree removed drop
+/// them before the disk is asked, so one that fails part-way leaves no copy
+/// to disagree with what it left.
 pub fn keepPages(pc: ?*PageCache) void {
     if (page_cache) |old| old.clear();
     page_cache = pc;
@@ -205,6 +215,10 @@ fn volumeAt(place: Place) Error!*fat16.Volume {
 /// Bounded and fixed: `capacity` bytes in all, files of up to `largest`, and
 /// `slots` of them, first come; past that a file is read from the disk as
 /// before. No allocator, so it is here from the boot, in `.bss`.
+///
+/// **A CACHE OF A SOURCE THAT CANNOT CHANGE**, so it never disagrees and
+/// needs no rule for it: it is filled only once `keepData` has made the site
+/// read-only, and emptied when `mount` hands io another volume.
 pub const SiteCache = struct {
     pub const capacity = 4 << 20;
     pub const largest = 512 << 10;
