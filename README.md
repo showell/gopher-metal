@@ -11,16 +11,22 @@ droplet through our own BIOS loader.
 
 ## Start here
 
-**Serving (2026-10-08): the tag `v20`** — gopher-metal `a26f85d` with
-angry-gopher `8b617f3c` — at **https://lynrummy.com**, the whole site, on a
-droplet with no Linux on it, with prod's real data, since the cutover of
-2026-10-04 ([`CUTOVER.md`](CUTOVER.md)). `v18` (`f592d4d`) is the way back;
-v19 was skipped.
+**Serving (2026-10-09, 20:11 UTC): the tag `v21`** — gopher-metal `81d7a35`
+with angry-gopher `a30a1542` — at **https://lynrummy.com**, the whole site, on
+a droplet with no Linux on it, with prod's real data, since the cutover of
+2026-10-04 ([`CUTOVER.md`](CUTOVER.md)). `v20` (`a26f85d`) is the way back.
+v21 over v20, served code only: the volume's write cache is turned off at
+boot and again after a reset (WCE=0); FAT copies that check alike are not
+rewritten, copies that differ and cannot be weighed leave the first in
+charge, and a refused repair no longer stops the mount; rewriting a file
+leaves the old file or the new, whole, never a mix, and a full disk refuses
+the rewrite and keeps the old; angry-gopher's changes from `8b617f3c` to
+`a30a1542`.
 What serves is a tag, not a branch: `master` may be ahead of it.
 
 **Branches and tags:**
 - `master` — everything.
-- `v17`, `v18`, `v20`, … — released images, one tag per release; the newest serves. `antithesis-sdk`
+- `v17`, `v18`, `v20`, `v21`, … — released images, one tag per release; the newest serves. `antithesis-sdk`
   and `box/v18` are merged and retired.
 - `claude/*` — a cloud session's work; the box merges it into `master`, and a
   cloud session never pushes `master` or a tag.
