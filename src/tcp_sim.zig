@@ -1860,8 +1860,10 @@ const rough_red = [_]u64{ 11277, 11529, 13514, 16190, 20063, 20615, 22509, 25720
 // 9728): without the ring each failed by fast retransmits that old
 // acknowledgements set off. With a duplicate held to SND.UNA (RFC 5681 §2)
 // each passes either way, so none witnesses the ring any more. Every rough
-// seed still fails without it.
-const crowd_red = [_]u64{ 640, 1281, 1452, 1872, 1961, 2305, 2870, 4362, 6307, 6606, 7546, 8003, 8575, 9366, 9769, 9951 };
+// seed still fails without it. **6307 LEFT WITH KARN ON THE SYN-ACK**: a
+// SYN-ACK sent again is no longer timed, so its first RTO is not the whole
+// timeout, and without the ring it passes too.
+const crowd_red = [_]u64{ 640, 1281, 1452, 1872, 1961, 2305, 2870, 4362, 6606, 7546, 8003, 8575, 9366, 9769, 9951 };
 
 test "a crowd the size of the kernel's table: every oracle holds, and the table fills" {
     for (1..3) |seed| try runFullSeed(seed);
