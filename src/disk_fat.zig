@@ -32,6 +32,7 @@
 //! machine never reads them for its own use.
 
 const std = @import("std");
+const builtin = @import("builtin");
 const virtio = @import("virtio.zig");
 const props = @import("coverage");
 
@@ -327,6 +328,15 @@ pub const Volume = struct {
     /// reports; counted here and said by a property, never the operation's
     /// error.
     cleanups_failed: u64 = 0,
+    /// **THE LEDGER** (Debug only, `ledger_on`): clusters the operation in
+    /// progress took and has not yet ended. Every cluster `allocChain`
+    /// takes ends in exactly one of four ways, each of which says how many
+    /// it ends: **committed** by the entry's write (`Commit`), **linked**
+    /// into a chain already committed (`linked`), **given back**
+    /// (`giveBack`), or **a counted leak** (`leftLeaked`). Each public
+    /// operation that changes the volume ends on `balanced`, an `always`
+    /// that nothing it took is left open.
+    ledger_open: u32 = 0,
     /// **A RESERVE FOR SMALL WRITES**: clusters a file larger than
     /// `small_bytes` may not take, set at mount to the lesser of
     /// `reserve_bytes` and a sixteenth of the volume. A bulk write is
@@ -1373,7 +1383,10 @@ pub const Volume = struct {
         }
         var first: Cluster = 0;
         var previous: Cluster = 0;
-        errdefer if (first != 0) self.giveBack(first);
+        // The clusters linked from `first`: `taken`, and a candidate whose
+        // failed link landed.
+        var in_chain: u32 = 0;
+        errdefer if (first != 0) self.giveBack(first, in_chain);
         var taken: u32 = 0;
         var candidate: Cluster = @max(self.alloc_hint, 2);
         // Once round the volume at most: a wrong hint costs a wrap, not a
@@ -1405,11 +1418,16 @@ pub const Volume = struct {
             self.fatSet(candidate, self.endMark(), &mark) catch |e| { // the end, until something follows
                 switch (mark) {
                     .before => {},
-                    .landed => self.giveBack(candidate),
-                    .unknown => self.leftLeaked(),
+                    .landed => {
+                        self.took(1);
+                        self.giveBack(candidate, 1);
+                    },
+                    // Never counted taken, as it may not be.
+                    .unknown => self.leftLeaked(0),
                 }
                 return e;
             };
+            self.took(1);
             // A failed link, by the verdict. Landed: the chain has the
             // candidate, and the errdefer frees both (freeing it here too
             // would free it twice). Not landed: the candidate goes back
@@ -1418,10 +1436,10 @@ pub const Volume = struct {
             var link: Landing = .before;
             if (previous != 0) self.fatSet(previous, candidate, &link) catch |e| {
                 switch (link) {
-                    .landed => {},
-                    .before => self.giveBack(candidate),
+                    .landed => in_chain += 1,
+                    .before => self.giveBack(candidate, 1),
                     .unknown => {
-                        self.leftLeaked();
+                        self.leftLeaked(taken + 1);
                         first = 0;
                     },
                 }
@@ -1430,6 +1448,7 @@ pub const Volume = struct {
             if (first == 0) first = candidate;
             previous = candidate;
             taken += 1;
+            in_chain = taken;
             candidate += 1;
         }
         self.alloc_hint = candidate;
@@ -1456,21 +1475,78 @@ pub const Volume = struct {
     /// overwrite's old chain).
     const Spend = struct { bytes: u64, frees: u64 = 0 };
 
-    /// Clusters left taken because what a failed write left could not be
-    /// read exactly: a counted leak (`cleanups_failed`).
-    fn leftLeaked(self: *Volume) void {
+    /// The `clusters` the operation took, left taken because what a failed
+    /// write left could not be read exactly: a counted leak
+    /// (`cleanups_failed`), and their end in the ledger.
+    fn leftLeaked(self: *Volume, clusters: u32) void {
         self.cleanups_failed +%= 1;
         props.reachable(@src(), "fat: clusters left taken, what a failed write left not read exactly", .{ .count = self.cleanups_failed });
+        self.ended(clusters);
     }
 
-    /// Clusters taken and not yet pointed at, given back on an error before
-    /// the commit. A give-back that fails is a counted leak
-    /// (`cleanups_failed`), never swallowed.
-    fn giveBack(self: *Volume, first: Cluster) void {
-        self.freeChain(first) catch {
-            self.cleanups_failed +%= 1;
-            props.reachable(@src(), "fat: clusters taken before a failure could not be given back, and are left a leak", .{ .count = self.cleanups_failed });
-        };
+    /// The chain from `first`, `clusters` long, taken and not yet pointed
+    /// at, given back on an error before the commit. Either way the
+    /// clusters end in the ledger.
+    ///
+    /// **THE CHAIN IS WALKED AS IT WAS MADE, NOT AS IT READS.** Exactly
+    /// `clusters` of it, each next in the data region and the last an end
+    /// mark. Without a held FAT each next is read from the disk, and a disk
+    /// that lies reads back another value: a walk that followed it stopped
+    /// short and left the rest taken and uncounted (the ledger found it), or
+    /// went on into another file's chain. A next of any other shape stops
+    /// the walk. What is left, and a give-back whose read or write fails, is
+    /// a counted leak (`cleanups_failed`), never swallowed.
+    fn giveBack(self: *Volume, first: Cluster, clusters: u32) void {
+        defer self.ended(clusters);
+        var cluster = first;
+        var freed: u32 = 0;
+        while (freed < clusters) : (freed += 1) {
+            const next = self.fatGet(cluster) catch return self.notGivenBack(freed, clusters);
+            const shaped = if (freed + 1 == clusters) self.isEnd(next) else self.inData(next);
+            if (!shaped) {
+                props.reachable(@src(), "fat: a chain given back reads back other than it was made, and is left a counted leak", .{ .at = freed, .of = clusters, .next = next });
+                return self.notGivenBack(freed, clusters);
+            }
+            // **THE HINT IS LOWERED FIRST**, as in freeChain.
+            if (cluster < self.alloc_hint) self.alloc_hint = cluster;
+            self.fatSet(cluster, 0, null) catch return self.notGivenBack(freed, clusters);
+            cluster = next;
+        }
+    }
+
+    fn notGivenBack(self: *Volume, freed: u32, clusters: u32) void {
+        self.cleanups_failed +%= 1;
+        props.reachable(@src(), "fat: clusters taken before a failure could not be given back, and are left a leak", .{ .count = self.cleanups_failed, .freed = freed, .of = clusters });
+    }
+
+    /// The ledger's checks run in Debug: the host's tests and simulators.
+    const ledger_on = builtin.mode == .Debug;
+
+    /// Clusters `allocChain` took.
+    fn took(self: *Volume, clusters: u32) void {
+        if (ledger_on) self.ledger_open += clusters;
+    }
+
+    /// Clusters that ended: committed, linked, given back or a counted leak.
+    fn ended(self: *Volume, clusters: u32) void {
+        if (!ledger_on) return;
+        props.alwaysLessThanOrEqualTo(@src(), clusters, self.ledger_open, "fat: an operation ends no more clusters than it took", null);
+        self.ledger_open -|= clusters;
+    }
+
+    /// Clusters linked into a chain an entry already points at (`grow`'s
+    /// new cluster, an append's): that link is their commit.
+    fn linked(self: *Volume, clusters: u32) void {
+        self.ended(clusters);
+    }
+
+    /// **EVERY PUBLIC OPERATION THAT CHANGES THE VOLUME ENDS HERE** (a
+    /// `defer` at its top, so after its own errdefers): nothing it took is
+    /// left open. Cleared after, so one miss is reported once.
+    fn balanced(self: *Volume) void {
+        if (!ledger_on) return;
+        props.always(@src(), self.ledger_open == 0, "fat: every cluster an operation took ended committed, linked, given back or a counted leak", .{ .open = self.ledger_open });
+        self.ledger_open = 0;
     }
 
     fn freeChain(self: *Volume, first: Cluster) Error!void {
@@ -1590,13 +1666,13 @@ pub const Volume = struct {
 
         const fresh = try self.allocChain(1, .{ .bytes = 0 });
         // By the link that makes it the directory's: given back on any
-        // failure before it or where it did not land; kept where it landed;
-        // a counted leak where that is unknown.
+        // failure before it or where it did not land; linked where it
+        // landed, answered or not; a counted leak where that is unknown.
         var link: Landing = .before;
-        errdefer switch (link) {
-            .before => self.giveBack(fresh),
-            .landed => {},
-            .unknown => self.leftLeaked(),
+        defer switch (link) {
+            .before => self.giveBack(fresh, 1),
+            .landed => self.linked(1),
+            .unknown => self.leftLeaked(1),
         };
         var s: u32 = 0;
         @memset(self.scratch, 0);
@@ -1726,6 +1802,20 @@ pub const Volume = struct {
     /// counted leak (`leftLeaked`).
     const Landing = enum { before, landed, unknown };
 
+    /// **AN OPERATION'S COMMIT**: where it stands against the entry's write
+    /// (`landing`), and how many clusters that write makes the entry's: the
+    /// ledger's committed ending where it lands, a counted leak where that
+    /// is unknown. Before, the caller gives them back.
+    const Commit = struct {
+        landing: Landing = .before,
+        clusters: u32,
+
+        fn done(c: *Commit, vol: *Volume, landing: Landing) void {
+            c.landing = landing;
+            if (landing == .landed) vol.ended(c.clusters);
+        }
+    };
+
     /// **A REFUSED COMMIT IS READ BACK, AND ONLY AN EXACT READ DECIDES.**
     /// The disk may have taken a write it refused, and a caller cannot tell
     /// from the answer. The entry at `at` in sector `lba` read back as
@@ -1733,9 +1823,9 @@ pub const Volume = struct {
     /// as anything else (rot, a read that failed) it is `unknown`, and what
     /// the operation took is a counted leak, never given back under an entry
     /// that may point at it.
-    fn commitRefused(self: *Volume, lba: u32, at: u32, was: *const [dirent_size]u8, written: *const [dirent_size]u8) Landing {
+    fn commitRefused(self: *Volume, lba: u32, at: u32, was: *const [dirent_size]u8, written: *const [dirent_size]u8, clusters: u32) Landing {
         self.readSector(lba, self.scratch) catch {
-            self.leftLeaked();
+            self.leftLeaked(clusters);
             return .unknown;
         };
         const now = self.scratch[at..][0..dirent_size];
@@ -1747,7 +1837,7 @@ pub const Volume = struct {
             props.reachable(@src(), "fat: a refused commit read back did not land, and is undone", null);
             return .before;
         }
-        self.leftLeaked();
+        self.leftLeaked(clusters);
         return .unknown;
     }
 
@@ -1762,9 +1852,9 @@ pub const Volume = struct {
         first: Cluster,
         size: u32,
         /// Where the operation stands against the short entry's write, the
-        /// commit (`Landing`): the caller gives back what it took while it is
-        /// `before`, and undoes nothing once the entry landed.
-        commit: ?*Landing,
+        /// commit: the caller gives back what it took while it is `before`,
+        /// and undoes nothing once the entry landed.
+        commit: ?*Commit,
     ) Error!void {
         const parts = longParts(name);
         const sum = shortChecksum(short);
@@ -1825,10 +1915,10 @@ pub const Volume = struct {
         e[31] = @truncate(size >> 24);
         const written = e.*;
         self.writeSector(slot.lba, self.scratch) catch |err| {
-            if (commit) |c| c.* = self.commitRefused(slot.lba, slot.at, &was, &written);
+            if (commit) |c| c.done(self, self.commitRefused(slot.lba, slot.at, &was, &written, c.clusters));
             return err;
         };
-        if (commit) |c| c.* = .landed;
+        if (commit) |c| c.done(self, .landed);
     }
 
     /// An 8.3 alias for a name. A name that reads back as itself in 8.3 is
@@ -1929,6 +2019,7 @@ pub const Volume = struct {
     /// **A DIRECTORY OF THAT NAME IS REFUSED** (`IsDirectory`, Linux's
     /// EISDIR): replacing its entry would orphan everything in it.
     pub fn writeFileIn(self: *Volume, dir_cluster: Cluster, given: []const u8, bytes: []const u8) Error!void {
+        defer self.balanced();
         if (given.len == 0 or given.len > max_name) {
             props.reachable(@src(), "fat: a write's name is empty or too long", null);
             return Error.BadName;
@@ -1955,8 +2046,8 @@ pub const Volume = struct {
         const first = try self.allocChain(clusters, .{ .bytes = bytes.len });
         // A failure before the entry gives the chain back; a failure of the
         // entry's write may have landed, and leaves it.
-        var commit: Landing = .before;
-        errdefer if (commit == .before) self.giveBack(first);
+        var commit: Commit = .{ .clusters = clusters };
+        errdefer if (commit.landing == .before) self.giveBack(first, clusters);
         if (bytes.len > 0) try self.writeChain(first, bytes);
 
         // The entry goes last: a stop before it loses the new file and
@@ -1982,13 +2073,13 @@ pub const Volume = struct {
         const frees = (@as(u64, old.size) + per_cluster - 1) / per_cluster;
         const first = try self.allocChain(clusters, .{ .bytes = bytes.len, .frees = frees });
         if (bytes.len > 0) self.writeChain(first, bytes) catch |err| {
-            self.giveBack(first);
+            self.giveBack(first, clusters);
             return err;
         };
-        var commit: Landing = .before;
+        var commit: Commit = .{ .clusters = clusters };
         self.setEntry(old, first, @intCast(bytes.len), &commit) catch |err| {
-            switch (commit) {
-                .before => self.giveBack(first),
+            switch (commit.landing) {
+                .before => self.giveBack(first, clusters),
                 // The entry points at the new chain: the old one is the
                 // cleanup, as after a commit that answered.
                 .landed => self.afterCommit(self.freeChain(old.first_cluster)),
@@ -2008,6 +2099,7 @@ pub const Volume = struct {
     /// parent with no room (`DirectoryFull`) takes nothing. The run stays
     /// free meanwhile: taking and writing the cluster touch no parent sector.
     pub fn makeDirIn(self: *Volume, dir_cluster: Cluster, name: []const u8) Error!Cluster {
+        defer self.balanced();
         // Held to a file's length: one longer is written and never found
         // again, so every makePath would make another.
         if (name.len == 0 or name.len > max_name) {
@@ -2031,8 +2123,8 @@ pub const Volume = struct {
         // fail, and a cluster freed under it would be given to two. So a
         // failure from there leaves it taken, a leak if the entry did not
         // land.
-        var commit: Landing = .before;
-        errdefer if (commit == .before) self.giveBack(cluster);
+        var commit: Commit = .{ .clusters = 1 };
+        errdefer if (commit.landing == .before) self.giveBack(cluster, 1);
         @memset(self.scratch, 0);
         var s: u32 = 0;
         while (s < self.sectors_per_cluster) : (s += 1) {
@@ -2061,6 +2153,7 @@ pub const Volume = struct {
     /// **NO DEEPER THAN THE CHECK WALKS** (`max_path_depth`): deeper would
     /// make a volume its own check calls `too_deep`. Refused `BadName`.
     pub fn makePath(self: *Volume, path: []const u8) Error!Cluster {
+        defer self.balanced();
         var cluster: Cluster = 0;
         var at: usize = 0;
         var depth: u32 = 0;
@@ -2082,6 +2175,7 @@ pub const Volume = struct {
 
     /// A whole file at a path, making the directories above it.
     pub fn writeFile(self: *Volume, path: []const u8, bytes: []const u8) Error!void {
+        defer self.balanced();
         var slash: ?usize = null;
         for (path, 0..) |c, i| {
             if (c == '/') slash = i;
@@ -2107,6 +2201,7 @@ pub const Volume = struct {
     /// clusters, or a chain longer than the size, which the next append
     /// fills. A write inside the file overwrites in place, not atomically.
     pub fn writeInto(self: *Volume, path: []const u8, offset: u32, bytes: []const u8) Error!void {
+        defer self.balanced();
         if (bytes.len == 0) return;
         const entry = try self.open(path);
         if (entry.isDirectory()) {
@@ -2143,28 +2238,29 @@ pub const Volume = struct {
         // A chain made here is the file's only once `setEntry` is tried (the
         // commit); before, a failure gives it back. After, nothing is undone.
         var chain: enum { the_files, made_here } = .the_files;
-        var commit: Landing = .before;
-        errdefer if (chain == .made_here and commit == .before) self.giveBack(first);
+        var commit: Commit = .{ .clusters = 0 };
+        errdefer if (chain == .made_here and commit.landing == .before) self.giveBack(first, need);
         if (have == 0 and first == 0) {
             first = try self.allocChain(need, .{ .bytes = new_size });
             chain = .made_here;
+            commit.clusters = need;
         } else {
             const end = try self.chainEnd(first);
             if (need > end.clusters) {
                 props.reachable(@src(), "fat: an append links clusters onto a file", .{ .need = need, .have = end.clusters });
-                const extra = try self.allocChain(need - end.clusters, .{ .bytes = new_size });
+                const more = need - end.clusters;
+                const extra = try self.allocChain(more, .{ .bytes = new_size });
                 // A link that does not land leaves `extra` taken and linked
-                // from nothing: given back; unknown, a counted leak, as
-                // `grow`'s link.
+                // from nothing: given back; unknown, a counted leak; landed,
+                // answered or not, linked into the file's chain. As `grow`'s
+                // link.
                 var link: Landing = .before;
-                self.fatSet(end.last, extra, &link) catch |e| {
-                    switch (link) {
-                        .before => self.giveBack(extra),
-                        .landed => {},
-                        .unknown => self.leftLeaked(),
-                    }
-                    return e;
+                defer switch (link) {
+                    .before => self.giveBack(extra, more),
+                    .landed => self.linked(more),
+                    .unknown => self.leftLeaked(more),
                 };
+                try self.fatSet(end.last, extra, &link);
             }
         }
 
@@ -2300,7 +2396,7 @@ pub const Volume = struct {
     /// `entry.lba`/`entry.slot`: the commit of an append or an overwrite.
     /// A failure of the read before it leaves `commit` `before`; a refused
     /// write is read back (`commitRefused`).
-    fn setEntry(self: *Volume, entry: Entry, first_cluster: Cluster, size: u32, commit: *Landing) Error!void {
+    fn setEntry(self: *Volume, entry: Entry, first_cluster: Cluster, size: u32, commit: *Commit) Error!void {
         if (entry.lba == 0) { // never located; refuse to guess
             props.@"unreachable"(@src(), "fat: an entry never located is written back", null);
             return Error.NotFound;
@@ -2320,10 +2416,10 @@ pub const Volume = struct {
         e[31] = @truncate(size >> 24);
         const written = e.*;
         self.writeSector(entry.lba, self.scratch) catch |err| {
-            commit.* = self.commitRefused(entry.lba, entry.slot, &was, &written);
+            commit.done(self, self.commitRefused(entry.lba, entry.slot, &was, &written, commit.clusters));
             return err;
         };
-        commit.* = .landed;
+        commit.done(self, .landed);
     }
 
     /// The cluster of a path's parent directory, plus the final component:
@@ -2373,6 +2469,7 @@ pub const Volume = struct {
     /// no-op. Both must be files in one directory: a directory as `to` is
     /// `IsDirectory`, as `from` `BadName`.
     pub fn rename(self: *Volume, from: []const u8, to: []const u8) Error!void {
+        defer self.balanced();
         const a = try self.parentOf(from);
         const b = try self.parentOf(to);
         if (a.cluster != b.cluster) {
@@ -2436,6 +2533,7 @@ pub const Volume = struct {
     /// unlink refuses one: taking its entry would leak everything under it.
     /// `removeTree` is how a directory goes.
     pub fn remove(self: *Volume, path: []const u8) Error!void {
+        defer self.balanced();
         const p = try self.parentOf(path);
         const e = (try self.find(p.cluster, p.name)) orelse {
             props.reachable(@src(), "fat: a remove of a file that is not there is refused", null);
@@ -2468,6 +2566,7 @@ pub const Volume = struct {
     /// **ONLY ABSENCE IS FINE**: a missing path is success; every other
     /// error is the caller's.
     pub fn removeTree(self: *Volume, path: []const u8) Error!void {
+        defer self.balanced();
         const entry = self.open(path) catch |e| switch (e) {
             Error.NotFound => return,
             else => return e,
