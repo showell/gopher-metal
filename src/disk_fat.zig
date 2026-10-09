@@ -1913,7 +1913,11 @@ pub const Volume = struct {
             self.giveBack(first);
             return err;
         };
-        try self.setEntry(old, first, @intCast(bytes.len));
+        var committing = false;
+        self.setEntry(old, first, @intCast(bytes.len), &committing) catch |err| {
+            if (!committing) self.giveBack(first);
+            return err;
+        };
         self.afterCommit(self.freeChain(old.first_cluster));
     }
 
@@ -2052,8 +2056,14 @@ pub const Volume = struct {
         // stop between leaves a chain longer than the size (the check's
         // `long`). Counted in the chain, the next append fills those first.
         var first = entry.first_cluster;
+        // A chain made here is the file's only once `setEntry` is tried (the
+        // commit); before, a failure gives it back. After, nothing is undone.
+        var fresh = false;
+        var committing = false;
+        errdefer if (fresh and !committing) self.giveBack(first);
         if (have == 0 and first == 0) {
             first = try self.allocChain(need, .{ .bytes = new_size });
+            fresh = true;
         } else {
             const end = try self.chainEnd(first);
             if (need > end.clusters) {
@@ -2074,7 +2084,7 @@ pub const Volume = struct {
         }
 
         try self.writeAt(first, offset, bytes);
-        try self.setEntry(entry, first, new_size);
+        try self.setEntry(entry, first, new_size, &committing);
     }
 
     /// A chain's last cluster, and how many clusters it holds.
@@ -2203,7 +2213,9 @@ pub const Volume = struct {
 
     /// Writes a file's size and first cluster into its entry, in place, at
     /// `entry.lba`/`entry.slot`: the commit of an append or an overwrite.
-    fn setEntry(self: *Volume, entry: Entry, first_cluster: Cluster, size: u32) Error!void {
+    /// `committing` turns true just before the sector write: a failure
+    /// before it (the read) is before the commit, and the caller may undo.
+    fn setEntry(self: *Volume, entry: Entry, first_cluster: Cluster, size: u32, committing: *bool) Error!void {
         if (entry.lba == 0) { // never located; refuse to guess
             props.@"unreachable"(@src(), "fat: an entry never located is written back", null);
             return Error.NotFound;
@@ -2220,6 +2232,7 @@ pub const Volume = struct {
         e[29] = @truncate(size >> 8);
         e[30] = @truncate(size >> 16);
         e[31] = @truncate(size >> 24);
+        committing.* = true;
         try self.writeSector(entry.lba, self.scratch);
     }
 

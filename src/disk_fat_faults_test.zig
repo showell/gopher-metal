@@ -963,3 +963,41 @@ test "a request that fails as an append links its clusters leaves no lost cluste
         }
     }
 }
+
+test "a request that fails as an empty file takes its first clusters leaves no lost cluster uncounted: given back before the entry points at them" {
+    // An empty file has no chain: its first write allocates one, writes the
+    // bytes into it, then points the entry at it (the commit). A failure
+    // before the commit must give the chain back.
+    const bytes = [_]u8{'e'} ** (2 * 512 + 100);
+    for (configs) |cfg| {
+        if (cfg.shape.kind != .fat16) continue;
+        const d = try Disk.makeUnkept("limit-empty-first", cfg.shape, cfg.cached);
+        defer d.deinit();
+        _ = try d.vol.makePath("data");
+        try d.vol.writeFile("data/EMPTY", "");
+        const before = try testing.allocator.dupe(u8, d.bytes);
+        defer testing.allocator.free(before);
+        try d.mount(cfg.cached);
+        const r0 = d.blk.requests;
+        try d.vol.writeInto("data/EMPTY", 0, &bytes);
+        const total = d.blk.requests - r0;
+        var n: u64 = 0;
+        while (n < total) : (n += 1) {
+            @memcpy(d.bytes, before);
+            try d.mount(cfg.cached);
+            d.blk.fault = .{ .at = d.blk.requests + n, .kind = .fails };
+            d.vol.writeInto("data/EMPTY", 0, &bytes) catch {};
+            d.blk.fault = null;
+            const counted = d.vol.cleanups_failed;
+            try d.mount(cfg.cached);
+            const r = try d.check();
+            // The last request is the commit's own write: refused, it may
+            // have landed, so nothing is undone, and what it leaves is what a
+            // stop there leaves, which the check finds.
+            if (r.health.leaked > 0 and counted == 0 and n != total - 1) {
+                std.debug.print("an empty file's first write (FAT {s}): request {d} of {d} refused; {d} clusters lost and none counted\n", .{ if (cfg.cached) "held" else "on disk", n, total, r.health.leaked });
+                return error.TestUnexpectedResult;
+            }
+        }
+    }
+}

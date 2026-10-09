@@ -473,7 +473,7 @@ pub fn build(b: *std.Build) void {
     const disk_fat_faults_opts = disk_fat_opts.createModule();
     // **EVERY TEST IN THE FILE RUNS UNDER ONE FILTER OR THE OTHER**, or the
     // build stops: a test named outside them would never run, and say nothing.
-    const faults_filters = [_][]const u8{ "every operation stopped after every write", "a request that fails is an error", "a request that fails before a write's commit", "a request that fails as an append links" };
+    const faults_filters = [_][]const u8{ "every operation stopped after every write", "a request that fails is an error", "a request that fails before a write's commit", "a request that fails as an append links", "a request that fails as an empty file takes" };
     const lies_filters = [_][]const u8{ "a disk that lies", "a write that lands and answers failure" };
     everyTestFiltered(b, "src/disk_fat_faults_test.zig", &(faults_filters ++ lies_filters));
     for ([_][]const []const u8{
