@@ -702,6 +702,11 @@ pub const Block = struct {
     /// null when it never said it had one, false when it would not be
     /// turned off and still caches.
     cache_turned_off: ?bool = null,
+    /// A reset or a change of mode parameters was told (UNIT ATTENTION), so
+    /// the write cache may be on again: looked at after the command that
+    /// met it (`scsi.recheckCache`). How many times it was.
+    cache_recheck: bool = false,
+    cache_rechecks: u64 = 0,
     /// **HOW MANY TIMES A READ IS TRIED** before its failure is the caller's
     /// (B25, Steve 2026-10-08). 1 while the machine serves: a request that
     /// meets a failing disk fails, and says so. Boot sets more

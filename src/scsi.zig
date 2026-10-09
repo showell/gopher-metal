@@ -110,7 +110,14 @@ pub const Memory = struct {
 /// How a command ended. `residual` is how many of the bytes asked for were
 /// not moved (virtio 1.2 §5.6.6): a command can end GOOD having moved fewer,
 /// an underrun, which is not the whole transfer it was asked for.
-const Outcome = struct { response: u8, status: u8, sense_key: u8, residual: u32 = 0 };
+const Outcome = struct { response: u8, status: u8, sense_key: u8, asc: u8 = 0, ascq: u8 = 0, residual: u32 = 0 };
+
+/// The additional sense codes of a UNIT ATTENTION that can mean the mode
+/// pages are not what this driver set (SPC-4 §4.5.6, table 47): a power on
+/// or reset (29h, any qualifier), or mode parameters changed (2Ah/01h).
+const asc_reset: u8 = 0x29;
+const asc_parameters_changed: u8 = 0x2A;
+const ascq_mode_parameters_changed: u8 = 0x01;
 
 const Direction = enum { none, from_disk, to_disk };
 
@@ -152,7 +159,9 @@ fn command(b: *virtio.Block, at: Address, cdb: []const u8, dir: Direction, addr:
     b.requests +%= 1;
 
     const sense_key: u8 = if (mem.response.sense_len >= 3) mem.response.sense[2] & 0x0F else 0;
-    return .{ .response = mem.response.response, .status = mem.response.status, .sense_key = sense_key, .residual = mem.response.residual };
+    const asc: u8 = if (mem.response.sense_len >= 14) mem.response.sense[12] else 0;
+    const ascq: u8 = if (mem.response.sense_len >= 14) mem.response.sense[13] else 0;
+    return .{ .response = mem.response.response, .status = mem.response.status, .sense_key = sense_key, .asc = asc, .ascq = ascq, .residual = mem.response.residual };
 }
 
 /// A command, sent again while the disk answers UNIT ATTENTION (it does once
@@ -164,6 +173,12 @@ fn commandSettled(b: *virtio.Block, at: Address, cdb: []const u8, dir: Direction
         const o = command(b, at, cdb, dir, addr, len);
         const attention = o.response == response_ok and o.status == status_check_condition and
             o.sense_key == sense_unit_attention;
+        // **A RESET PUTS THE MODE PAGES BACK** (metal-vmm QUEUE 119): a
+        // MODE SELECT with SP clear saves nothing, so after a power on or a
+        // reset the write cache this driver turned off is on again. Marked
+        // here, and the caller looks again once its own command is done.
+        if (attention and (o.asc == asc_reset or (o.asc == asc_parameters_changed and o.ascq == ascq_mode_parameters_changed)))
+            b.cache_recheck = true;
         if (!attention or tries == 2) return o;
     }
 }
@@ -192,6 +207,7 @@ pub fn transfer(b: *virtio.Block, at: Address, from_disk: bool, lba: u64, addr: 
         @truncate(n),                  0,
     };
     const o = commandSettled(b, at, &cdb, if (from_disk) .from_disk else .to_disk, addr, len);
+    if (b.cache_recheck) recheckCache(b, at);
     // **A SHORT TRANSFER IS A FAILED ONE.** A read that moved fewer bytes
     // than asked leaves the rest of the buffer as it was; a write that did
     // has not put them on the disk. Neither is answered as done.
@@ -210,6 +226,7 @@ pub fn transfer(b: *virtio.Block, at: Address, from_disk: bool, lba: u64, addr: 
 pub fn synchronize(b: *virtio.Block, at: Address) u8 {
     const cdb = [10]u8{ 0x35, 0, 0, 0, 0, 0, 0, 0, 0, 0 };
     const o = commandSettled(b, at, &cdb, .none, 0, 0);
+    if (b.cache_recheck) recheckCache(b, at);
     if (good(o)) return virtio.blk_s_ok;
     if (o.response == response_ok and o.status == status_check_condition and o.sense_key == sense_illegal_request) {
         b.write_cache = false;
@@ -270,6 +287,40 @@ fn turnCacheOff(b: *virtio.Block, at: Address, scratch: u64, page: []u8) bool {
         return false;
     }
     return true;
+}
+
+/// **THE WRITE CACHE, LOOKED AT AGAIN AFTER A RESET** (metal-vmm QUEUE
+/// 119): sensed; if on, turned off and read back as at bring-up; and what
+/// it took in meanwhile (the command that met the reset, sent again into
+/// the cache) synchronized. A disk that will not turn it off is left as it
+/// says: `write_cache` true, so every answer waits on a SYNCHRONIZE
+/// (io.durable), and `cache_turned_off` false, for /admin/host to say.
+fn recheckCache(b: *virtio.Block, at: Address) void {
+    b.cache_recheck = false;
+    b.cache_rechecks +%= 1;
+    const mem = b.scsi.?;
+    const scratch = @intFromPtr(&mem.scratch);
+    const on = writeCache(b, at, scratch, &mem.scratch);
+    if (on != true) {
+        b.write_cache = on;
+        return;
+    }
+    props.reachable(@src(), "scsi: a reset turned the write cache back on, and it is turned off again", null);
+    const taken = turnCacheOff(b, at, scratch, &mem.scratch);
+    b.write_cache = writeCache(b, at, scratch, &mem.scratch);
+    if (!taken or b.write_cache != false) {
+        b.cache_turned_off = false;
+        // Still caching: what it holds waits for io.durable's flush.
+        b.unflushed = true;
+        return;
+    }
+    // What the cache took before it was turned off again.
+    const sync = [10]u8{ 0x35, 0, 0, 0, 0, 0, 0, 0, 0, 0 };
+    if (!good(commandSettled(b, at, &sync, .none, 0, 0))) {
+        props.reachable(@src(), "scsi: after a reset, the cache turned off again, its held writes fail to synchronize", null);
+        b.write_cache = null; // flushed as if on, before every answer
+        b.unflushed = true;
+    }
 }
 
 fn be32(bytes: []const u8) u32 {
@@ -346,6 +397,8 @@ pub fn bring(device: virtio.Device, mem: *virtio.BlockMemory) Error!virtio.Block
                 b.write_cache = writeCache(&b, at, scratch, &mem.scsi.scratch);
                 if (b.write_cache != false) b.cache_turned_off = false;
             }
+            // The power-on attention of bring-up is answered just above.
+            b.cache_recheck = false;
             return b;
         }
     }

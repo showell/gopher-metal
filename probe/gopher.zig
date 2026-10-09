@@ -1703,7 +1703,7 @@ fn addVolume(facts: *std.ArrayList(router.host_status.Fact), alloc: std.mem.Allo
     else if (v.blk.write_cache) |on| (if (on) "on: writes wait in it until flushed" else "off: it writes through") else "not said: flushed as if on";
     try facts.append(alloc, .{
         .label = cache_label,
-        .value = try std.fmt.allocPrint(alloc, "{s}; {d} flushes, {d} failed", .{ cache, v.blk.flushes, v.blk.flush_failures }),
+        .value = try std.fmt.allocPrint(alloc, "{s}; {d} flushes, {d} failed; looked at again after {d} resets", .{ cache, v.blk.flushes, v.blk.flush_failures, v.blk.cache_rechecks }),
     });
     if (v.dirs) |d| try facts.append(alloc, .{
         .label = dirs_label,
