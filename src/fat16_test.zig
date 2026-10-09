@@ -209,6 +209,43 @@ test "a full disk refuses the write, and the refused write leaves nothing behind
     }
 }
 
+test "a reserve is kept for small writes: a large one that would leave less free is refused, a small one is not (metal-vmm QUEUE 132)" {
+    for (configs) |cfg| {
+        const d = try Disk.make("reserve", cfg.shape, cfg.cached);
+        defer d.deinit();
+        const reserve = d.vol.reserve_clusters;
+        // 64 MiB, or a sixteenth of a volume too small for that.
+        const per_cluster = d.vol.sectors_per_cluster * 512;
+        try testing.expectEqual(@min((64 << 20) / per_cluster, (d.vol.max_cluster - 1) / 16), reserve);
+        try testing.expect(reserve > 3);
+        // Filled to leave the reserve and three clusters more (its folder
+        // made first: it takes a cluster).
+        _ = try d.vol.makePath("data");
+        const fill = (d.free() - reserve - 3) * per_cluster;
+        const big = try testing.allocator.alloc(u8, fill);
+        defer testing.allocator.free(big);
+        _ = pattern(big, 5);
+        try d.vol.writeFile("data/bulk", big);
+        try testing.expectEqual(reserve + 3, @as(u32, @intCast(d.free())));
+        // Four clusters would leave less than the reserve: refused, nothing taken.
+        const four = big[0 .. 4 * per_cluster];
+        try testing.expectError(fat16.Error.Full, d.vol.writeFile("data/four", four));
+        try testing.expectEqual(reserve + 3, @as(u32, @intCast(d.free())));
+        // Three leave exactly the reserve: taken.
+        try d.vol.writeFile("data/three", big[0 .. 3 * per_cluster]);
+        try testing.expectEqual(reserve, @as(u32, @intCast(d.free())));
+        // Now a small record (one or two clusters) still goes, into the reserve.
+        try d.vol.writeFile("data/small", big[0 .. 2 * per_cluster]);
+        try d.vol.writeFile("data/smaller", "x");
+        try d.expectFile("data/smaller", "x");
+        // A large one does not, and a remove always does.
+        try testing.expectError(fat16.Error.Full, d.vol.writeFile("data/four", four));
+        try d.vol.remove("data/bulk");
+        try d.vol.writeFile("data/four", four);
+        try testing.expect(d.fatsAgree());
+    }
+}
+
 test "a full disk refuses a write over a file, and the old file stays whole" {
     for (both) |cached| {
         // Room for the old file's chain and not for a second one beside it:

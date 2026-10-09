@@ -465,6 +465,15 @@ pub const Volume = struct {
     /// check reports and the box's #4 reclaims. Counted here, said by a
     /// property, never swallowed and never the operation's error.
     cleanups_failed: u64 = 0,
+    /// **A RESERVE FOR SMALL WRITES** (metal-vmm QUEUE 132, Steve 2026-10-09:
+    /// "a little breathing room for emergencies"): clusters an allocation of
+    /// more than `small_clusters` may not take. 64 MiB of clusters, or a
+    /// sixteenth of a volume too small for that, set at mount. A bulk write
+    /// (an upload, a long append) is refused `Full` first, while small
+    /// records, a directory's growth and a replace's second chain still go,
+    /// and a remove always does. The kernel decides by size alone, so the
+    /// application needs no policy.
+    reserve_clusters: u32 = 0,
     /// Writes of a FAT copy past the first that failed (`copyApart`).
     fat_copies_failed: u64 = 0,
     /// **WHICH VOLUME THIS IS**: the serial number mkfs chose at random when it
@@ -892,6 +901,7 @@ pub const Volume = struct {
             },
         };
         vol.free_clusters = try vol.countFree();
+        vol.reserve_clusters = @min(reserve_bytes / (vol.sectors_per_cluster * sector_size), (vol.max_cluster - 1) / 16);
         return vol;
     }
 
@@ -1492,6 +1502,13 @@ pub const Volume = struct {
     /// would ever find.
     fn allocChain(self: *Volume, count: u32) Error!Cluster {
         if (count == 0) return 0;
+        // **THE RESERVE** (`reserve_clusters`, QUEUE 132): a large
+        // allocation that would leave less free than it is refused before it
+        // takes anything; a small one may go into it.
+        if (count > small_clusters and self.free_clusters < @as(u64, count) + self.reserve_clusters) {
+            props.reachable(@src(), "fat: a large allocation is refused to keep the reserve for small writes", .{ .count = count, .free = self.free_clusters });
+            return Error.Full;
+        }
         var first: Cluster = 0;
         var previous: Cluster = 0;
         // **WHAT IT TOOK GOES BACK ON EVERY ERROR** (QUEUE 131, #6), not only
@@ -1550,6 +1567,11 @@ pub const Volume = struct {
             props.reachable(@src(), "fat: a cleanup after the commit failed, and is left a leak", .{ .count = self.cleanups_failed });
         };
     }
+
+    /// The reserve's size (`reserve_clusters`), and the largest allocation
+    /// it lets through.
+    pub const reserve_bytes: u32 = 64 << 20;
+    pub const small_clusters: u32 = 2;
 
     /// Clusters taken and not yet pointed at, given back on an error before
     /// the commit (QUEUE 131, #6). A give-back that fails is counted with the
