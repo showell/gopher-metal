@@ -476,6 +476,17 @@ pub const Volume = struct {
     reserve_clusters: u32 = 0,
     /// Writes of a FAT copy past the first that failed (`copyApart`).
     fat_copies_failed: u64 = 0,
+    /// **HELD FAT SECTORS NOT KNOWN** (metal-vmm QUEUE 134): a write of one
+    /// failed, and the read that would tell what landed failed too. The held
+    /// sector keeps what it held before (its one entry put back), and is
+    /// read from the disk again before it is used: `fatGet` or `fatSet` in
+    /// it fails until that read succeeds, so nothing is decided by a value
+    /// nobody knows, and nothing a failed read left in a buffer reaches a
+    /// copy. More of them than this, and every held sector is not known
+    /// (`fat_unknown_all`).
+    fat_unknown: [8]Unknown = undefined,
+    fat_unknown_len: u8 = 0,
+    fat_unknown_all: bool = false,
     /// **WHICH VOLUME THIS IS**: the serial number mkfs chose at random when it
     /// formatted it (the extended boot record's volume ID, offset 39), or null
     /// on a boot sector without one. Linux's `blkid` shows it as the UUID,
@@ -1345,7 +1356,10 @@ pub const Volume = struct {
     fn fatGet(self: *Volume, cluster: Cluster) Error!Cluster {
         const width = self.entryBytes();
         const at = @as(u32, cluster) * width;
-        if (self.fat) |fat| return self.entryIn(fat[at - at % sector_size ..][0..sector_size], at % sector_size / width);
+        if (self.fat) |fat| {
+            try self.knowSector(at / sector_size); // QUEUE 134
+            return self.entryIn(fat[at - at % sector_size ..][0..sector_size], at % sector_size / width);
+        }
         try self.readSector(self.fat_start + at / sector_size, self.scratch);
         return self.entryIn(self.scratch, at % sector_size / width);
     }
@@ -1377,6 +1391,31 @@ pub const Volume = struct {
     /// long as the machine ran (QUEUE.md item 80). Once the first copy has
     /// landed it is the FAT (cacheFat), so a later copy's failure is an
     /// error and changes nothing held.
+    /// A held sector not known, and the value its entry was put back to,
+    /// against which the read that settles it keeps the free count.
+    const Unknown = struct { sector: u32, entry: u32, assumed: Cluster };
+
+    /// The held FAT sector `in_sector`, known: read again if it is not
+    /// (`fat_unknown`), into scratch, and only then into the held copy. A
+    /// read that fails leaves it not known, and the caller's operation fails.
+    fn knowSector(self: *Volume, in_sector: u32) Error!void {
+        const fat = self.fat orelse return;
+        if (self.fat_unknown_all) return Error.ReadFailed;
+        var k: usize = 0;
+        while (k < self.fat_unknown_len) : (k += 1) {
+            const u = self.fat_unknown[k];
+            if (u.sector != in_sector) continue;
+            try self.readSector(self.fat_start + in_sector, self.scratch);
+            const sector = fat[in_sector * sector_size ..][0..sector_size];
+            @memcpy(sector, self.scratch[0..sector_size]);
+            self.keepCount(u.assumed, self.entryIn(sector, u.entry));
+            props.reachable(@src(), "fat: a held FAT sector not known is read again, and known", null);
+            self.fat_unknown[k] = self.fat_unknown[self.fat_unknown_len - 1];
+            self.fat_unknown_len -= 1;
+            return;
+        }
+    }
+
     fn fatSet(self: *Volume, cluster: Cluster, value: Cluster) Error!void {
         try self.forgetFsInfo();
         const width = self.entryBytes();
@@ -1401,17 +1440,25 @@ pub const Volume = struct {
             // not promise. `dirs` drops a sector in the same case; the FAT is
             // held whole and has no "not known" to drop to. The next mount
             // weighs the copies again.
+            try self.knowSector(in_sector);
             const sector = fat[in_sector * sector_size ..][0..sector_size];
             const old = self.entryIn(sector, at % sector_size / width);
             self.putEntry(sector, at % sector_size, value);
             self.writeSector(self.fat_start + in_sector, sector) catch |e| {
-                self.readSector(self.fat_start + in_sector, sector) catch {
-                    // Not even read: what the disk holds is unknown, and the
-                    // held sector goes on as it was, the old value.
-                    props.reachable(@src(), "fat: a FAT sector whose write failed cannot be read again", null);
+                // **READ AGAIN INTO SCRATCH, AND HELD ONLY IF IT CAME**
+                // (QUEUE 134): a read that fails may have filled its buffer
+                // with anything, and the held sector is what every later
+                // change to it writes to each copy.
+                self.readSector(self.fat_start + in_sector, self.scratch) catch {
+                    props.reachable(@src(), "fat: a FAT sector whose write failed cannot be read again, and is not known", null);
                     self.putEntry(sector, at % sector_size, old);
+                    if (self.fat_unknown_len < self.fat_unknown.len) {
+                        self.fat_unknown[self.fat_unknown_len] = .{ .sector = in_sector, .entry = at % sector_size / width, .assumed = old };
+                        self.fat_unknown_len += 1;
+                    } else self.fat_unknown_all = true;
                     return e;
                 };
+                @memcpy(sector, self.scratch[0..sector_size]);
                 self.keepCount(old, self.entryIn(sector, at % sector_size / width));
                 return e;
             };
@@ -1545,9 +1592,15 @@ pub const Volume = struct {
                 return e;
             };
             // Taken and not yet linked: given back on its own if the link
-            // fails, as the chain before it is by the errdefer.
+            // failed and did not land, as the chain before it is by the
+            // errdefer. **IF IT LANDED, THE CHAIN HAS IT** (QUEUE 134(c)):
+            // the errdefer frees it with the rest, and freeing it here too
+            // freed one cluster twice. Not known (the read-back failed): a
+            // leak, never a free.
             if (previous != 0) self.fatSet(previous, candidate) catch |e| {
-                self.giveBack(candidate);
+                if (self.fatGet(previous)) |now| {
+                    if (now != candidate) self.giveBack(candidate);
+                } else |_| {}
                 return e;
             };
             if (first == 0) first = candidate;

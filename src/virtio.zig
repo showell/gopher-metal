@@ -772,6 +772,11 @@ pub const Block = struct {
         },
         /// The bytes `garbage` reads.
         seed: u8 = 0xA5,
+        /// **A SECOND FAILURE** (metal-vmm QUEUE 134): this many requests
+        /// after `at` fail too, a read among them first filling its buffer
+        /// with other bytes, as a device that wrote part of it may. What a
+        /// caller does when its read-back of a failed write fails as well.
+        then_fail: u8 = 0,
     };
 
     /// A disk of `bytes.len / 512` sectors held in `bytes`, which the caller
@@ -802,6 +807,12 @@ pub const Block = struct {
         if (at > disk.len or len > disk.len - at) return blk_s_ioerr;
         const there = disk[@intCast(at)..][0..len];
         const here: [*]u8 = @ptrFromInt(@as(usize, @intCast(addr)));
+        if (self.fault) |f| if (number > f.at and number - f.at <= f.then_fail) {
+            if (kind == blk_t_in) {
+                for (here[0..len], 0..) |*b, i| b.* = @truncate(i *% 131 +% f.seed);
+            }
+            return blk_s_ioerr;
+        };
         if (self.fault) |f| if (f.at == number) {
             switch (f.kind) {
                 .fails => return blk_s_ioerr,
