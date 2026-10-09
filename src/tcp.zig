@@ -355,6 +355,10 @@ pub const Result = struct {
 };
 
 /// What `handle` decided a frame meant.
+/// What one segment did, the most of it: a segment that opens a connection
+/// and carries the peer's FIN reports `.peer_done`, not `.opened`. A host
+/// that must see every change reads the connection (`pending`, `peer_done`,
+/// `state`), as probe/gopher.zig does.
 pub const Event = enum {
     nothing,
     /// A handshake completed.
@@ -767,6 +771,9 @@ pub const Table = struct {
             c.fin_ever_sent = true;
             if (c.rto_at == null) c.rto_at = now + c.rto_ns;
         }
+        // No debt without a clock: whatever the peer has not acknowledged
+        // is timed.
+        props.always(@src(), c.highest() == c.una or c.rto_at != null, "tcp: what is outstanding has its retransmission timer", .{ .conn = i });
     }
 
     /// **THE RECEIVE SIDE'S ONE TIMER.** A window the peer last saw too small,
@@ -789,7 +796,7 @@ pub const Table = struct {
             },
             .repeating => {},
         }
-        // A missing timer is a debt with no clock; tcp_check.zig names it.
+        props.always(@src(), c.update_at != null, "tcp: a reopened window said again has its clock", .{ .conn = i });
         const at = c.update_at orelse return;
         if (now < at) return;
         if (c.updates >= max_retries) {
@@ -898,6 +905,8 @@ pub const Table = struct {
         // would let it move forward.)
         if (!updated) c.wnd -= @min(c.wnd, advance);
         if (advance > bytes) {
+            // Past every byte, an ACK can cover only our FIN, which takes one.
+            props.always(@src(), c.fin_ever_sent and advance == @as(u32, @intCast(bytes)) + 1, "tcp: an ACK past every byte covers our FIN and nothing more", .{ .advance = advance, .bytes = bytes });
             c.fin = .acknowledged;
             c.high = 0;
             c.sent = 0;
@@ -907,6 +916,7 @@ pub const Table = struct {
         self.measure(c, number, now);
         if (c.srtt_ns == 0) c.rto_ns = first_rto_ns;
         c.rto_at = if (c.highest() != c.una) now + c.rto_ns else null;
+        props.always(@src(), c.sent <= c.high and c.high <= c.queued(), "tcp: after an ACK, what was sent lies within what is queued", .{ .sent = c.sent, .high = c.high, .queued = c.queued() });
         return c.fin == .acknowledged;
     }
 
@@ -981,6 +991,7 @@ pub const Table = struct {
             }
             const slot = self.free() orelse self.oldestHalfOpen(now) orelse {
                 self.refused += 1;
+                props.reachable(@src(), "tcp: a SYN finds the table full, and nothing to give way", null);
                 return .{ .event = .nothing };
             };
             const c = &self.conns[slot];
