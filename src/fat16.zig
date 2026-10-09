@@ -488,6 +488,12 @@ pub const Volume = struct {
         /// The copies differed and could not be weighed (the check failed):
         /// the first is held, neither was written.
         unweighed: bool = false,
+        /// The copies differed and checked alike: the first is held, and
+        /// neither is written over, since nothing says which is right.
+        tied: bool = false,
+        /// The disk refused a repair's write: the mount goes on with the FAT
+        /// held, and the copies are as far apart as the writes left them.
+        repair_failed: bool = false,
     };
 
     /// The most differing sectors that are weighed copy against copy; past
@@ -557,7 +563,11 @@ pub const Volume = struct {
         if (n_differ == 0) return m;
         if (too_many) {
             props.reachable(@src(), "fat: more FAT sectors differ than are weighed, and the first copy is the FAT", null);
-            return .{ .repaired = try self.mirrorFirst(fat, &run) };
+            const n = self.mirrorFirst(fat, &run) catch {
+                repairRefused();
+                return .{ .repair_failed = true };
+            };
+            return .{ .repaired = n };
         }
         // The second copy's version of each differing sector, kept to weigh.
         var second: [max_weighed_sectors][sector_size]u8 = undefined;
@@ -607,12 +617,31 @@ pub const Volume = struct {
                 }
             } else {
                 for (differ[0..n_differ], 0..) |at, i| fat[at * sector_size ..][0..sector_size].* = first[i];
+                // **A TIE WRITES NEITHER** (the night of 2026-10-08, seed
+                // 16341): a first copy that read wrong but checked as well
+                // as the second was written over the good one, and the disk
+                // left differing where it had not.
+                if (m.health[0].problems == m.health[1].problems and m.health[0].leaked == m.health[1].leaked) {
+                    props.reachable(@src(), "fat: FAT copies apart check alike, and neither is written over", null);
+                    m.tied = true;
+                    return m;
+                }
             }
         }
         // The copy not trusted is written from the held FAT, sector by sector.
+        // **A REPAIR THE DISK REFUSES DOES NOT STOP THE MOUNT** (the night of
+        // 2026-10-08, seed 18771: one refused write, and the boot stopped):
+        // the FAT is held either way, and later changes write each sector
+        // they touch to every copy.
         const into = if (m.trusted == 0) self.fat_start + self.sectors_per_fat else self.fat_start;
-        for (differ[0..n_differ]) |at| try self.writeSector(into + at, fat[at * sector_size ..][0..sector_size]);
-        m.repaired = @intCast(n_differ);
+        for (differ[0..n_differ]) |at| {
+            self.writeSector(into + at, fat[at * sector_size ..][0..sector_size]) catch {
+                repairRefused();
+                m.repair_failed = true;
+                return m;
+            };
+            m.repaired += 1;
+        }
         return m;
     }
 
@@ -640,6 +669,11 @@ pub const Volume = struct {
     }
 
     fn ignoreFinding(_: void, _: Finding) void {}
+
+    /// One coverage site for every repair write the disk refused.
+    fn repairRefused() void {
+        props.reachable(@src(), "fat: a repair of the FAT's copies is refused by the disk, and the mount goes on", null);
+    }
 
     /// One coverage site for both checks of a weighing that could not run.
     fn unweighed() void {

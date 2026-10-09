@@ -1235,6 +1235,63 @@ test "a name removed leaves its entries for the next name of the same length (mu
     }
 }
 
+test "FAT copies apart that check alike: neither is written over (the night of 2026-10-08, seed 16341)" {
+    for (formats) |shape| {
+        const d = try Disk.make("damaged-weigh-tie", shape, false);
+        defer d.deinit();
+        // A cluster marked bad in the first copy, free in the second: neither
+        // is a leak, so the two check alike.
+        const l = Layout.of(d.bytes);
+        const c: usize = 900;
+        l.set(d.bytes, 0, c, l.bad());
+        const writes = d.blk.writes;
+        try d.mount(true);
+        try testing.expect(!d.fatsAgree());
+        try testing.expectEqual(@as(u32, 0), d.repaired);
+        try testing.expectEqual(writes, d.blk.writes); // nothing written
+        try testing.expectEqual(l.bad(), l.get(d.bytes, 0, c));
+        try testing.expectEqual(@as(u32, 0), l.get(d.bytes, 1, c));
+    }
+}
+
+test "a repair of FAT copies apart that the disk refuses: the mount goes on (the night of 2026-10-08, seed 18771)" {
+    for (formats) |shape| {
+        const d = try Disk.make("damaged-repair-refused", shape, false);
+        defer d.deinit();
+        try d.vol.writeFile("f", "x");
+        // The second copy apart from the first by clusters nothing holds: the
+        // first checks cleaner, and the second is to be written from it.
+        const l = Layout.of(d.bytes);
+        l.set(d.bytes, 1, 300, l.end());
+        const damaged = try testing.allocator.dupe(u8, d.bytes);
+        defer testing.allocator.free(damaged);
+        const buf = try testing.allocator.alloc(u8, d.vol.fatBytes());
+        defer testing.allocator.free(buf);
+        const room = try testing.allocator.alloc(u8, d.vol.checkBytes());
+        defer testing.allocator.free(room);
+
+        // How many requests come before the repair: the copies read and
+        // weighed, less the sectors written to repair them.
+        try d.mount(false);
+        const r0 = d.blk.requests;
+        const whole = try d.vol.cacheFatChecked(buf, room);
+        try testing.expect(whole.repaired > 0);
+        const before_repair = d.blk.requests - r0 - whole.repaired;
+        @memcpy(d.bytes, damaged);
+
+        // The same mount, and the repair's first write fails.
+        try d.mount(false);
+        d.blk.fault = .{ .at = d.blk.requests + before_repair, .kind = .fails };
+        const m = try d.vol.cacheFatChecked(buf, room);
+        d.blk.fault = null;
+        try testing.expect(m.checked);
+        try testing.expect(!m.unweighed);
+        try testing.expect(m.repair_failed);
+        try testing.expectEqual(@as(u32, 0), m.trusted);
+        try testing.expectEqual(@as(u32, 0), m.repaired);
+    }
+}
+
 // ---- the kept free count (QUEUE item 14) -------------------------------------
 
 test "the kept free count follows every operation, the refused and failed ones included" {

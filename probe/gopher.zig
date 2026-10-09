@@ -1279,6 +1279,16 @@ fn mountFat(blk: *virtio.Block, scratch: *[fat16.sector_size]u8, what: []const u
         serial.put(if (mirrors.trusted == 1) "the first was written from the second\n" else "the second was written from the first\n");
     }
     if (weigh_room == null) serial.put("  no memory to weigh the FAT's copies: the first is the FAT\n");
+    if (mirrors.tied) {
+        serial.put("  ");
+        serial.put(what);
+        serial.put(": the FAT's copies differ and check alike: the first is held, neither written over\n");
+    }
+    if (mirrors.repair_failed) {
+        serial.put("  ");
+        serial.put(what);
+        serial.put(": the disk refused a repair of the FAT's copies: the FAT is held, the copies left apart\n");
+    }
     if (mirrors.unweighed) {
         serial.put("  ");
         serial.put(what);
