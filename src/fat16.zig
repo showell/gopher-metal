@@ -131,12 +131,12 @@ const fat32_mask: Cluster = 0x0FFF_FFFF;
 const fat32_chain_end: Cluster = 0x0FFF_FFF8;
 const fat32_bad_cluster: Cluster = 0x0FFF_FFF7;
 
-fn le16(b: []const u8) u16 {
-    return @as(u16, b[0]) | (@as(u16, b[1]) << 8);
+fn le16(b: *const [2]u8) u16 {
+    return std.mem.readInt(u16, b, .little);
 }
 
-fn le32(b: []const u8) u32 {
-    return @as(u32, b[0]) | (@as(u32, b[1]) << 8) | (@as(u32, b[2]) << 16) | (@as(u32, b[3]) << 24);
+fn le32(b: *const [4]u8) u32 {
+    return std.mem.readInt(u32, b, .little);
 }
 
 /// The longest name this filesystem will hold. VFAT allows 255. The
@@ -1062,56 +1062,67 @@ pub const Volume = struct {
     /// either.
     const Walk = struct {
         vol: *Volume,
-        root: bool,
-        cluster: Cluster,
         lba: u32,
-        left_in_root: u32,
-        in_cluster: u32 = 0,
-        /// So that a looped chain ends the walk.
-        loop: Loop = .{},
+        where: union(enum) {
+            /// FAT16's root: a fixed run of sectors before the data region,
+            /// with no chain and nothing to loop.
+            fixed_root: struct { left: u32 },
+            /// Any other directory, FAT32's root among them.
+            chain: struct {
+                cluster: Cluster,
+                in_cluster: u32 = 0,
+                /// So that a looped chain ends the walk.
+                loop: Loop,
+            },
+        },
 
         fn start(vol: *Volume, dir_cluster: Cluster) Error!Walk {
             // FAT32's root is a chain like any other directory's.
             const first = vol.dirStart(dir_cluster);
-            if (first != 0 and !vol.inData(first)) {
+            if (first == 0) return .{ .vol = vol, .lba = vol.root_start, .where = .{ .fixed_root = .{ .left = vol.root_sectors } } };
+            if (!vol.inData(first)) {
                 props.reachable(@src(), "fat: a directory's first cluster is outside the data", null);
                 return Error.BadChain;
             }
             return .{
                 .vol = vol,
-                .root = first == 0,
-                .cluster = first,
-                .lba = if (first == 0) vol.root_start else vol.clusterSector(first),
-                .left_in_root = vol.root_sectors,
+                .lba = vol.clusterSector(first),
                 // As `pass(first)` leaves it.
-                .loop = .{ .seen = first, .power = 2 },
+                .where = .{ .chain = .{ .cluster = first, .loop = .{ .seen = first, .power = 2 } } },
             };
         }
 
         /// Moves to the next sector. Answers false at the end of the directory.
         fn next(self: *Walk) Error!bool {
-            if (self.root) {
-                self.left_in_root -= 1;
-                if (self.left_in_root == 0) return false;
-                self.lba += 1;
-                return true;
+            switch (self.where) {
+                .fixed_root => |*root| {
+                    root.left -= 1;
+                    if (root.left == 0) return false;
+                    self.lba += 1;
+                    return true;
+                },
+                .chain => |*chain| {
+                    chain.in_cluster += 1;
+                    if (chain.in_cluster < self.vol.sectors_per_cluster) {
+                        self.lba += 1;
+                        return true;
+                    }
+                    chain.cluster = (try self.vol.nextCluster(chain.cluster)) orelse return false;
+                    try chain.loop.pass(chain.cluster);
+                    self.lba = self.vol.clusterSector(chain.cluster);
+                    chain.in_cluster = 0;
+                    return true;
+                },
             }
-            self.in_cluster += 1;
-            if (self.in_cluster < self.vol.sectors_per_cluster) {
-                self.lba += 1;
-                return true;
-            }
-            self.cluster = (try self.vol.nextCluster(self.cluster)) orelse return false;
-            try self.loop.pass(self.cluster);
-            self.lba = self.vol.clusterSector(self.cluster);
-            self.in_cluster = 0;
-            return true;
         }
 
         /// The sectors from this one to the end of its stretch of disk: the
         /// rest of the cluster, or the rest of FAT16's fixed root.
         fn sectorsLeftInRun(self: *const Walk) u32 {
-            return if (self.root) self.left_in_root else self.vol.sectors_per_cluster - self.in_cluster;
+            return switch (self.where) {
+                .fixed_root => |root| root.left,
+                .chain => |chain| self.vol.sectors_per_cluster - chain.in_cluster,
+            };
         }
     };
 
@@ -1747,11 +1758,9 @@ pub const Volume = struct {
     /// straddles a cluster edge needs a directory of sixty-odd entries, and a
     /// player's session folder can have that.
     fn removeEntry(self: *Volume, dir_cluster: Cluster, name: []const u8) Error!void {
-        return self.unlinkEntry(dir_cluster, name, true);
+        return self.unlinkEntry(dir_cluster, name, .free);
     }
 
-    /// removeEntry's work. With `free` false the entry goes and its chain
-    /// stays allocated, for `rename`, which hands the chain to another entry.
     /// One long-name part marked deleted, where the walk found it.
     fn clearPart(self: *Volume, lba: u32, at: u32) Error!void {
         try self.readSector(lba, self.scratch);
@@ -1759,7 +1768,9 @@ pub const Volume = struct {
         try self.writeSector(lba, self.scratch);
     }
 
-    fn unlinkEntry(self: *Volume, dir_cluster: Cluster, name: []const u8, free: bool) Error!void {
+    /// removeEntry's work. With `.keep` the entry goes and its chain stays
+    /// allocated, for `rename`, which hands the chain to another entry.
+    fn unlinkEntry(self: *Volume, dir_cluster: Cluster, name: []const u8, chain_is: enum { free, keep }) Error!void {
         const Pos = struct { lba: u32, at: u32 };
         var walk = try Walk.start(self, dir_cluster);
         var parts: [max_long_parts]Pos = undefined;
@@ -1834,7 +1845,7 @@ pub const Volume = struct {
                     }
 
                     // 3. and only now, the data
-                    if (free and chain >= 2) self.afterCommit(self.freeChain(chain));
+                    if (chain_is == .free and chain >= 2) self.afterCommit(self.freeChain(chain));
                     return;
                 }
                 long_ok = false;
@@ -2494,7 +2505,7 @@ pub const Volume = struct {
             room = .{ .short = short, .run = try self.findRun(b.cluster, parts + 1) };
         }
 
-        try self.unlinkEntry(a.cluster, a.name, false);
+        try self.unlinkEntry(a.cluster, a.name, .keep);
 
         if (dst) |d| {
             props.reachable(@src(), "fat: a rename replaces a file", null);
