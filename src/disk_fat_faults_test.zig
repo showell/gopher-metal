@@ -987,6 +987,37 @@ const leak_ops = [_]LeakOp{
             try v.writeInto("data/EMPTY", 0, &leak_more);
         }
     }.f },
+    .{ .name = "a rename to a new name", .setup = struct {
+        fn f(v: *disk_fat.Volume) anyerror!void {
+            _ = try v.makePath("data");
+            try v.writeFile("data/LOG", &leak_more);
+        }
+    }.f, .run = struct {
+        fn f(v: *disk_fat.Volume) anyerror!void {
+            try v.rename("data/LOG", "data/a longer name.txt");
+        }
+    }.f },
+    .{ .name = "a rename over another file", .setup = struct {
+        fn f(v: *disk_fat.Volume) anyerror!void {
+            _ = try v.makePath("data");
+            try v.writeFile("data/LOG", &leak_more);
+            try v.writeFile("data/OLD", &leak_first);
+        }
+    }.f, .run = struct {
+        fn f(v: *disk_fat.Volume) anyerror!void {
+            try v.rename("data/LOG", "data/OLD");
+        }
+    }.f },
+    .{ .name = "a remove", .setup = struct {
+        fn f(v: *disk_fat.Volume) anyerror!void {
+            _ = try v.makePath("data");
+            try v.writeFile("data/a longer name.txt", &leak_more);
+        }
+    }.f, .run = struct {
+        fn f(v: *disk_fat.Volume) anyerror!void {
+            try v.remove("data/a longer name.txt");
+        }
+    }.f },
 };
 
 test "a request that fails or lies leaves no cluster lost uncounted, its commit included, nor the kept free count wrong uncounted" {

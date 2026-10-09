@@ -1704,7 +1704,8 @@ pub const Volume = struct {
     /// clusters, where the other order leaves an entry pointing at clusters
     /// already given away. A name not in the directory is no error.
     fn removeEntry(self: *Volume, dir_cluster: Cluster, name: []const u8) Error!void {
-        return self.unlinkEntry(dir_cluster, name, .free_chain);
+        var gone: Landing = .before;
+        return self.unlinkEntry(dir_cluster, name, .free_chain, &gone);
     }
 
     /// One long-name part marked deleted, where the walk found it.
@@ -1716,7 +1717,12 @@ pub const Volume = struct {
 
     /// removeEntry's work. With `.keep_chain` the chain stays allocated, for
     /// `rename` to hand to another entry.
-    fn unlinkEntry(self: *Volume, dir_cluster: Cluster, name: []const u8, then: enum { free_chain, keep_chain }) Error!void {
+    ///
+    /// **A REFUSED TOMBSTONE IS READ BACK** (`commitRefused`), and `gone`
+    /// says where it stands. Landed, the cleanup runs as after one that
+    /// answered, and the error is still the caller's; unknown, the chain
+    /// is left, a counted leak.
+    fn unlinkEntry(self: *Volume, dir_cluster: Cluster, name: []const u8, then: enum { free_chain, keep_chain }, gone: *Landing) Error!void {
         const Pos = struct { lba: u32, at: u32 };
         var walk = try Walk.start(self, dir_cluster);
         // Where the open run's parts sit, to mark each deleted with its
@@ -1767,8 +1773,16 @@ pub const Volume = struct {
                     // 1. the short entry, while its sector is in scratch: the
                     // commit. What follows is cleanup, whose failure leaves
                     // orphaned parts or a leaked chain, not the error.
+                    const was = e.*;
                     self.scratch[at] = 0xE5;
-                    try self.writeSector(short_lba, self.scratch);
+                    const written = e.*;
+                    var refused: ?Error = null;
+                    self.writeSector(short_lba, self.scratch) catch |err| {
+                        gone.* = self.commitRefused(short_lba, at, &was, &written, 0);
+                        if (gone.* != .landed) return err;
+                        refused = err;
+                    };
+                    gone.* = .landed;
 
                     // 2. the long-name parts, each where the walk found it
                     if (has_long) {
@@ -1777,6 +1791,7 @@ pub const Volume = struct {
 
                     // 3. and only now, the data
                     if (then == .free_chain and chain >= 2) self.afterCommit(self.freeChain(chain));
+                    if (refused) |err| return err;
                     return;
                 }
                 part_count = 0;
@@ -2464,6 +2479,11 @@ pub const Volume = struct {
     /// When `to` does not exist, step 2 writes a new entry, and a stop
     /// before it loses `from`. Never two entries on one chain.
     ///
+    /// **A WRITE THAT FAILS LOSES WHAT A STOP WOULD, AND COUNTS IT.** Each
+    /// commit (`from`'s tombstone, `to`'s entry) is read back where it is
+    /// refused (`commitRefused`); a chain no entry points at after it is a
+    /// counted leak (`cleanups_failed`), kept for fsck.fat to recover.
+    ///
     /// An existing `to` keeps its name; a new one takes the case given; a
     /// name that differs from `from`'s only in case, or is its alias, is a
     /// no-op. Both must be files in one directory: a directory as `to` is
@@ -2503,12 +2523,37 @@ pub const Volume = struct {
             room = .{ .short = short, .run = try self.findRun(b.cluster, parts + 1) };
         }
 
-        try self.unlinkEntry(a.cluster, a.name, .keep_chain);
+        // **ONCE `from`'S ENTRY IS GONE ITS CHAIN IS THE RENAME'S**, pointed
+        // at by no entry until `to`'s write lands (the commit). A failure
+        // before that leaves it a counted leak, never given back: fsck.fat
+        // recovers a lost chain as a file, and freeing it would lose the
+        // bytes for good. Counted from the size, as the ledger needs only
+        // the same number at both ends.
+        const per_cluster: u64 = @as(u64, self.sectors_per_cluster) * sector_size;
+        const clusters: u32 = @intCast((@as(u64, src.size) + per_cluster - 1) / per_cluster);
+        var gone: Landing = .before;
+        self.unlinkEntry(a.cluster, a.name, .keep_chain, &gone) catch |err| {
+            // Unknown is counted by the read-back; landed, nothing points
+            // at the chain now.
+            if (gone == .landed) {
+                props.reachable(@src(), "fat: a rename's refused unlink landed, and the file's chain is left a counted leak", null);
+                self.took(clusters);
+                self.leftLeaked(clusters);
+            }
+            return err;
+        };
+        self.took(clusters);
+        var commit: Commit = .{ .clusters = clusters };
+        errdefer if (commit.landing == .before) {
+            props.reachable(@src(), "fat: a rename's new entry did not land, and the file's chain is left a counted leak", null);
+            self.leftLeaked(clusters);
+        };
 
         if (dst) |d| {
             props.reachable(@src(), "fat: a rename replaces a file", null);
             try self.readSector(d.lba, self.scratch);
             const e = self.scratch[d.slot..][0..dirent_size];
+            const was = e.*;
             putCluster(e, src.first_cluster);
             e[28] = @truncate(src.size);
             e[29] = @truncate(src.size >> 8);
@@ -2517,14 +2562,21 @@ pub const Volume = struct {
             const when = self.stamp();
             putLe16(e[18..20], when.date); // last access date
             putDos(e[22..26], when); // write time, write date
-            try self.writeSector(d.lba, self.scratch);
-            // The commit; freeing the old chain after it is cleanup.
+            const written = e.*;
+            // The commit, read back where refused; freeing the old chain
+            // after it is cleanup.
+            self.writeSector(d.lba, self.scratch) catch |err| {
+                commit.done(self, self.commitRefused(d.lba, d.slot, &was, &written, clusters));
+                if (commit.landing == .landed and d.first_cluster >= 2) self.afterCommit(self.freeChain(d.first_cluster));
+                return err;
+            };
+            commit.done(self, .landed);
             if (d.first_cluster >= 2) self.afterCommit(self.freeChain(d.first_cluster));
             return;
         }
 
         const r = room.?;
-        try self.writeEntry(r.run, if (needsLongName(b.name)) b.name else b.name[0..0], r.short, 0x20, src.first_cluster, src.size, null);
+        try self.writeEntry(r.run, if (needsLongName(b.name)) b.name else b.name[0..0], r.short, 0x20, src.first_cluster, src.size, &commit);
     }
 
     /// Deletes one file (`removeEntry`).
