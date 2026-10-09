@@ -447,22 +447,38 @@ test {
     _ = test_disk; // its write cache's own test
 }
 
-test "store_sim: a handful of seeds" {
-    for (1..21) |seed| try runSeed(seed);
+/// The seeds `zig build test` runs, of `runSeed` and of `replaysExactly`.
+/// `zig build properties` sweeps the rest: 1,000 seeds of `runSeed`, and
+/// seeds 1 to 20 of `replaysExactly`, which `test` ran until
+/// they cost most of a minute of a Debug run (metal-vmm QUEUE 136).
+const seeds = [_]u64{
+    1,
+    2,
+    // Kills mutant S4 (MUTATION.md: a full volume's `Full` not mapped to
+    // NoSpace); 1 and 2 never fill it.
+    5,
+};
+
+test "store_sim: three seeds (properties: 1..1000)" {
+    for (seeds) |seed| try runSeed(seed);
+}
+
+/// **A RUN UNDER A TAPE REPLAYS EXACTLY**: the same draws, the same
+/// choices, for one seed.
+pub fn replaysExactly(seed: u64) !void {
+    var first = explore.Tape.init(std.testing.allocator, seed);
+    defer first.deinit();
+    try runWith(&first);
+    var again = explore.Tape.branch(std.testing.allocator, &first, first.position(), seed +% 0x9999, null);
+    defer again.deinit();
+    try runWith(&again);
+    try std.testing.expect(!again.drifted);
+    try std.testing.expectEqualSlices(u8, first.bytes.items, again.bytes.items);
+    try std.testing.expectEqual(first.choices.items.len, again.choices.items.len);
 }
 
 test "a run under a tape replays exactly: the same draws, the same choices" {
-    for (1..21) |seed| {
-        var first = explore.Tape.init(std.testing.allocator, seed);
-        defer first.deinit();
-        try runWith(&first);
-        var again = explore.Tape.branch(std.testing.allocator, &first, first.position(), seed +% 0x9999, null);
-        defer again.deinit();
-        try runWith(&again);
-        try std.testing.expect(!again.drifted);
-        try std.testing.expectEqualSlices(u8, first.bytes.items, again.bytes.items);
-        try std.testing.expectEqual(first.choices.items.len, again.choices.items.len);
-    }
+    try replaysExactly(1);
 }
 
 // **FAT16 HERE NEEDS A DISK THAT WRITES THROUGH** (metal-vmm QUEUE 112):
@@ -476,8 +492,13 @@ test "store_sim: on a disk with a write cache, a cut breaks fat16's promises (wh
     var broken: u32 = 0;
     quiet = true;
     defer quiet = false;
-    for (1..41) |seed| runSeedCached(seed) catch {
-        broken += 1;
-    };
+    // Up to forty seeds, stopping at the first that breaks: one is the
+    // finding (metal-vmm QUEUE 136: the rest cost time and said no more).
+    for (1..41) |seed| {
+        runSeedCached(seed) catch {
+            broken += 1;
+            break;
+        };
+    }
     try std.testing.expect(broken > 0);
 }

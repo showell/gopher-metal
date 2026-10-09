@@ -429,16 +429,16 @@ pub fn build(b: *std.Build) void {
     const fat16_opts = b.addOptions();
     fat16_opts.addOption([]const u8, "images_dir", b.option([]const u8, "fat16-images", "where fat16_test writes its disk images") orelse "");
     fat16_opts.addOption([]const u8, "foreign_dir", b.option([]const u8, "fat16-foreign", "volumes other tools made, for fat16_test's check to judge") orelse "");
-    // **ReleaseSafe, NOT Debug**: every safety check stays on, and the run is
-    // a third of the time (12.5 s, not 33 s). Its tests format and check tens
-    // of 35 MB FAT32 images (a rename stopped at each step, on every shape);
-    // the first build after a change to fat16 costs what Debug's run did.
+    // **Debug, like every other test** (metal-vmm QUEUE 136): these were
+    // ReleaseSafe for a run a third as long (12.5 s, not 33 s), but its
+    // compiles cost 72 s of a 2-core box's time for the three binaries, to
+    // save 20 s of running. Debug: 1-2 s of compiling each, 37 s of running.
     const fat16_unit = b.addTest(.{
         .name = "fat16_test",
         .root_module = b.createModule(.{
             .root_source_file = b.path("src/fat16_test.zig"),
             .target = b.graph.host,
-            .optimize = .ReleaseSafe,
+            .optimize = .Debug,
             .imports = &.{
                 .{ .name = "fat16_test_options", .module = fat16_opts.createModule() },
                 .{ .name = "coverage", .module = coverage },
@@ -462,7 +462,7 @@ pub fn build(b: *std.Build) void {
             .root_module = b.createModule(.{
                 .root_source_file = b.path("src/fat16_faults_test.zig"),
                 .target = b.graph.host,
-                .optimize = .ReleaseSafe,
+                .optimize = .Debug,
                 .imports = &.{
                     .{ .name = "fat16_test_options", .module = fat16_faults_opts },
                     .{ .name = "coverage", .module = coverage },
