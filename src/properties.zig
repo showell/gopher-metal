@@ -46,6 +46,10 @@ test "the properties over a sweep of seeds" {
     defer jsonl.deinit(std.testing.allocator);
     if (options.sdk_jsonl.len > 0) at.sink = keep;
     defer at.sink = null;
+    // A seed's failed oracle is a broken `always` named with its seed, counted
+    // and reported at the end; it must not stop the sweep at the first.
+    at.on_broken = null;
+    defer at.on_broken = at.failTest;
     at.declare();
 
     var failed_seeds: usize = 0;
