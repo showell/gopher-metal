@@ -1277,6 +1277,45 @@ test "FAT copies apart that check alike: neither is written over (the night of 2
     }
 }
 
+test "FAT copies that tie: the next change to a differing sector writes the held copy's version to both (a finding, metal-vmm QUEUE 124(f): the box decides)" {
+    // **THIS PINS WHAT IS, NOT WHAT SHOULD BE.** On a tie the first copy is
+    // held and neither is written, so the second's version is kept for a
+    // boot that can weigh. But a change to a FAT sector writes the held
+    // sector to every copy, so the first change in a sector that differs
+    // makes the second copy the first's there, entries the change never
+    // touched among them: the tie postpones the choice, then makes it.
+    //
+    // **IT DOES NOT CHOOSE BETWEEN THE FIXES** (metal-vmm QUEUE 127(g)). The
+    // difference here is a bad-cluster mark against a free entry, and a tie
+    // needs a difference that neutral: rot that freed a cluster a file holds
+    // breaks that copy's chain, and the other copy wins outright. Under
+    // P124(f)'s "merge toward allocated" the mark is the nonzero side, so
+    // both copies end as here and this stays green; under "keep each copy's
+    // own" the second copy stays free at 900 and this goes red. A fix is
+    // judged by its own red test, not by this one.
+    for (formats) |shape| {
+        const d = try Disk.make("damaged-weigh-tie-written", shape, false);
+        defer d.deinit();
+        const l = Layout.of(d.bytes);
+        const c: usize = 900;
+        l.set(d.bytes, 0, c, l.bad());
+        try d.mount(true);
+        try testing.expect(!d.fatsAgree());
+        try testing.expectEqual(@as(u32, 0), l.get(d.bytes, 1, c));
+        // A file long enough that its chain runs through the FAT sector
+        // that holds entry 900, around it.
+        const per_sector: usize = if (l.kind == .fat32) 128 else 256;
+        const bytes = try testing.allocator.alloc(u8, (c / per_sector * per_sector + per_sector) * 512);
+        defer testing.allocator.free(bytes);
+        @memset(bytes, 'x');
+        try d.vol.writeFile("big", bytes);
+        // The second copy now says what the first said of a cluster the
+        // write never touched.
+        try testing.expectEqual(l.bad(), l.get(d.bytes, 1, c));
+        try testing.expectEqual(l.bad(), l.get(d.bytes, 0, c));
+    }
+}
+
 test "a repair of FAT copies apart that the disk refuses: the mount goes on (the night of 2026-10-08, seed 18771)" {
     for (formats) |shape| {
         const d = try Disk.make("damaged-repair-refused", shape, false);

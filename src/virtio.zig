@@ -698,10 +698,11 @@ pub const Block = struct {
     /// write-through unless VIRTIO_BLK_F_FLUSH is negotiated (virtio 1.2
     /// §5.2.5.1), and this driver never negotiates it, so it is false there.
     write_cache: ?bool = null,
-    /// Whether boot turned the disk's write cache off (`scsi.turnCacheOff`):
-    /// null when it never said it had one, false when it would not be
-    /// turned off and still caches.
-    cache_turned_off: ?bool = null,
+    /// Whether the disk said its write cache was on at bring-up, before
+    /// boot turned it off (`scsi.turnCacheOff`). With `write_cache`, all
+    /// that is said of the cache is derived from it (`scsi_mode.report`,
+    /// metal-vmm QUEUE 131, #11): no second stored fact to drift.
+    cache_on_at_bringup: bool = false,
     /// A reset or a change of mode parameters was told (UNIT ATTENTION), so
     /// the write cache may be on again: looked at after the command that
     /// met it (`scsi.recheckCache`). How many times it was.
@@ -758,6 +759,10 @@ pub const Block = struct {
             fails,
             /// A write answers OK and nothing lands.
             lands_nothing,
+            /// A write lands whole and answers `blk_s_ioerr`: the disk took
+            /// it and said it did not (metal-vmm QUEUE 131), which is what a
+            /// caller cannot tell from one that did not land.
+            lands_and_fails,
             /// A write of more than one sector answers OK and only its first
             /// half lands: a torn write.
             torn,
@@ -801,6 +806,11 @@ pub const Block = struct {
             switch (f.kind) {
                 .fails => return blk_s_ioerr,
                 .lands_nothing => if (kind != blk_t_in) return blk_s_ok,
+                .lands_and_fails => if (kind != blk_t_in) {
+                    @memcpy(there, here[0..len]);
+                    if (self.cache) |c| c.wrote(c.context, lba, there);
+                    return blk_s_ioerr;
+                },
                 .torn => if (kind != blk_t_in and len > 512) {
                     const half = len / 512 / 2 * 512;
                     @memcpy(there[0..half], here[0..half]);

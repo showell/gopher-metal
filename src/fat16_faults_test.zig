@@ -365,9 +365,13 @@ test "every operation stopped after every write leaves an outcome its doc names,
                 d.label = "limit-stopped";
 
                 d.blk.fail_after_writes = d.blk.writes + stop;
-                if (op.run(&d.vol)) |_| {
-                    finished = true;
-                } else |_| {}
+                // Done, it says: and finished, when no cleanup after its
+                // commit failed. One that did is done with a leak (metal-vmm
+                // QUEUE 131, #3), and the stops go on past it.
+                const said_done = if (op.run(&d.vol)) |_| true else |_| false;
+                // Nor one whose FAT copy past the first failed: done, with
+                // the copies apart until the next mount (#7).
+                if (said_done and d.vol.cleanups_failed == 0 and d.vol.fat_copies_failed == 0) finished = true;
                 d.blk.fail_after_writes = null;
                 if (!finished and !std.mem.eql(u8, before, d.bytes)) seen_partial = true;
 
@@ -382,7 +386,7 @@ test "every operation stopped after every write leaves an outcome its doc names,
                     for (w.any, 0..) |st, i| {
                         if (sameState(st, got)) outcome = outcome * 8 + i;
                     }
-                    const ok = if (finished)
+                    const ok = if (said_done)
                         sameState(w.any[w.any.len - 1], got)
                     else for (w.any) |s| {
                         if (sameState(s, got)) break true;
@@ -477,6 +481,61 @@ fn requestsOf(op: Stopped, cfg: anytype) !u64 {
     return d.blk.requests - before;
 }
 
+test "a request that fails before a write's commit gives back every cluster it took (metal-vmm QUEUE 131, kernel-facts #6)" {
+    // A failure part-way through taking clusters (a FAT read or write, the
+    // zeros of a directory's new cluster, the file's own bytes) gave back
+    // nothing but on a full volume: every other error leaked what it had
+    // taken, and the error said nothing of it. Before the commit nothing
+    // points at those clusters, so nothing excuses keeping them. On FAT16,
+    // where a new file's last request is its entry's write, the commit:
+    // every request before it fails once, in turn.
+    const big = [_]u8{'b'} ** (3 * 512 + 100); // several clusters on the small shape
+    for (configs) |cfg| {
+        if (cfg.shape.kind != .fat16) continue;
+        for ([_]bool{ false, true }) |grows| {
+            const d = try Disk.makeUnkept("limit-give-back", cfg.shape, cfg.cached);
+            defer d.deinit();
+            _ = try d.vol.makePath("data/full");
+            if (grows) {
+                // Its first cluster full, but for `.` and `..`: the write
+                // grows it.
+                const slots = d.vol.sectors_per_cluster * (512 / 32) - 2;
+                var i: u32 = 0;
+                var name: [32]u8 = undefined;
+                while (i < slots) : (i += 1) {
+                    try d.vol.writeFile(try std.fmt.bufPrint(&name, "data/full/F{d}", .{i}), "x");
+                }
+            }
+            const before = try testing.allocator.dupe(u8, d.bytes);
+            defer testing.allocator.free(before);
+            try d.mount(cfg.cached);
+            const r0 = d.blk.requests;
+            try d.vol.writeFile("data/full/BIG.DAT", &big);
+            const total = d.blk.requests - r0;
+            var n: u64 = 0;
+            while (n + 1 < total) : (n += 1) {
+                @memcpy(d.bytes, before);
+                try d.mount(cfg.cached);
+                d.blk.fault = .{ .at = d.blk.requests + n, .kind = .fails };
+                const result = d.vol.writeFile("data/full/BIG.DAT", &big);
+                d.blk.fault = null;
+                // Done only when the failure was a FAT copy past the first,
+                // which is no failure of the write (#7).
+                if ((d.vol.fat_copies_failed != 0) == std.meta.isError(result)) {
+                    std.debug.print("a new file{s} (FAT {s}): request {d} of {d} failed; the write {s}, and {d} FAT copy writes failed\n", .{ if (grows) ", growing its directory" else "", if (cfg.cached) "held" else "on disk", n, total, if (std.meta.isError(result)) "failed" else "said done", d.vol.fat_copies_failed });
+                    return error.TestUnexpectedResult;
+                }
+                try d.mount(cfg.cached);
+                const r = try d.check();
+                if (r.health.leaked != 0) {
+                    std.debug.print("a new file{s} (FAT {s}): request {d} of {d} failed, before the commit, and {d} clusters are leaked\n", .{ if (grows) ", growing its directory" else "", if (cfg.cached) "held" else "on disk", n, total, r.health.leaked });
+                    return error.TestUnexpectedResult;
+                }
+            }
+        }
+    }
+}
+
 test "a request that fails is an error, and the machine carries on with nothing worse than a stop leaves" {
     var buf: [8192]u8 = undefined;
     for (stopped_ops) |op| {
@@ -504,10 +563,7 @@ test "a request that fails is an error, and the machine carries on with nothing 
                 d.blk.fault = .{ .at = d.blk.requests + n, .kind = .fails };
                 const result = op.run(&d.vol);
                 d.blk.fault = null;
-                if (result) |_| {
-                    std.debug.print("{s} ({s}, FAT {s}): request {d} of {d} failed, and the operation said it was done\n", .{ op.name, kind, if (cfg.cached) "held" else "on disk", n, total });
-                    return error.TestUnexpectedResult;
-                } else |_| {}
+                const said_done = if (result) |_| true else |_| false;
 
                 // What the machine holds in memory is still the disk's, at
                 // once (a later change to the same FAT sector would write
@@ -520,6 +576,7 @@ test "a request that fails is an error, and the machine carries on with nothing 
 
                 // And the next boot finds an outcome the operation names.
                 try d.mount(cfg.cached);
+                var done = true;
                 for (op.want) |w| {
                     const got = try stateOf(d, w.path, &buf);
                     for (w.any) |st| {
@@ -528,9 +585,73 @@ test "a request that fails is an error, and the machine carries on with nothing 
                         std.debug.print("{s} ({s}): request {d} failed; {s} is {s}, not an outcome named\n", .{ op.name, kind, n, w.path, describe(got) });
                         return error.TestUnexpectedResult;
                     }
+                    if (!sameState(w.any[w.any.len - 1], got)) done = false;
+                }
+                // **DONE IS SAID OF WHAT IS DONE, AND ONLY OF IT** (metal-vmm
+                // QUEUE 131, kernel-facts #3): a request that failed landed
+                // nothing, so an operation that answers done must have left
+                // its finished outcome (the last one named), and one that
+                // left it must answer done. A cleanup after the commit (a
+                // chain freed, a long name's parts) that fails is a leak the
+                // check reports, not the operation's failure.
+                if (said_done != done) {
+                    std.debug.print("{s} ({s}, FAT {s}): request {d} of {d} failed; the operation {s}, and its outcome is {s}\n", .{ op.name, kind, if (cfg.cached) "held" else "on disk", n, total, if (said_done) "said it was done" else "said it failed", if (done) "the finished one" else "not the finished one" });
+                    return error.TestUnexpectedResult;
                 }
                 const r = try d.check();
                 try onlyAllowed(&r, if (op.appends != null) &allowed_append else &allowed, op.name, kind, "failed request", n);
+            }
+        }
+    }
+}
+
+test "a write that lands and answers failure is an error, and leaves nothing worse than a stop: no rollback once a commit was tried (metal-vmm QUEUE 131)" {
+    // A caller cannot tell a refused write that landed from one that did not.
+    // Whatever it undoes after trying its commit (the entry that points at
+    // what it made) must be safe either way: a cluster freed under an entry
+    // that landed is one the next file takes, two files in one cluster.
+    var buf: [8192]u8 = undefined;
+    for (stopped_ops) |op| {
+        for (configs) |cfg| {
+            if (cfg.shape.kind == .fat32 and !cfg.cached) continue;
+            const kind = if (cfg.shape.kind == .fat32) "FAT32" else "FAT16";
+            const total = try requestsOf(op, cfg);
+            const d = try Disk.makeUnkept("limit-lands-fails", cfg.shape, cfg.cached);
+            defer d.deinit();
+            try op.setup(&d.vol);
+            setFsInfo(d);
+            const before = try testing.allocator.dupe(u8, d.bytes);
+            defer testing.allocator.free(before);
+            var clean_at: ?u64 = null;
+            var n: u64 = 0;
+            while (n < total) : (n += 1) {
+                if (clean_at != d.blk.writes) @memcpy(d.bytes, before);
+                clean_at = d.blk.writes;
+                try d.mount(cfg.cached);
+                d.blk.fault = .{ .at = d.blk.requests + n, .kind = .lands_and_fails };
+                // Its answer is either: a read the fault met is served as
+                // it is, since only writes lie.
+                op.run(&d.vol) catch {};
+                d.blk.fault = null;
+                // What the machine holds is the disk's, whatever the write
+                // answered: a FAT sector the disk took and called failed is
+                // read again, not assumed old (QUEUE 131, #7).
+                try heldIsDisk(d, op.name, kind, n);
+                try d.mount(cfg.cached);
+                for (op.want) |w| {
+                    const got = try stateOf(d, w.path, &buf);
+                    for (w.any) |st| {
+                        if (sameState(st, got)) break;
+                    } else {
+                        std.debug.print("{s} ({s}): request {d} landed and failed; {s} is {s}, not an outcome named\n", .{ op.name, kind, n, w.path, describe(got) });
+                        return error.TestUnexpectedResult;
+                    }
+                }
+                const r = try d.check();
+                try onlyAllowed(&r, if (op.appends != null) &allowed_append else &allowed, op.name, kind, "write that landed and failed", n);
+                // And it still takes a new file.
+                try d.vol.writeFile("data/after", &after_bytes);
+                try d.expectFile("data/after", &after_bytes);
             }
         }
     }

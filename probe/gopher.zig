@@ -1188,10 +1188,11 @@ fn dataVolume() ?virtio.Block {
         serial.put(", ");
         serial.putDec(b.capacity / 2048);
         serial.put(" MB\n");
-        if (b.cache_turned_off) |off| serial.put(if (off)
-            "  the volume's write cache is turned off: every write is on the disk when answered\n"
-        else
-            "  the volume's write cache would not turn off: a power cut can leave its filesystem damaged\n");
+        if (b.cache_on_at_bringup) switch (metal.scsi_mode.report(b.write_cache, true)) {
+            .turned_off => serial.put("  the volume's write cache is turned off: every write is on the disk when answered\n"),
+            .would_not_turn_off => serial.put("  the volume's write cache would not turn off: a power cut can leave its filesystem damaged\n"),
+            else => serial.put("  the volume's write cache was on, and will not say now: every save is flushed as if it were\n"),
+        };
         return b;
     } else |e| switch (e) {
         error.NoDisk => {
@@ -1696,11 +1697,13 @@ fn addVolume(facts: *std.ArrayList(router.host_status.Fact), alloc: std.mem.Allo
     try facts.append(alloc, .{ .label = label, .value = value });
     // **WHETHER A SAVE IS DURABLE BEFORE IT IS ANSWERED** (io.durable): what
     // the disk says of its write cache, and the flushes sent to it.
-    const cache: []const u8 = if (v.blk.cache_turned_off == false)
-        "on, and it would not turn off: writes wait in it until flushed, and a power cut can damage the filesystem"
-    else if (v.blk.cache_turned_off == true)
-        "turned off at boot: it writes through"
-    else if (v.blk.write_cache) |on| (if (on) "on: writes wait in it until flushed" else "off: it writes through") else "not said: flushed as if on";
+    const cache: []const u8 = switch (metal.scsi_mode.report(v.blk.write_cache, v.blk.cache_on_at_bringup)) {
+        .would_not_turn_off => "on, and it would not turn off: writes wait in it until flushed, and a power cut can damage the filesystem",
+        .turned_off => "turned off at boot: it writes through",
+        .caches => "on: writes wait in it until flushed",
+        .writes_through => "off: it writes through",
+        .unknown => "not said: flushed as if on",
+    };
     try facts.append(alloc, .{
         .label = cache_label,
         .value = try std.fmt.allocPrint(alloc, "{s}; {d} flushes, {d} failed; looked at again after {d} resets", .{ cache, v.blk.flushes, v.blk.flush_failures, v.blk.cache_rechecks }),
