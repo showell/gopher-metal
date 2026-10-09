@@ -2561,9 +2561,9 @@ pub const Volume = struct {
             seen: []u8,
             context: Context,
             health: Health = .{},
-            /// Some directory was not walked, so a leak cannot be told from
-            /// what it holds, and none is reported.
-            stopped_short: bool = false,
+            /// Whether every directory was walked. Where one was not, a
+            /// leak cannot be told from what it holds, and none is reported.
+            walked: enum { every_directory, stopped_short } = .every_directory,
             /// The path being walked, for the findings.
             path: [max_tree_depth * (max_name + 1)]u8 = undefined,
             path_len: usize = 0,
@@ -2700,7 +2700,7 @@ pub const Volume = struct {
                     const n = try self.chain(entry.first_cluster, null);
                     if (n == 0) return;
                     if (depth + 1 >= max_tree_depth) {
-                        self.stopped_short = true;
+                        self.walked = .stopped_short;
                         self.report(.too_deep, entry.first_cluster, 0);
                         return;
                     }
@@ -2758,7 +2758,7 @@ pub const Volume = struct {
                             if (c > v.max_cluster) break;
                             const value = v.entryIn(entries, i);
                             if (value == 0) free += 1;
-                            const leaked = !self.stopped_short and value != 0 and value != v.badMark() and !self.held(@intCast(c));
+                            const leaked = self.walked == .every_directory and value != 0 and value != v.badMark() and !self.held(@intCast(c));
                             if (leaked) {
                                 if (run == 0) run_start = @intCast(c);
                                 run += 1;
