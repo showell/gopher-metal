@@ -384,28 +384,51 @@ pub const Volume = struct {
 
     /// What `cacheFatChecked` found of the FAT's copies.
     pub const Mirrors = struct {
+        found: Found = .agree,
+        repair: Repair = .none,
         /// Sectors of a copy written to bring it into line with the other.
         repaired: u32 = 0,
         /// The copy the other was brought into line with: 0, the first,
         /// unless the second checked cleaner.
         trusted: u32 = 0,
-        /// Whether the copies differed and each was checked, and what the
-        /// check found with each: problems, then leaked clusters.
-        checked: bool = false,
+        /// When `weighed` or `tied`, what the check found with each copy:
+        /// problems, then leaked clusters.
         health: [2]Health = .{ .{}, .{} },
-        /// The copies differed and could not be weighed (the check failed):
-        /// the first is held, neither was written.
-        unweighed: bool = false,
-        /// The copies differed and checked alike: the first is held, and
-        /// neither is written over, since nothing says which is right.
+
+        /// How the copies stood, and which is the FAT.
         ///
-        /// Here and when `unweighed`, **NEITHER IS WRITTEN AT MOUNT**: the
+        /// When `unweighed` or `tied`, **NEITHER IS WRITTEN AT MOUNT**: the
         /// first change to an entry in a differing sector writes the held
         /// sector, the first copy's, whole over the second (`fatSet`).
-        tied: bool = false,
-        /// The disk refused a repair's write: the mount goes on with the FAT
-        /// held, and the copies are as far apart as the writes left them.
-        repair_failed: bool = false,
+        pub const Found = enum {
+            /// The copies agree.
+            agree,
+            /// More sectors differ than are weighed: the first is the FAT,
+            /// and the others are written from it.
+            past_weighing,
+            /// They differ, with no room given to weigh them: the first is
+            /// the FAT, and the second is written from it.
+            unchecked,
+            /// They differ, and the check that weighs them failed: the first
+            /// is held, and neither is written.
+            unweighed,
+            /// Each was checked; `trusted` checked cleaner, and the other is
+            /// written from it.
+            weighed,
+            /// Each was checked, and they checked alike: the first is held,
+            /// and neither is written, since nothing says which is right.
+            tied,
+        };
+
+        /// Whether the writes `found` calls for went through.
+        pub const Repair = enum {
+            /// Nothing to write.
+            none,
+            written,
+            /// The disk refused one: the mount goes on with the FAT held,
+            /// and the copies are as far apart as the writes left them.
+            refused,
+        };
     };
 
     /// The most differing sectors weighed copy against copy; past it the
@@ -442,9 +465,10 @@ pub const Volume = struct {
         try self.readSectors(self.fat_start, self.sectors_per_fat, fat.ptr);
         // Compared in runs: a FAT32 FAT can be tens of thousands of sectors.
         var run: [run_sectors * sector_size]u8 align(16) = undefined;
+        // Every differing sector is counted; the first `max_weighed_sectors`
+        // are kept to weigh.
         var differ: [max_weighed_sectors]u32 = undefined;
         var n_differ: usize = 0;
-        var too_many = false;
         var copy: u32 = 1;
         while (copy < self.num_fats) : (copy += 1) {
             var s: u32 = 0;
@@ -454,25 +478,23 @@ pub const Volume = struct {
                 var k: u32 = 0;
                 while (k < n) : (k += 1) {
                     if (std.mem.eql(u8, run[k * sector_size ..][0..sector_size], fat[(s + k) * sector_size ..][0..sector_size])) continue;
-                    if (n_differ == differ.len) too_many = true else {
-                        differ[n_differ] = s + k;
-                        n_differ += 1;
-                    }
+                    if (n_differ < differ.len) differ[n_differ] = s + k;
+                    n_differ += 1;
                 }
                 s += n;
             }
         }
         self.fat = fat;
-        var m: Mirrors = .{};
-        if (n_differ == 0) return m;
-        if (too_many) {
+        if (n_differ == 0) return .{};
+        if (n_differ > differ.len) {
             props.reachable(@src(), "fat: more FAT sectors differ than are weighed, and the first copy is the FAT", null);
             const n = self.mirrorFirst(fat, &run) catch {
                 repairRefused();
-                return .{ .repair_failed = true };
+                return .{ .found = .past_weighing, .repair = .refused };
             };
-            return .{ .repaired = n };
+            return .{ .found = .past_weighing, .repair = .written, .repaired = n };
         }
+        var m: Mirrors = .{ .found = .unchecked };
         // The second copy's version of each differing sector, kept to weigh.
         var second: [max_weighed_sectors][sector_size]u8 = undefined;
         for (differ[0..n_differ], 0..) |at, i| try self.readSector(self.fat_start + self.sectors_per_fat + at, &second[i]);
@@ -483,7 +505,7 @@ pub const Volume = struct {
             // perhaps the good one, is there for a boot that can weigh.
             const first_health = self.check(room, {}, ignoreFinding) catch {
                 unweighed();
-                return .{ .unweighed = true };
+                return .{ .found = .unweighed };
             };
             m.health[0] = first_health;
             var first: [max_weighed_sectors][sector_size]u8 = undefined;
@@ -495,9 +517,9 @@ pub const Volume = struct {
             m.health[1] = self.check(room, {}, ignoreFinding) catch {
                 for (differ[0..n_differ], 0..) |at, i| fat[at * sector_size ..][0..sector_size].* = first[i];
                 unweighed();
-                return .{ .unweighed = true };
+                return .{ .found = .unweighed };
             };
-            m.checked = true;
+            m.found = .weighed;
             const better = m.health[1].problems < m.health[0].problems or
                 (m.health[1].problems == m.health[0].problems and m.health[1].leaked < m.health[0].leaked);
             if (better) {
@@ -523,7 +545,7 @@ pub const Volume = struct {
                 // check as well as the good second.
                 if (m.health[0].problems == m.health[1].problems and m.health[0].leaked == m.health[1].leaked) {
                     props.reachable(@src(), "fat: FAT copies apart check alike, and neither is written over", null);
-                    m.tied = true;
+                    m.found = .tied;
                     return m;
                 }
             }
@@ -535,11 +557,12 @@ pub const Volume = struct {
         for (differ[0..n_differ]) |at| {
             self.writeSector(into + at, fat[at * sector_size ..][0..sector_size]) catch {
                 repairRefused();
-                m.repair_failed = true;
+                m.repair = .refused;
                 return m;
             };
             m.repaired += 1;
         }
+        m.repair = .written;
         return m;
     }
 

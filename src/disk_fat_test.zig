@@ -1259,8 +1259,7 @@ test "copies apart and a directory that cannot be read: the volume mounts, and n
         try d.mount(false);
         d.blk.fault = .{ .at = d.blk.requests + before_check, .kind = .fails };
         const m = try d.vol.cacheFatChecked(buf, room);
-        try testing.expect(!m.checked);
-        try testing.expect(m.unweighed);
+        try testing.expectEqual(.unweighed, m.found);
         try testing.expectEqual(@as(u32, 0), m.repaired);
         try testing.expectEqual(was, l.get(d.bytes, 1, last)); // the second copy kept
     }
@@ -1435,9 +1434,8 @@ test "a repair of FAT copies apart that the disk refuses: the mount goes on (the
         d.blk.fault = .{ .at = d.blk.requests + before_repair, .kind = .fails };
         const m = try d.vol.cacheFatChecked(buf, room);
         d.blk.fault = null;
-        try testing.expect(m.checked);
-        try testing.expect(!m.unweighed);
-        try testing.expect(m.repair_failed);
+        try testing.expectEqual(.weighed, m.found);
+        try testing.expectEqual(.refused, m.repair);
         try testing.expectEqual(@as(u32, 0), m.trusted);
         try testing.expectEqual(@as(u32, 0), m.repaired);
     }
@@ -1982,8 +1980,8 @@ test "a FAT whose copies differ in more sectors than are weighed is held as the 
     d.blk.fault = .{ .at = d.blk.requests + before + 1, .kind = .fails };
     const m = try d.vol.cacheFatChecked(buf, room);
     d.blk.fault = null;
-    try testing.expect(m.repair_failed);
-    try testing.expect(!m.checked);
+    try testing.expectEqual(.refused, m.repair);
+    try testing.expectEqual(.past_weighing, m.found);
     try testing.expectEqual(@as(u32, 0), m.repaired);
     try testing.expectEqual(l.end(), l.get(d.bytes, 1, 100));
     try testing.expect(!d.fatsAgree());
@@ -2037,8 +2035,7 @@ test "copies apart whose second weighing cannot run: the first copy is held as i
         d.blk.fault = .{ .at = d.blk.requests + before_check + one_check, .kind = .fails };
         const m = try d.vol.cacheFatChecked(buf, room);
         d.blk.fault = null;
-        try testing.expect(m.unweighed);
-        try testing.expect(!m.checked);
+        try testing.expectEqual(.unweighed, m.found);
         try testing.expectEqual(@as(u32, 0), m.repaired);
         // The held FAT is the first copy as the disk has it, the second's
         // sectors weighed in it put back; neither copy is written.
