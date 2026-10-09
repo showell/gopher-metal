@@ -784,6 +784,44 @@ test "a write that lands and answers failure, as an allocation links its chain, 
     }
 }
 
+test "a write that lands and answers failure, its read-back rotten: the kept free count is moved for every entry the read-back changes (metal-vmm QUEUE 134(h))" {
+    // The held sector is replaced whole by the read-back of a failed write.
+    // Where that differs from what was held in more than the one entry
+    // written (rot on the read-back; a weighing that trusted the second copy
+    // and whose repair was refused), the count moved for the one entry
+    // only, and was wrong after.
+    const big = [_]u8{'b'} ** (3 * 512 + 100);
+    for (configs) |cfg| {
+        if (cfg.shape.kind != .fat16 or !cfg.cached) continue;
+        const d = try Disk.makeUnkept("limit-read-back-rots", cfg.shape, cfg.cached);
+        defer d.deinit();
+        _ = try d.vol.makePath("data");
+        const before = try testing.allocator.dupe(u8, d.bytes);
+        defer testing.allocator.free(before);
+        try d.mount(cfg.cached);
+        const r0 = d.blk.requests;
+        try d.vol.writeFile("data/BIG.DAT", &big);
+        const total = d.blk.requests - r0;
+        var n: u64 = 0;
+        while (n < total) : (n += 1) {
+            @memcpy(d.bytes, before);
+            try d.mount(cfg.cached);
+            d.blk.fault = .{ .at = d.blk.requests + n, .kind = .lands_and_fails, .then_garbage = true, .seed = @truncate(n) };
+            d.vol.writeFile("data/BIG.DAT", &big) catch {};
+            d.blk.fault = null;
+            var held_free: u32 = 0;
+            var c: u32 = 2;
+            while (c <= d.vol.max_cluster) : (c += 1) {
+                if (std.mem.readInt(u16, d.vol.fat.?[c * 2 ..][0..2], .little) == 0) held_free += 1;
+            }
+            if (held_free != d.vol.free_clusters) {
+                std.debug.print("request {d} of {d} landed and failed, its read-back rotten: the kept free count is {d}, the held FAT's {d}\n", .{ n, total, d.vol.free_clusters, held_free });
+                return error.TestUnexpectedResult;
+            }
+        }
+    }
+}
+
 test "a disk that lies (a write that lands nothing or half, a read of other bytes) never stops the machine, and the next boot mounts and checks it" {
     const virtio = @import("virtio.zig");
     // What `Volume.check` found across every run, by problem: the boot's

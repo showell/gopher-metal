@@ -1391,24 +1391,42 @@ pub const Volume = struct {
     /// long as the machine ran (QUEUE.md item 80). Once the first copy has
     /// landed it is the FAT (cacheFat), so a later copy's failure is an
     /// error and changes nothing held.
-    /// A held sector not known, and the value its entry was put back to,
-    /// against which the read that settles it keeps the free count.
-    const Unknown = struct { sector: u32, entry: u32, assumed: Cluster };
+    /// A held sector not known: its entry was put back to the value the
+    /// count stands on, so the read that settles it moves the count by
+    /// whatever the disk's bytes change (`adoptSector`).
+    const Unknown = struct { sector: u32 };
+
+    /// **A HELD FAT SECTOR TAKES THE DISK'S BYTES, AND THE COUNT FOLLOWS
+    /// EVERY ENTRY** (metal-vmm QUEUE 134(h)): the free count moves for each
+    /// entry the copy changes, not only the one a write meant, since the
+    /// held sector may have differed in others (rot on a read-back; a
+    /// weighing that trusted the second copy, its repair refused).
+    fn adoptSector(self: *Volume, in_sector: u32, from: *const [sector_size]u8) void {
+        const fat = self.fat orelse return;
+        const sector = fat[in_sector * sector_size ..][0..sector_size];
+        const per = self.entriesPerSector();
+        var i: u32 = 0;
+        while (i < per) : (i += 1) {
+            const c = in_sector * per + i;
+            if (c < 2) continue;
+            if (c > self.max_cluster) break;
+            self.keepCount(self.entryIn(sector, i), self.entryIn(from, i));
+        }
+        @memcpy(sector, from);
+    }
 
     /// The held FAT sector `in_sector`, known: read again if it is not
     /// (`fat_unknown`), into scratch, and only then into the held copy. A
     /// read that fails leaves it not known, and the caller's operation fails.
     fn knowSector(self: *Volume, in_sector: u32) Error!void {
-        const fat = self.fat orelse return;
+        if (self.fat == null) return;
         if (self.fat_unknown_all) return Error.ReadFailed;
         var k: usize = 0;
         while (k < self.fat_unknown_len) : (k += 1) {
             const u = self.fat_unknown[k];
             if (u.sector != in_sector) continue;
             try self.readSector(self.fat_start + in_sector, self.scratch);
-            const sector = fat[in_sector * sector_size ..][0..sector_size];
-            @memcpy(sector, self.scratch[0..sector_size]);
-            self.keepCount(u.assumed, self.entryIn(sector, u.entry));
+            self.adoptSector(in_sector, self.scratch[0..sector_size]);
             props.reachable(@src(), "fat: a held FAT sector not known is read again, and known", null);
             self.fat_unknown[k] = self.fat_unknown[self.fat_unknown_len - 1];
             self.fat_unknown_len -= 1;
@@ -1453,13 +1471,15 @@ pub const Volume = struct {
                     props.reachable(@src(), "fat: a FAT sector whose write failed cannot be read again, and is not known", null);
                     self.putEntry(sector, at % sector_size, old);
                     if (self.fat_unknown_len < self.fat_unknown.len) {
-                        self.fat_unknown[self.fat_unknown_len] = .{ .sector = in_sector, .entry = at % sector_size / width, .assumed = old };
+                        self.fat_unknown[self.fat_unknown_len] = .{ .sector = in_sector };
                         self.fat_unknown_len += 1;
                     } else self.fat_unknown_all = true;
                     return e;
                 };
-                @memcpy(sector, self.scratch[0..sector_size]);
-                self.keepCount(old, self.entryIn(sector, at % sector_size / width));
+                // The count as it was for this entry (not yet moved), then
+                // moved for every entry the disk's bytes change.
+                self.putEntry(sector, at % sector_size, old);
+                self.adoptSector(in_sector, self.scratch[0..sector_size]);
                 return e;
             };
             self.keepCount(old, value);

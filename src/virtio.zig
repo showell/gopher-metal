@@ -777,6 +777,9 @@ pub const Block = struct {
         /// with other bytes, as a device that wrote part of it may. What a
         /// caller does when its read-back of a failed write fails as well.
         then_fail: u8 = 0,
+        /// The request after `at`, a read, answers OK with other bytes: rot
+        /// on the read-back of a failed write (metal-vmm QUEUE 134(h)).
+        then_garbage: bool = false,
     };
 
     /// A disk of `bytes.len / 512` sectors held in `bytes`, which the caller
@@ -812,6 +815,10 @@ pub const Block = struct {
                 for (here[0..len], 0..) |*b, i| b.* = @truncate(i *% 131 +% f.seed);
             }
             return blk_s_ioerr;
+        };
+        if (self.fault) |f| if (f.then_garbage and number == f.at + 1 and kind == blk_t_in) {
+            for (here[0..len], 0..) |*b, i| b.* = @truncate(i *% 167 +% f.seed);
+            return blk_s_ok;
         };
         if (self.fault) |f| if (f.at == number) {
             switch (f.kind) {
