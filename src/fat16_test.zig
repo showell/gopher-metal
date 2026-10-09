@@ -412,6 +412,26 @@ test "the check counts what a healthy volume holds" {
     }
 }
 
+test "the check counts the free clusters of the FAT it walks: the one fact the kept count is set from, and held to (metal-vmm QUEUE 131, kernel-facts #8)" {
+    for (configs) |cfg| {
+        const d = try Disk.make("check-free", cfg.shape, cfg.cached);
+        defer d.deinit();
+        var data: [3000]u8 = undefined;
+        try d.vol.writeFile("data/chat/a.md", pattern(&data, 2));
+        try d.vol.writeFile("data/gone", "x");
+        try d.vol.remove("data/gone");
+        const r = try d.check();
+        try testing.expectEqual(d.free(), r.health.free);
+        try testing.expectEqual(d.vol.free_clusters, r.health.free);
+        // A kept count gone wrong is one the check's disagrees with: what
+        // the per-request property in a coverage build sees.
+        d.vol.free_clusters += 1;
+        const again = try d.check();
+        try testing.expect(again.health.free != d.vol.free_clusters);
+        d.vol.free_clusters -= 1;
+    }
+}
+
 test "the check finds clusters in use that nothing holds" {
     for (configs) |cfg| {
         const shape, const cached = .{ cfg.shape, cfg.cached };

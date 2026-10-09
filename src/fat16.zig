@@ -281,6 +281,12 @@ pub const Health = struct {
     used: u32 = 0,
     leaked: u32 = 0,
     problems: u32 = 0,
+    /// **THE FREE COUNT, ONE FACT** (metal-vmm QUEUE 131, kernel-facts #8):
+    /// the clusters the FAT the machine uses marks free (the held one, when
+    /// held), counted in the same pass as the leaks. The boot sets the kept
+    /// count (`Volume.free_clusters`) from it, and a coverage build holds the
+    /// kept count to it after every request (probe/gopher.zig).
+    free: u32 = 0,
 
     pub fn clean(self: Health) bool {
         return self.problems == 0;
@@ -2827,6 +2833,7 @@ pub const Volume = struct {
                     base += n;
                 }
                 if (run > 0) self.leak(run_start, run);
+                self.health.free = free;
                 if (differ > 0) self.report(.fats_differ, differ_at, differ);
                 if (v.kind == .fat32 and v.fsinfo_sector != 0 and v.fsinfo_sector < v.fat_start) {
                     var fsinfo: [sector_size]u8 align(16) = undefined;
