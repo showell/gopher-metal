@@ -266,7 +266,35 @@ const data_dirs = [_][]const u8{ data_dir, auth_dir };
 /// which is the log /admin/host shows, and after whatever the console still
 /// owes, so no line lands inside another. tools/coverage_jsonl.sh takes each
 /// back out by its prefix.
+/// **metal-vmm's COVERAGE DOOR** (its main.zig): a port that answers
+/// `coverage_door_answer` there and nowhere else (a PC decodes nothing at
+/// 0xE2, and an unanswered read is 0xFF). A line handed to it costs the
+/// guest no time, where on the serial port every byte is an exit (KVM
+/// emulates `rep outsb` a byte at a time), and a boot's catalog alone was
+/// about nine seconds of guest time: enough to change what a run did
+/// (metal-vmm QUEUE B28). The line is copied into `door_line` (its length,
+/// then its bytes) and the buffer's address written to the door, one exit.
+/// The kernel's memory is identity-mapped, so the address is physical.
+/// Read once, at boot.
+const coverage_door: u16 = 0xE2;
+const coverage_door_answer: u8 = 'M';
+var coverage_door_found = false;
+var door_line: [4 + 4096]u8 align(4) = undefined;
+
 fn coverageLine(line: []const u8) void {
+    if (coverage_door_found) {
+        // A line longer than the buffer goes in pieces; metal-vmm joins
+        // them up to the newline.
+        var rest = line;
+        while (rest.len > 0) {
+            const n = @min(rest.len, door_line.len - 4);
+            std.mem.writeInt(u32, door_line[0..4], @intCast(n), .little);
+            @memcpy(door_line[4..][0..n], rest[0..n]);
+            metal.port.outl(coverage_door, @intCast(@intFromPtr(&door_line)));
+            rest = rest[n..];
+        }
+        return;
+    }
     serial.flushPending();
     serial.putPort("coverage: ");
     serial.putPort(line);
@@ -277,6 +305,7 @@ pub fn kmain() noreturn {
     interrupts.install();
     serial.put("gopher-metal: angry-gopher's route table, with no Linux under it\n");
     if (gm_build.coverage) {
+        coverage_door_found = metal.port.inb(coverage_door) == coverage_door_answer;
         metal.coverage.sink = coverageLine;
         metal.coverage.declare();
     }
