@@ -792,7 +792,7 @@ const Sim = struct {
             std.debug.print("  the check found {d} problems, the first {s} at {s}\n", .{ r.health.problems, @tagName(r.found[0].problem), r.found[0].text() });
             return s.fault("the volume does not check clean");
         }
-        if (d.vol.free_clusters != d.free()) return s.fault("the kept free count is not the FAT's");
+        if (d.vol.derived.free != d.free()) return s.fault("the kept free count is not the FAT's");
         if ((try d.vol.countFreeAgain()) != d.free()) return s.fault("the volume's recount is not the FAT's");
         if (!d.fatsAgree()) return s.fault("the FAT copies differ");
         var f = s.model.files.iterator();

@@ -456,8 +456,8 @@ test "every operation stopped after every write leaves an outcome its doc names,
 
 /// The kept free count, and the FAT if it is held, are the disk's.
 fn heldIsDisk(d: *test_disk.Disk, op: []const u8, kind: []const u8, n: u64) !void {
-    if (d.vol.free_clusters != d.free()) {
-        std.debug.print("{s} ({s}): request {d} failed; the kept free count is {d}, the disk has {d}\n", .{ op, kind, n, d.vol.free_clusters, d.free() });
+    if (d.vol.derived.free != d.free()) {
+        std.debug.print("{s} ({s}): request {d} failed; the kept free count is {d}, the disk has {d}\n", .{ op, kind, n, d.vol.derived.free, d.free() });
         return error.TestUnexpectedResult;
     }
     if (d.vol.fat) |held| {

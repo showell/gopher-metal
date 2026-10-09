@@ -42,9 +42,9 @@
 //!   if the first copy's write is answered. So once mounted it is what the
 //!   disk's copies are written FROM: in practice the source of each sector a
 //!   change touches (`fatSet`).
-//! - `free_clusters`: derived from the FAT. Counted at mount, then moved
+//! - `derived.free`: derived from the FAT. Counted at mount, then moved
 //!   entry by entry (`keepCount`); never recounted while the machine runs.
-//! - `next_free`: a hint for allocation. Wrong costs a longer search, never
+//! - `derived.next_free`: a hint for allocation. Wrong costs a longer search, never
 //!   a wrong cluster (`allocChain`).
 //! - `fsinfo_unknown`: a cache of one fact about the disk, "FSInfo's hints say
 //!   unknown". False at every mount, so each mount writes them once.
@@ -385,6 +385,43 @@ pub const DirCache = struct {
     }
 };
 
+/// **WHAT A VOLUME'S FAT DERIVES**, kept so that it need not be asked
+/// again: the free count (derived) and where allocation starts looking (a
+/// hint). `Volume.derive` works both out from the FAT; between mounts they
+/// are moved in step with it (`keepCount`, `allocChain`, `freeChain`), and
+/// a coverage build holds them to `derive` after every request.
+pub const Derived = struct {
+    /// **HOW MANY CLUSTERS ARE FREE, KEPT** (QUEUE.md item 14): counted once
+    /// at mount, then moved by `fatSet`, the one place a FAT entry changes,
+    /// whenever an entry goes from free to used or back. So every path that
+    /// takes or gives back clusters keeps it, the failure paths included, and
+    /// `space` is a field read instead of a walk of the FAT per request.
+    ///
+    /// **ONE COPY OF A VOLUME WRITES.** A `Volume` is a value, and its copies
+    /// share the held FAT (a slice) but not this count. So two copies that
+    /// both wrote would each count only their own writes. On this machine
+    /// only io.zig's copy writes once it has one (`mount`, `keepData`).
+    ///
+    /// **DERIVED, AND STORED.** Its source is the FAT; mount derives it, and
+    /// from then on it is moved, not re-derived: `countFreeAgain` recounts,
+    /// and only the tests and simulators call it. A count gone wrong stays
+    /// wrong until the next mount derives it again.
+    free: u32 = 0,
+    /// **WHERE THE NEXT ALLOCATION STARTS LOOKING** (FAT32.md §8). Every
+    /// cluster below it is in use: it starts at 2, moves only past clusters
+    /// an allocation took or found taken, and moves back to any cluster
+    /// `freeChain` gives back. So the first free cluster from here is the
+    /// first free cluster on the volume, the one a search from 2 would find,
+    /// and allocation chooses exactly what it chose before, without
+    /// re-reading every entry below on each small file. On FAT32's millions
+    /// of clusters that scan is the cost.
+    ///
+    /// **A HINT.** Allocation reads the FAT at every candidate, so a cursor
+    /// past a free cluster costs only the choice: a cluster further on, or a
+    /// wrap. 2 at every mount.
+    next_free: Cluster = 2,
+};
+
 pub const Volume = struct {
     blk: *virtio.Block,
 
@@ -429,35 +466,10 @@ pub const Volume = struct {
     fsinfo_unknown: bool = false,
     /// The highest cluster number the data region holds.
     max_cluster: Cluster,
-    /// **HOW MANY CLUSTERS ARE FREE, KEPT** (QUEUE.md item 14): counted once
-    /// at mount, then moved by `fatSet`, the one place a FAT entry changes,
-    /// whenever an entry goes from free to used or back. So every path that
-    /// takes or gives back clusters keeps it, the failure paths included, and
-    /// `space` is a field read instead of a walk of the FAT per request.
-    ///
-    /// **ONE COPY OF A VOLUME WRITES.** A `Volume` is a value, and its copies
-    /// share the held FAT (a slice) but not this count. So two copies that
-    /// both wrote would each count only their own writes. On this machine
-    /// only io.zig's copy writes once it has one (`mount`, `keepData`).
-    ///
-    /// **DERIVED, AND STORED.** Its source is the FAT; mount derives it, and
-    /// from then on it is moved, not re-derived: `countFreeAgain` recounts,
-    /// and only the tests and simulators call it. A count gone wrong stays
-    /// wrong until the next mount derives it again.
-    free_clusters: u32 = 0,
-    /// **WHERE THE NEXT ALLOCATION STARTS LOOKING** (FAT32.md §8). Every
-    /// cluster below it is in use: it starts at 2, moves only past clusters
-    /// an allocation took or found taken, and moves back to any cluster
-    /// `freeChain` gives back. So the first free cluster from here is the
-    /// first free cluster on the volume, the one a search from 2 would find,
-    /// and allocation chooses exactly what it chose before, without
-    /// re-reading every entry below on each small file. On FAT32's millions
-    /// of clusters that scan is the cost.
-    ///
-    /// **A HINT.** Allocation reads the FAT at every candidate, so a cursor
-    /// past a free cluster costs only the choice: a cluster further on, or a
-    /// wrap. 2 at every mount.
-    next_free: Cluster = 2,
+    /// **WHAT THE FAT DERIVES, KEPT** (essay web-server-in-a-box: memory
+    /// is a function of the disk). Both values are the FAT's to say;
+    /// `derive` says them afresh, and mount starts from it.
+    derived: Derived = .{},
     /// **CLEANUPS AFTER A COMMIT THAT FAILED** (metal-vmm QUEUE 131,
     /// kernel-facts #3 and #6): a chain given back, or a long name's parts
     /// cleared, once the one write that decides the operation was asked.
@@ -682,8 +694,8 @@ pub const Volume = struct {
                         if (c < 2 or c > self.max_cluster) continue;
                         const was = self.entryIn(&first[i], e);
                         const now = self.entryIn(&second[i], e);
-                        if (was == 0 and now != 0) self.free_clusters -|= 1;
-                        if (was != 0 and now == 0) self.free_clusters += 1;
+                        if (was == 0 and now != 0) self.derived.free -|= 1;
+                        if (was != 0 and now == 0) self.derived.free += 1;
                     }
                 }
             } else {
@@ -891,30 +903,48 @@ pub const Volume = struct {
                 .fat32 => if (b[66] == 0x29) le32(b[67..71]) else null,
             },
         };
-        vol.free_clusters = try vol.countFree();
+        // The count is the FAT's; the hint starts at 2, which every hint
+        // satisfies, as it always has.
+        vol.derived = .{ .free = (try vol.derive()).free };
         return vol;
     }
 
-    /// Free clusters, counted in the first FAT on the disk a sector at a
-    /// time: `sectors_per_fat` reads, not one per cluster.
-    fn countFree(self: *Volume) Error!u32 {
+    /// **WHAT THE FAT SAYS, AFRESH**: its free clusters, and the first of
+    /// them (2 when none is free) as where allocation starts. From the held
+    /// FAT when there is one, else from the first copy on the disk, a run
+    /// of sectors at a time: `sectors_per_fat` reads, not one per cluster.
+    pub fn derive(self: *Volume) Error!Derived {
+        return self.deriveFrom(if (self.fat != null) .held else .disk);
+    }
+
+    fn deriveFrom(self: *Volume, source: enum { held, disk }) Error!Derived {
         var free: u32 = 0;
+        var first: ?Cluster = null;
         const per = self.entriesPerSector();
         var run: [run_sectors * sector_size]u8 align(16) = undefined;
         var s: u32 = 0;
         while (s < self.sectors_per_fat) {
             const n = @min(run_sectors, self.sectors_per_fat - s);
-            try self.readSectors(self.fat_start + s, n, &run);
+            const sectors: []const u8 = switch (source) {
+                .held => self.fat.?[s * sector_size ..][0 .. n * sector_size],
+                .disk => read: {
+                    try self.readSectors(self.fat_start + s, n, &run);
+                    break :read run[0 .. n * sector_size];
+                },
+            };
             var i: u32 = 0;
             while (i < n * per) : (i += 1) {
                 const c = s * per + i;
                 if (c < 2) continue;
-                if (c > self.max_cluster) return free;
-                if (self.entryIn(&run, i) == 0) free += 1;
+                if (c > self.max_cluster) return .{ .free = free, .next_free = first orelse 2 };
+                if (self.entryIn(sectors, i) == 0) {
+                    free += 1;
+                    if (first == null) first = c;
+                }
             }
             s += n;
         }
-        return free;
+        return .{ .free = free, .next_free = first orelse 2 };
     }
 
     /// How many sectors a FAT is read in at a time, where it is read whole:
@@ -1327,19 +1357,19 @@ pub const Volume = struct {
     }
 
     /// How many bytes the data region holds, and how many of them no file
-    /// has: the kept count (`free_clusters`), so a field read.
+    /// has: the kept count (`derived.free`), so a field read.
     pub fn space(self: *Volume) Error!struct { total: u64, free: u64 } {
         const cluster_bytes: u64 = @as(u64, self.sectors_per_cluster) * sector_size;
-        return .{ .total = (@as(u64, self.max_cluster) - 1) * cluster_bytes, .free = @as(u64, self.free_clusters) * cluster_bytes };
+        return .{ .total = (@as(u64, self.max_cluster) - 1) * cluster_bytes, .free = @as(u64, self.derived.free) * cluster_bytes };
     }
 
-    /// The free count afresh, from the FAT on the disk: what `free_clusters`
+    /// The free count afresh, from the FAT on the disk: what `derived.free`
     /// must always equal. For tests, and for a check that wants to say so.
     /// It counts the FIRST COPY on the disk, not the held FAT: where
     /// `cacheFatChecked` trusted the second copy and the repair was refused,
     /// the kept count follows the held FAT and this does not.
     pub fn countFreeAgain(self: *Volume) Error!u32 {
-        return self.countFree();
+        return (try self.deriveFrom(.disk)).free;
     }
 
     /// The FAT entry for a cluster.
@@ -1486,12 +1516,12 @@ pub const Volume = struct {
     /// **THE DERIVED VALUE, MOVED IN STEP WITH ITS SOURCE**, not recomputed
     /// from it: the next mount's count is the reconcile.
     fn keepCount(self: *Volume, old: Cluster, new: Cluster) void {
-        if (old == 0 and new != 0) props.always(@src(), self.free_clusters > 0, "fat: the kept free count never runs below zero", null);
+        if (old == 0 and new != 0) props.always(@src(), self.derived.free > 0, "fat: the kept free count never runs below zero", null);
         // The fewest free clusters any run left (zig-coverage-sdk's
         // comparisons): a property only, beside the one above.
-        if (old == 0 and new != 0) props.alwaysGreaterThan(@src(), self.free_clusters, 0, "fat: a cluster is taken with one free", null);
-        if (old == 0 and new != 0) self.free_clusters -|= 1;
-        if (old != 0 and new == 0) self.free_clusters += 1;
+        if (old == 0 and new != 0) props.alwaysGreaterThan(@src(), self.derived.free, 0, "fat: a cluster is taken with one free", null);
+        if (old == 0 and new != 0) self.derived.free -|= 1;
+        if (old != 0 and new == 0) self.derived.free += 1;
     }
 
     /// A chain of `count` clusters, linked and terminated. Answers its first.
@@ -1510,7 +1540,7 @@ pub const Volume = struct {
         // the chain so far. Nothing points at it yet.
         errdefer if (first != 0) self.giveBack(first);
         var taken: u32 = 0;
-        var candidate: Cluster = @max(self.next_free, 2);
+        var candidate: Cluster = @max(self.derived.next_free, 2);
         // Once round the whole volume at most: a cursor that was wrong (a FAT
         // changed under it) costs a wrap, not a wrong answer.
         var looked: u32 = 0;
@@ -1549,7 +1579,7 @@ pub const Volume = struct {
             taken += 1;
             candidate += 1;
         }
-        self.next_free = candidate;
+        self.derived.next_free = candidate;
         return first;
     }
 
@@ -1583,7 +1613,7 @@ pub const Volume = struct {
             // cluster free behind the cursor: "every cluster below it is in
             // use" no longer holds until the next mount, and allocation
             // passes the cluster by.
-            if (cluster < self.next_free) self.next_free = cluster;
+            if (cluster < self.derived.next_free) self.derived.next_free = cluster;
             cluster = next;
         }
     }

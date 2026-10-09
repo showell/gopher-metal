@@ -266,7 +266,7 @@ pub const Disk = struct {
         const tested = std.mem.startsWith(u8, d.label, "damaged-") or std.mem.startsWith(u8, d.label, "limit-");
         if (!tested and d.blk.fail_after == null) {
             const r = d.check() catch |e| std.debug.panic("{s}: the check failed: {s}", .{ d.label, @errorName(e) });
-            const kept = d.vol.free_clusters;
+            const kept = d.vol.derived.free;
             if (kept != d.free()) std.debug.panic("{s}: the kept free count is {d}, and the FAT on the disk has {d} free", .{ d.label, kept, d.free() });
             if (!r.health.clean()) std.debug.panic("{s}: left healthy, and the check found {d} problems, the first {s} at {s}", .{ d.label, r.health.problems, @tagName(r.found[0].problem), r.found[0].text() });
         }
@@ -291,13 +291,13 @@ pub const Disk = struct {
         // count against (tools/check_fat16_images.sh).
         var count: [16]u8 = undefined;
         const free_name = try std.fmt.bufPrint(&name, "{s}{s}-{s}.free", .{ d.label, d.suffix, held });
-        try dir.writeFile(io, .{ .sub_path = free_name, .data = try std.fmt.bufPrint(&count, "{d}\n", .{d.vol.free_clusters}) });
+        try dir.writeFile(io, .{ .sub_path = free_name, .data = try std.fmt.bufPrint(&count, "{d}\n", .{d.vol.derived.free}) });
     }
 
-    /// The volume's kept free count (`free_clusters`) equals a fresh count of
+    /// The volume's kept free count (`derived.free`) equals a fresh count of
     /// the FAT on the disk, made here from the spec, and fat16.zig's own.
     pub fn expectKept(d: *Disk) !void {
-        try testing.expectEqual(d.free(), d.vol.free_clusters);
+        try testing.expectEqual(d.free(), d.vol.derived.free);
         try testing.expectEqual(@as(u32, @intCast(d.free())), try d.vol.countFreeAgain());
     }
 

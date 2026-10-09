@@ -1357,6 +1357,12 @@ fn checkVolumes() void {
         };
         _ = vol.check(seen, &damage, Count.each) catch continue;
         metal.coverage.always(@src(), damage == 0, "fat: after a request, a volume has no damage beyond what a stop leaves", .{ .damage = damage });
+        // **WHAT THE VOLUME KEEPS OF ITS FAT IS WHAT THE FAT SAYS NOW**
+        // (essay web-server-in-a-box; kernel-facts #8): the kept count, and
+        // a hint with no free cluster below it.
+        const now = vol.derive() catch continue;
+        metal.coverage.always(@src(), vol.derived.free == now.free, "fat: after a request, the kept free count is the FAT's", .{ .kept = vol.derived.free, .fat = now.free });
+        metal.coverage.always(@src(), now.free == 0 or vol.derived.next_free <= now.next_free, "fat: after a request, no free cluster lies below the allocation hint", .{ .hint = vol.derived.next_free, .first_free = now.next_free });
     }
 }
 
