@@ -453,7 +453,7 @@ pub fn build(b: *std.Build) void {
     // is named by one filter or the other.
     const fat16_faults_opts = fat16_opts.createModule();
     for ([_][]const []const u8{
-        &.{ "every operation stopped after every write", "a request that fails is an error" },
+        &.{ "every operation stopped after every write", "a request that fails is an error", "a request that fails before a write's commit" },
         &.{ "a disk that lies", "a write that lands and answers failure" },
     }, [_][]const u8{ "fat16_faults_test", "fat16_lies_test" }) |filters, name| {
         const unit = b.addTest(.{

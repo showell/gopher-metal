@@ -423,6 +423,8 @@ pub const Volume = struct {
     /// check reports and the box's #4 reclaims. Counted here, said by a
     /// property, never swallowed and never the operation's error.
     cleanups_failed: u64 = 0,
+    /// Writes of a FAT copy past the first that failed (`copyApart`).
+    fat_copies_failed: u64 = 0,
     /// **WHICH VOLUME THIS IS**: the serial number mkfs chose at random when it
     /// formatted it (the extended boot record's volume ID, offset 39), or null
     /// on a boot sector without one. Linux's `blkid` shows it as the UUID,
@@ -1305,6 +1307,13 @@ pub const Volume = struct {
         const width = self.entryBytes();
         const at = @as(u32, cluster) * width;
         const in_sector = at / sector_size;
+        // **THE FIRST COPY DECIDES** (QUEUE 131, kernel-facts #7). Every read
+        // here follows it, so its write is the change: a failure there is
+        // the caller's, and the sector is read again to learn what landed
+        // (a write the disk called failed may have), never assumed old. A
+        // later copy that fails is copies apart, which the next mount brings
+        // into line with the first (cacheFat): counted and said, not the
+        // operation's failure.
         if (self.fat) |fat| {
             // The cached sector is the truth — cacheFat brought every copy
             // into line with it — so it is written to each copy whole, and no
@@ -1313,26 +1322,54 @@ pub const Volume = struct {
             const old = self.entryIn(sector, at % sector_size / width);
             self.putEntry(sector, at % sector_size, value);
             self.writeSector(self.fat_start + in_sector, sector) catch |e| {
-                self.putEntry(sector, at % sector_size, old);
+                self.readSector(self.fat_start + in_sector, sector) catch {
+                    // Not even read: what the disk holds is unknown, and the
+                    // held sector goes on as it was, the old value.
+                    props.reachable(@src(), "fat: a FAT sector whose write failed cannot be read again", null);
+                    self.putEntry(sector, at % sector_size, old);
+                    return e;
+                };
+                self.keepCount(old, self.entryIn(sector, at % sector_size / width));
                 return e;
             };
             self.keepCount(old, value);
             var c: u32 = 1;
             while (c < self.num_fats) : (c += 1) {
-                try self.writeSector(self.fat_start + c * self.sectors_per_fat + in_sector, sector);
+                self.writeSector(self.fat_start + c * self.sectors_per_fat + in_sector, sector) catch self.copyApart();
             }
             return;
         }
         var copy: u32 = 0;
         while (copy < self.num_fats) : (copy += 1) {
             const lba = self.fat_start + copy * self.sectors_per_fat + in_sector;
-            try self.readSector(lba, self.scratch);
-            // The first copy is the one every read here follows.
-            const old = self.entryIn(self.scratch, at % sector_size / width);
+            if (copy == 0) {
+                try self.readSector(lba, self.scratch);
+                // The first copy is the one every read here follows.
+                const old = self.entryIn(self.scratch, at % sector_size / width);
+                self.putEntry(self.scratch, at % sector_size, value);
+                self.writeSector(lba, self.scratch) catch |e| {
+                    // What landed, read again for the count.
+                    const now = if (self.readSector(lba, self.scratch)) |_| self.entryIn(self.scratch, at % sector_size / width) else |_| old;
+                    self.keepCount(old, now);
+                    return e;
+                };
+                self.keepCount(old, value);
+                continue;
+            }
+            self.readSector(lba, self.scratch) catch {
+                self.copyApart();
+                continue;
+            };
             self.putEntry(self.scratch, at % sector_size, value);
-            try self.writeSector(lba, self.scratch);
-            if (copy == 0) self.keepCount(old, value);
+            self.writeSector(lba, self.scratch) catch self.copyApart();
         }
+    }
+
+    /// A FAT copy past the first that could not be written: apart from the
+    /// first until the next mount brings it into line (QUEUE 131, #7).
+    fn copyApart(self: *Volume) void {
+        self.fat_copies_failed +%= 1;
+        props.reachable(@src(), "fat: a FAT copy past the first fails to write, and is left apart", .{ .count = self.fat_copies_failed });
     }
 
     /// **FSINFO'S FREE COUNT AND NEXT-FREE HINT, MARKED UNKNOWN** on the first
@@ -1382,6 +1419,10 @@ pub const Volume = struct {
         if (count == 0) return 0;
         var first: Cluster = 0;
         var previous: Cluster = 0;
+        // **WHAT IT TOOK GOES BACK ON EVERY ERROR** (QUEUE 131, #6), not only
+        // on a full volume: a FAT read or write that fails part-way leaked
+        // the chain so far. Nothing points at it yet.
+        errdefer if (first != 0) self.giveBack(first);
         var taken: u32 = 0;
         var candidate: Cluster = @max(self.next_free, 2);
         // Once round the whole volume at most: a cursor that was wrong (a FAT
@@ -1398,17 +1439,25 @@ pub const Volume = struct {
                 props.reachable(@src(), "fat: an allocation finds the volume full", .{ .count = count, .taken = taken });
                 if (first != 0) {
                     props.reachable(@src(), "fat: a volume full part-way through an allocation gives back what it took", .{ .taken = taken });
-                    self.freeChain(first) catch {};
                 }
-                return Error.Full;
+                return Error.Full; // the errdefer gives it back
             }
             looked += 1;
             if ((try self.fatGet(candidate)) != 0) {
                 candidate += 1;
                 continue;
             }
-            try self.fatSet(candidate, self.endMark()); // the end, until something follows
-            if (previous != 0) try self.fatSet(previous, candidate);
+            // Its own mark may land and still fail: given back if it did.
+            self.fatSet(candidate, self.endMark()) catch |e| { // the end, until something follows
+                if (self.fatGet(candidate)) |now| if (now != 0) self.giveBack(candidate) else {} else |_| {}
+                return e;
+            };
+            // Taken and not yet linked: given back on its own if the link
+            // fails, as the chain before it is by the errdefer.
+            if (previous != 0) self.fatSet(previous, candidate) catch |e| {
+                self.giveBack(candidate);
+                return e;
+            };
             if (first == 0) first = candidate;
             previous = candidate;
             taken += 1;
@@ -1424,6 +1473,17 @@ pub const Volume = struct {
         done catch {
             self.cleanups_failed +%= 1;
             props.reachable(@src(), "fat: a cleanup after the commit failed, and is left a leak", .{ .count = self.cleanups_failed });
+        };
+    }
+
+    /// Clusters taken and not yet pointed at, given back on an error before
+    /// the commit (QUEUE 131, #6). A give-back that fails is counted with the
+    /// cleanups (`cleanups_failed`), never swallowed: the clusters are a
+    /// leak the boot's check reports.
+    fn giveBack(self: *Volume, first: Cluster) void {
+        self.freeChain(first) catch {
+            self.cleanups_failed +%= 1;
+            props.reachable(@src(), "fat: clusters taken before a failure could not be given back, and are left a leak", .{ .count = self.cleanups_failed });
         };
     }
 
@@ -1556,12 +1616,23 @@ pub const Volume = struct {
         const last = end.last;
 
         const fresh = try self.allocChain(1);
+        // Given back on a failure before the link that makes it the
+        // directory's (QUEUE 131, #6); not after, since that write may have
+        // landed (#2).
+        var committing = false;
+        errdefer if (!committing) self.giveBack(fresh);
         var s: u32 = 0;
         @memset(self.scratch, 0);
         while (s < self.sectors_per_cluster) : (s += 1) {
             try self.writeSector(self.clusterSector(fresh) + s, self.scratch);
         }
-        try self.fatSet(last, fresh);
+        committing = true;
+        self.fatSet(last, fresh) catch |e| {
+            // The link failed: what the FAT says now, read again (#7), tells
+            // whether it landed. If not, nothing points at the cluster.
+            if (self.fatGet(last)) |now| if (now != fresh) self.giveBack(fresh) else {} else |_| {}
+            return e;
+        };
     }
 
     /// The most entries a directory may hold (Microsoft's FAT specification:
@@ -1712,6 +1783,10 @@ pub const Volume = struct {
         attr: u8,
         first: Cluster,
         size: u32,
+        /// Set true just before the short entry's write, the commit: a
+        /// caller undoes nothing after it (QUEUE 131, #2), and may give back
+        /// what it took on a failure before it (#6).
+        committing: ?*bool,
     ) Error!void {
         const parts = longParts(name);
         const sum = shortChecksum(short);
@@ -1771,6 +1846,7 @@ pub const Volume = struct {
         e[29] = @truncate(size >> 8);
         e[30] = @truncate(size >> 16);
         e[31] = @truncate(size >> 24);
+        if (committing) |c| c.* = true;
         try self.writeSector(slot.lba, self.scratch);
     }
 
@@ -1891,11 +1967,16 @@ pub const Volume = struct {
         const run = try self.findRun(dir_cluster, parts + 1);
 
         const first = try self.allocChain(clusters);
+        // A failure before the entry gives the chain back (QUEUE 131, #6); a
+        // failure of the entry's write may have landed, and leaves it (#2).
+        var committing = false;
+        errdefer if (!committing) self.giveBack(first);
         if (bytes.len > 0) try self.writeChain(first, bytes);
 
         // The entry goes last: until it is written, nothing points at the data,
         // so a machine that stops here has lost a file rather than corrupted one.
-        try self.writeEntry(run, if (needs_long) name else name[0..0], short, 0x20, first, @intCast(bytes.len));
+        // `committing` is set at its short entry's write.
+        try self.writeEntry(run, if (needs_long) name else name[0..0], short, 0x20, first, @intCast(bytes.len), &committing);
     }
 
     /// **AN OVERWRITE IS ONE SECTOR WRITE** (essay kernel-facts #1). The new
@@ -1915,7 +1996,7 @@ pub const Volume = struct {
     fn overwrite(self: *Volume, old: Entry, clusters: u32, bytes: []const u8) Error!void {
         const first = try self.allocChain(clusters);
         if (bytes.len > 0) self.writeChain(first, bytes) catch |err| {
-            self.freeChain(first) catch props.reachable(@src(), "fat: an overwrite's new chain is left allocated, a leak", null);
+            self.giveBack(first);
             return err;
         };
         try self.setEntry(old, first, @intCast(bytes.len));
@@ -1956,7 +2037,7 @@ pub const Volume = struct {
         // on, a failure leaves the cluster taken: a leak if the entry did not
         // land, which the check reports and the boot reclaims (the box's #4).
         var committing = false;
-        errdefer if (!committing) self.freeChain(cluster) catch {};
+        errdefer if (!committing) self.giveBack(cluster);
         @memset(self.scratch, 0);
         var s: u32 = 0;
         while (s < self.sectors_per_cluster) : (s += 1) {
@@ -1976,8 +2057,7 @@ pub const Volume = struct {
         putCluster(dotdot, dir_cluster);
         try self.writeSector(self.clusterSector(cluster), self.scratch);
 
-        committing = true;
-        try self.writeEntry(run, if (needs_long) name else name[0..0], short, attr_directory, cluster, 0);
+        try self.writeEntry(run, if (needs_long) name else name[0..0], short, attr_directory, cluster, 0, &committing);
         return cluster;
     }
 
@@ -2357,7 +2437,7 @@ pub const Volume = struct {
         }
 
         const r = room.?;
-        try self.writeEntry(r.run, if (needsLongName(b.name)) b.name else b.name[0..0], r.short, 0x20, src.first_cluster, src.size);
+        try self.writeEntry(r.run, if (needsLongName(b.name)) b.name else b.name[0..0], r.short, 0x20, src.first_cluster, src.size, null);
     }
 
     /// Deletes one file. removeEntry does the real work: it frees the
