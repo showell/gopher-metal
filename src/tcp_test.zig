@@ -1318,7 +1318,7 @@ test "a duplicate acknowledgement names SND.UNA: an older one, or one of data ne
     try testing.expectEqual(@as(u64, 0), f.table.fast_retransmits);
     try testing.expectEqual(@as(u8, 0), f.table.conns[i].dupacks);
     // Nothing was sent again; three that name SND.UNA still are.
-    try testing.expect(f.wire.count >= sent);
+    try testing.expectEqual(sent, f.wire.count);
     for (0..3) |_| _ = p.ackUpTo(&f.table, &f.wire, una, 6 * ms);
     try testing.expectEqual(@as(u64, 1), f.table.fast_retransmits);
 }

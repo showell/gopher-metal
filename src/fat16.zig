@@ -477,13 +477,20 @@ pub const Volume = struct {
     /// property, never swallowed and never the operation's error.
     cleanups_failed: u64 = 0,
     /// **A RESERVE FOR SMALL WRITES** (metal-vmm QUEUE 132, Steve 2026-10-09:
-    /// "a little breathing room for emergencies"): clusters an allocation of
-    /// more than `small_clusters` may not take. 64 MiB of clusters, or a
-    /// sixteenth of a volume too small for that, set at mount. A bulk write
-    /// (an upload, a long append) is refused `Full` first, while small
-    /// records, a directory's growth and a replace's second chain still go,
-    /// and a remove always does. The kernel decides by size alone, so the
-    /// application needs no policy.
+    /// "a little breathing room for emergencies"): clusters a file larger
+    /// than `small_bytes` may not take. 64 MiB of clusters, or a sixteenth of
+    /// a volume too small for that, set at mount. A bulk write (an upload, a
+    /// long append) is refused `Full` first, while small records and a
+    /// directory's growth still go, and a remove always does. The kernel
+    /// decides by size alone, so the application needs no policy.
+    ///
+    /// **JUDGED BY THE FILE, IN BYTES** (metal-vmm QUEUE 138(e)): "small" is
+    /// the same 64 KiB whatever the cluster size, and an append is judged by
+    /// the file it makes, not the bytes it adds, so a log grown a cluster at
+    /// a time spends the reserve no more than one write of it would. An
+    /// overwrite is judged by what it leaves free once its old chain is
+    /// gone, so one that frees as much as it takes goes, near the reserve or
+    /// in it (if the clusters for its new chain are there to take).
     reserve_clusters: u32 = 0,
     /// Writes of a FAT copy past the first that failed (`copyApart`).
     fat_copies_failed: u64 = 0,
@@ -1575,13 +1582,15 @@ pub const Volume = struct {
     /// part way, what was taken is given back before the error is returned,
     /// because a half-built chain nothing points at is a leak no `fsck` here
     /// would ever find.
-    fn allocChain(self: *Volume, count: u32) Error!Cluster {
+    fn allocChain(self: *Volume, count: u32, spend: Spend) Error!Cluster {
         if (count == 0) return 0;
-        // **THE RESERVE** (`reserve_clusters`, QUEUE 132): a large
-        // allocation that would leave less free than it is refused before it
-        // takes anything; a small one may go into it.
-        if (count > small_clusters and self.free_clusters < @as(u64, count) + self.reserve_clusters) {
-            props.reachable(@src(), "fat: a large allocation is refused to keep the reserve for small writes", .{ .count = count, .free = self.free_clusters });
+        // **THE RESERVE** (`reserve_clusters`, QUEUE 132, 138(e)): an
+        // allocation for a large file that would leave less free than the
+        // reserve, once what the operation frees after it is back, is
+        // refused before it takes anything; a small file's may go into it.
+        // One that takes no more than it frees spends nothing.
+        if (spend.bytes > small_bytes and count > spend.frees and self.free_clusters + spend.frees < @as(u64, count) + self.reserve_clusters) {
+            props.reachable(@src(), "fat: a large allocation is refused to keep the reserve for small writes", .{ .count = count, .free = self.free_clusters, .bytes = spend.bytes });
             return Error.Full;
         }
         var first: Cluster = 0;
@@ -1668,7 +1677,13 @@ pub const Volume = struct {
     /// The reserve's size (`reserve_clusters`), and the largest allocation
     /// it lets through.
     pub const reserve_bytes: u32 = 64 << 20;
-    pub const small_clusters: u32 = 2;
+    pub const small_bytes: u32 = 64 << 10;
+
+    /// What an allocation is for, as the reserve judges it (138(e)): the
+    /// size of the file it makes (a new file's bytes, an appended file's
+    /// size after; zero for a directory's growth), and the clusters the
+    /// operation gives back after it (an overwrite's old chain).
+    const Spend = struct { bytes: u64, frees: u64 = 0 };
 
     /// Clusters taken and not yet pointed at, given back on an error before
     /// the commit (QUEUE 131, #6). A give-back that fails is counted with the
@@ -1821,7 +1836,7 @@ pub const Volume = struct {
         props.alwaysLessThanOrEqualTo(@src(), (end.clusters + 1) * per_cluster, max_dir_entries, "fat: a directory grown stays within FAT's most entries", null);
         const last = end.last;
 
-        const fresh = try self.allocChain(1);
+        const fresh = try self.allocChain(1, .{ .bytes = 0 });
         // Given back on a failure before the link that makes it the
         // directory's (QUEUE 131, #6); not after, since that write may have
         // landed (#2).
@@ -2178,7 +2193,7 @@ pub const Volume = struct {
         const parts: u32 = if (needs_long) longParts(name) else 0;
         const run = try self.findRun(dir_cluster, parts + 1);
 
-        const first = try self.allocChain(clusters);
+        const first = try self.allocChain(clusters, .{ .bytes = bytes.len });
         // A failure before the entry gives the chain back (QUEUE 131, #6); a
         // failure of the entry's write may have landed, and leaves it (#2).
         var committing = false;
@@ -2206,7 +2221,12 @@ pub const Volume = struct {
     /// the file is the new one, and the old chain a leak (`afterCommit`,
     /// QUEUE 131, #3).
     fn overwrite(self: *Volume, old: Entry, clusters: u32, bytes: []const u8) Error!void {
-        const first = try self.allocChain(clusters);
+        // What the old chain gives back after, counted from its size: a
+        // chain longer than its size (a stop between an append's link and
+        // its entry) gives back more, never less.
+        const per_cluster: u64 = @as(u64, self.sectors_per_cluster) * sector_size;
+        const frees = (@as(u64, old.size) + per_cluster - 1) / per_cluster;
+        const first = try self.allocChain(clusters, .{ .bytes = bytes.len, .frees = frees });
         if (bytes.len > 0) self.writeChain(first, bytes) catch |err| {
             self.giveBack(first);
             return err;
@@ -2238,7 +2258,7 @@ pub const Volume = struct {
         const parts: u32 = if (needs_long) longParts(name) else 0;
         const run = try self.findRun(dir_cluster, parts + 1);
 
-        const cluster = try self.allocChain(1);
+        const cluster = try self.allocChain(1, .{ .bytes = 0 });
         // A write refused before the commit gives the cluster back; a machine
         // that stops leaves it leaked, which the check reports.
         //
@@ -2376,12 +2396,12 @@ pub const Volume = struct {
         // counted in the chain, it fills them first.
         var first = entry.first_cluster;
         if (have == 0 and first == 0) {
-            first = try self.allocChain(need);
+            first = try self.allocChain(need, .{ .bytes = new_size });
         } else {
             const end = try self.chainEnd(first);
             if (need > end.clusters) {
                 props.reachable(@src(), "fat: an append links clusters onto a file", .{ .need = need, .have = end.clusters });
-                const extra = try self.allocChain(need - end.clusters);
+                const extra = try self.allocChain(need - end.clusters, .{ .bytes = new_size });
                 try self.fatSet(end.last, extra);
             }
         }
