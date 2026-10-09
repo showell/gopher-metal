@@ -1625,7 +1625,10 @@ def run_story(elf, linux_bin, content, pristine, work, mnt, steps, label, report
     rq, rport, rserial = start_kernel(elf, recheck, rscratch)
     ask(rport, case("the version, on a boot of the written disk", "GET", "/version"),
         os.path.join(rscratch, "recheck"))
-    _, rlog = finish_kernel(rq, rserial)
+    rcode, rlog = finish_kernel(rq, rserial)
+    if rcode != 1:
+        failures += 1
+        report(f"FAIL  {label}: the boot after the story exited {rcode}, not at its request limit")
     if "the boot disk" not in disk_check_lines(rlog):
         failures += 1
         report(f"FAIL  {label}: the boot after the story printed no disk check")
@@ -1708,9 +1711,9 @@ def held_open(elf, pristine, work, mnt, ms: int):
         rest = None
     let_go = time.time() - began
     held.close()
-    _, log = finish_kernel(qemu, serial)
+    code, log = finish_kernel(qemu, serial)
     shutil.rmtree(scratch, ignore_errors=True)
-    return answered, let_go, answer, rest, log
+    return answered, let_go, answer, rest, log, code
 
 
 def timeout_failures(elf, pristine, work, mnt, report) -> int:
@@ -1728,7 +1731,10 @@ def timeout_failures(elf, pristine, work, mnt, report) -> int:
     let_go_at = {}
     low, high = (500, 2000) if QUICK else (2000, 6000)
     for ms in (low, high):
-        answered, let_go, answer, rest, log = held_open(elf, pristine, work, mnt, ms)
+        answered, let_go, answer, rest, log, code = held_open(elf, pristine, work, mnt, ms)
+        if code != 1:
+            failures += 1
+            report(f"FAIL  timeout: with idle_timeout_ms={ms} the kernel exited {code}, not at its request limit")
         let_go_at[ms] = let_go
         if answer.get("status") != 200:
             failures += 1
@@ -2231,20 +2237,23 @@ def admin_reset_failures(elf, linux_bin, content, pristine, work, mnt, gopher_ro
     qemu, port, serial, first = boot(image, line, 2)
     expect(logs_in(port, RESET_PASSWORD), "metal: the reset password did not log in")
     expect(not logs_in(port, MEMBER_PASSWORD), "metal: the old password still logged in after the reset")
-    _, log = finish_kernel(qemu, serial)
+    code, log = finish_kernel(qemu, serial)
+    expect(code == 1, f"metal: a boot exited {code}, not at its request limit")
     expect("admin password reset for Steve: applied;" in log, "metal: the boot did not say it applied the reset")
 
     # The same image again: once is once.
     qemu, port, serial, _ = boot(image, line, 1, after=first)
     expect(logs_in(port, RESET_PASSWORD), "metal: the reset password did not log in on the second boot")
-    _, log = finish_kernel(qemu, serial)
+    code, log = finish_kernel(qemu, serial)
+    expect(code == 1, f"metal: a boot exited {code}, not at its request limit")
     expect("applied by an earlier boot; nothing changed" in log, "metal: the second boot did not say it had applied it before")
 
     # Someone else's name: refused, the old password still good.
     shutil.copy(pristine, image)
     qemu, port, serial, _ = boot(image, f"admin_password_reset = Mallory {new_hash}\n", 1)
     expect(logs_in(port, MEMBER_PASSWORD), "metal: a reset for another name changed the admin's password")
-    _, log = finish_kernel(qemu, serial)
+    code, log = finish_kernel(qemu, serial)
+    expect(code == 1, f"metal: a boot exited {code}, not at its request limit")
     expect("REFUSED: uid 1 is not named so" in log, "metal: a reset for another name was not refused out loud")
     shutil.rmtree(scratch, ignore_errors=True)
 
