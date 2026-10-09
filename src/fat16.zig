@@ -416,6 +416,13 @@ pub const Volume = struct {
     /// re-reading every entry below on each small file. On FAT32's millions
     /// of clusters that scan is the cost.
     next_free: Cluster = 2,
+    /// **CLEANUPS AFTER A COMMIT THAT FAILED** (metal-vmm QUEUE 131,
+    /// kernel-facts #3 and #6): a chain given back, or a long name's parts
+    /// cleared, once the one write that decides the operation was asked.
+    /// The operation is done; what was not cleaned is a leak the boot's
+    /// check reports and the box's #4 reclaims. Counted here, said by a
+    /// property, never swallowed and never the operation's error.
+    cleanups_failed: u64 = 0,
     /// **WHICH VOLUME THIS IS**: the serial number mkfs chose at random when it
     /// formatted it (the extended boot record's volume ID, offset 39), or null
     /// on a boot sector without one. Linux's `blkid` shows it as the UUID,
@@ -1411,6 +1418,15 @@ pub const Volume = struct {
         return first;
     }
 
+    /// A cleanup after the commit (`cleanups_failed`): its failure is a
+    /// leak, counted, not the operation's error.
+    fn afterCommit(self: *Volume, done: Error!void) void {
+        done catch {
+            self.cleanups_failed +%= 1;
+            props.reachable(@src(), "fat: a cleanup after the commit failed, and is left a leak", .{ .count = self.cleanups_failed });
+        };
+    }
+
     fn freeChain(self: *Volume, first: Cluster) Error!void {
         var cluster = first;
         while (self.inData(cluster)) {
@@ -1586,6 +1602,13 @@ pub const Volume = struct {
 
     /// removeEntry's work. With `free` false the entry goes and its chain
     /// stays allocated, for `rename`, which hands the chain to another entry.
+    /// One long-name part marked deleted, where the walk found it.
+    fn clearPart(self: *Volume, lba: u32, at: u32) Error!void {
+        try self.readSector(lba, self.scratch);
+        self.scratch[at] = 0xE5;
+        try self.writeSector(lba, self.scratch);
+    }
+
     fn unlinkEntry(self: *Volume, dir_cluster: Cluster, name: []const u8, free: bool) Error!void {
         const Pos = struct { lba: u32, at: u32 };
         var walk = try Walk.start(self, dir_cluster);
@@ -1647,21 +1670,21 @@ pub const Volume = struct {
                         return Error.BadName;
                     }
 
-                    // 1. the short entry, while its sector is in scratch
+                    // 1. the short entry, while its sector is in scratch: the
+                    // commit. From here the entry is gone, and what follows
+                    // is cleanup whose failure leaves orphaned long-name
+                    // parts or a leaked chain, what a stop leaves, not the
+                    // operation's error (QUEUE 131, #3).
                     self.scratch[at] = 0xE5;
                     try self.writeSector(short_lba, self.scratch);
 
                     // 2. the long-name parts, each where the walk found it
                     if (has_long) {
-                        for (run) |pos| {
-                            try self.readSector(pos.lba, self.scratch);
-                            self.scratch[pos.at] = 0xE5;
-                            try self.writeSector(pos.lba, self.scratch);
-                        }
+                        for (run) |pos| self.afterCommit(self.clearPart(pos.lba, pos.at));
                     }
 
                     // 3. and only now, the data
-                    if (free and chain >= 2) try self.freeChain(chain);
+                    if (free and chain >= 2) self.afterCommit(self.freeChain(chain));
                     return;
                 }
                 long_ok = false;
@@ -1886,9 +1909,9 @@ pub const Volume = struct {
     /// may still have landed, and freeing a chain the entry points at would
     /// give one cluster to two files. So a failure there leaves the new
     /// chain allocated (a leak at worst), and the boot's disk check says it.
-    /// A failure freeing the old chain after it is the write's error, as
-    /// `rename`'s is, though the file is already the new one (QUEUE 131,
-    /// #3, weighs that).
+    /// A failure freeing the old chain after it is no failure of the write:
+    /// the file is the new one, and the old chain a leak (`afterCommit`,
+    /// QUEUE 131, #3).
     fn overwrite(self: *Volume, old: Entry, clusters: u32, bytes: []const u8) Error!void {
         const first = try self.allocChain(clusters);
         if (bytes.len > 0) self.writeChain(first, bytes) catch |err| {
@@ -1896,7 +1919,7 @@ pub const Volume = struct {
             return err;
         };
         try self.setEntry(old, first, @intCast(bytes.len));
-        try self.freeChain(old.first_cluster);
+        self.afterCommit(self.freeChain(old.first_cluster));
     }
 
     /// Makes a directory in `dir_cluster`. Its first cluster holds `.` and `..`,
@@ -1923,9 +1946,17 @@ pub const Volume = struct {
         const run = try self.findRun(dir_cluster, parts + 1);
 
         const cluster = try self.allocChain(1);
-        // A write refused from here gives the cluster back; a machine that
-        // stops leaves it leaked, which the check reports.
-        errdefer self.freeChain(cluster) catch {};
+        // A write refused before the commit gives the cluster back; a machine
+        // that stops leaves it leaked, which the check reports.
+        //
+        // **NO ROLLBACK ONCE THE COMMIT IS TRIED** (metal-vmm QUEUE 131,
+        // kernel-facts #2): the entry write that points at the cluster may
+        // land and still answer an error, and the cluster freed under it is
+        // one the next file takes, two in one cluster. So from `writeEntry`
+        // on, a failure leaves the cluster taken: a leak if the entry did not
+        // land, which the check reports and the boot reclaims (the box's #4).
+        var committing = false;
+        errdefer if (!committing) self.freeChain(cluster) catch {};
         @memset(self.scratch, 0);
         var s: u32 = 0;
         while (s < self.sectors_per_cluster) : (s += 1) {
@@ -1945,6 +1976,7 @@ pub const Volume = struct {
         putCluster(dotdot, dir_cluster);
         try self.writeSector(self.clusterSector(cluster), self.scratch);
 
+        committing = true;
         try self.writeEntry(run, if (needs_long) name else name[0..0], short, attr_directory, cluster, 0);
         return cluster;
     }
@@ -2318,7 +2350,9 @@ pub const Volume = struct {
             putLe16(e[18..20], when.date); // last access date
             putDos(e[22..26], when); // write time, write date
             try self.writeSector(d.lba, self.scratch);
-            if (d.first_cluster >= 2) try self.freeChain(d.first_cluster);
+            // The commit: `to` is the file now. The old chain freed after it
+            // is cleanup (QUEUE 131, #3).
+            if (d.first_cluster >= 2) self.afterCommit(self.freeChain(d.first_cluster));
             return;
         }
 

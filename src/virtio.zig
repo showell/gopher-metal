@@ -758,6 +758,10 @@ pub const Block = struct {
             fails,
             /// A write answers OK and nothing lands.
             lands_nothing,
+            /// A write lands whole and answers `blk_s_ioerr`: the disk took
+            /// it and said it did not (metal-vmm QUEUE 131), which is what a
+            /// caller cannot tell from one that did not land.
+            lands_and_fails,
             /// A write of more than one sector answers OK and only its first
             /// half lands: a torn write.
             torn,
@@ -801,6 +805,11 @@ pub const Block = struct {
             switch (f.kind) {
                 .fails => return blk_s_ioerr,
                 .lands_nothing => if (kind != blk_t_in) return blk_s_ok,
+                .lands_and_fails => if (kind != blk_t_in) {
+                    @memcpy(there, here[0..len]);
+                    if (self.cache) |c| c.wrote(c.context, lba, there);
+                    return blk_s_ioerr;
+                },
                 .torn => if (kind != blk_t_in and len > 512) {
                     const half = len / 512 / 2 * 512;
                     @memcpy(there[0..half], here[0..half]);
