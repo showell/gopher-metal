@@ -926,3 +926,40 @@ test "a disk that lies (a write that lands nothing or half, a read of other byte
     }
     try testing.expect(runs > 1000);
 }
+
+test "a request that fails as an append links its clusters leaves no lost cluster uncounted: given back, or counted a leak" {
+    // An append takes its new clusters, then links them on after the file's
+    // last. A refused link must not leave them allocated and unreferenced
+    // with nothing said: given back if the disk still ends the chain where
+    // it did, else counted (`cleanups_failed`), as grow's link does.
+    const first = [_]u8{'a'} ** 600;
+    const more = [_]u8{'m'} ** (3 * 512 + 100);
+    for (configs) |cfg| {
+        if (cfg.shape.kind != .fat16) continue;
+        const d = try Disk.makeUnkept("limit-append-link", cfg.shape, cfg.cached);
+        defer d.deinit();
+        _ = try d.vol.makePath("data");
+        try d.vol.writeFile("data/LOG", &first);
+        const before = try testing.allocator.dupe(u8, d.bytes);
+        defer testing.allocator.free(before);
+        try d.mount(cfg.cached);
+        const r0 = d.blk.requests;
+        try d.vol.writeInto("data/LOG", first.len, &more);
+        const total = d.blk.requests - r0;
+        var n: u64 = 0;
+        while (n < total) : (n += 1) {
+            @memcpy(d.bytes, before);
+            try d.mount(cfg.cached);
+            d.blk.fault = .{ .at = d.blk.requests + n, .kind = .fails };
+            d.vol.writeInto("data/LOG", first.len, &more) catch {};
+            d.blk.fault = null;
+            const counted = d.vol.cleanups_failed;
+            try d.mount(cfg.cached);
+            const r = try d.check();
+            if (r.health.leaked > 0 and counted == 0) {
+                std.debug.print("an append (FAT {s}): request {d} of {d} refused; {d} clusters lost and none counted\n", .{ if (cfg.cached) "held" else "on disk", n, total, r.health.leaked });
+                return error.TestUnexpectedResult;
+            }
+        }
+    }
+}

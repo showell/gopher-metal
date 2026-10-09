@@ -471,9 +471,14 @@ pub fn build(b: *std.Build) void {
     // stops and the failed requests, one for the lies. Every test in the file
     // is named by one filter or the other.
     const disk_fat_faults_opts = disk_fat_opts.createModule();
+    // **EVERY TEST IN THE FILE RUNS UNDER ONE FILTER OR THE OTHER**, or the
+    // build stops: a test named outside them would never run, and say nothing.
+    const faults_filters = [_][]const u8{ "every operation stopped after every write", "a request that fails is an error", "a request that fails before a write's commit", "a request that fails as an append links" };
+    const lies_filters = [_][]const u8{ "a disk that lies", "a write that lands and answers failure" };
+    everyTestFiltered(b, "src/disk_fat_faults_test.zig", &(faults_filters ++ lies_filters));
     for ([_][]const []const u8{
-        &.{ "every operation stopped after every write", "a request that fails is an error", "a request that fails before a write's commit" },
-        &.{ "a disk that lies", "a write that lands and answers failure" },
+        faults_filters[0..],
+        lies_filters[0..],
     }, [_][]const u8{ "disk_fat_faults_test", "disk_fat_lies_test" }) |filters, name| {
         const unit = b.addTest(.{
             .name = name,
@@ -564,4 +569,18 @@ fn pinnedSdk(b: *std.Build, sdk_path: []const u8) void {
         return;
     }
     std.process.fatal("the coverage SDK at {s} is at {s}, but build.zig pins {s}: `git -C {s} fetch && git -C {s} checkout {s}`, or move the pin with the change that needs it (-Dcoverage-sdk-unpinned builds anyway)", .{ sdk_path, head, coverage_sdk_pin, sdk_path, sdk_path, coverage_sdk_pin });
+}
+
+/// Stops the build when a `test "..."` in `path` contains none of `filters`:
+/// a test binary built with filters runs only the tests they name.
+fn everyTestFiltered(b: *std.Build, path: []const u8, filters: []const []const u8) void {
+    const text = b.build_root.handle.readFileAlloc(b.graph.io, path, b.allocator, .limited(1 << 22)) catch |e|
+        std.process.fatal("{s}: cannot be read to check its test names ({t})", .{ path, e });
+    var it = std.mem.splitScalar(u8, text, '\n');
+    while (it.next()) |line| {
+        if (!std.mem.startsWith(u8, line, "test \"")) continue;
+        for (filters) |f| {
+            if (std.mem.indexOf(u8, line, f) != null) break;
+        } else std.process.fatal("{s}: a test no filter in build.zig names, so it would never run: {s}", .{ path, line });
+    }
 }

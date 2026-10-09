@@ -2059,7 +2059,17 @@ pub const Volume = struct {
             if (need > end.clusters) {
                 props.reachable(@src(), "fat: an append links clusters onto a file", .{ .need = need, .have = end.clusters });
                 const extra = try self.allocChain(need - end.clusters, .{ .bytes = new_size });
-                try self.fatSet(end.last, extra);
+                // A link that does not land leaves `extra` taken and linked
+                // from nothing: given back while the disk still ends the
+                // chain where it did, else a counted leak, as `grow`'s link.
+                self.fatSet(end.last, extra) catch |e| {
+                    const now = self.fatGet(end.last) catch {
+                        self.leftLeaked();
+                        return e;
+                    };
+                    if (self.isEnd(now)) self.giveBack(extra) else if (now != extra) self.leftLeaked();
+                    return e;
+                };
             }
         }
 
