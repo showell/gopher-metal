@@ -1185,31 +1185,34 @@ pub const Volume = struct {
     }
 
     /// **WHETHER A FAILED WRITE OF THE FIRST COPY LANDED, FOR THE ONE ENTRY
-    /// IN DOUBT.** Read back into scratch: the entry exactly as it was
-    /// (`old`) says it did not land; anything else (the value written, rot,
-    /// a read-back that failed too) is taken as landed. Only that entry is
-    /// read: the held FAT stays the mirror for every other. So a cluster goes
-    /// back only on an exact "not landed"; "landed" or "not known" leave it
-    /// taken, at worst a leak, never a cluster freed under a link.
-    fn landed(self: *Volume, lba: u32, at: u32, old: Cluster) bool {
+    /// IN DOUBT**, read back once into scratch: as `value`, `landed`; as
+    /// `old`, `before`; anything else (rot, a read-back that failed too),
+    /// `unknown`. Only that entry is read: the held FAT stays the mirror for
+    /// every other. **THIS ONE READ IS THE VERDICT** for `fatSet` and its
+    /// caller both: a caller that read the disk again could hear another.
+    fn fatRefused(self: *Volume, lba: u32, at: u32, old: Cluster, value: Cluster) Landing {
         const width = self.entryBytes();
         self.readSector(lba, self.scratch) catch {
-            props.reachable(@src(), "fat: a FAT sector whose write failed cannot be read again: taken as written", null);
-            return true;
+            props.reachable(@src(), "fat: a FAT sector whose write failed cannot be read again", null);
+            return .unknown;
         };
         const now = self.entryIn(self.scratch, at % sector_size / width);
-        if (now == old) return false;
-        return true;
+        if (now == value) return .landed;
+        if (now == old) return .before;
+        props.reachable(@src(), "fat: a FAT sector whose write failed reads back as neither old nor new", null);
+        return .unknown;
     }
 
     /// Sets a cluster's FAT entry **in every copy of the FAT**, the one place
     /// a FAT entry changes after mount, and moves `free_clusters` with it.
     ///
     /// **THE FIRST COPY'S WRITE IS THE CHANGE**: its failure is the caller's
-    /// error, and the held entry and the count stand or go back by what
-    /// `landed` reads. A later copy that fails is counted apart (`copyApart`)
-    /// for the next mount to mend, not the operation's failure.
-    fn fatSet(self: *Volume, cluster: Cluster, value: Cluster) Error!void {
+    /// error, and `fatRefused`'s verdict is the caller's too (`landing`).
+    /// The held entry and the count go back only on `before`; `unknown` is
+    /// taken as written, so the count never says free what may be linked.
+    /// A later copy that fails is counted apart (`copyApart`) for the next
+    /// mount to mend, not the operation's failure.
+    fn fatSet(self: *Volume, cluster: Cluster, value: Cluster, landing: ?*Landing) Error!void {
         try self.forgetFsInfo();
         const width = self.entryBytes();
         const at = @as(u32, cluster) * width;
@@ -1222,15 +1225,21 @@ pub const Volume = struct {
             const old = self.entryIn(sector, at % sector_size / width);
             self.putEntry(sector, at % sector_size, value);
             self.writeSector(self.fat_start + in_sector, sector) catch |e| {
-                if (self.landed(self.fat_start + in_sector, at, old)) {
+                const verdict = self.fatRefused(self.fat_start + in_sector, at, old, value);
+                if (landing) |l| l.* = verdict;
+                switch (verdict) {
+                    .before => self.putEntry(sector, at % sector_size, old),
                     // Taken as written: the held entry and the count keep
                     // the value, and the other copies are written as after
                     // a write that answered.
-                    self.keepCount(old, value);
-                    self.writeCopies(in_sector, sector);
-                } else self.putEntry(sector, at % sector_size, old);
+                    .landed, .unknown => {
+                        self.keepCount(old, value);
+                        self.writeCopies(in_sector, sector);
+                    },
+                }
                 return e;
             };
+            if (landing) |l| l.* = .landed;
             self.keepCount(old, value);
             self.writeCopies(in_sector, sector);
             return;
@@ -1244,15 +1253,21 @@ pub const Volume = struct {
                 const old = self.entryIn(self.scratch, at % sector_size / width);
                 self.putEntry(self.scratch, at % sector_size, value);
                 self.writeSector(lba, self.scratch) catch |e| {
-                    // The count by what `landed` reads, as above. If landed,
+                    // The count by the verdict, as above. Taken as written,
                     // the other copies are left and counted apart, for the
                     // next mount to weigh.
-                    if (self.landed(lba, at, old)) {
-                        self.keepCount(old, value);
-                        self.copyApart();
+                    const verdict = self.fatRefused(lba, at, old, value);
+                    if (landing) |l| l.* = verdict;
+                    switch (verdict) {
+                        .before => {},
+                        .landed, .unknown => {
+                            self.keepCount(old, value);
+                            self.copyApart();
+                        },
                     }
                     return e;
                 };
+                if (landing) |l| l.* = .landed;
                 self.keepCount(old, value);
                 continue;
             }
@@ -1359,32 +1374,33 @@ pub const Volume = struct {
                 candidate += 1;
                 continue;
             }
-            // Its own mark may land and still fail: given back only if it
-            // reads exactly as written; free, nothing to do; anything else a
+            // Its own mark may land and still fail, by `fatSet`'s verdict:
+            // landed, given back; not landed, nothing to do; unknown, a
             // counted leak.
-            self.fatSet(candidate, self.endMark()) catch |e| { // the end, until something follows
-                const now = self.fatGet(candidate) catch {
-                    self.leftLeaked();
-                    return e;
-                };
-                if (now == self.endMark()) self.giveBack(candidate) else if (now != 0) self.leftLeaked();
+            var mark: Landing = .before;
+            self.fatSet(candidate, self.endMark(), &mark) catch |e| { // the end, until something follows
+                switch (mark) {
+                    .before => {},
+                    .landed => self.giveBack(candidate),
+                    .unknown => self.leftLeaked(),
+                }
                 return e;
             };
-            // A failed link, by what it reads now. Exactly as written: the
-            // chain has the candidate, and the errdefer frees both (freeing
-            // it here too would free it twice). An end mark (not landed):
-            // the candidate goes back alone, the chain by the errdefer.
-            // Anything else (rot, or not read): candidate and chain are a
-            // counted leak, and the errdefer does not walk them.
-            if (previous != 0) self.fatSet(previous, candidate) catch |e| {
-                const now = self.fatGet(previous) catch candidate +% 1;
-                if (now == candidate) return e;
-                if (self.isEnd(now)) {
-                    self.giveBack(candidate);
-                    return e;
+            // A failed link, by the verdict. Landed: the chain has the
+            // candidate, and the errdefer frees both (freeing it here too
+            // would free it twice). Not landed: the candidate goes back
+            // alone, the chain by the errdefer. Unknown: candidate and chain
+            // are a counted leak, and the errdefer does not walk them.
+            var link: Landing = .before;
+            if (previous != 0) self.fatSet(previous, candidate, &link) catch |e| {
+                switch (link) {
+                    .landed => {},
+                    .before => self.giveBack(candidate),
+                    .unknown => {
+                        self.leftLeaked();
+                        first = 0;
+                    },
                 }
-                self.leftLeaked();
-                first = 0;
                 return e;
             };
             if (first == 0) first = candidate;
@@ -1441,7 +1457,7 @@ pub const Volume = struct {
             // **THE HINT IS LOWERED FIRST.** A lower hint is always sound,
             // and a fatSet that fails may still have freed the cluster.
             if (cluster < self.alloc_hint) self.alloc_hint = cluster;
-            try self.fatSet(cluster, 0);
+            try self.fatSet(cluster, 0, null);
             cluster = next;
         }
     }
@@ -1549,27 +1565,21 @@ pub const Volume = struct {
         const last = end.last;
 
         const fresh = try self.allocChain(1, .{ .bytes = 0 });
-        // Given back on a failure before the link that makes it the
-        // directory's; not after, since that write may have landed.
-        var committing = false;
-        errdefer if (!committing) self.giveBack(fresh);
+        // By the link that makes it the directory's: given back on any
+        // failure before it or where it did not land; kept where it landed;
+        // a counted leak where that is unknown.
+        var link: Landing = .before;
+        errdefer switch (link) {
+            .before => self.giveBack(fresh),
+            .landed => {},
+            .unknown => self.leftLeaked(),
+        };
         var s: u32 = 0;
         @memset(self.scratch, 0);
         while (s < self.sectors_per_cluster) : (s += 1) {
             try self.writeSector(self.clusterSector(fresh) + s, self.scratch);
         }
-        committing = true;
-        self.fatSet(last, fresh) catch |e| {
-            // The link failed. Reading as an end mark (not landed): the
-            // cluster goes back. Reading as `fresh`: the directory has it.
-            // Anything else: a counted leak.
-            const now = self.fatGet(last) catch {
-                self.leftLeaked();
-                return e;
-            };
-            if (self.isEnd(now)) self.giveBack(fresh) else if (now != fresh) self.leftLeaked();
-            return e;
-        };
+        try self.fatSet(last, fresh, &link);
     }
 
     /// The most entries a directory may hold: the specification's 2 MiB of
@@ -1697,13 +1707,14 @@ pub const Volume = struct {
         return Dos.fromUnix(now);
     }
 
-    /// **WHERE AN OPERATION STANDS AGAINST ITS COMMIT**, the one sector write
-    /// of a directory entry. `before`: nothing the operation took is pointed
-    /// at, and a failure gives it back. `landed`: the entry is on the disk as
-    /// written. `unknown`: the commit's write was refused and the read that
-    /// would say whether it landed failed too, so what the operation took is
-    /// left taken, a counted leak (`leftLeaked`).
-    const Commit = enum { before, landed, unknown };
+    /// **WHERE A WRITE STANDS**: a directory entry's (an operation's commit)
+    /// or a FAT entry's (`fatSet`). `before`: not tried, or refused and read
+    /// back exactly as it was; what the operation took is pointed at by
+    /// nothing, and a failure gives it back. `landed`: on the disk as
+    /// written. `unknown`: refused, and the read-back was neither (rot, or a
+    /// read that failed too), so what the operation took is left taken, a
+    /// counted leak (`leftLeaked`).
+    const Landing = enum { before, landed, unknown };
 
     /// **A REFUSED COMMIT IS READ BACK, AND ONLY AN EXACT READ DECIDES.**
     /// The disk may have taken a write it refused, and a caller cannot tell
@@ -1712,7 +1723,7 @@ pub const Volume = struct {
     /// as anything else (rot, a read that failed) it is `unknown`, and what
     /// the operation took is a counted leak, never given back under an entry
     /// that may point at it.
-    fn commitRefused(self: *Volume, lba: u32, at: u32, was: *const [dirent_size]u8, written: *const [dirent_size]u8) Commit {
+    fn commitRefused(self: *Volume, lba: u32, at: u32, was: *const [dirent_size]u8, written: *const [dirent_size]u8) Landing {
         self.readSector(lba, self.scratch) catch {
             self.leftLeaked();
             return .unknown;
@@ -1741,9 +1752,9 @@ pub const Volume = struct {
         first: Cluster,
         size: u32,
         /// Where the operation stands against the short entry's write, the
-        /// commit (`Commit`): the caller gives back what it took while it is
+        /// commit (`Landing`): the caller gives back what it took while it is
         /// `before`, and undoes nothing once the entry landed.
-        commit: ?*Commit,
+        commit: ?*Landing,
     ) Error!void {
         const parts = longParts(name);
         const sum = shortChecksum(short);
@@ -1934,7 +1945,7 @@ pub const Volume = struct {
         const first = try self.allocChain(clusters, .{ .bytes = bytes.len });
         // A failure before the entry gives the chain back; a failure of the
         // entry's write may have landed, and leaves it.
-        var commit: Commit = .before;
+        var commit: Landing = .before;
         errdefer if (commit == .before) self.giveBack(first);
         if (bytes.len > 0) try self.writeChain(first, bytes);
 
@@ -1964,7 +1975,7 @@ pub const Volume = struct {
             self.giveBack(first);
             return err;
         };
-        var commit: Commit = .before;
+        var commit: Landing = .before;
         self.setEntry(old, first, @intCast(bytes.len), &commit) catch |err| {
             switch (commit) {
                 .before => self.giveBack(first),
@@ -2010,7 +2021,7 @@ pub const Volume = struct {
         // fail, and a cluster freed under it would be given to two. So a
         // failure from there leaves it taken, a leak if the entry did not
         // land.
-        var commit: Commit = .before;
+        var commit: Landing = .before;
         errdefer if (commit == .before) self.giveBack(cluster);
         @memset(self.scratch, 0);
         var s: u32 = 0;
@@ -2122,7 +2133,7 @@ pub const Volume = struct {
         // A chain made here is the file's only once `setEntry` is tried (the
         // commit); before, a failure gives it back. After, nothing is undone.
         var fresh = false;
-        var commit: Commit = .before;
+        var commit: Landing = .before;
         errdefer if (fresh and commit == .before) self.giveBack(first);
         if (have == 0 and first == 0) {
             first = try self.allocChain(need, .{ .bytes = new_size });
@@ -2133,14 +2144,15 @@ pub const Volume = struct {
                 props.reachable(@src(), "fat: an append links clusters onto a file", .{ .need = need, .have = end.clusters });
                 const extra = try self.allocChain(need - end.clusters, .{ .bytes = new_size });
                 // A link that does not land leaves `extra` taken and linked
-                // from nothing: given back while the disk still ends the
-                // chain where it did, else a counted leak, as `grow`'s link.
-                self.fatSet(end.last, extra) catch |e| {
-                    const now = self.fatGet(end.last) catch {
-                        self.leftLeaked();
-                        return e;
-                    };
-                    if (self.isEnd(now)) self.giveBack(extra) else if (now != extra) self.leftLeaked();
+                // from nothing: given back; unknown, a counted leak, as
+                // `grow`'s link.
+                var link: Landing = .before;
+                self.fatSet(end.last, extra, &link) catch |e| {
+                    switch (link) {
+                        .before => self.giveBack(extra),
+                        .landed => {},
+                        .unknown => self.leftLeaked(),
+                    }
                     return e;
                 };
             }
@@ -2278,7 +2290,7 @@ pub const Volume = struct {
     /// `entry.lba`/`entry.slot`: the commit of an append or an overwrite.
     /// A failure of the read before it leaves `commit` `before`; a refused
     /// write is read back (`commitRefused`).
-    fn setEntry(self: *Volume, entry: Entry, first_cluster: Cluster, size: u32, commit: *Commit) Error!void {
+    fn setEntry(self: *Volume, entry: Entry, first_cluster: Cluster, size: u32, commit: *Landing) Error!void {
         if (entry.lba == 0) { // never located; refuse to guess
             props.@"unreachable"(@src(), "fat: an entry never located is written back", null);
             return Error.NotFound;

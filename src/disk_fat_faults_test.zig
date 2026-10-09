@@ -989,13 +989,27 @@ const leak_ops = [_]LeakOp{
     }.f },
 };
 
-test "a request that fails or lies leaves no cluster lost uncounted, its commit included" {
+test "a request that fails or lies leaves no cluster lost uncounted, its commit included, nor the kept free count wrong uncounted" {
     // Before the commit, what an operation took is given back; a refused
     // commit is read back, and given back if it did not land; after it, a
     // failed cleanup is counted (`cleanups_failed`). So a check after any
     // one failed request finds no leaked cluster that was not counted.
+    //
+    // **AND THE KEPT FREE COUNT AGREES WITH THE FAT, OR IS COUNTED WRONG**:
+    // where a failed write's read-back fails too (`then_fail`), what the
+    // write left is not known, and every reader of it must take one
+    // verdict; a caller that read the disk again could free nothing while
+    // the count said taken.
+    const Kind = @FieldType(@import("virtio.zig").Block.Fault, "kind");
+    const faults = [_]struct { kind: Kind, then_fail: u8 }{
+        .{ .kind = .fails, .then_fail = 0 },
+        .{ .kind = .lands_and_fails, .then_fail = 0 },
+        .{ .kind = .fails, .then_fail = 1 },
+        .{ .kind = .lands_and_fails, .then_fail = 1 },
+    };
     for (leak_ops) |op| {
-        for ([_]@FieldType(@import("virtio.zig").Block.Fault, "kind"){ .fails, .lands_and_fails }) |kind| {
+        for (faults) |fault| {
+            const kind = fault.kind;
             for (configs) |cfg| {
                 if (cfg.shape.kind != .fat16) continue;
                 const d = try Disk.makeUnkept("limit-no-lost", cfg.shape, cfg.cached);
@@ -1011,14 +1025,19 @@ test "a request that fails or lies leaves no cluster lost uncounted, its commit 
                 while (n < total) : (n += 1) {
                     @memcpy(d.bytes, before);
                     try d.mount(cfg.cached);
-                    d.blk.fault = .{ .at = d.blk.requests + n, .kind = kind };
+                    d.blk.fault = .{ .at = d.blk.requests + n, .kind = kind, .then_fail = fault.then_fail };
                     op.run(&d.vol) catch {};
                     d.blk.fault = null;
                     const counted = d.vol.cleanups_failed;
+                    const fat_free = (try d.vol.derive()).free;
+                    if (fat_free != d.vol.free_clusters and counted == 0) {
+                        std.debug.print("{s} (FAT {s}, {t}, then {d} failed): request {d} of {d}; the kept free count is {d}, the FAT's {d}, and nothing counted\n", .{ op.name, if (cfg.cached) "held" else "on disk", kind, fault.then_fail, n, total, d.vol.free_clusters, fat_free });
+                        return error.TestUnexpectedResult;
+                    }
                     try d.mount(cfg.cached);
                     const r = try d.check();
                     if (r.health.leaked > 0 and counted == 0) {
-                        std.debug.print("{s} (FAT {s}, {t}): request {d} of {d}; {d} clusters lost and none counted\n", .{ op.name, if (cfg.cached) "held" else "on disk", kind, n, total, r.health.leaked });
+                        std.debug.print("{s} (FAT {s}, {t}, then {d} failed): request {d} of {d}; {d} clusters lost and none counted\n", .{ op.name, if (cfg.cached) "held" else "on disk", kind, fault.then_fail, n, total, r.health.leaked });
                         return error.TestUnexpectedResult;
                     }
                 }
