@@ -2486,20 +2486,12 @@ pub const Volume = struct {
         }
 
         const First = struct {
-            name: [max_name]u8 = undefined,
-            len: usize = 0,
-            is_dir: bool = false,
-            cluster: Cluster = 0,
-            found: bool = false,
+            entry: ?Entry = null,
             fn each(s: *@This(), e: Entry) void {
-                if (s.found) return;
+                if (s.entry != null) return;
                 const text = e.text();
                 if (eqlBytes(text, ".") or eqlBytes(text, "..")) return;
-                s.len = @min(text.len, max_name);
-                @memcpy(s.name[0..s.len], text[0..s.len]);
-                s.is_dir = e.isDirectory();
-                s.cluster = e.first_cluster;
-                s.found = true;
+                s.entry = e;
             }
         };
 
@@ -2509,9 +2501,9 @@ pub const Volume = struct {
         while (rounds <= max_dir_entries) : (rounds += 1) {
             var first = First{};
             try self.list(dir_cluster, &first, First.each);
-            if (!first.found) return; // empty
-            if (first.is_dir) try self.removeTreeAt(first.cluster, depth + 1);
-            try self.removeEntry(dir_cluster, first.name[0..first.len]);
+            const entry = first.entry orelse return; // empty
+            if (entry.isDirectory()) try self.removeTreeAt(entry.first_cluster, depth + 1);
+            try self.removeEntry(dir_cluster, entry.text());
         }
         props.reachable(@src(), "fat: a directory yields more entries than a directory holds, removing a tree, and is refused as broken", null);
         return Error.BadChain;
