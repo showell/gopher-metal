@@ -73,7 +73,7 @@ pub fn random(_: Self, buf: []u8) void {
 /// they were when the machine had one disk.
 ///
 /// **THESE ARE THE COPIES OF EACH `Volume` THAT WRITE** (fat16's
-/// `derived.free`): the host's copy shares the held FAT and the folder
+/// `free_clusters`): the host's copy shares the held FAT and the folder
 /// cache's memory, and must not write once it has handed a volume here.
 var site: ?fat16.Volume = null;
 var data: ?fat16.Volume = null;
