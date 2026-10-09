@@ -34,6 +34,11 @@
 #    reset (exact and not), a peer that vanishes, a window it shuts, a
 #    damaged segment, a SYN flood that fills the table, and a request
 #    segment lost so the next arrives ahead (the table in the script).
+#    The flood's real client drips its request (PEER_DRIP_US): the site
+#    serves one request and stops, so a client answered at once ends the
+#    run before any half-open is older than min_rto_ns, the age at which
+#    one gives way to a new SYN (tcp.zig oldestHalfOpen). In production's
+#    shape, 1000 SYNs 100 us apart reached it in no run.
 #    Their coverage joins the same sdk.jsonl.
 #
 # 5. **Seeded fault schedules, with a volume** (metal-vmm's sweep.sh,
@@ -233,7 +238,7 @@ reset-inexact  one /steve-resume.pdf end  PEER_RESET_AT=30000 PEER_RESET_OFF=100
 vanish         two /steve-resume.pdf end  PEER_VANISH_AFTER=3000
 shut-window    one /steve-resume.pdf page PEER_SHUT_AFTER=5000 PEER_SHUT_FOR_US=1500000
 damaged        one /                 page PEER_DAMAGE=3
-flood          one /                 page PEER_FLOOD=1000 PEER_FLOOD_GAP_US=100
+flood          one /                 page PEER_FLOOD=1000 PEER_FLOOD_GAP_US=1000 PEER_DRIP_US=100000 PEER_MSS=10
 ahead          one /                 page PEER_REQUEST=$OUT/req1k PEER_MSS=100 PEER_EAT=6
 EOF
     [ -z "$rough_bad" ] || failed+=("metal rough:$rough_bad")
