@@ -2228,6 +2228,32 @@ test "a name whose every 8.3 alias is taken is refused, and takes nothing" {
     }
 }
 
+test "a new name that is another file's 8.3 alias is refused, and takes nothing" {
+    for (configs) |cfg| {
+        const d = try Disk.make("alias-as-name", cfg.shape, cfg.cached);
+        defer d.deinit();
+        try d.vol.writeFile("data/FooBarBaz.txt", "first");
+        try testing.expectEqualStrings("FOOBAR~1.TXT", (try d.vol.open("data/FooBarBaz.txt")).alias());
+        try d.vol.writeFile("data/other", "other");
+        const before = d.free();
+        // Each would write a second FOOBAR~1.TXT, which fsck calls a
+        // duplicate and Linux opens as either file.
+        try testing.expectError(disk_fat.Error.NameTaken, d.vol.writeFile("data/FOOBAR~1.TXT", "second"));
+        try testing.expectError(disk_fat.Error.NameTaken, d.vol.makePath("data/FOOBAR~1.TXT"));
+        try testing.expectError(disk_fat.Error.NameTaken, d.vol.rename("data/other", "data/FOOBAR~1.TXT"));
+        try testing.expectEqual(before, d.free());
+        try d.expectFile("data/FooBarBaz.txt", "first");
+        try d.expectFile("data/other", "other");
+        // A file renamed to its own alias is the same file: a no-op.
+        try d.vol.rename("data/FooBarBaz.txt", "data/FOOBAR~1.TXT");
+        try d.expectFile("data/FooBarBaz.txt", "first");
+        // Gone, the alias is free to be a name.
+        try d.vol.remove("data/FooBarBaz.txt");
+        try d.vol.writeFile("data/FOOBAR~1.TXT", "second");
+        try d.expectFile("data/FOOBAR~1.TXT", "second");
+    }
+}
+
 test "a path through a file, too deep, or with no name, and a directory written into, are refused with their own errors" {
     for (configs) |cfg| {
         const d = try Disk.make("refused-paths", cfg.shape, cfg.cached);

@@ -36,7 +36,8 @@
 //!   whose parent is a file, `NotFat16`, where a read or remove meets it).
 //! - `IsDirectory`: a file operation on a directory (disk_fat `IsDirectory`).
 //! - `BadName`: a path the rules above refuse, or one through a file where a
-//!   directory must be made (disk_fat `BadName`, and `NotFat16` on a write).
+//!   directory must be made (disk_fat `BadName`, and `NotFat16` on a write),
+//!   or a new name that is another file's 8.3 alias (disk_fat `NameTaken`).
 //! - `TooBig`: a file larger than the buffer it is read into (disk_fat `TooBig`).
 //! - `NoSpace`: the volume or a directory is full (disk_fat `Full`,
 //!   `DirectoryFull`). The model never answers it: it has no size.

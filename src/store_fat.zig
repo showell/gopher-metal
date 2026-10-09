@@ -46,7 +46,7 @@ pub const FatStore = struct {
         return switch (e) {
             error.NotFound => Error.NotFound,
             error.IsDirectory => Error.IsDirectory,
-            error.BadName => Error.BadName,
+            error.BadName, error.NameTaken => Error.BadName,
             error.NotFat16 => if (writing) Error.BadName else Error.NotFound,
             error.TooBig => Error.TooBig,
             error.Full, error.DirectoryFull => Error.NoSpace,

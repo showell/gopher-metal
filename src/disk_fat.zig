@@ -92,6 +92,9 @@ pub const Error = error{
     TooManyClusters,
     /// A file asked to replace a directory, which Linux refuses too (EISDIR).
     IsDirectory,
+    /// A new name that is another entry's 8.3 alias: a second entry would
+    /// share it, which fsck calls a duplicate.
+    NameTaken,
 };
 
 /// **WHICH FAT A VOLUME IS**, decided as the specification decides it: by
@@ -1808,8 +1811,9 @@ pub const Volume = struct {
     }
 
     /// An 8.3 alias for a name. A name that reads back as itself in 8.3 is
-    /// its own alias, unchecked against the directory; any other gets
-    /// SESSIO~1, SESSIO~2, and so on until one is free.
+    /// its own alias, and refused (`NameTaken`) if another entry's alias is
+    /// already that; any other gets SESSIO~1, SESSIO~2, and so on until one
+    /// is free.
     fn aliasFor(self: *Volume, dir_cluster: Cluster, name: []const u8) Error![11]u8 {
         // **A NEW NAME IS ASCII.** A long name holds a byte as one UTF-16
         // unit, and `takeLongPart` reads a unit past ASCII as '?', so such a
@@ -1820,7 +1824,13 @@ pub const Volume = struct {
             return Error.BadName;
         };
         if (!needsLongName(name)) {
-            if (encode(name)) |short| return short else |_| {}
+            if (encode(name)) |short| {
+                if (try self.aliasTaken(dir_cluster, short)) {
+                    props.reachable(@src(), "fat: a new name that is another entry's alias is refused", null);
+                    return Error.NameTaken;
+                }
+                return short;
+            } else |_| {}
         }
 
         var n: u32 = 1;
@@ -2337,9 +2347,9 @@ pub const Volume = struct {
     /// before it loses `from`. Never two entries on one chain.
     ///
     /// An existing `to` keeps its name; a new one takes the case given; a
-    /// name that differs from `from`'s only in case is a no-op. Both must be
-    /// files in one directory: a directory as `to` is `IsDirectory`, as
-    /// `from` `BadName`.
+    /// name that differs from `from`'s only in case, or is its alias, is a
+    /// no-op. Both must be files in one directory: a directory as `to` is
+    /// `IsDirectory`, as `from` `BadName`.
     pub fn rename(self: *Volume, from: []const u8, to: []const u8) Error!void {
         const a = try self.parentOf(from);
         const b = try self.parentOf(to);
@@ -2356,7 +2366,8 @@ pub const Volume = struct {
             props.reachable(@src(), "fat: a rename of a directory is refused", null);
             return Error.BadName;
         }
-        if (eqlFold(src.text(), b.name)) return; // the same file
+        // The same file, by its name in any case or by its own alias.
+        if (eqlFold(src.text(), b.name) or eqlFold(src.alias(), b.name)) return;
         const dst = try self.find(b.cluster, b.name);
         if (dst) |d| if (d.isDirectory()) {
             props.reachable(@src(), "fat: a rename onto a directory is refused", null);
