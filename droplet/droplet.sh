@@ -87,7 +87,7 @@ door=(-device isa-debug-exit,iobase=0xf4,iosize=0x04)
 # there with or without one. VOLUME names a raw disk image; the target and LUN
 # default to 0 and 1, and the kernel finds the disk wherever it is.
 volume=()
-[ -n "${VOLUME:-}" ] && volume=(-drive id=volume,file="$VOLUME",format=raw,if=none
+[ -n "${VOLUME:-}" ] && volume=(-drive id=volume,file="$VOLUME",format=raw,if=none,cache=unsafe
     -device scsi-hd,drive=volume,bus=scsi.0,scsi-id="${VOLUME_TARGET:-0}",lun="${VOLUME_LUN:-1}")
 screen=(-device virtio-vga,addr=02.0)
 [ "${NO_SCREEN:-}" = 1 ] && screen=()
@@ -95,6 +95,11 @@ bios=()
 [ -n "${BIOS:-}" ] && bios=(-bios "$BIOS")
 [ "${NO_DOOR:-}" = 1 ] && door=()
 
+# **A FLUSH IS NOT A SYNC HERE** (cache=unsafe on every disk): nothing
+# that boots this machine cuts its power, so the box's own disk has nothing
+# to keep, and syncing it at each of the guest's flushes cost the judge's
+# cap story 28 s of its 39 (2026-10-09). Every byte is still written to the
+# image. Durability is judged on metal-vmm, which cuts power on purpose.
 accel=(-accel kvm -cpu host)
 [ "${ACCEL:-kvm}" = tcg ] && accel=(-accel tcg -cpu max)
 
@@ -106,7 +111,7 @@ exec qemu-system-x86_64 \
     -netdev "$public" -device virtio-net-pci,netdev=public,addr=03.0 \
     -netdev "$private" -device virtio-net-pci,netdev=private,addr=04.0 \
     -device virtio-scsi-pci,id=scsi,addr=05.0 "${volume[@]}" \
-    -drive id=boot,file="$DISK",format=raw,if=none -device virtio-blk-pci,drive=boot,addr=06.0,bootindex=0 \
-    -drive id=config,file="$DISK.config",format=raw,if=none -device virtio-blk-pci,drive=config,addr=07.0 \
+    -drive id=boot,file="$DISK",format=raw,if=none,cache=unsafe -device virtio-blk-pci,drive=boot,addr=06.0,bootindex=0 \
+    -drive id=config,file="$DISK.config",format=raw,if=none,cache=unsafe -device virtio-blk-pci,drive=config,addr=07.0 \
     -device virtio-balloon-pci,addr=08.0 \
     "${door[@]}"

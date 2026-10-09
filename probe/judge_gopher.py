@@ -887,7 +887,9 @@ def microvm_start(elf: str, image: str, scratch: str, port: int, serial_log, kvm
         "-nographic", "-no-reboot", "-m", "512",
         "-global", "virtio-mmio.force-legacy=false",
         "-device", "isa-debug-exit,iobase=0xf4,iosize=0x04",
-        "-drive", f"id=d,file={image},format=raw,if=none",
+        # cache=unsafe: a flush is not a sync of the box's disk (droplet.sh
+        # says why).
+        "-drive", f"id=d,file={image},format=raw,if=none,cache=unsafe",
         "-device", "virtio-blk-device,drive=d",
         "-cpu", "max", "-device", "virtio-rng-device",
         "-netdev", f"user,id=n0,hostfwd=tcp:127.0.0.1:{port}-:80",
