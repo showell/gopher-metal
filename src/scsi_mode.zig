@@ -38,22 +38,31 @@ pub fn selectList(page: []u8, got: usize) ?u16 {
     return @intCast(8 + page_len);
 }
 
-/// What the driver records of its cache, for io.durable and /admin/host.
-pub const Cache = struct {
-    /// Whether the disk says it caches writes; null when it would not say.
-    write_cache: ?bool,
-    /// Whether boot turned it off (true), tried and could not (false), or
-    /// nothing is known of it (null).
-    turned_off: ?bool,
+/// **WHAT /admin/host AND THE BOOT LINE SAY OF THE CACHE** (metal-vmm QUEUE
+/// 131, kernel-facts #11): derived, every time, from what the disk says now
+/// (`write_cache`) and one bit of bring-up (whether it was on then). It was a
+/// second stored fact, `cache_turned_off`, kept beside `write_cache` and
+/// apart from it: a recheck that could not read the page left it saying
+/// "turned off at boot" of a cache nothing could see (QUEUE 130).
+pub const Report = enum {
+    /// On at bring-up, and off now: boot turned it off (or a recheck after
+    /// a reset turned it off again).
+    turned_off,
+    /// On at bring-up, and on now: it would not turn off.
+    would_not_turn_off,
+    /// Never on at bring-up, and off now.
+    writes_through,
+    /// Never on at bring-up, and on now (a reset turned it on, and it would
+    /// not turn off again).
+    caches,
+    /// The disk will not say: flushed as if on.
+    unknown,
 };
 
-/// After a reset, the cache sensed again and found not on (`on` false or
-/// null): what is recorded. **A PAGE THAT WOULD NOT READ SAYS NOTHING OF
-/// BOOT'S WORK** (metal-vmm QUEUE 130): `turned_off` stayed true, and
-/// /admin/host said "turned off at boot" of a cache nothing could see. The
-/// data was safe (null is flushed as if on); the line was wrong.
-pub fn sensedNotOn(was: Cache, on: ?bool) Cache {
-    return .{ .write_cache = on, .turned_off = if (on == null) null else was.turned_off };
+pub fn report(write_cache: ?bool, on_at_bringup: bool) Report {
+    const now = write_cache orelse return .unknown;
+    if (on_at_bringup) return if (now) .would_not_turn_off else .turned_off;
+    return if (now) .caches else .writes_through;
 }
 
 // ── tests ────────────────────────────────────────────────────────────────────
@@ -103,13 +112,16 @@ test "an answer cut short of its page, or not the caching page, is not sent (QUE
     try testing.expectEqual(@as(?u16, null), selectList(&buf, got));
 }
 
-test "a recheck that cannot read the page knows nothing of the cache: not \"turned off at boot\" (QUEUE 130)" {
-    const booted: Cache = .{ .write_cache = false, .turned_off = true };
-    const lost = sensedNotOn(booted, null);
-    try testing.expectEqual(@as(?bool, null), lost.write_cache);
-    try testing.expectEqual(@as(?bool, null), lost.turned_off);
-    // Read, and still off: as boot left it.
-    const still = sensedNotOn(booted, false);
-    try testing.expectEqual(@as(?bool, false), still.write_cache);
-    try testing.expectEqual(@as(?bool, true), still.turned_off);
+test "the cache report is derived from what the disk says now and one bit of bring-up, never a second stored fact (metal-vmm QUEUE 131, kernel-facts #11)" {
+    // On at bring-up: turned off (it says off now), or would not turn off.
+    try testing.expectEqual(Report.turned_off, report(false, true));
+    try testing.expectEqual(Report.would_not_turn_off, report(true, true));
+    // Never on at bring-up: as it says now (a reset may have turned it on
+    // and a recheck not off).
+    try testing.expectEqual(Report.writes_through, report(false, false));
+    try testing.expectEqual(Report.caches, report(true, false));
+    // A disk that will not say, at bring-up or at a recheck after a reset
+    // (QUEUE 130): unknown, never "turned off at boot".
+    try testing.expectEqual(Report.unknown, report(null, true));
+    try testing.expectEqual(Report.unknown, report(null, false));
 }

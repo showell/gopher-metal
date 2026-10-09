@@ -294,7 +294,8 @@ fn turnCacheOff(b: *virtio.Block, at: Address, scratch: u64, page: []u8, got: us
 /// it took in meanwhile (the command that met the reset, sent again into
 /// the cache) synchronized. A disk that will not turn it off is left as it
 /// says: `write_cache` true, so every answer waits on a SYNCHRONIZE
-/// (io.durable), and `cache_turned_off` false, for /admin/host to say.
+/// (io.durable), and /admin/host derives what it says from it
+/// (`scsi_mode.report`).
 fn recheckCache(b: *virtio.Block, at: Address) void {
     b.cache_recheck = false;
     b.cache_rechecks +%= 1;
@@ -303,16 +304,13 @@ fn recheckCache(b: *virtio.Block, at: Address) void {
     var got: usize = 0;
     const on = writeCache(b, at, scratch, &mem.scratch, &got);
     if (on != true) {
-        const now = mode.sensedNotOn(.{ .write_cache = b.write_cache, .turned_off = b.cache_turned_off }, on);
-        b.write_cache = now.write_cache;
-        b.cache_turned_off = now.turned_off;
+        b.write_cache = on;
         return;
     }
     props.reachable(@src(), "scsi: a reset turned the write cache back on, and it is turned off again", null);
     const taken = turnCacheOff(b, at, scratch, &mem.scratch, got);
     b.write_cache = writeCache(b, at, scratch, &mem.scratch, &got);
     if (!taken or b.write_cache != false) {
-        b.cache_turned_off = false;
         // Still caching: what it holds waits for io.durable's flush.
         b.unflushed = true;
         return;
@@ -397,9 +395,11 @@ pub fn bring(device: virtio.Device, mem: *virtio.BlockMemory) Error!virtio.Block
             var got: usize = 0;
             b.write_cache = writeCache(&b, at, scratch, &mem.scsi.scratch, &got);
             if (b.write_cache == true) {
-                b.cache_turned_off = turnCacheOff(&b, at, scratch, &mem.scsi.scratch, got);
+                b.cache_on_at_bringup = true;
+                // Whether it took is read back: what the disk says now is
+                // the one fact (`write_cache`).
+                _ = turnCacheOff(&b, at, scratch, &mem.scsi.scratch, got);
                 b.write_cache = writeCache(&b, at, scratch, &mem.scsi.scratch, &got);
-                if (b.write_cache != false) b.cache_turned_off = false;
             }
             // The power-on attention of bring-up is answered just above.
             b.cache_recheck = false;

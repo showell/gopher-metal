@@ -11,6 +11,7 @@ pub const log_ring = @import("log_ring.zig");
 pub const screen = @import("screen.zig");
 pub const virtio = @import("virtio.zig");
 pub const scsi = @import("scsi.zig");
+pub const scsi_mode = @import("scsi_mode.zig");
 pub const net = @import("net.zig");
 pub const proto = @import("proto.zig");
 pub const dhcp = @import("dhcp.zig");

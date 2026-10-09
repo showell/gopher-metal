@@ -698,10 +698,11 @@ pub const Block = struct {
     /// write-through unless VIRTIO_BLK_F_FLUSH is negotiated (virtio 1.2
     /// §5.2.5.1), and this driver never negotiates it, so it is false there.
     write_cache: ?bool = null,
-    /// Whether boot turned the disk's write cache off (`scsi.turnCacheOff`):
-    /// null when it never said it had one, false when it would not be
-    /// turned off and still caches.
-    cache_turned_off: ?bool = null,
+    /// Whether the disk said its write cache was on at bring-up, before
+    /// boot turned it off (`scsi.turnCacheOff`). With `write_cache`, all
+    /// that is said of the cache is derived from it (`scsi_mode.report`,
+    /// metal-vmm QUEUE 131, #11): no second stored fact to drift.
+    cache_on_at_bringup: bool = false,
     /// A reset or a change of mode parameters was told (UNIT ATTENTION), so
     /// the write cache may be on again: looked at after the command that
     /// met it (`scsi.recheckCache`). How many times it was.
