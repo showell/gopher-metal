@@ -1159,6 +1159,10 @@ fn dataVolume() ?virtio.Block {
         serial.put(", ");
         serial.putDec(b.capacity / 2048);
         serial.put(" MB\n");
+        if (b.cache_turned_off) |off| serial.put(if (off)
+            "  the volume's write cache is turned off: every write is on the disk when answered\n"
+        else
+            "  the volume's write cache would not turn off: a power cut can leave its filesystem damaged\n");
         return b;
     } else |e| switch (e) {
         error.NoDisk => {
@@ -1663,7 +1667,11 @@ fn addVolume(facts: *std.ArrayList(router.host_status.Fact), alloc: std.mem.Allo
     try facts.append(alloc, .{ .label = label, .value = value });
     // **WHETHER A SAVE IS DURABLE BEFORE IT IS ANSWERED** (io.durable): what
     // the disk says of its write cache, and the flushes sent to it.
-    const cache: []const u8 = if (v.blk.write_cache) |on| (if (on) "on: writes wait in it until flushed" else "off: it writes through") else "not said: flushed as if on";
+    const cache: []const u8 = if (v.blk.cache_turned_off == false)
+        "on, and it would not turn off: writes wait in it until flushed, and a power cut can damage the filesystem"
+    else if (v.blk.cache_turned_off == true)
+        "turned off at boot: it writes through"
+    else if (v.blk.write_cache) |on| (if (on) "on: writes wait in it until flushed" else "off: it writes through") else "not said: flushed as if on";
     try facts.append(alloc, .{
         .label = cache_label,
         .value = try std.fmt.allocPrint(alloc, "{s}; {d} flushes, {d} failed", .{ cache, v.blk.flushes, v.blk.flush_failures }),

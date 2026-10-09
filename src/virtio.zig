@@ -698,6 +698,10 @@ pub const Block = struct {
     /// write-through unless VIRTIO_BLK_F_FLUSH is negotiated (virtio 1.2
     /// §5.2.5.1), and this driver never negotiates it, so it is false there.
     write_cache: ?bool = null,
+    /// Whether boot turned the disk's write cache off (`scsi.turnCacheOff`):
+    /// null when it never said it had one, false when it would not be
+    /// turned off and still caches.
+    cache_turned_off: ?bool = null,
     /// **HOW MANY TIMES A READ IS TRIED** before its failure is the caller's
     /// (B25, Steve 2026-10-08). 1 while the machine serves: a request that
     /// meets a failing disk fails, and says so. Boot sets more

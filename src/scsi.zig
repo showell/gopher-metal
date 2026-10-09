@@ -10,8 +10,9 @@
 //! response the device writes: its own outcome, the disk's SCSI status, and
 //! sense data saying why when the status is CHECK CONDITION. Six commands are
 //! all a disk needs here: INQUIRY (is there a disk at this address?), READ
-//! CAPACITY (how big?), MODE SENSE (does it cache writes?), READ(10),
-//! WRITE(10), and SYNCHRONIZE CACHE (make what it cached durable).
+//! CAPACITY (how big?), MODE SENSE (does it cache writes?), MODE SELECT
+//! (stop caching them), READ(10), WRITE(10), and SYNCHRONIZE CACHE (make
+//! what it cached durable).
 //!
 //! **IT IS A `virtio.Block` LIKE ANY OTHER.** The FAT16 volume and the GPT
 //! reader call `read`, `readMany`, `write` and `writeMany`; on a Block brought
@@ -21,6 +22,7 @@
 //! the sense data, SCSI Block Commands (SBC-3) for the rest. The numbers below
 //! are theirs.
 
+const std = @import("std");
 const props = @import("coverage");
 const virtio = @import("virtio.zig");
 const tsc = @import("tsc.zig");
@@ -241,6 +243,35 @@ fn writeCache(b: *virtio.Block, at: Address, scratch: u64, page: []const u8) ?bo
     return page[p + 2] & 0x04 != 0;
 }
 
+/// **THE WRITE CACHE TURNED OFF** (metal-vmm QUEUE 112, Steve's choice
+/// 2026-10-09): with a cache, a power cut keeps the writes it had taken in an
+/// order of its own, and FAT's ordering (data, then the FAT, then the
+/// directory entry) is lost with it: a file can be left Damaged, or a
+/// cluster in two files. Writing through keeps the order the driver wrote
+/// in. MODE SELECT(10), PF set and SP clear, sends back the caching page
+/// MODE SENSE just answered in `page`, with WCE cleared, the header's mode
+/// data length and device-specific byte zeroed, and no block descriptors
+/// (SPC-4 §6.13, as Linux's sd does). The caller reads the page again to
+/// know: a disk may take the command and keep caching.
+fn turnCacheOff(b: *virtio.Block, at: Address, scratch: u64, page: []u8) bool {
+    const descriptors = (@as(usize, page[6]) << 8) | page[7];
+    const p = 8 + descriptors;
+    const page_len: usize = 20;
+    if (p + page_len > page.len) return false;
+    std.mem.copyForwards(u8, page[8..][0..page_len], page[p..][0..page_len]);
+    @memset(page[0..8], 0);
+    page[8] &= 0x3F; // PS is reserved in MODE SELECT
+    page[10] &= ~@as(u8, 0x04); // WCE
+    const len: u16 = 8 + page_len;
+    const cdb = [10]u8{ 0x55, 0x10, 0, 0, 0, 0, 0, @truncate(len >> 8), @truncate(len), 0 };
+    const o = commandSettled(b, at, &cdb, .to_disk, scratch, len);
+    if (!good(o)) {
+        props.reachable(@src(), "scsi: a disk that refuses to turn its write cache off", null);
+        return false;
+    }
+    return true;
+}
+
 fn be32(bytes: []const u8) u32 {
     return (@as(u32, bytes[0]) << 24) | (@as(u32, bytes[1]) << 16) | (@as(u32, bytes[2]) << 8) | bytes[3];
 }
@@ -310,6 +341,11 @@ pub fn bring(device: virtio.Device, mem: *virtio.BlockMemory) Error!virtio.Block
             b.capacity = @as(u64, last) + 1;
             b.address = at;
             b.write_cache = writeCache(&b, at, scratch, &mem.scsi.scratch);
+            if (b.write_cache == true) {
+                b.cache_turned_off = turnCacheOff(&b, at, scratch, &mem.scsi.scratch);
+                b.write_cache = writeCache(&b, at, scratch, &mem.scsi.scratch);
+                if (b.write_cache != false) b.cache_turned_off = false;
+            }
             return b;
         }
     }
