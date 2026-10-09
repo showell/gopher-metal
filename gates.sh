@@ -55,8 +55,11 @@ mkdir -p "$VERDICTS"
 # The limits angry-gopher's store copies from fat16.zig and io.zig: a
 # second, so first (tools/check_limits.py).
 python3 tools/check_limits.py "$GOPHER_ROOT/zig-server/src" || failed+=(limits)
-zig build test --summary all 2>&1 | grep -E "tests passed|error"
-[ "${PIPESTATUS[0]}" = 0 ] || failed+=(test)
+# The whole summary is kept: each test binary's time is in it, and this step
+# is the gates' longest.
+zig build test --summary all > "$VERDICTS/test-summary.txt" 2>&1
+[ $? = 0 ] || failed+=(test)
+grep -E "tests passed|error" "$VERDICTS/test-summary.txt"
 lap "zig build test"
 zig build kernels 2>&1 | grep error
 [ "${PIPESTATUS[0]}" = 0 ] || failed+=(kernels)
@@ -149,15 +152,18 @@ droplet/screen.sh 2>&1 | tail -1
 [ "${PIPESTATUS[0]}" = 0 ] || failed+=(screen)
 lap "screen"
 # **metal-vmm IS BUILT HERE**, for the reason gopher.elf is above: its scripts
-# run whatever binary is on disk. `rest.sh all` is the PC-shaped machine
+# run whatever binary is on disk. `pc_vs_microvm.sh all` is the PC-shaped machine
 # (TRANSPORT=pci): every route with the server halting between frames and
 # woken by MSI-X and the APIC timer, the path a droplet runs.
 VMM="${METAL_VMM:-$HOME/showell_repos/metal-vmm}"
 (cd "$VMM" && zig build 2>&1 | tail -5; exit "${PIPESTATUS[0]}") || failed+=(vmm-build)
 (cd "$VMM" && ./check.sh 2>&1 | tail -2; exit "${PIPESTATUS[0]}") || failed+=(vmm-check)
 (cd "$VMM" && ./same.sh 2>&1 | tail -2; exit "${PIPESTATUS[0]}") || failed+=(vmm-same)
-(cd "$VMM" && ./rest.sh all 2>&1 | tail -2; exit "${PIPESTATUS[0]}") || failed+=(vmm-rest)
-lap "metal-vmm check, same and rest"
+(cd "$VMM" && ./pc_vs_microvm.sh all 2>&1 | tail -2; exit "${PIPESTATUS[0]}") || failed+=(vmm-pc)
+# **TIMEOUTS, IN THE MACHINE'S TIME**: what a setting governs, proved by
+# moving it, read off metal-vmm's clock rather than waited out on the box's.
+(cd "$VMM" && ./timeouts.sh 2>&1 | tail -3; exit "${PIPESTATUS[0]}") || failed+=(vmm-timeouts)
+lap "metal-vmm check, same, rest and timeouts"
 
 if [ ${#failed[@]} = 0 ]; then
     [ "$mode" = full ] && python3 tools/verdicts.py record gates PASS

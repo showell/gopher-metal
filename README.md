@@ -11,16 +11,22 @@ droplet through our own BIOS loader.
 
 ## Start here
 
-**Serving (2026-10-08): the tag `v20`** — gopher-metal `a26f85d` with
-angry-gopher `8b617f3c` — at **https://lynrummy.com**, the whole site, on a
-droplet with no Linux on it, with prod's real data, since the cutover of
-2026-10-04 ([`CUTOVER.md`](CUTOVER.md)). `v18` (`f592d4d`) is the way back;
-v19 was skipped.
+**Serving (2026-10-09, 20:11 UTC): the tag `v21`** — gopher-metal `81d7a35`
+with angry-gopher `a30a1542` — at **https://lynrummy.com**, the whole site, on
+a droplet with no Linux on it, with prod's real data, since the cutover of
+2026-10-04 ([`CUTOVER.md`](CUTOVER.md)). `v20` (`a26f85d`) is the way back.
+v21 over v20, served code only: the volume's write cache is turned off at
+boot and again after a reset (WCE=0); FAT copies that check alike are not
+rewritten, copies that differ and cannot be weighed leave the first in
+charge, and a refused repair no longer stops the mount; rewriting a file
+leaves the old file or the new, whole, never a mix, and a full disk refuses
+the rewrite and keeps the old; angry-gopher's changes from `8b617f3c` to
+`a30a1542`.
 What serves is a tag, not a branch: `master` may be ahead of it.
 
 **Branches and tags:**
 - `master` — everything.
-- `v17`, `v18`, `v20`, … — released images, one tag per release; the newest serves. `antithesis-sdk`
+- `v17`, `v18`, `v20`, `v21`, … — released images, one tag per release; the newest serves. `antithesis-sdk`
   and `box/v18` are merged and retired.
 - `claude/*` — a cloud session's work; the box merges it into `master`, and a
   cloud session never pushes `master` or a tag.
@@ -223,7 +229,7 @@ SECRET-LEAK.md and ADMIN-PASSWORD-LOST.md and when each is needed):
 | the boot | **works** — PVH, long mode, identity-mapped low 4 GB |
 | a droplet's boot | **works** — `droplet/loader.S`, our own BIOS loader, from a GPT disk (`droplet/image.zig`); checked on the droplet-shaped QEMU by `droplet/boot.sh` and on real droplets |
 | the screen | **works** — everything the console says is also in VGA text, which is what DigitalOcean's console shows (`droplet/screen.sh`) |
-| interrupts, and resting when idle | **works on PCI** — the card wakes the machine by MSI-X, the APIC timer at 1 ms otherwise: on a droplet, the droplet-shaped QEMU, and metal-vmm's `TRANSPORT=pci` machine (`rest.sh` in gates.sh, the lossy sweep in long.sh). On virtio-mmio (microvm, metal-vmm's default machine) it spins. On the droplet it took the slow tenth of requests from 3-5 ms to 0.5 ms |
+| interrupts, and resting when idle | **works on PCI** — the card wakes the machine by MSI-X, the APIC timer at 1 ms otherwise: on a droplet, the droplet-shaped QEMU, and metal-vmm's `TRANSPORT=pci` machine (`pc_vs_microvm.sh` in gates.sh, the lossy sweep in long.sh). On virtio-mmio (microvm, metal-vmm's default machine) it spins. On the droplet it took the slow tenth of requests from 3-5 ms to 0.5 ms |
 | virtio-blk over MMIO | **works** — reads, writes, and reads back |
 | virtio-net over MMIO | **works** |
 | virtio over PCI | **works** — disk and network found on a PC's bus, as a droplet has them |
@@ -267,7 +273,7 @@ SECRET-LEAK.md and ADMIN-PASSWORD-LOST.md and when each is needed):
 - `./gates.sh quick` is for a single commit. `./gates.sh` is the full run,
   for a batch: host tests, every probe, the chat judge on FAT32 on microvm
   and on the droplet-shaped machine side by side, the droplet boot checks,
-  and metal-vmm's `check.sh`, `same.sh` and `rest.sh all`. It rebuilds
+  and metal-vmm's `check.sh`, `same.sh` and `pc_vs_microvm.sh all`. It rebuilds
   `gopher.elf` and metal-vmm, but does not re-port: run `./port.sh` first.
 - `./long.sh` is the long tier: the simulators at 10,000 seeds against
   `coverage/floor-sim.txt`, the chat judge on FAT16, and the real kernel on
@@ -302,7 +308,7 @@ script runs `isolated`; it is there to ask by hand.
 **Two builds.** `-Ddev` builds the kernels in Debug — a rebuild of the real
 server in seconds instead of ReleaseSafe's tens — and `run.sh quick` builds
 that way and runs the judge with test-sized waits (a 3-second stream
-keepalive, sub-second silent-client timeouts), one boot for the single
+keepalive), one boot for the single
 requests, and without the boots that exist to be long. Shipping kernels are
 ReleaseSafe, and every run says which build it judged, read from a marker
 each kernel carries.

@@ -1665,9 +1665,9 @@ test "a FAT is held only in a buffer that holds all of it, and a file past 4 GiB
 fn expectCursorSound(d: *test_disk.Disk) !void {
     const l = Layout.of(d.bytes);
     var c: usize = 2;
-    while (c < d.vol.next_free) : (c += 1) {
+    while (c < d.vol.alloc_hint) : (c += 1) {
         if (l.get(d.bytes, 0, c) == 0) {
-            std.debug.print("cluster {d} is free, below the cursor at {d}\n", .{ c, d.vol.next_free });
+            std.debug.print("cluster {d} is free, below the cursor at {d}\n", .{ c, d.vol.alloc_hint });
             return error.TestUnexpectedResult;
         }
     }
@@ -1691,7 +1691,7 @@ test "the cursor: every cluster below it stays in use, through writes, removes, 
             const p = try std.fmt.bufPrint(&path, "data/f{d}", .{k});
             const first = (try d.vol.open(p)).first_cluster;
             try d.vol.remove(p);
-            try testing.expect(d.vol.next_free <= first);
+            try testing.expect(d.vol.alloc_hint <= first);
             try expectCursorSound(d);
         }
         const lowest_free = blk: {
@@ -1706,7 +1706,7 @@ test "the cursor: every cluster below it stays in use, through writes, removes, 
         try d.vol.removeTree("data");
         try expectCursorSound(d);
         try d.mount(cached);
-        try testing.expectEqual(@as(fat16.Cluster, 2), d.vol.next_free);
+        try testing.expectEqual(@as(fat16.Cluster, 2), d.vol.alloc_hint);
         try d.vol.writeFile("after-a-mount", "x");
         try expectCursorSound(d);
     }

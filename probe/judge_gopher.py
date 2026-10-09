@@ -759,21 +759,6 @@ def set_request_limit(image: str, n: int, mnt: str, **conf) -> None:
     disk_write(image, mnt, "gopher-metal.conf", request_limit_text(image, n, **conf))
 
 
-def silent_client(port: int, payload: bytes):
-    """**A CLIENT THAT CONNECTS AND THEN SAYS (ALMOST) NOTHING.** This server
-    takes one connection at a time, so this is the request that holds the whole
-    site: half a request line and then silence, with the socket left open. The
-    kernel must let it go on its own and answer the next caller.
-
-    Returns the open socket, which the caller closes when it is done proving
-    the point — closing it early would be the polite hangup the kernel already
-    handled."""
-    sock = socket.create_connection(("127.0.0.1", port), timeout=5)
-    if payload:
-        sock.sendall(payload)
-    return sock
-
-
 # **THE QUICK TIER.** With JUDGE_QUICK set, the machine's waits are
 # test-sized — a three-second stream keepalive, sub-second silent-client
 # timeouts — and the boots that exist to be long are left out. The full run
@@ -786,7 +771,7 @@ QUICK = bool(os.environ.get("JUDGE_QUICK"))
 # uploads) runs that gate and nothing else. An unknown name is an error, not a
 # silently complete run.
 GATES = ["cases", "members", "uids", "caps", "lynrummy", "streams-linux", "streams-metal", "budget", "churn",
-         "bulk", "uploads", "slow", "lagging", "concurrent", "timeouts",
+         "bulk", "uploads", "slow", "lagging", "concurrent",
          "damaged", "endurance", "stamina", "admin-reset", "throttle", "retire", "secret"]
 # The boots that exist to be long. The quick tier leaves them out; asking for
 # one by name still runs it.
@@ -887,7 +872,9 @@ def microvm_start(elf: str, image: str, scratch: str, port: int, serial_log, kvm
         "-nographic", "-no-reboot", "-m", "512",
         "-global", "virtio-mmio.force-legacy=false",
         "-device", "isa-debug-exit,iobase=0xf4,iosize=0x04",
-        "-drive", f"id=d,file={image},format=raw,if=none",
+        # cache=unsafe: a flush is not a sync of the box's disk (droplet.sh
+        # says why).
+        "-drive", f"id=d,file={image},format=raw,if=none,cache=unsafe",
         "-device", "virtio-blk-device,drive=d",
         "-cpu", "max", "-device", "virtio-rng-device",
         "-netdev", f"user,id=n0,hostfwd=tcp:127.0.0.1:{port}-:80",
@@ -995,6 +982,25 @@ def keep_coverage_lines(text: str):
         for l in text.splitlines():
             if l.startswith("coverage: "):
                 f.write(l[len("coverage: "):].rstrip("\r") + "\n")
+
+
+def use_up_requests(qemu, port: int, at_most: int) -> None:
+    """**A BOOT ENDS AT ITS REQUEST LIMIT, NOT AT finish_kernel's 60 s.** A
+    story that sends fewer requests than its boot's `requests =` leaves the
+    guest serving, and finish_kernel then waits a minute and kills it, which
+    also hides a guest that hangs. After the story, this asks `/version` until
+    the guest stops on its own, at most `at_most` times; the gate then holds
+    the exit to 1, the clean stop."""
+    for _ in range(at_most):
+        if qemu.poll() is not None:
+            return
+        try:
+            conn = http.client.HTTPConnection("127.0.0.1", port, timeout=10)
+            conn.request("GET", "/version")
+            conn.getresponse().read()
+            conn.close()
+        except OSError:
+            return
 
 
 def finish_kernel(qemu, serial: str, damaged: bool = False):
@@ -1604,7 +1610,10 @@ def run_story(elf, linux_bin, content, pristine, work, mnt, steps, label, report
     rq, rport, rserial = start_kernel(elf, recheck, rscratch)
     ask(rport, case("the version, on a boot of the written disk", "GET", "/version"),
         os.path.join(rscratch, "recheck"))
-    _, rlog = finish_kernel(rq, rserial)
+    rcode, rlog = finish_kernel(rq, rserial)
+    if rcode != 1:
+        failures += 1
+        report(f"FAIL  {label}: the boot after the story exited {rcode}, not at its request limit")
     if "the boot disk" not in disk_check_lines(rlog):
         failures += 1
         report(f"FAIL  {label}: the boot after the story printed no disk check")
@@ -1659,85 +1668,6 @@ def missing_marks(steps, answers, report, label) -> int:
             failures += 1
             report(f"FAIL  {label}: {s['name']}: {len(gone)} of {len(s['expect'])} marks are not in "
                    f"the {len(body)}-byte body it returned, first {gone[0].decode()}")
-    return failures
-
-
-def held_open(elf, pristine, work, mnt, ms: int):
-    """One boot, one client that connects and then says nothing, and one caller
-    beside it. Returns (how long the caller waited for its answer, when the
-    kernel closed the silent socket, the caller's answer, what the silent socket
-    read at the end, the serial log) — times in seconds from the moment the
-    silent client connected."""
-    scratch = tempfile.mkdtemp(dir=work)
-    image = os.path.join(scratch, "disk.img")
-    shutil.copy(pristine, image)
-    set_request_limit(image, 2, mnt, idle_timeout_ms=ms)
-    qemu, port, serial = start_kernel(elf, image, scratch)
-    held = silent_client(port, b"GET / HTTP/1.1\r\n")  # half a request, then silence
-    began = time.time()
-    answer = ask(port, step("the caller beside the silent one", "GET", "/"),
-                 os.path.join(scratch, "after"), patience=60)
-    answered = time.time() - began
-    # The kernel closes the silent connection when it lets it go; the socket
-    # then reads end-of-stream.
-    held.settimeout(ms / 1000 + 30)
-    try:
-        rest = held.recv(64)
-    except OSError:
-        rest = None
-    let_go = time.time() - began
-    held.close()
-    _, log = finish_kernel(qemu, serial)
-    shutil.rmtree(scratch, ignore_errors=True)
-    return answered, let_go, answer, rest, log
-
-
-def timeout_failures(elf, pristine, work, mnt, report) -> int:
-    """**A CLIENT THAT SAYS NOTHING NO LONGER HOLDS ANYONE UP — AND IS STILL LET
-    GO.** When the machine held one connection at a time, this gate proved that
-    a caller queued behind a silent client waited out the timeout (6 s at a
-    2-second setting, 18 s at 6). With a table of connections the caller must
-    NOT wait: it is answered while the silent one sits in the table. The silent
-    one is still closed by the kernel once it has been quiet for the setting.
-
-    Two boots with two `idle_timeout_ms`, because "it was let go" is not the
-    claim: the claim is that the setting decides WHEN, and the only way to show
-    that is to change it and watch the close move."""
-    failures = 0
-    let_go_at = {}
-    low, high = (500, 2000) if QUICK else (2000, 6000)
-    for ms in (low, high):
-        answered, let_go, answer, rest, log = held_open(elf, pristine, work, mnt, ms)
-        let_go_at[ms] = let_go
-        if answer.get("status") != 200:
-            failures += 1
-            report(f"FAIL  timeout: with idle_timeout_ms={ms} the caller beside a silent client "
-                   f"got {answer.get('status', answer.get('error'))}, not 200")
-        if answered >= ms / 1000:
-            failures += 1
-            report(f"FAIL  timeout: with idle_timeout_ms={ms} the caller waited {answered:.1f}s — "
-                   f"as long as the silent client was allowed; it was held up behind it")
-        if rest != b"":
-            failures += 1
-            report(f"FAIL  timeout: with idle_timeout_ms={ms} the silent client was never closed "
-                   f"by the kernel (its socket read {rest!r})")
-        elif not (0.8 * ms / 1000 <= let_go <= ms / 1000 + 5):
-            failures += 1
-            report(f"FAIL  timeout: with idle_timeout_ms={ms} the silent client was let go after "
-                   f"{let_go:.1f}s")
-        if "the client stopped sending" not in log:
-            failures += 1
-            report(f"FAIL  timeout: with idle_timeout_ms={ms} the kernel never said it let the "
-                   f"silent client go: {' | '.join(log.splitlines()[-3:])}")
-    moved = let_go_at[high] - let_go_at[low]
-    if moved < 0.8 * (high - low) / 1000:
-        failures += 1
-        report(f"FAIL  timeout: raising the setting by {(high - low) / 1000:g}s moved the close by only "
-               f"{moved:.1f}s — the setting does not govern it")
-    if not failures:
-        report(f"ok    a silent client holds nobody up and is still let go when the volume says: "
-               f"closed after {let_go_at[low]:.1f}s at {low} ms and {let_go_at[high]:.1f}s at {high} ms, "
-               f"with the caller beside it answered first both times")
     return failures
 
 
@@ -2210,20 +2140,23 @@ def admin_reset_failures(elf, linux_bin, content, pristine, work, mnt, gopher_ro
     qemu, port, serial, first = boot(image, line, 2)
     expect(logs_in(port, RESET_PASSWORD), "metal: the reset password did not log in")
     expect(not logs_in(port, MEMBER_PASSWORD), "metal: the old password still logged in after the reset")
-    _, log = finish_kernel(qemu, serial)
+    code, log = finish_kernel(qemu, serial)
+    expect(code == 1, f"metal: a boot exited {code}, not at its request limit")
     expect("admin password reset for Steve: applied;" in log, "metal: the boot did not say it applied the reset")
 
     # The same image again: once is once.
     qemu, port, serial, _ = boot(image, line, 1, after=first)
     expect(logs_in(port, RESET_PASSWORD), "metal: the reset password did not log in on the second boot")
-    _, log = finish_kernel(qemu, serial)
+    code, log = finish_kernel(qemu, serial)
+    expect(code == 1, f"metal: a boot exited {code}, not at its request limit")
     expect("applied by an earlier boot; nothing changed" in log, "metal: the second boot did not say it had applied it before")
 
     # Someone else's name: refused, the old password still good.
     shutil.copy(pristine, image)
     qemu, port, serial, _ = boot(image, f"admin_password_reset = Mallory {new_hash}\n", 1)
     expect(logs_in(port, MEMBER_PASSWORD), "metal: a reset for another name changed the admin's password")
-    _, log = finish_kernel(qemu, serial)
+    code, log = finish_kernel(qemu, serial)
+    expect(code == 1, f"metal: a boot exited {code}, not at its request limit")
     expect("REFUSED: uid 1 is not named so" in log, "metal: a reset for another name was not refused out loud")
     shutil.rmtree(scratch, ignore_errors=True)
 
@@ -2321,12 +2254,14 @@ def login_throttle_failures(elf, linux_bin, content, pristine, work, mnt, report
         scratch = tempfile.mkdtemp(dir=work)
         image = os.path.join(scratch, "disk.img")
         shutil.copy(pristine, image)
-        disk_write(image, mnt, "gopher-metal.conf", request_limit_text(image, 60))
+        disk_write(image, mnt, "gopher-metal.conf", request_limit_text(image, 30))
         qemu, port, serial = start_kernel(elf, image, scratch)
         try:
             fn("metal", port)
+            use_up_requests(qemu, port, 30)
         finally:
-            finish_kernel(qemu, serial)
+            code, _ = finish_kernel(qemu, serial)
+        expect(code == 1, f"metal: the guest exited {code}, not at its request limit")
         shutil.rmtree(scratch, ignore_errors=True)
 
     def on_linux(fn):
@@ -2455,13 +2390,16 @@ def retire_failures(elf, linux_bin, content, pristine, work, mnt, gopher_root, r
         fixture(root)
         image = os.path.join(scratch, "disk.img")
         build_disk(image, root, os.path.join(scratch, "mnt"))
-        set_request_limit(image, 300, os.path.join(scratch, "mnt"), idle_timeout_ms=60000)
+        set_request_limit(image, 30, os.path.join(scratch, "mnt"), idle_timeout_ms=60000)
         qemu, port, serial = start_kernel(elf, image, scratch)
         try:
-            return drive("metal", port)
+            got = drive("metal", port)
+            use_up_requests(qemu, port, 30)
         finally:
-            finish_kernel(qemu, serial)
+            code, _ = finish_kernel(qemu, serial)
             shutil.rmtree(scratch, ignore_errors=True)
+        expect(code == 1, f"metal: the guest exited {code}, not at its request limit")
+        return got
 
     def on_linux():
         root = tempfile.mkdtemp(dir=work)
@@ -2533,10 +2471,13 @@ def secret_failures(elf, linux_bin, content, pristine, work, mnt, gopher_root, r
         set_request_limit(image, 5, os.path.join(scratch, "mnt"), idle_timeout_ms=60000)
         qemu, port, serial = start_kernel(elf, image, scratch)
         try:
-            return chat_status(port)
+            got = chat_status(port)
+            use_up_requests(qemu, port, 5)
         finally:
-            finish_kernel(qemu, serial)
+            code, _ = finish_kernel(qemu, serial)
             shutil.rmtree(scratch, ignore_errors=True)
+        expect(code == 1, f"metal: the guest exited {code}, not at its request limit")
+        return got
 
     def on_linux(where):
         root = tempfile.mkdtemp(dir=work)
@@ -3511,10 +3452,8 @@ def main() -> int:
         failures += concurrent_failures(elf, linux_bin, content, pristine, work, mnt, print)
         lap("many clients")
 
-    # ── the client that says nothing ─────────────────────────────────────────
-    if running("timeouts"):
-        failures += timeout_failures(elf, pristine, work, mnt, print)
-        lap("silent clients")
+    # ── the client that says nothing: metal-vmm's timeouts.sh, in the
+    # machine's time (gates.sh) ──────────────────────────────────────────────
     # ── endurance: the writes, read back every round ─────────────────────────
     if running("endurance"):
         f, log, answers, files = run_story(elf, linux_bin, content, pristine, work, mnt,

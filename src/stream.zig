@@ -438,6 +438,7 @@ fn streamFn(r: *Reader, w: *Writer, limit: std.Io.Limit) Reader.StreamError!usiz
     // A window that had shrunk below a segment is announced when it reopens,
     // so a peer that filled it does not sit waiting for its own probe.
     const was_tight = c.room() < tcp.our_mss;
+    // Handed on, the bytes are the reader's: the table releases them.
     c.consume(n);
     if (was_tight and c.room() >= tcp.our_mss) self.table.ack(self.wire, self.index);
     return n;
