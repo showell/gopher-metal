@@ -1211,11 +1211,15 @@ pub const Table = struct {
             // peer that repeats itself forever must not be able to hold the
             // connection open by pushing the timer out, so the next one waits
             // until something new has been acknowledged.
+            //
+            // **AND IT NAMES SND.UNA** (RFC 5681 §2; metal-vmm QUEUE 133): an
+            // older acknowledgement (reordered) or one of data never sent is
+            // no news of a hole, and counts toward nothing.
             const bare = data.len == 0 and flags & flag_fin == 0 and flags & flag_syn == 0;
             if (c.una != was) {
                 c.dupacks = 0;
                 c.resent_early = false;
-            } else if (bare and c.wnd == held and c.wnd != 0 and c.highest() != c.una) {
+            } else if (bare and number == c.una and c.wnd == held and c.wnd != 0 and c.highest() != c.una) {
                 c.dupacks += 1;
                 if (c.dupacks == dupacks_before_resend and !c.resent_early) self.resend(wire, i, now);
             }

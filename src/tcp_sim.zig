@@ -1856,7 +1856,12 @@ test "several clients, a table sized by the seed, keep-alive and a held stream" 
 /// revival, the client's ACK rebuilds its half-open, and each passes; with
 /// the ring turned off (`revival_cap` 0) each fails as it did.
 const rough_red = [_]u64{ 11277, 11529, 13514, 16190, 20063, 20615, 22509, 25720, 32011, 38526, 41147, 43082, 48515, 48671 };
-const crowd_red = [_]u64{ 640, 1281, 1452, 1733, 1872, 1961, 2305, 2870, 4362, 6307, 6606, 6918, 7374, 7546, 7968, 8003, 8575, 9366, 9728, 9769, 9951 };
+// **FIVE LEFT THIS LIST WITH metal-vmm QUEUE 133** (1733, 6918, 7374, 7968,
+// 9728): without the ring each failed by fast retransmits that old
+// acknowledgements set off. With a duplicate held to SND.UNA (RFC 5681 §2)
+// each passes either way, so none witnesses the ring any more. Every rough
+// seed still fails without it.
+const crowd_red = [_]u64{ 640, 1281, 1452, 1872, 1961, 2305, 2870, 4362, 6307, 6606, 7546, 8003, 8575, 9366, 9769, 9951 };
 
 test "a crowd the size of the kernel's table: every oracle holds, and the table fills" {
     for (1..3) |seed| try runFullSeed(seed);
