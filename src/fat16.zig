@@ -1853,27 +1853,50 @@ pub const Volume = struct {
             props.reachable(@src(), "fat: a write onto a directory is refused", null);
             return Error.IsDirectory;
         };
-        const kept = old != null;
-        const name = if (kept) old.?.text() else given;
-        try self.removeEntry(dir_cluster, given);
-
-        const short = if (kept) old.?.short else try self.aliasFor(dir_cluster, name);
-        const needs_long = needsLongName(name);
-        const parts: u32 = if (needs_long) longParts(name) else 0;
-        const run = try self.findRun(dir_cluster, parts + 1);
-
         const per_cluster = self.sectors_per_cluster * sector_size;
         if (bytes.len > 0xFFFF_FFFF) {
             props.reachable(@src(), "fat: a file of 4 GiB or more is refused", null);
             return Error.TooBig;
         }
         const clusters: u32 = @intCast((@as(u64, bytes.len) + per_cluster - 1) / per_cluster);
+        if (old) |e| return self.overwrite(e, clusters, bytes);
+
+        const name = given;
+        const short = try self.aliasFor(dir_cluster, name);
+        const needs_long = needsLongName(name);
+        const parts: u32 = if (needs_long) longParts(name) else 0;
+        const run = try self.findRun(dir_cluster, parts + 1);
+
         const first = try self.allocChain(clusters);
         if (bytes.len > 0) try self.writeChain(first, bytes);
 
         // The entry goes last: until it is written, nothing points at the data,
         // so a machine that stops here has lost a file rather than corrupted one.
         try self.writeEntry(run, if (needs_long) name else name[0..0], short, 0x20, first, @intCast(bytes.len));
+    }
+
+    /// **AN OVERWRITE IS ONE SECTOR WRITE** (essay kernel-facts #1). The new
+    /// bytes go into a chain of their own, one write of the entry's sector
+    /// points the file at it, and then the old chain is freed. A machine
+    /// stopped anywhere leaves the old file or the new one, never neither;
+    /// a volume without room for both refuses the write and keeps the old.
+    /// The entry keeps its name, its alias and its long-name parts.
+    ///
+    /// **NO UNDO ONCE THE ENTRY'S WRITE IS ASKED.** A write the disk failed
+    /// may still have landed, and freeing a chain the entry points at would
+    /// give one cluster to two files. So a failure there leaves the new
+    /// chain allocated (a leak at worst), and the boot's disk check says it.
+    /// A failure freeing the old chain after it is the write's error, as
+    /// `rename`'s is, though the file is already the new one (QUEUE 131,
+    /// #3, weighs that).
+    fn overwrite(self: *Volume, old: Entry, clusters: u32, bytes: []const u8) Error!void {
+        const first = try self.allocChain(clusters);
+        if (bytes.len > 0) self.writeChain(first, bytes) catch |err| {
+            self.freeChain(first) catch props.reachable(@src(), "fat: an overwrite's new chain is left allocated, a leak", null);
+            return err;
+        };
+        try self.setEntry(old, first, @intCast(bytes.len));
+        try self.freeChain(old.first_cluster);
     }
 
     /// Makes a directory in `dir_cluster`. Its first cluster holds `.` and `..`,

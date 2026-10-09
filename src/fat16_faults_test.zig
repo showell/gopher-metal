@@ -137,9 +137,9 @@ const stopped_ops = [_]Stopped{
         },
     },
     .{
-        // A whole-file replace removes the old entry first: a stop between
-        // loses the file ("has lost a file rather than corrupted one"),
-        // which is why the Store replaces by rename.
+        // **A WRITE OVER A FILE IS OLD OR NEW, NEVER GONE** (essay
+        // kernel-facts #1): the new chain is written first, and one sector
+        // write points the entry at it.
         .name = "replace a file",
         .setup = struct {
             fn f(v: *fat16.Volume) !void {
@@ -151,7 +151,7 @@ const stopped_ops = [_]Stopped{
                 return v.writeFile("data/rec", &new_rec);
             }
         }.f,
-        .want = &.{.{ .path = "data/rec", .any = &.{ .{ .file = &old_rec }, .absent, .{ .file = &new_rec } } }},
+        .want = &.{.{ .path = "data/rec", .any = &.{ .{ .file = &old_rec }, .{ .file = &new_rec } } }},
     },
     .{
         .name = "append inside the last cluster",
