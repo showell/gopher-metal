@@ -223,7 +223,7 @@ SECRET-LEAK.md and ADMIN-PASSWORD-LOST.md and when each is needed):
 | the boot | **works** — PVH, long mode, identity-mapped low 4 GB |
 | a droplet's boot | **works** — `droplet/loader.S`, our own BIOS loader, from a GPT disk (`droplet/image.zig`); checked on the droplet-shaped QEMU by `droplet/boot.sh` and on real droplets |
 | the screen | **works** — everything the console says is also in VGA text, which is what DigitalOcean's console shows (`droplet/screen.sh`) |
-| interrupts, and resting when idle | **works on PCI** — the card wakes the machine by MSI-X, the APIC timer at 1 ms otherwise: on a droplet, the droplet-shaped QEMU, and metal-vmm's `TRANSPORT=pci` machine (`rest.sh` in gates.sh, the lossy sweep in long.sh). On virtio-mmio (microvm, metal-vmm's default machine) it spins. On the droplet it took the slow tenth of requests from 3-5 ms to 0.5 ms |
+| interrupts, and resting when idle | **works on PCI** — the card wakes the machine by MSI-X, the APIC timer at 1 ms otherwise: on a droplet, the droplet-shaped QEMU, and metal-vmm's `TRANSPORT=pci` machine (`pc_vs_microvm.sh` in gates.sh, the lossy sweep in long.sh). On virtio-mmio (microvm, metal-vmm's default machine) it spins. On the droplet it took the slow tenth of requests from 3-5 ms to 0.5 ms |
 | virtio-blk over MMIO | **works** — reads, writes, and reads back |
 | virtio-net over MMIO | **works** |
 | virtio over PCI | **works** — disk and network found on a PC's bus, as a droplet has them |
@@ -267,7 +267,7 @@ SECRET-LEAK.md and ADMIN-PASSWORD-LOST.md and when each is needed):
 - `./gates.sh quick` is for a single commit. `./gates.sh` is the full run,
   for a batch: host tests, every probe, the chat judge on FAT32 on microvm
   and on the droplet-shaped machine side by side, the droplet boot checks,
-  and metal-vmm's `check.sh`, `same.sh` and `rest.sh all`. It rebuilds
+  and metal-vmm's `check.sh`, `same.sh` and `pc_vs_microvm.sh all`. It rebuilds
   `gopher.elf` and metal-vmm, but does not re-port: run `./port.sh` first.
 - `./long.sh` is the long tier: the simulators at 10,000 seeds against
   `coverage/floor-sim.txt`, the chat judge on FAT16, and the real kernel on

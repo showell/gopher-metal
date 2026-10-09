@@ -149,14 +149,14 @@ droplet/screen.sh 2>&1 | tail -1
 [ "${PIPESTATUS[0]}" = 0 ] || failed+=(screen)
 lap "screen"
 # **metal-vmm IS BUILT HERE**, for the reason gopher.elf is above: its scripts
-# run whatever binary is on disk. `rest.sh all` is the PC-shaped machine
+# run whatever binary is on disk. `pc_vs_microvm.sh all` is the PC-shaped machine
 # (TRANSPORT=pci): every route with the server halting between frames and
 # woken by MSI-X and the APIC timer, the path a droplet runs.
 VMM="${METAL_VMM:-$HOME/showell_repos/metal-vmm}"
 (cd "$VMM" && zig build 2>&1 | tail -5; exit "${PIPESTATUS[0]}") || failed+=(vmm-build)
 (cd "$VMM" && ./check.sh 2>&1 | tail -2; exit "${PIPESTATUS[0]}") || failed+=(vmm-check)
 (cd "$VMM" && ./same.sh 2>&1 | tail -2; exit "${PIPESTATUS[0]}") || failed+=(vmm-same)
-(cd "$VMM" && ./rest.sh all 2>&1 | tail -2; exit "${PIPESTATUS[0]}") || failed+=(vmm-rest)
+(cd "$VMM" && ./pc_vs_microvm.sh all 2>&1 | tail -2; exit "${PIPESTATUS[0]}") || failed+=(vmm-pc)
 lap "metal-vmm check, same and rest"
 
 if [ ${#failed[@]} = 0 ]; then
