@@ -147,6 +147,12 @@ fn safety(c: *const Conn) ?Rule {
 /// A new kind of debt is a new row here. A debt with no row is invisible to
 /// every test — that is how a reopened window's lost announcement went
 /// unnoticed until it was read for.
+///
+/// Each row is tcp.zig's rule that no debt is without a clock; each clock's
+/// give-up (`max_retries`, `fin_wait_ns`) is tcp.zig's. The converse, no
+/// clock without a debt, is checked for a free slot
+/// (`closed_holds_a_deadline`) and for the window's clock
+/// (`window_timer_without_news`).
 const Row = struct {
     rule: Rule,
     owes: *const fn (*const Conn) bool,

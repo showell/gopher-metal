@@ -57,6 +57,10 @@
 //! deadline, plus however long until the next `transmit`" — and that second
 //! part is the host's to bound (stream.zig).
 //!
+//! Each entry is a **debt**: something owed, with a clock that pays it and a
+//! give-up that ends it. No debt without a clock, no clock without a debt, no
+//! clock without a give-up.
+//!
 //! - **Bytes queued and not yet sent** (`tx`, past `sent`). Sent by the next
 //!   `transmit` as far as the peer's window allows. Bounded by: the window;
 //!   while it is shut, a probe at `rto_at`, and a reset after `max_retries`
@@ -111,7 +115,8 @@ pub const flag_rst: u8 = 0x04;
 pub const flag_psh: u8 = 0x08;
 pub const flag_ack: u8 = 0x10;
 
-/// What a peer that says nothing about segment size may be sent (RFC 9293).
+/// What a peer that says nothing about segment size may be sent (RFC 9293
+/// §3.7.1).
 pub const default_mss: u16 = 536;
 /// What we say we can take: an ethernet frame's worth, which the NIC's receive
 /// buffers hold with room to spare.
@@ -128,13 +133,15 @@ pub const mss_option = [4]u8{ 2, 4, our_mss >> 8, our_mss & 0xFF };
 /// ACKNOWLEDGEMENTS.** A peer may sit on an acknowledgement for tens of
 /// milliseconds (Linux) or up to 200 (slirp, in front of QEMU). Waiting less
 /// than that turns a delay into a "loss" and makes us re-send a whole window
-/// for nothing, so the floor is Linux's own `TCP_RTO_MIN`. It is also the
-/// first wait, before anything is measured: this machine answers Caddy over a
-/// private network, not the open internet, and RFC 6298's unmeasured second is
-/// a thousand times the round trip we will actually see.
+/// for nothing, so the floor is Linux's own `TCP_RTO_MIN`, not RFC 6298's
+/// one second (2.4). It is also the first wait, before anything is measured:
+/// this machine answers Caddy over a private network, not the open internet,
+/// and RFC 6298's unmeasured second is a thousand times the round trip we
+/// will actually see.
 ///
-/// Each timeout doubles the wait up to the ceiling, and the connection is
-/// reset once `max_retries` have passed with nothing acknowledged.
+/// Each timeout doubles the wait up to the ceiling (RFC 6298 (5.5)), and the
+/// connection is reset once `max_retries` have passed with nothing
+/// acknowledged: RFC 9293's R2 (§3.8.3), counted in timeouts.
 pub const min_rto_ns: u64 = 200 * ns_per_ms;
 pub const first_rto_ns: u64 = min_rto_ns;
 pub const max_rto_ns: u64 = 5 * ns_per_s;
@@ -145,17 +152,25 @@ pub const max_retries: u8 = 6;
 /// peer telling us what the timer would only guess at a round trip later.
 pub const dupacks_before_resend: u8 = 3;
 /// How long a connection whose FIN was acknowledged waits for the peer's.
+/// RFC 9293 has no such bound on FIN-WAIT-2; Linux's `tcp_fin_timeout` is
+/// the same idea.
 pub const fin_wait_ns: u64 = 30 * ns_per_s;
 pub const ns_per_ms = 1_000_000;
 pub const ns_per_s = 1_000_000_000;
 
+/// RFC 9293's states, fewer of them: the table as a whole is LISTEN, and the
+/// closing states are told apart by `fin` and `peer_done` rather than by name.
 pub const State = enum {
-    /// The slot is free — unless the host still holds it (`claimed`).
+    /// CLOSED. The slot is free — unless the host still holds it (`claimed`).
     closed,
+    /// SYN-RECEIVED: our SYN-ACK is out, its acknowledgement not yet in.
     syn_received,
+    /// ESTABLISHED, and CLOSE-WAIT once `peer_done`.
     established,
     /// We have said we are done: the queue drains, then our FIN goes; once it
     /// is acknowledged and the peer's FIN has arrived, the connection is over.
+    /// FIN-WAIT-1, FIN-WAIT-2 (`fin == .acknowledged`), and CLOSING or
+    /// LAST-ACK (`peer_done`). There is no TIME-WAIT: the slot is CLOSED at once.
     closing,
 };
 
@@ -165,16 +180,20 @@ pub const Fin = enum { none, queued, sent, acknowledged };
 /// One connection.
 pub const Conn = struct {
     state: State = .closed,
+    // The remote half of the connection's socket pair; the local half is the
+    // table's (`local_ip`, `port`).
     peer_ip: [4]u8 = proto.ip_any,
     peer_mac: [6]u8 = proto.mac_broadcast,
     peer_port: u16 = 0,
 
-    /// The next sequence number we expect from the peer.
+    /// RCV.NXT: the next sequence number we expect from the peer. There is no
+    /// IRS field; the SYN sets this to IRS + 1.
     rcv_nxt: u32 = 0,
 
     /// **WHAT THE PEER HAS SENT AND NOBODY HAS READ YET: `rx[start..end]`.**
     /// The reader consumes from the front, and the space it frees is what the
-    /// window advertises.
+    /// window advertises. Held for the reader: we acknowledged these bytes,
+    /// so the peer will not send them again. RCV.WND is `window()`.
     rx: []u8,
     start: usize = 0,
     end: usize = 0,
@@ -182,10 +201,14 @@ pub const Conn = struct {
     /// **WHAT WE HAVE TO SAY AND THE PEER HAS NOT ACKNOWLEDGED:
     /// `tx[tx_start..tx_end]`.** The first `sent` of those bytes are on the
     /// wire; the rest wait for room in the peer's window. `tx[tx_start]` is
-    /// the byte numbered `una`.
+    /// the byte numbered `una`. Held for the peer until it acknowledges them:
+    /// sent is not released.
     tx: []u8,
     tx_start: usize = 0,
     tx_end: usize = 0,
+    /// Where the next segment starts, as a count past `una`. A timeout or
+    /// three duplicate acknowledgements set it back to 0. RFC 9293's SND.NXT
+    /// never goes back; that is `highest()`, built on `high`.
     sent: usize = 0,
     /// The most bytes past `una` ever on the wire. A timeout sends from `una`
     /// again, so `sent` goes back; an acknowledgement of what was sent before
@@ -193,24 +216,31 @@ pub const Conn = struct {
     high: usize = 0,
     /// Our FIN has been on the wire at least once.
     fin_ever_sent: bool = false,
-    /// The oldest sequence number the peer has not acknowledged. Before the
-    /// handshake completes it is our SYN's.
+    /// SND.UNA: the oldest sequence number the peer has not acknowledged.
+    /// Before the handshake completes it is our SYN's, ISS; there is no ISS
+    /// field.
     una: u32 = 0,
     fin: Fin = .none,
-    /// How many bytes past `una` the peer last said it has room for.
+    /// SND.WND: how many bytes past `una` the peer last said it has room for.
+    /// Always measured from `una`, so the right edge stays where the peer put
+    /// it (see `acknowledge`). At most 0xFFFF: no window scaling.
     wnd: u32 = 0,
     /// The sequence and acknowledgement numbers of the segment that last set
     /// `wnd` (RFC 9293's SND.WL1 and SND.WL2): an older segment, arriving
     /// late, does not overrule a newer one's window.
     wl1: u32 = 0,
     wl2: u32 = 0,
-    /// The largest segment the peer said it takes.
+    /// SendMSS (RFC 9293 §3.7.1): the largest segment the peer said it takes,
+    /// and never more than `our_mss`.
     mss: u16 = default_mss,
-    /// When the oldest unacknowledged thing is sent again, or a shut window
-    /// probed. Null when nothing is waiting on the peer.
+    /// The retransmission timer (RFC 6298 §5), which is also the persist
+    /// timer: when the oldest unacknowledged thing is sent again, or a shut
+    /// window probed. Null when nothing is waiting on the peer.
     rto_at: ?i96 = null,
+    /// RTO (RFC 6298 §2): the measured clock, doubled by each timeout.
     rto_ns: u64 = first_rto_ns,
-    /// Timeouts since the peer last acknowledged anything.
+    /// Timeouts since the peer last acknowledged anything: the give-up for
+    /// `rto_at`, against `max_retries`.
     retries: u8 = 0,
     /// **THE PATH, AS MEASURED** (RFC 6298's SRTT and RTTVAR). Zero until the
     /// first sample, which the handshake provides.
@@ -223,32 +253,39 @@ pub const Conn = struct {
     timed_at: ?i96 = null,
     timed_seq: u32 = 0,
     /// Acknowledgements of the same byte in a row: the peer saying it is
-    /// receiving what came after something that never arrived.
+    /// receiving what came after something that never arrived (RFC 5681's
+    /// duplicate acknowledgements).
     dupacks: u8 = 0,
     /// Whether this run of duplicates has already been answered. Cleared when
     /// the peer acknowledges something new.
     resent_early: bool = false,
     /// Our FIN is acknowledged and the peer's has not come: until when to
-    /// wait for it.
+    /// wait for it. FIN-WAIT-2's bound, which RFC 9293 does not have.
     fin_wait_until: ?i96 = null,
 
     /// The peer has sent its FIN: nothing more is coming, but what already
-    /// arrived is still there to be read.
+    /// arrived is still there to be read. `rcv_nxt` has counted the FIN.
     peer_done: bool = false,
 
-    /// **THE WINDOW WE LAST TOLD THE PEER**, in the last segment we sent it.
+    /// **THE WINDOW WE LAST TOLD THE PEER**, in the last segment we sent it:
+    /// the RCV.WND the peer believes.
     told_wnd: u16 = 0xFFFF,
     /// **WHAT WE STILL OWE THE PEER ABOUT OUR WINDOW.** A segment that opens
     /// a window the peer last saw too small to send into makes it
     /// `.said_once`; the next turn of `transmit` makes it `.repeating` and
     /// starts `update_at`, on which the announcement is said again until the
-    /// peer sends something, finishes, or `max_retries` have gone.
+    /// peer sends something, finishes, or `max_retries` have gone. Not in RFC
+    /// 9293, whose window update is a bare ACK nothing repeats; there the
+    /// peer's persist timer (§3.8.6.1) is the only recovery from its loss.
     window_news: WindowNews = .none,
     /// When the reopened window is said again. Armed exactly while
     /// `window_news` is `.repeating`.
     update_at: ?i96 = null,
+    /// Repeats so far: the give-up for `update_at`, against `max_retries`.
     updates: u8 = 0,
 
+    // ── The host's marks on the slot, not TCP's. `reset()` keeps `claimed`
+    // by hand; the rest are set again when a connection takes the slot.
     /// **HELD BY THE HOST.** A slot the host is serving is never handed to a
     /// new connection, even after this one ends — otherwise a reader part-way
     /// through a request could find a stranger's bytes in its buffer.
@@ -268,7 +305,7 @@ pub const Conn = struct {
         return self.rx[self.start..self.end];
     }
 
-    /// Marks `n` pending bytes as read. The buffer is compacted once the front
+    /// Marks `n` pending bytes as read, releasing them. The buffer is compacted once the front
     /// is more than half consumed, so the window grows back as a request is
     /// read rather than only when the connection ends.
     pub fn consume(self: *Conn, n: usize) void {
@@ -285,12 +322,13 @@ pub const Conn = struct {
     }
 
     /// Free space at the end of the receive buffer, which is what arriving
-    /// bytes can be put into and what the window advertises.
+    /// bytes can be put into and what the window advertises. Space freed at
+    /// the front counts only once `consume` compacts.
     pub fn room(self: *const Conn) usize {
         return self.rx.len - self.end;
     }
 
-    /// Bytes we have queued that the peer has not acknowledged.
+    /// Bytes we have queued that the peer has not acknowledged, sent or not.
     pub fn queued(self: *const Conn) usize {
         return self.tx_end - self.tx_start;
     }
@@ -311,6 +349,7 @@ pub const Conn = struct {
     /// `sent` is not it: a timeout rewinds `sent` to re-send from `una`, and a
     /// segment numbered back there is behind the peer's window and is
     /// discarded (a reset) or answered with a duplicate acknowledgement.
+    /// (BSD keeps the two as `snd_nxt` and `snd_max`; this is `snd_max`.)
     pub fn highest(self: *const Conn) u32 {
         var n = self.una +% @as(u32, @intCast(self.high));
         if (self.state == .syn_received) n +%= 1;
@@ -326,7 +365,9 @@ pub const Conn = struct {
         self.timed_seq = past_it;
     }
 
-    /// Whether `seq` is past `rcv_nxt` but inside the window we advertise.
+    /// Whether `seq` is past `rcv_nxt` but inside the window we advertise:
+    /// **AHEAD**, acceptable to RFC 9293's sequence test (§3.10.7.4) but not
+    /// the next byte. A shut window has nothing ahead.
     fn ahead(self: *const Conn, seq: u32) bool {
         const off = seq -% self.rcv_nxt;
         return off != 0 and off < @max(self.window(), 1);
@@ -339,6 +380,7 @@ pub const Conn = struct {
         self.* = .{ .rx = rx, .tx = tx, .claimed = claimed };
     }
 
+    /// RCV.WND: `room()`, as much of it as the 16-bit field carries.
     pub fn window(self: *const Conn) u16 {
         return @intCast(@min(self.room(), 0xFFFF));
     }
@@ -771,7 +813,8 @@ pub const Table = struct {
         if (expired) {
             if (!backoff(c, now)) return self.giveUp(wire, i);
             // **GO BACK.** Everything from the oldest unacknowledged byte on is
-            // sent again; the peer drops what it already has.
+            // sent again; the peer drops what it already has. (RFC 6298 (5.4)
+            // asks only for the oldest segment; the rest follow it here.)
             c.sent = 0;
             if (c.fin == .sent) c.fin = .queued;
             c.timed_at = null; // Karn: no telling which copy is answered
@@ -784,8 +827,9 @@ pub const Table = struct {
             const usable = if (c.wnd > c.sent) c.wnd - c.sent else 0;
             var n = @min(c.queued() - c.sent, usable, c.mss);
             if (n == 0) {
-                // **A SHUT WINDOW IS PROBED WHEN THE TIMER RUNS OUT.** One byte
-                // past the window: the peer's answer carries its window again.
+                // **A SHUT WINDOW IS PROBED WHEN THE TIMER RUNS OUT** (RFC 9293
+                // §3.8.6.1, on the retransmission clock). One byte past the
+                // window: the peer's answer carries its window again.
                 if (!probe) {
                     if (c.rto_at == null) c.rto_at = now + c.rto_ns;
                     break;
@@ -853,7 +897,10 @@ pub const Table = struct {
 
     /// Sends everything unacknowledged again, now, without touching the
     /// backoff: the peer told us it is missing something, which is news about
-    /// this connection, not evidence that the path has slowed down.
+    /// this connection, not evidence that the path has slowed down. RFC
+    /// 5681's fast retransmit, going back like a timeout: everything from
+    /// `una` goes, not only the missing segment, and with no congestion
+    /// control there is no fast recovery.
     fn resend(self: *Table, wire: anytype, i: usize, now: i96) void {
         const c = &self.conns[i];
         c.dupacks = 0;
@@ -892,7 +939,7 @@ pub const Table = struct {
         self.measured_ns = c.srtt_ns;
     }
 
-    /// One more timeout: false once they have run out.
+    /// One more timeout (RFC 6298 (5.5), (5.6)): false once they have run out.
     fn backoff(c: *Conn, now: i96) bool {
         if (c.retries >= max_retries) return false;
         c.retries += 1;
@@ -912,12 +959,16 @@ pub const Table = struct {
     }
 
     /// Takes in the peer's acknowledgement and window, from a segment numbered
-    /// `seq`. True once our FIN is acknowledged.
+    /// `seq`, as RFC 9293 §3.10.7.4 does in ESTABLISHED: SND.UNA < SEG.ACK
+    /// =< SND.NXT moves `una`, and SND.WL1/WL2 decide whether `wnd` moves.
+    /// True once our FIN is acknowledged.
     fn acknowledge(self: *Table, c: *Conn, seq: u32, number: u32, window: u16, now: i96) bool {
         const flight = c.highest() -% c.una;
         const advance = number -% c.una;
         // An acknowledgement of something never sent, or an old one (which
-        // wraps to a huge advance): neither says anything current.
+        // wraps to a huge advance): neither says anything current. The RFC
+        // also drops a segment that acknowledges what was never sent, and
+        // answers it; here only its acknowledgement is ignored.
         if (advance > flight) return false;
         const updated = after(seq, c.wl1) or (seq == c.wl1 and !after(c.wl2, number));
         if (updated) {
@@ -940,7 +991,8 @@ pub const Table = struct {
         // came with this segment it is measured from here already; when an
         // older segment carried a newer acknowledgement, the window rule
         // skipped the update, and the right edge would move forward with
-        // `una` unless it is brought back by as much.
+        // `una` unless it is brought back by as much. (RFC 9293's usable
+        // window, SND.UNA + SND.WND - SND.NXT, does let it move.)
         if (!updated) c.wnd -= @min(c.wnd, advance);
         if (advance > bytes) {
             c.fin = .acknowledged;
@@ -1021,7 +1073,8 @@ pub const Table = struct {
         }
 
         // A SYN for no connection we know is the start of one — if there is a
-        // slot for it. Anything else for no connection is refused.
+        // slot for it: the table is LISTEN (RFC 9293 §3.10.7.2). Anything else
+        // **FOR NO CONNECTION** is answered with a reset (`refuse`).
         const i = found orelse {
             if (flags & flag_syn == 0 or flags & flag_ack != 0) {
                 props.reachable(@src(), "tcp: a segment for no connection is refused", null);
@@ -1060,8 +1113,10 @@ pub const Table = struct {
         const c = &self.conns[i];
 
         // A repeated SYN for a connection we already answered: the SYN-ACK was
-        // lost or is late. Say it again, from the same starting number. On an
-        // established connection it is answered with an acknowledgement.
+        // lost or is late. Say it again, from the same starting number (as
+        // Linux does; the RFC's sequence test would answer it with a bare
+        // ACK). On an established connection it is answered with an
+        // acknowledgement, RFC 9293's challenge ACK (after RFC 5961 §4).
         if (flags & flag_syn != 0) {
             if (c.state == .syn_received) {
                 self.emit(wire, i, flag_syn | flag_ack, c.una, "");
@@ -1069,16 +1124,27 @@ pub const Table = struct {
             return .{ .event = .nothing };
         }
 
-        // Every segment after the SYN acknowledges something.
+        // Every segment after the SYN acknowledges something; one with no ACK
+        // is dropped (RFC 9293 §3.10.7.4, fifth).
         if (flags & flag_ack == 0) return .{ .event = .nothing };
 
-        // **A SEGMENT THAT IS NOT THE NEXT ONE IS ANSWERED, NOT TAKEN.** One
-        // from behind — a repeated FIN whose acknowledgement was lost, a
-        // keepalive probe — or from beyond the window gets an acknowledgement
-        // and nothing else. One ahead but inside the window still says what
-        // the peer has received; only its data and FIN wait.
+        // **A SEGMENT THAT IS NOT THE NEXT ONE IS ANSWERED, NOT TAKEN.** Each
+        // arriving segment is one of:
         //
-        // Its acknowledgement number still counts if it moves forward: an
+        // - **the next** (`seq == rcv_nxt`): acceptable, and taken;
+        // - **ahead** (`c.ahead(seq)`): acceptable to RFC 9293's sequence
+        //   test (§3.10.7.4), so its acknowledgement and window count, but its
+        //   data and FIN are dropped and re-acknowledged: in-order only;
+        // - **from behind** — a repeated FIN whose acknowledgement was lost, a
+        //   keepalive probe — or from beyond the window: not acceptable, and
+        //   answered with an acknowledgement.
+        //
+        // A segment that starts behind and runs on past `rcv_nxt` is
+        // acceptable to the RFC, which trims it and takes the new part; here
+        // it is from behind, and the peer sends the new part again.
+        //
+        // From behind, its acknowledgement number still counts if it moves
+        // forward, where the RFC drops an unacceptable segment whole: an
         // acknowledgement is cumulative, so a newer one cannot be wrong, and a
         // peer that repeats its FIN with our FIN now acknowledged would
         // otherwise wait on a timer for nothing. (The window rule keeps an old
@@ -1110,7 +1176,8 @@ pub const Table = struct {
                 return .{ .event = .nothing };
             }
             if (number != c.una +% 1) {
-                // An acknowledgement of something we never sent is refused.
+                // An acknowledgement of something we never sent is refused
+                // with <SEQ=SEG.ACK><CTL=RST> (RFC 9293 §3.10.7.4).
                 self.segment(wire, .{ .mac = c.peer_mac, .ip = c.peer_ip, .port = c.peer_port }, flag_rst, number, 0, 0, "");
                 return .{ .event = .nothing };
             }
@@ -1135,6 +1202,8 @@ pub const Table = struct {
             // unacknowledged, is the peer telling us it received what came
             // after a hole (RFC 5681). Three of them and we send again at
             // once, rather than a round trip later when the timer runs out.
+            // (RFC 5681 also asks that it name SND.UNA exactly; here an older
+            // or impossible acknowledgement counts too.)
             //
             // **NOT WHILE THE WINDOW IS SHUT, AND ONCE PER LOSS.** A peer with
             // no room answers every window probe with the same
@@ -1153,7 +1222,7 @@ pub const Table = struct {
         }
 
         if (early) {
-            // Its data and FIN are not the next thing; ask for what is.
+            // Ahead: its data and FIN are not the next thing; ask for what is.
             if (data.len > 0 or flags & flag_fin != 0) self.emit(wire, i, flag_ack, c.highest(), "");
             return self.settle(i, event, fin_acknowledged, now);
         }
