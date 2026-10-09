@@ -2073,14 +2073,17 @@ test "a boot sector whose FAT sizes overflow 32 bits, or that cannot be read, is
     var scratch: [test_disk.sector]u8 align(16) = undefined;
     // FAT32's sectors per FAT (BPB_FATSz32, at 36), as two FATs and the 32
     // reserved sectors before them make it overflow.
-    const cases = [_]struct { what: []const u8, per_fat: u32 }{
+    const cases = [_]struct { what: []const u8, per_fat: u32, root_entries: u16 = 0 }{
         .{ .what = "a FAT of no sectors", .per_fat = 0 },
         .{ .what = "two FATs of more than 2^32 sectors", .per_fat = 0x8000_0000 },
         .{ .what = "two FATs and the reserved sectors past 2^32", .per_fat = 0x7FFF_FFFF },
+        // BPB_RootEntCnt at its most is 4,096 sectors more, past 2^32.
+        .{ .what = "the root directory's sectors past 2^32", .per_fat = 0x7FFF_F800, .root_entries = 0xFFFF },
     };
     for (cases) |c| {
         test_disk.format(bytes, test_disk.small32);
         std.mem.writeInt(u32, bytes[36..40], c.per_fat, .little);
+        std.mem.writeInt(u16, bytes[17..19], c.root_entries, .little);
         testing.expectError(disk_fat.Error.BadBootSector, disk_fat.Volume.mount(&blk, &scratch, 0)) catch |e| {
             std.debug.print("refusing {s}\n", .{c.what});
             return e;
@@ -2380,5 +2383,38 @@ test "a directory's growth stopped at any request before its commit is an error,
         }
         @memcpy(d.bytes, before);
         try d.mount(false);
+    }
+}
+
+test "a directory's name is held to the same length as a file's: one too long is refused, and making a path twice makes one directory" {
+    for (configs) |cfg| {
+        const d = try Disk.make("dir-name-length", cfg.shape, cfg.cached);
+        defer d.deinit();
+        const longest = [_]u8{'d'} ** disk_fat.max_name;
+        const too_long = [_]u8{'d'} ** (disk_fat.max_name + 1);
+        var path: [disk_fat.max_name + 8]u8 = undefined;
+        const p = try std.fmt.bufPrint(&path, "data/{s}", .{&longest});
+        const a = try d.vol.makePath(p);
+        try testing.expectEqual(a, try d.vol.makePath(p)); // found, not made again
+        const q = try std.fmt.bufPrint(&path, "data/{s}", .{&too_long});
+        try testing.expectError(disk_fat.Error.BadName, d.vol.makePath(q));
+        const r = try d.check();
+        try testing.expect(r.health.clean());
+    }
+}
+
+test "a tree removes whole whatever its size within the directory limit: past 4,096 entries too" {
+    for (configs) |cfg| {
+        if (cfg.shape.kind != .fat16 or !cfg.cached) continue;
+        const d = try Disk.make("remove-large", cfg.shape, cfg.cached);
+        defer d.deinit();
+        _ = try d.vol.makePath("data/big");
+        var name: [32]u8 = undefined;
+        var i: u32 = 0;
+        while (i < 4100) : (i += 1) try d.vol.writeFile(try std.fmt.bufPrint(&name, "data/big/F{d}", .{i}), "");
+        try d.vol.removeTree("data/big");
+        try testing.expectError(disk_fat.Error.NotFound, d.vol.open("data/big"));
+        const r = try d.check();
+        try testing.expect(r.health.clean());
     }
 }

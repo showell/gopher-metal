@@ -633,7 +633,10 @@ pub const Volume = struct {
             return Error.BadBootSector;
         };
         const root_sectors = (root_entries * dirent_size + sector_size - 1) / sector_size;
-        const data_start = root_start + root_sectors;
+        const data_start = std.math.add(u32, root_start, root_sectors) catch {
+            props.reachable(@src(), "fat: a mount refuses a root directory whose sectors overflow", null);
+            return Error.BadBootSector;
+        };
         if (total == 0 or data_start >= total) {
             props.reachable(@src(), "fat: a mount refuses a volume with no data region", null);
             return Error.BadBootSector;
@@ -1974,6 +1977,12 @@ pub const Volume = struct {
     /// parent with no room (`DirectoryFull`) takes nothing. The run stays
     /// free meanwhile: taking and writing the cluster touch no parent sector.
     pub fn makeDirIn(self: *Volume, dir_cluster: Cluster, name: []const u8) Error!Cluster {
+        // Held to a file's length: one longer is written and never found
+        // again, so every makePath would make another.
+        if (name.len == 0 or name.len > max_name) {
+            props.reachable(@src(), "fat: a directory's name is empty or too long", null);
+            return Error.BadName;
+        }
         if ((try self.find(dir_cluster, name))) |e| {
             if (e.isDirectory()) return e.first_cluster;
             props.reachable(@src(), "fat: a directory to be made is a file's name", null);
@@ -2462,17 +2471,17 @@ pub const Volume = struct {
         };
 
         var rounds: u32 = 0;
-        while (rounds < 4096) : (rounds += 1) {
+        // One round removes one entry: a directory holds at most
+        // `max_dir_entries`, so more rounds than that is a broken volume.
+        while (rounds <= max_dir_entries) : (rounds += 1) {
             var first = First{};
             try self.list(dir_cluster, &first, First.each);
             if (!first.found) return; // empty
             if (first.is_dir) try self.removeTreeAt(first.cluster, depth + 1);
             try self.removeEntry(dir_cluster, first.name[0..first.len]);
         }
-        props.reachable(@src(), "fat: a tree with more entries than a volume holds is refused as broken", null);
-        // Not only a broken one: 4,096 rounds is below `max_dir_entries`, so
-        // a larger valid directory is refused too.
-        return Error.DirectoryFull; // more entries than this is a broken volume
+        props.reachable(@src(), "fat: a directory yields more entries than a directory holds, removing a tree, and is refused as broken", null);
+        return Error.BadChain;
     }
 
     // ---- the boot-time check -------------------------------------------
