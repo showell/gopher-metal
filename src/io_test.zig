@@ -11,7 +11,7 @@ const std = @import("std");
 const io_mod = @import("io.zig");
 const serial = @import("serial.zig");
 const test_disk = @import("test_disk.zig");
-const fat16 = @import("fat16.zig");
+const disk_fat = @import("disk_fat.zig");
 
 const testing = std.testing;
 const Disk = test_disk.Disk;
@@ -55,7 +55,7 @@ const Two = struct {
 };
 
 fn expectAbsent(d: *Disk, path: []const u8) !void {
-    try testing.expectError(fat16.Error.NotFound, d.vol.open(path));
+    try testing.expectError(disk_fat.Error.NotFound, d.vol.open(path));
 }
 
 fn logged(what: []const u8) bool {
@@ -214,7 +214,7 @@ test "an append through a File goes to the disk its path names" {
 }
 
 test "an offset past what FAT holds reads nothing and writes nothing, rather than a panic" {
-    // io.zig hands fat16 a u32 offset. Each cast is guarded (QUEUE.md item
+    // io.zig hands disk_fat a u32 offset. Each cast is guarded (QUEUE.md item
     // 69): a read at or past the file's end is its end, and a write past
     // 4 GiB is a full disk. These are the edges of both.
     const t = try Two.make(true);
@@ -229,7 +229,7 @@ test "an offset past what FAT holds reads nothing and writes nothing, rather tha
         try testing.expectEqual(@as(usize, 0), try file.readPositionalAll(io, &buf, at));
     for ([_]u64{ 0x1_0000_0000, std.math.maxInt(u64) }) |at|
         try testing.expectError(io_mod.Error.NoSpaceLeft, file.writePositionalAll(io, "x", at));
-    // Just under the bound it is fat16's own answer: past the end is a hole,
+    // Just under the bound it is disk_fat's own answer: past the end is a hole,
     // which FAT cannot leave, and is refused as a failed write.
     try testing.expectError(io_mod.Error.WriteFailed, file.writePositionalAll(io, "x", 0xFFFF_FFFF));
     try t.volume.expectFile(path, "abc");
@@ -246,7 +246,7 @@ test "a directory that cannot be read is an error, never an empty listing (metal
     var it = dir.iterate();
     try testing.expectError(io_mod.Error.ReadFailed, it.next(io));
     // A directory whose entry names a cluster outside the data, as a damaged
-    // entry does: fat16 refuses to walk it, and that is no empty folder.
+    // entry does: disk_fat refuses to walk it, and that is no empty folder.
     const damaged = io_mod.Dir{ .cluster = 0x0FFF_FFF0, .place = .data };
     var it2 = damaged.iterate();
     try testing.expect(std.meta.isError(it2.next(io)));
@@ -288,7 +288,7 @@ test "a directory opened under data/ lists the volume's entries, and deleting a 
     try t.site.expectFile("data/players/stale", "x");
 }
 
-test "rename replaces a file on the volume, as std.Io spells it, and refuses what fat16.rename does" {
+test "rename replaces a file on the volume, as std.Io spells it, and refuses what disk_fat.rename does" {
     const t = try Two.make(true);
     defer t.deinit();
     try cwd.writeFile(io, .{ .sub_path = "data/chat/1_2/sessions/topic.count", .data = "4\n" });
@@ -298,7 +298,7 @@ test "rename replaces a file on the volume, as std.Io spells it, and refuses wha
     try expectAbsent(t.volume, "data/chat/1_2/sessions/~0a1b2c3d.tmp");
 
     try testing.expectError(io_mod.Error.FileNotFound, cwd.rename("data/chat/nothing", cwd, "data/chat/x", io));
-    // Across directories: fat16.rename moves within one only.
+    // Across directories: disk_fat.rename moves within one only.
     try testing.expectError(io_mod.Error.NameTooLong, cwd.rename("data/chat/1_2/sessions/topic.count", cwd, "data/topic.count", io));
     // Off the volume, or onto the site: refused as every write there is.
     try testing.expectError(io_mod.Error.WriteFailed, cwd.rename("data/chat/1_2/sessions/topic.count", cwd, "index.html", io));

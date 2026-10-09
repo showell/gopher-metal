@@ -44,7 +44,7 @@ const rng = metal.rng;
 const tcp = metal.tcp;
 const stream = metal.stream;
 const gpt = metal.gpt;
-const fat16 = metal.fat16;
+const disk_fat = metal.disk_fat;
 const stack = metal.stack;
 const pages = metal.pages;
 const pvh = metal.pvh;
@@ -124,8 +124,8 @@ var volume_mem: virtio.BlockMemory align(4096) = .{};
 var disks: [2]?*virtio.Block = .{ null, null };
 var nic_mem: net.Memory align(4096) = .{};
 var rng_mem: rng.Memory align(4096) = .{};
-var sector: [fat16.sector_size]u8 align(4096) = undefined;
-var volume_sector: [fat16.sector_size]u8 align(4096) = undefined;
+var sector: [disk_fat.sector_size]u8 align(4096) = undefined;
+var volume_sector: [disk_fat.sector_size]u8 align(4096) = undefined;
 var dhcp_frame: [net.buffer_size]u8 align(16) = undefined;
 var dhcp_reply: [1024]u8 align(16) = undefined;
 var tcp_out: [net.buffer_size]u8 align(16) = undefined;
@@ -1221,7 +1221,7 @@ const fat_budget_bytes: usize = 32 << 20;
 /// that refused once answers the next time. Serving, a read is tried once.
 const boot_read_tries: u8 = 3;
 
-fn mountFat(blk: *virtio.Block, scratch: *[fat16.sector_size]u8, what: []const u8) fat16.Volume {
+fn mountFat(blk: *virtio.Block, scratch: *[disk_fat.sector_size]u8, what: []const u8) disk_fat.Volume {
     // A table that cannot be read is a disk failing, not a blank one: the
     // two are told apart.
     const part = gpt.dataPartition(blk, scratch) catch |e| {
@@ -1234,7 +1234,7 @@ fn mountFat(blk: *virtio.Block, scratch: *[fat16.sector_size]u8, what: []const u
         serial.put(": no GPT partition\n");
         serial.fail("a disk has no partition to serve from");
     };
-    var vol = fat16.Volume.mount(blk, scratch, part.first_lba) catch |e| {
+    var vol = disk_fat.Volume.mount(blk, scratch, part.first_lba) catch |e| {
         serial.put("  ");
         serial.put(what);
         if (e == error.ReadFailed) {
@@ -1272,18 +1272,18 @@ fn mountFat(blk: *virtio.Block, scratch: *[fat16.sector_size]u8, what: []const u
         serial.put("\n");
         serial.fail("the FAT could not be held in memory");
     };
-    // Lookups read a directory up to a cluster per request (fat16's
+    // Lookups read a directory up to a cluster per request (disk_fat's
     // `dir_burst`), within the most one request carries.
     const burst_sectors = @min(vol.sectors_per_cluster, virtio.Block.max_sectors);
-    vol.dir_burst = pages.allocator.alloc(u8, burst_sectors * fat16.sector_size) catch
+    vol.dir_burst = pages.allocator.alloc(u8, burst_sectors * disk_fat.sector_size) catch
         serial.fail("no memory to read directories in bursts");
-    // Directory sectors, once read, are held (fat16's `dirs`): 8 MiB, sixteen
+    // Directory sectors, once read, are held (disk_fat's `dirs`): 8 MiB, sixteen
     // thousand sectors, so a send or Recent finds its folders in memory.
     // A speed-up, so memory it cannot have means serving without it, never
     // a boot that stops.
     const dir_slots = 16384;
     if (pages.allocator.alloc(u32, dir_slots)) |dir_keys| {
-        if (pages.allocator.alloc(u8, dir_slots * fat16.sector_size)) |dir_data| {
+        if (pages.allocator.alloc(u8, dir_slots * disk_fat.sector_size)) |dir_data| {
             vol.cacheDirs(dir_keys, dir_data);
         } else |_| {
             pages.allocator.free(dir_keys);
@@ -1292,7 +1292,7 @@ fn mountFat(blk: *virtio.Block, scratch: *[fat16.sector_size]u8, what: []const u
     } else |_| serial.put("  no memory to hold folders: they are read from the disk\n");
     // A machine stopped between the FAT copies' writes, or a copy that
     // reads wrong, leaves them apart; the copy that checks cleaner is the
-    // FAT, the first on a tie (fat16.cacheFatChecked).
+    // FAT, the first on a tie (disk_fat.cacheFatChecked).
     if (mirrors.repaired > 0) {
         serial.put("  ");
         serial.put(what);
@@ -1348,13 +1348,13 @@ fn mountFat(blk: *virtio.Block, scratch: *[fat16.sector_size]u8, what: []const u
 /// outside), so this is the nearest thing: the state after the last request
 /// is the state the run ended in.
 fn checkVolumes() void {
-    for ([_]?*fat16.Volume{ Io.siteVolume(), Io.dataVolume() }) |maybe| {
+    for ([_]?*disk_fat.Volume{ Io.siteVolume(), Io.dataVolume() }) |maybe| {
         const vol = maybe orelse continue;
         const seen = pages.allocator.alloc(u8, vol.checkBytes()) catch continue;
         defer pages.allocator.free(seen);
         var damage: u32 = 0;
         const Count = struct {
-            fn each(n: *u32, f: fat16.Finding) void {
+            fn each(n: *u32, f: disk_fat.Finding) void {
                 if (f.problem.damage()) n.* += 1;
             }
         };
@@ -1369,7 +1369,7 @@ fn checkVolumes() void {
     }
 }
 
-/// **THE DISK CHECK, AT EVERY MOUNT** (`fat16.Volume.check`, QUEUE.md item
+/// **THE DISK CHECK, AT EVERY MOUNT** (`disk_fat.Volume.check`, QUEUE.md item
 /// 13): one summary line per volume, then each finding. It reports and never
 /// halts, and it writes nothing: a damaged volume still boots and serves, and
 /// the log says what to look at with fsck.vfat on a copy. The judges read the
@@ -1377,7 +1377,7 @@ fn checkVolumes() void {
 ///
 /// It runs after `cacheFat`, so following a chain is a memory read; the walk
 /// reads each directory sector once.
-fn diskCheck(vol: *fat16.Volume, what: []const u8) void {
+fn diskCheck(vol: *disk_fat.Volume, what: []const u8) void {
     serial.put("  disk check, ");
     serial.put(what);
     serial.put(": ");
@@ -1390,12 +1390,12 @@ fn diskCheck(vol: *fat16.Volume, what: []const u8) void {
         /// More findings than this are counted, not printed: a volume with
         /// thousands of leaked runs must not bury the rest of the boot.
         const most = 20;
-        held: [most]fat16.Finding = undefined,
+        held: [most]disk_fat.Finding = undefined,
         paths: [most][256]u8 = undefined,
         n: u32 = 0,
-        /// Findings that are damage (`fat16.Problem.damage`), all of them.
+        /// Findings that are damage (`disk_fat.Problem.damage`), all of them.
         damage: u32 = 0,
-        fn each(self: *@This(), f: fat16.Finding) void {
+        fn each(self: *@This(), f: disk_fat.Finding) void {
             if (f.problem.damage()) self.damage += 1;
             if (self.n < most) {
                 const len = @min(f.path.len, self.paths[self.n].len);
@@ -1692,11 +1692,11 @@ fn metalFacts(io: Io, alloc: std.mem.Allocator) anyerror![]const router.host_sta
 
 /// What the host status page calls a volume: it said FAT16 of every one,
 /// and metal's volume is FAT32.
-fn kindName(v: *const fat16.Volume) []const u8 {
+fn kindName(v: *const disk_fat.Volume) []const u8 {
     return if (v.kind == .fat32) "FAT32" else "FAT16";
 }
 
-fn addVolume(facts: *std.ArrayList(router.host_status.Fact), alloc: std.mem.Allocator, label: []const u8, cache_label: []const u8, dirs_label: []const u8, v: *fat16.Volume) !void {
+fn addVolume(facts: *std.ArrayList(router.host_status.Fact), alloc: std.mem.Allocator, label: []const u8, cache_label: []const u8, dirs_label: []const u8, v: *disk_fat.Volume) !void {
     var serial_text: [9]u8 = undefined;
     const named = if (v.serial) |n| serialText(&serial_text, n) else "no serial";
     const value = if (v.space()) |sp|

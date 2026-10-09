@@ -51,7 +51,7 @@ pub fn build(b: *std.Build) void {
     coverage.red_zone = false;
     // The seed explorer (zig-coverage-sdk's explore.zig): simulators only.
     const explore = sdk.module("explore");
-    const coverage_catalog = @import("zig_coverage_sdk").addCatalog(b, sdk.artifact("coverage-scan"), coverage, b.path("src"), &.{ "tcp.zig", "tcp_sim.zig", "fat16.zig", "fat_sim.zig", "page_sim.zig", "pure_sim.zig", "ready_sim.zig", "durable_sim.zig", "durable.zig", "gpt.zig", "floor_sim.zig", "page_cache.zig", "log_ring.zig", "kept_log.zig", "proto.zig", "arp.zig", "request_heap.zig", "store_sim.zig", "pvh.zig", "restart.zig", "pages.zig", "rtc.zig", "pit.zig", "admin_reset.zig", "rng.zig", "ready.zig" });
+    const coverage_catalog = @import("zig_coverage_sdk").addCatalog(b, sdk.artifact("coverage-scan"), coverage, b.path("src"), &.{ "tcp.zig", "tcp_sim.zig", "disk_fat.zig", "fat_sim.zig", "page_sim.zig", "pure_sim.zig", "ready_sim.zig", "durable_sim.zig", "durable.zig", "gpt.zig", "floor_sim.zig", "page_cache.zig", "log_ring.zig", "kept_log.zig", "proto.zig", "arp.zig", "request_heap.zig", "store_sim.zig", "pvh.zig", "restart.zig", "pages.zig", "rtc.zig", "pit.zig", "admin_reset.zig", "rng.zig", "ready.zig" });
     const with_coverage = [_]std.Build.Module.Import{
         .{ .name = "coverage", .module = coverage },
         .{ .name = "coverage_catalog", .module = coverage_catalog },
@@ -263,7 +263,7 @@ pub fn build(b: *std.Build) void {
     // tools/linecov.py; the lines with code that none of them ran are listed.
     const tcp_coverage = b.addSystemCommand(&.{ "python3", "tools/linecov.py", "src/tcp.zig" });
     b.step("tcp-coverage", "the lines of tcp.zig its unit tests never run").dependOn(&tcp_coverage.step);
-    for ([_][]const u8{ "src/rtc.zig", "src/pit.zig", "src/stack.zig", "src/civil.zig", "src/fat16.zig", "src/pvh.zig", "src/pages.zig", "src/tcp.zig", "src/tcp_check.zig", "src/tcp_sim.zig", "src/fat_sim.zig", "src/page_sim.zig", "src/pure_sim.zig", "src/ready_sim.zig", "src/durable_sim.zig", "src/durable.zig", "src/scsi_mode.zig", "src/floor_sim.zig", "src/store.zig", "src/store_model.zig", "src/store_test.zig", "src/store_linux.zig", "src/store_sim.zig", "src/scratch_dir.zig", "src/io_test.zig", "src/log_ring.zig", "src/restart.zig", "src/kept_log.zig", "src/ready.zig", "src/request_heap.zig", "src/page_cache.zig", "src/admin_reset.zig", "droplet/image.zig", "src/dhcp.zig", "src/screen.zig", "src/serial_gate.zig", "src/net.zig" }) |path| {
+    for ([_][]const u8{ "src/rtc.zig", "src/pit.zig", "src/stack.zig", "src/civil.zig", "src/disk_fat.zig", "src/pvh.zig", "src/pages.zig", "src/tcp.zig", "src/tcp_check.zig", "src/tcp_sim.zig", "src/fat_sim.zig", "src/page_sim.zig", "src/pure_sim.zig", "src/ready_sim.zig", "src/durable_sim.zig", "src/durable.zig", "src/scsi_mode.zig", "src/floor_sim.zig", "src/store.zig", "src/store_model.zig", "src/store_test.zig", "src/store_linux.zig", "src/store_sim.zig", "src/scratch_dir.zig", "src/io_test.zig", "src/log_ring.zig", "src/restart.zig", "src/kept_log.zig", "src/ready.zig", "src/request_heap.zig", "src/page_cache.zig", "src/admin_reset.zig", "droplet/image.zig", "src/dhcp.zig", "src/screen.zig", "src/serial_gate.zig", "src/net.zig" }) |path| {
         if (test_file) |only| if (!std.mem.eql(u8, only, path)) continue;
         test_file_found = true;
         const unit = b.addTest(.{ .root_module = b.createModule(.{
@@ -279,7 +279,7 @@ pub fn build(b: *std.Build) void {
         test_step.dependOn(&b.addRunArtifact(unit).step);
     }
     // The test files built on their own, below.
-    for ([_][]const u8{ "src/fat16_test.zig", "src/fat16_faults_test.zig", "src/tcp_test.zig" }) |path| {
+    for ([_][]const u8{ "src/disk_fat_test.zig", "src/disk_fat_faults_test.zig", "src/tcp_test.zig" }) |path| {
         if (test_file) |only| if (std.mem.eql(u8, only, path)) {
             test_file_found = true;
         };
@@ -431,51 +431,51 @@ pub fn build(b: *std.Build) void {
     // **FAT16 ON AN IN-MEMORY DISK.** With -Dfat16-images=<dir>, every image
     // the tests made is also written there, for tools/fat16_read.py to check:
     // tools/check_fat16_images.sh does both.
-    const fat16_opts = b.addOptions();
-    fat16_opts.addOption([]const u8, "images_dir", b.option([]const u8, "fat16-images", "where fat16_test writes its disk images") orelse "");
-    fat16_opts.addOption([]const u8, "foreign_dir", b.option([]const u8, "fat16-foreign", "volumes other tools made, for fat16_test's check to judge") orelse "");
+    const disk_fat_opts = b.addOptions();
+    disk_fat_opts.addOption([]const u8, "images_dir", b.option([]const u8, "fat16-images", "where disk_fat_test writes its disk images") orelse "");
+    disk_fat_opts.addOption([]const u8, "foreign_dir", b.option([]const u8, "fat16-foreign", "volumes other tools made, for disk_fat_test's check to judge") orelse "");
     // **Debug, like every other test** (metal-vmm QUEUE 136): these were
     // ReleaseSafe for a run a third as long (12.5 s, not 33 s), but its
     // compiles cost 72 s of a 2-core box's time for the three binaries, to
     // save 20 s of running. Debug: 1-2 s of compiling each, 37 s of running.
-    const fat16_unit = b.addTest(.{
-        .name = "fat16_test",
+    const disk_fat_unit = b.addTest(.{
+        .name = "disk_fat_test",
         .root_module = b.createModule(.{
-            .root_source_file = b.path("src/fat16_test.zig"),
+            .root_source_file = b.path("src/disk_fat_test.zig"),
             .target = b.graph.host,
             .optimize = .Debug,
             .imports = &.{
-                .{ .name = "fat16_test_options", .module = fat16_opts.createModule() },
+                .{ .name = "disk_fat_test_options", .module = disk_fat_opts.createModule() },
                 .{ .name = "coverage", .module = coverage },
                 .{ .name = "coverage_catalog", .module = coverage_catalog },
             },
         }),
     });
-    if (wanted(test_file, "src/fat16_test.zig")) test_step.dependOn(&b.addRunArtifact(fat16_unit).step);
+    if (wanted(test_file, "src/disk_fat_test.zig")) test_step.dependOn(&b.addRunArtifact(disk_fat_unit).step);
     // The stops and the lying disk (QUEUE.md items 79-80): hundreds of runs
-    // each, so binaries of their own, run beside fat16_test's: one for the
+    // each, so binaries of their own, run beside disk_fat_test's: one for the
     // stops and the failed requests, one for the lies. Every test in the file
     // is named by one filter or the other.
-    const fat16_faults_opts = fat16_opts.createModule();
+    const disk_fat_faults_opts = disk_fat_opts.createModule();
     for ([_][]const []const u8{
         &.{ "every operation stopped after every write", "a request that fails is an error", "a request that fails before a write's commit" },
         &.{ "a disk that lies", "a write that lands and answers failure" },
-    }, [_][]const u8{ "fat16_faults_test", "fat16_lies_test" }) |filters, name| {
+    }, [_][]const u8{ "disk_fat_faults_test", "disk_fat_lies_test" }) |filters, name| {
         const unit = b.addTest(.{
             .name = name,
             .filters = filters,
             .root_module = b.createModule(.{
-                .root_source_file = b.path("src/fat16_faults_test.zig"),
+                .root_source_file = b.path("src/disk_fat_faults_test.zig"),
                 .target = b.graph.host,
                 .optimize = .Debug,
                 .imports = &.{
-                    .{ .name = "fat16_test_options", .module = fat16_faults_opts },
+                    .{ .name = "disk_fat_test_options", .module = disk_fat_faults_opts },
                     .{ .name = "coverage", .module = coverage },
                     .{ .name = "coverage_catalog", .module = coverage_catalog },
                 },
             }),
         });
-        if (wanted(test_file, "src/fat16_faults_test.zig")) test_step.dependOn(&b.addRunArtifact(unit).step);
+        if (wanted(test_file, "src/disk_fat_faults_test.zig")) test_step.dependOn(&b.addRunArtifact(unit).step);
     }
 
     const starts = [_]struct { isn: u32, peer: u32 }{

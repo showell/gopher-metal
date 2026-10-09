@@ -16,7 +16,7 @@ judges each entry against two sets of limits.
   - **The copy**: what writes the volume: mtools, in build_volume.py
     (FAT16 or FAT32), or Linux's vfat driver behind rehearse.py's --mount.
     Both refuse or change the same names, and are held to the same limits.
-  - **The reader**: this machine's own src/fat16.zig and src/io.zig, which
+  - **The reader**: this machine's own src/disk_fat.zig and src/io.zig, which
     are what read it afterwards.
 
 Each finding says whether angry-gopher's own path builders can produce it.
@@ -35,13 +35,13 @@ import time
 
 # ── the limits ──────────────────────────────────────────────────────────────
 
-# src/fat16.zig: the longest name it reads or writes (max_name).
+# src/disk_fat.zig: the longest name it reads or writes (max_name).
 MAX_NAME = 96
 # The application's longest name: <sid>.reactions.jsonl at a session id of 80.
 APP_LONGEST_NAME = 96
 # src/io.zig: the longest path a File remembers (max_path).
 MAX_PATH = 256
-# src/fat16.zig: removeTree's recursion cap (max_tree_depth).
+# src/disk_fat.zig: removeTree's recursion cap (max_tree_depth).
 MAX_TREE_DEPTH = 16
 # The VFAT long-name limit, in UTF-16 units; Linux refuses longer.
 VFAT_MAX_NAME = 255
@@ -81,7 +81,7 @@ DEFAULT_CLUSTER = 32 << 10
 # So the application can produce, and only produce, names that differ only
 # in case: two sessions "Plan" and "plan" in one conversation, two channels
 # "Dev" and "dev". Its longest name, <sid>.reactions.jsonl at a sid of 80, is
-# 96 characters, which fat16.zig holds (it held 64 until QUEUE item 8).
+# 96 characters, which disk_fat.zig holds (it held 64 until QUEUE item 8).
 # It cannot produce a forbidden or non-ASCII character, a trailing dot or
 # space, a symlink, a file over 4 GiB (Caddy caps an upload at 110 MB and a
 # user at 1 GiB in all), or a path past MAX_PATH (its deepest is about 200).
@@ -171,7 +171,7 @@ def app_says(rel, rule):
         return "no: not a path angry-gopher builds; something else wrote it"
     what, long_ok, case_ok = kind
     # Its longest name is <sid>.reactions.jsonl at a sid of 80: 96, which
-    # fat16.zig holds since max_name went from 64 to 96.
+    # disk_fat.zig holds since max_name went from 64 to 96.
     if rule == "long-name" and long_ok and MAX_NAME < APP_LONGEST_NAME:
         return f"yes: {what}; session ids and doc slugs may be 80 characters"
     if rule == "case-collision" and case_ok:
@@ -245,19 +245,19 @@ def check(root, volume=DEFAULT_VOLUME, cluster=DEFAULT_CLUSTER, fat=16):
                 add(rel, "trailing-dot-or-space", "vfat drops trailing dots and spaces, so it is stored as "
                     f"{vfat_name(n)!r}")
             if any(ord(c) > 0x7F for c in n):
-                add(rel, "non-ascii", "fat16.zig reads a character past ASCII as '?', so the file cannot be found by its name")
+                add(rel, "non-ascii", "disk_fat.zig reads a character past ASCII as '?', so the file cannot be found by its name")
             units = len(n.encode("utf-16-le", "surrogatepass")) // 2
             if units > VFAT_MAX_NAME:
                 add(rel, "long-name", f"{units} characters; VFAT holds 255, so the copy fails")
             elif len(os.fsencode(n)) > MAX_NAME:
-                add(rel, "long-name", f"{len(os.fsencode(n))} bytes; fat16.zig reads and writes names up to {MAX_NAME}, "
+                add(rel, "long-name", f"{len(os.fsencode(n))} bytes; disk_fat.zig reads and writes names up to {MAX_NAME}, "
                     "so on this machine it is found only under its 8.3 alias")
 
             if len(os.fsencode(rel)) > MAX_PATH:
                 add(rel, "long-path", f"a path of {len(os.fsencode(rel))} bytes; io.zig opens paths up to {MAX_PATH}")
             depth = rel.count(os.sep) + 1
             if depth > MAX_TREE_DEPTH:
-                add(rel, "deep", f"{depth} levels down; fat16.zig's removeTree stops at {MAX_TREE_DEPTH}")
+                add(rel, "deep", f"{depth} levels down; disk_fat.zig's removeTree stops at {MAX_TREE_DEPTH}")
 
             mtime = int(st.st_mtime)
             if mtime < FIRST_DATE or mtime > LAST_DATE:

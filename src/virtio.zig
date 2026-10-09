@@ -786,7 +786,7 @@ pub const Block = struct {
     };
 
     /// A disk of `bytes.len / 512` sectors held in `bytes`, which the caller
-    /// owns. For host tests of what sits on a disk (`fat16.zig`, `io.zig`):
+    /// owns. For host tests of what sits on a disk (`disk_fat.zig`, `io.zig`):
     /// on a host every address is the caller's own memory, so a transfer is a
     /// copy. Nothing here may be called on it but the transfers.
     pub fn inMemory(bytes: []u8) Block {

@@ -24,11 +24,11 @@
 //!   `probe/run.sh` requires of the probes.
 //!
 //! A failing seed is reported with the operation it failed at; it is the
-//! repro. fat16.zig's coverage properties (COVERAGE.md) say which of its
+//! repro. disk_fat.zig's coverage properties (COVERAGE.md) say which of its
 //! paths the runs reached.
 
 const std = @import("std");
-const fat16 = @import("fat16.zig");
+const disk_fat = @import("disk_fat.zig");
 const test_disk = @import("test_disk.zig");
 const props = @import("coverage");
 const explore = @import("explore");
@@ -279,7 +279,7 @@ const Sim = struct {
     }
 
     fn roomless(e: anyerror) bool {
-        return e == fat16.Error.Full or e == fat16.Error.DirectoryFull;
+        return e == disk_fat.Error.Full or e == disk_fat.Error.DirectoryFull;
     }
 
     fn run(s: *Sim) !void {
@@ -357,7 +357,7 @@ const Sim = struct {
                 const old = s.model.files.get(path) orelse {
                     if (vol.writeInto(path, 0, bytes)) {
                         return s.fault("an append to a file that is not there succeeded");
-                    } else |e| if (e != fat16.Error.NotFound) return s.fault(@errorName(e));
+                    } else |e| if (e != disk_fat.Error.NotFound) return s.fault(@errorName(e));
                     return;
                 };
                 if (vol.writeInto(path, @intCast(old.len), bytes)) {
@@ -378,7 +378,7 @@ const Sim = struct {
                     if (!s.model.files.contains(path)) return s.fault("a remove of a file that is not there succeeded");
                     s.model.dropFile(path);
                 } else |e| {
-                    if (e != fat16.Error.NotFound or s.model.files.contains(path)) return s.fault(@errorName(e));
+                    if (e != disk_fat.Error.NotFound or s.model.files.contains(path)) return s.fault(@errorName(e));
                 }
             },
             .rename => {
@@ -397,7 +397,7 @@ const Sim = struct {
                     s.model.dropFile(from);
                     try s.model.setFile(to, copy);
                 } else |e| {
-                    if (e == fat16.Error.NotFound and old_from == null) return;
+                    if (e == disk_fat.Error.NotFound and old_from == null) return;
                     if (!roomless(e)) return s.fault(@errorName(e));
                     s.last_said = @errorName(e);
                     s.full += 1;
@@ -438,7 +438,7 @@ const Sim = struct {
     /// `WriteFailed` and nothing worse.
     fn probe(s: *Sim, r: std.Random) !void {
         const vol = &s.disk.vol;
-        const E = fat16.Error;
+        const E = disk_fat.Error;
         const Kind = enum { boot, unreadable, bad_name, onto_dir, overwrite_dir, hole, through_open, through_write, through_remove, rename_across, rename_dir, rename_onto_dir, chain_out, chain_loop, failing };
         // Named choices (explore.pickAs, .pick, .flag), each drawn exactly as
         // the call it replaced, so a probe seed's run is the run it was.
@@ -451,9 +451,9 @@ const Sim = struct {
         switch (kind) {
             .boot => try s.probeBoot(r),
             .unreadable => {
-                var scratch: [fat16.sector_size]u8 align(16) = undefined;
+                var scratch: [disk_fat.sector_size]u8 align(16) = undefined;
                 s.disk.blk.fail_after = s.disk.blk.requests;
-                const got = fat16.Volume.mount(&s.disk.blk, &scratch, 0);
+                const got = disk_fat.Volume.mount(&s.disk.blk, &scratch, 0);
                 s.disk.blk.fail_after = null;
                 if (got) |_| return s.fault("a mount of a disk that does not answer succeeded") else |e| if (e != E.ReadFailed) return s.fault(@errorName(e));
             },
@@ -461,7 +461,7 @@ const Sim = struct {
                 // A name past the longest FAT keeps, or none at all.
                 // In a directory that is there: making one could find no room.
                 const dir = (if (r.boolean()) s.someDir(r) else null) orelse "";
-                const name = if (r.boolean()) "x" ** (fat16.max_name + 1) else "";
+                const name = if (r.boolean()) "x" ** (disk_fat.max_name + 1) else "";
                 const path = join(dir, name, &buf);
                 if (vol.writeFile(path, "never")) return s.fault("a write with no name, or too long a one, succeeded") else |e| if (e != E.BadName) return s.fault(@errorName(e));
             },
@@ -554,7 +554,7 @@ const Sim = struct {
     /// **A BOOT SECTOR THAT LIES**, one field at a time: the mount must
     /// refuse it with its own error, and the volume, restored, is untouched.
     fn probeBoot(s: *Sim, r: std.Random) !void {
-        const E = fat16.Error;
+        const E = disk_fat.Error;
         const disk = s.disk.bytes;
         const fat32 = s.sc.shape.kind == .fat32;
         var saved: [2 * test_disk.sector]u8 = undefined;
@@ -657,8 +657,8 @@ const Sim = struct {
                 break :w E.BadBootSector;
             },
         };
-        var scratch: [fat16.sector_size]u8 align(16) = undefined;
-        if (fat16.Volume.mount(&s.disk.blk, &scratch, start)) |_| {
+        var scratch: [disk_fat.sector_size]u8 align(16) = undefined;
+        if (disk_fat.Volume.mount(&s.disk.blk, &scratch, start)) |_| {
             return s.fault("a mount of a boot sector that lies succeeded");
         } else |e| if (e != want) {
             std.debug.print("  the boot sector probe wanted {s}\n", .{@errorName(want)});
@@ -673,7 +673,7 @@ const Sim = struct {
     /// an append must refuse the loop; then the FAT is restored, and the
     /// next `verify` finds everything as it was.
     fn probeChain(s: *Sim, r: std.Random, loop: bool) !void {
-        const E = fat16.Error;
+        const E = disk_fat.Error;
         const disk = s.disk.bytes;
         const l = test_disk.Layout.of(disk);
         const cluster_bytes = @as(usize, disk[13]) * test_disk.sector;
@@ -758,7 +758,7 @@ const Sim = struct {
     /// the model follows what the disk says.
     fn settle(s: *Sim, path: []const u8, before: ?[]const u8, after: ?[]const u8) !void {
         const got = s.disk.read(path) catch |e| switch (e) {
-            fat16.Error.NotFound => {
+            disk_fat.Error.NotFound => {
                 // Absent only where there was no file: a write over one is
                 // old or new, never gone (essay kernel-facts #1).
                 if (before != null) return s.fault("an operation that found no room lost the file it was writing over");
@@ -915,12 +915,12 @@ const seeds = [_]u64{ 1, 2 };
 /// a minute in Debug, and the quick tests stay quick.
 pub const regressions = [_]u64{
     // A full FAT16 root: a rename to a new name unlinked `from` before
-    // finding room for `to`, and a lost file's chain leaked (fat16.zig's
+    // finding room for `to`, and a lost file's chain leaked (disk_fat.zig's
     // rename).
     38,
     // A full FAT16 root: a directory's cluster was taken before room for its
     // entry was found, and leaked on DirectoryFull, by a write making its
-    // parents (33) and by a mkdir (45) (fat16.zig's makeDirIn).
+    // parents (33) and by a mkdir (45) (disk_fat.zig's makeDirIn).
     33,
     45,
 };
@@ -930,7 +930,7 @@ pub const regressions = [_]u64{
 // which `check` called `too_deep` and `removeTree` refused). Fifteen levels
 // are made, checked clean and removed; a sixteenth is refused as a name too
 // long, and leaves the volume as it was.
-test "fat16: the deepest tree makePath makes is one check and removeTree take" {
+test "disk_fat: the deepest tree makePath makes is one check and removeTree take" {
     const d = try test_disk.Disk.make("limit-deep", test_disk.small, false);
     defer d.deinit();
     var path: [64]u8 = undefined;
@@ -942,7 +942,7 @@ test "fat16: the deepest tree makePath makes is one check and removeTree take" {
     }
     _ = try d.vol.makePath(path[0..n]); // fifteen levels
     @memcpy(path[n..][0..2], "/d");
-    try testing.expectError(fat16.Error.BadName, d.vol.makePath(path[0 .. n + 2]));
+    try testing.expectError(disk_fat.Error.BadName, d.vol.makePath(path[0 .. n + 2]));
     const r = try d.check();
     try testing.expect(r.health.clean());
     try d.vol.removeTree("deep");

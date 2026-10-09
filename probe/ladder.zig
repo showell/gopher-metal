@@ -37,7 +37,7 @@ const std = @import("std");
 const metal = @import("metal");
 const serial = metal.serial;
 const virtio = metal.virtio;
-const fat16 = metal.fat16;
+const disk_fat = metal.disk_fat;
 const pages = metal.pages;
 const pvh = metal.pvh;
 const Io = metal.io;
@@ -74,8 +74,8 @@ var gpa: std.heap.DebugAllocator(.{
 }) = .{};
 
 var blk_mem: virtio.BlockMemory align(4096) = .{};
-var scratch: [fat16.sector_size]u8 align(4096) = undefined;
-var sector: [fat16.sector_size]u8 align(4096) = undefined;
+var scratch: [disk_fat.sector_size]u8 align(4096) = undefined;
+var sector: [disk_fat.sector_size]u8 align(4096) = undefined;
 var block: [4096]u8 = undefined;
 var chunk: [512]u8 = undefined;
 var nic_mem: net.Memory align(4096) = .{};
@@ -361,7 +361,7 @@ pub fn kmain() noreturn {
 
     const base = virtio.find(virtio.device_id_block) orelse serial.fail("no virtio-blk device on the PCI bus or in any mmio slot");
     var blk = blk_mem.bring(base) catch serial.fail("the block device would not come up");
-    var vol = fat16.Volume.mount(&blk, &scratch, 0) catch serial.fail("the disk does not start with a FAT16 volume");
+    var vol = disk_fat.Volume.mount(&blk, &scratch, 0) catch serial.fail("the disk does not start with a FAT16 volume");
     const fat = pages.allocator.alloc(u8, vol.fatBytes()) catch serial.fail("no memory to hold the FAT");
     _ = vol.cacheFat(fat) catch serial.fail("the FAT could not be held in memory");
     Io.mount(vol);

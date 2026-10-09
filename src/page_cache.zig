@@ -14,7 +14,7 @@
 //! it holds nothing for that path. A change it is told of is applied to the
 //! kept copy only when the disk took it; a change that failed drops the path,
 //! because after a failed write the disk may hold the old file, the new, or
-//! neither (fat16's docs), and the next read must ask the disk which.
+//! neither (disk_fat's docs), and the next read must ask the disk which.
 //!
 //! **A CACHE, IN THE LEXICON'S SENSE.** The disk is the source of every file
 //! it holds; a kept copy is never written back, and when it cannot be kept
@@ -29,10 +29,10 @@
 //! disk as before rather than pushing out every transcript. The file used
 //! least recently goes first.
 //!
-//! **NAMES AS FAT MATCHES THEM.** fat16 compares names ignoring ASCII case,
+//! **NAMES AS FAT MATCHES THEM.** disk_fat compares names ignoring ASCII case,
 //! and a path's empty parts (`data//x`, `data/x/`) name the same file, so the
 //! key folds both: two spellings of one file must not be two copies, one of
-//! them stale. fat16 matches each file by one name only (its long name, or
+//! them stale. disk_fat matches each file by one name only (its long name, or
 //! its 8.3 name when it has no long one), so there is no third spelling.
 
 const std = @import("std");

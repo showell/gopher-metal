@@ -31,7 +31,7 @@ const serial = @import("serial.zig");
 const virtio = @import("virtio.zig");
 const stack = @import("stack.zig");
 const PageCache = @import("page_cache.zig").PageCache;
-const fat16 = @import("fat16.zig");
+const disk_fat = @import("disk_fat.zig");
 const rng = @import("rng.zig");
 const tsc = @import("tsc.zig");
 
@@ -72,22 +72,22 @@ pub fn random(_: Self, buf: []u8) void {
 /// With no data volume, the data directories are on the site's volume, as
 /// they were when the machine had one disk.
 ///
-/// **THESE ARE THE COPIES OF EACH `Volume` THAT WRITE** (fat16's
+/// **THESE ARE THE COPIES OF EACH `Volume` THAT WRITE** (disk_fat's
 /// `free_clusters`): the host's copy shares the held FAT and the folder
 /// cache's memory, and must not write once it has handed a volume here.
-var site: ?fat16.Volume = null;
-var data: ?fat16.Volume = null;
+var site: ?disk_fat.Volume = null;
+var data: ?disk_fat.Volume = null;
 var data_dirs: []const []const u8 = &.{};
 
 /// The volume every path is resolved against, until `keepData` names the
 /// directories that are the application's data.
-pub fn mount(v: fat16.Volume) void {
+pub fn mount(v: disk_fat.Volume) void {
     if (page_cache) |pc| pc.clear();
     site = v;
     site_cache.clear(); // what it kept was another volume's
     // **THE FILESYSTEM GETS THIS MACHINE'S CLOCK.** FAT16 entries carry a date,
     // and the application's "recent activity" is built entirely out of file
-    // modification times. fat16.zig has no clock of its own and must not invent
+    // modification times. disk_fat.zig has no clock of its own and must not invent
     // one, so it asks this — which answers null until the host has read the RTC,
     // and files written before then honestly carry no date.
     site.?.clock = realUnixOrNull;
@@ -97,7 +97,7 @@ pub fn mount(v: fat16.Volume) void {
 /// From here on nothing outside `dirs` is written: whatever is there is the
 /// site's, and on a droplet the next image replaces it, so a write there would
 /// be lost without anyone being told. Such a write is refused and logged.
-pub fn keepData(dirs: []const []const u8, on: ?fat16.Volume) void {
+pub fn keepData(dirs: []const []const u8, on: ?disk_fat.Volume) void {
     data_dirs = dirs;
     data = on;
     if (data) |*d| d.clock = realUnixOrNull;
@@ -153,7 +153,7 @@ fn pagesFor(path: []const u8) ?*PageCache {
 /// may be a disk with no cache at all. The flush is tried again before the
 /// next response.
 pub fn durable() void {
-    for ([_]?fat16.Volume{ site, data }, 0..) |maybe, k| {
+    for ([_]?disk_fat.Volume{ site, data }, 0..) |maybe, k| {
         const v = maybe orelse continue;
         if (!v.blk.unflushed) continue;
         if (v.blk.flush() != virtio.blk_s_ok) {
@@ -168,17 +168,17 @@ pub fn durable() void {
 
 /// The two volumes, for a host's status report: the site's, and the data's
 /// when it has one of its own.
-pub fn siteVolume() ?*fat16.Volume {
+pub fn siteVolume() ?*disk_fat.Volume {
     return if (site) |*v| v else null;
 }
-pub fn dataVolume() ?*fat16.Volume {
+pub fn dataVolume() ?*disk_fat.Volume {
     return if (data) |*v| v else null;
 }
 
 const Place = enum { site, data };
 
 /// **THE DISK IS CHOSEN THE WAY FAT16 WILL RESOLVE THE PATH**, or the path is
-/// refused. fat16 matches names ignoring case, so the first directory is
+/// refused. disk_fat matches names ignoring case, so the first directory is
 /// compared the same way; and it resolves `.` and `..` as real entries, so a
 /// path holding either could be routed by its first directory and land
 /// somewhere else — `data/../x` at the volume's root, past the refusal in
@@ -197,7 +197,7 @@ fn placeOf(path: []const u8) ?Place {
     return .site;
 }
 
-fn volumeAt(place: Place) Error!*fat16.Volume {
+fn volumeAt(place: Place) Error!*disk_fat.Volume {
     if (place == .data) {
         if (data) |*d| return d;
     }
@@ -300,26 +300,26 @@ fn cacheable(path: []const u8) bool {
     return data_dirs.len != 0 and placeOf(path) == .site;
 }
 
-/// **ABSENT, OR A DISK THAT WOULD NOT SAY: NOT THE SAME ANSWER.** fat16's
+/// **ABSENT, OR A DISK THAT WOULD NOT SAY: NOT THE SAME ANSWER.** disk_fat's
 /// `open`, its errors as the application's: NotFound is FileNotFound, and a
 /// read that failed is ReadFailed. Every failure was FileNotFound, so a disk
 /// error read as "no such file": `createFile` then made the file afresh,
 /// emptying one that was there, and the admin's reset took the admin for
 /// absent (QUEUE.md item 89).
-fn openEntry(v: *fat16.Volume, path: []const u8) Error!fat16.Entry {
+fn openEntry(v: *disk_fat.Volume, path: []const u8) Error!disk_fat.Entry {
     return v.open(path) catch |e| switch (e) {
         error.NotFound => if (throughFile(v, path)) Error.NotDir else Error.FileNotFound,
         else => Error.ReadFailed,
     };
 }
 
-/// **A PATH THROUGH A FILE IS `NotDir`, AS std.Io ANSWERS ON LINUX.** fat16
+/// **A PATH THROUGH A FILE IS `NotDir`, AS std.Io ANSWERS ON LINUX.** disk_fat
 /// refuses `a/b` with `a` a file as a name that is not there, and this
 /// answered FileNotFound, where Linux says NotDir: so the same store.zig call
 /// read as an absent file on metal and as an error on Linux (the store judge,
 /// 2026-10-07: `readOrEmpty` gave "" on one host and failed on the other).
 /// Asked only after a miss, so a found path costs nothing more.
-fn throughFile(v: *fat16.Volume, path: []const u8) bool {
+fn throughFile(v: *disk_fat.Volume, path: []const u8) bool {
     var end: usize = 0;
     while (std.mem.indexOfScalarPos(u8, path, end, '/')) |slash| : (end = slash + 1) {
         if (slash == 0) continue;
@@ -330,12 +330,12 @@ fn throughFile(v: *fat16.Volume, path: []const u8) bool {
 }
 
 /// The volume to read `path` from.
-fn reading(path: []const u8) Error!*fat16.Volume {
+fn reading(path: []const u8) Error!*disk_fat.Volume {
     return volumeAt(placeOf(path) orelse return Error.FileNotFound);
 }
 
 /// The volume to change `path` on, or a refusal: see `keepData`.
-fn writing(path: []const u8) Error!*fat16.Volume {
+fn writing(path: []const u8) Error!*disk_fat.Volume {
     const place = placeOf(path) orelse {
         serial.put("  refused: a write to a path with . or ..: ");
         serial.put(path);
@@ -425,7 +425,7 @@ pub const Error = error{
 pub const max_path: usize = 256;
 
 pub const File = struct {
-    entry: fat16.Entry,
+    entry: disk_fat.Entry,
 
     /// **A FILE REMEMBERS ITS PATH**, because a write here names a path rather
     /// than holding a descriptor: there are no open files on this machine, only
@@ -436,7 +436,7 @@ pub const File = struct {
     /// at is the ONLY way a File is made, so none can exist without its path.
     /// openFile once built one without it, and every positional read through
     /// that handle would have looked up the empty path.
-    fn at(entry: fat16.Entry, path: []const u8) Error!File {
+    fn at(entry: disk_fat.Entry, path: []const u8) Error!File {
         if (path.len > max_path) return Error.NameTooLong;
         var f = File{ .entry = entry, .path_len = path.len };
         @memcpy(f.path[0..path.len], path);
@@ -498,7 +498,7 @@ pub const File = struct {
     /// — a chat message, a game action, an uploaded chunk. `offset` may also be
     /// inside the file (an overwrite); it may not be past the end, because FAT
     /// has no sparse files and the hole would be whatever those clusters last
-    /// held. See fat16.writeInto.
+    /// held. See disk_fat.writeInto.
     pub fn writePositionalAll(self: File, _: Self, bytes: []const u8, offset: u64) Error!void {
         if (offset > 0xFFFF_FFFF) return Error.NoSpaceLeft;
         const path = self.path[0..self.path_len];
@@ -531,14 +531,14 @@ pub const Entry = struct {
 /// into 256 slots and stopped the machine past them, which the application
 /// reaches: a player may keep 500 game sessions in one folder, and nothing
 /// bounds the players (QUEUE.md item 50). It now reads the directory as it is
-/// asked (fat16's `Lister`), so its size is one sector and one name whatever
+/// asked (disk_fat's `Lister`), so its size is one sector and one name whatever
 /// the directory holds, and a directory that will not read says so at the
 /// entry it fails on.
 pub const Iterator = struct {
-    lister: ?fat16.Volume.Lister = null,
+    lister: ?disk_fat.Volume.Lister = null,
     /// **A DIRECTORY THAT CANNOT BE LISTED IS NOT AN EMPTY ONE** (metal-vmm
     /// QUEUE 104). `iterate` cannot answer an error (its shape is std's), so
-    /// a volume that is not there, or a directory fat16 will not walk (an
+    /// a volume that is not there, or a directory disk_fat will not walk (an
     /// entry naming a cluster outside the data), is kept here and is what
     /// the first `next` answers.
     failed: ?Error = null,
@@ -548,7 +548,7 @@ pub const Iterator = struct {
     /// resumed to a conversation that does not exist. The alias is an artifact
     /// of how FAT16 stores a name; `text()` is the name the file was created
     /// with, and the name every other operation here matches on.
-    name: [fat16.max_name]u8 = undefined,
+    name: [disk_fat.max_name]u8 = undefined,
 
     pub fn next(self: *Iterator, _: Self) Error!?Entry {
         if (self.failed) |e| return e;
@@ -561,7 +561,7 @@ pub const Iterator = struct {
             // into every directory a listing hands it, recursed into "."
             // forever. That is not a hang: it walks the stack past its end,
             // through `.bss` and into the page tables, and the machine
-            // triple-faults with nothing in the log. fat16.zig's own removeTree
+            // triple-faults with nothing in the log. disk_fat.zig's own removeTree
             // already knew this; the knowledge just did not reach the layer
             // that hands names to the application.
             const name = e.text();
@@ -620,7 +620,7 @@ pub const AccessOptions = struct {};
 
 pub const Dir = struct {
     /// The cluster this directory starts at; zero is the root.
-    cluster: fat16.Cluster = 0,
+    cluster: disk_fat.Cluster = 0,
     /// The volume it is on, which is where `iterate` lists it.
     place: Place = .site,
 
@@ -745,7 +745,7 @@ pub const Dir = struct {
 
     /// mkdir -p. The application calls it before nearly every write, because
     /// its stores are directory trees keyed by id and the parent usually does
-    /// not exist yet. fat16.makePath already walks and creates, so this is a
+    /// not exist yet. disk_fat.makePath already walks and creates, so this is a
     /// rename with error translation.
     pub fn createDirPath(self: Dir, _: Self, sub_path: []const u8) Error!void {
         self.fromRoot();
@@ -778,7 +778,7 @@ pub const Dir = struct {
 
         // Absent: made. A disk that would not say is an error, never taken
         // for absent: that emptied a file that was there (QUEUE.md item 89).
-        const existing: ?fat16.Entry = openEntry(v, sub_path) catch |e| switch (e) {
+        const existing: ?disk_fat.Entry = openEntry(v, sub_path) catch |e| switch (e) {
             Error.FileNotFound => null,
             else => return e,
         };
@@ -815,7 +815,7 @@ pub const Dir = struct {
 
     /// rename moves a file to another name in the same directory, over any
     /// file of that name: how angry-gopher's `store.replace` makes a rewrite
-    /// survive a stop (fat16.rename says what each stop leaves). std.Io's
+    /// survive a stop (disk_fat.rename says what each stop leaves). std.Io's
     /// shape, `io` last; both paths from the root, on one volume, in one
     /// directory.
     pub fn rename(self: Dir, old_sub_path: []const u8, new_dir: Dir, new_sub_path: []const u8, _: Self) Error!void {
@@ -841,7 +841,7 @@ pub const Dir = struct {
     }
 
     /// deleteTree removes a directory and everything under it — a released
-    /// account's game data, a deleted player. See fat16.removeTree for why it
+    /// account's game data, a deleted player. See disk_fat.removeTree for why it
     /// re-lists each round instead of walking a snapshot.
     pub fn deleteTree(self: Dir, _: Self, sub_path: []const u8) Error!void {
         self.fromRoot();

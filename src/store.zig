@@ -32,27 +32,27 @@
 //! **ERRORS** (`Error`), and which of the floor's refusals answer each
 //! (gopher-metal COVERAGE.md, "Errors under the Store"):
 //!
-//! - `NotFound`: no such file or directory (fat16 `NotFound`, and a path
+//! - `NotFound`: no such file or directory (disk_fat `NotFound`, and a path
 //!   whose parent is a file, `NotFat16`, where a read or remove meets it).
-//! - `IsDirectory`: a file operation on a directory (fat16 `IsDirectory`).
+//! - `IsDirectory`: a file operation on a directory (disk_fat `IsDirectory`).
 //! - `BadName`: a path the rules above refuse, or one through a file where a
-//!   directory must be made (fat16 `BadName`, and `NotFat16` on a write).
-//! - `TooBig`: a file larger than the buffer it is read into (fat16 `TooBig`).
-//! - `NoSpace`: the volume or a directory is full (fat16 `Full`,
+//!   directory must be made (disk_fat `BadName`, and `NotFat16` on a write).
+//! - `TooBig`: a file larger than the buffer it is read into (disk_fat `TooBig`).
+//! - `NoSpace`: the volume or a directory is full (disk_fat `Full`,
 //!   `DirectoryFull`). The model never answers it: it has no size.
-//! - `Damaged`: the volume is not what it should be (fat16 `BadChain`, and
+//! - `Damaged`: the volume is not what it should be (disk_fat `BadChain`, and
 //!   any of `mount`'s refusals met later).
-//! - `Io`: the disk refused a request (fat16 `ReadFailed`, `WriteFailed`, a
+//! - `Io`: the disk refused a request (disk_fat `ReadFailed`, `WriteFailed`, a
 //!   failed flush).
 //!
 //! The implementations: `store_model.zig` (the oracle, in memory),
-//! `store_fat.zig` (over `fat16.zig`), and the strict Linux store (item 79).
+//! `store_fat.zig` (over `disk_fat.zig`), and the strict Linux store (item 79).
 
 const std = @import("std");
 
 pub const Error = error{ NotFound, IsDirectory, BadName, TooBig, NoSpace, Damaged, Io };
 
-/// The longest part of a path. FAT's longest name is `fat16.max_name` (96);
+/// The longest part of a path. FAT's longest name is `disk_fat.max_name` (96);
 /// this leaves room for `temp_prefix` on it.
 pub const max_part = 80;
 /// The most parts in a path. FAT's deepest directory is 15 down.

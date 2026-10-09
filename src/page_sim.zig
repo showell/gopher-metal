@@ -32,7 +32,7 @@
 //!   after the read, unless memory ran out.
 //!
 //! The model is the disk, not the cache turned around: names are matched by
-//! folding case and dropping empty parts, written here from fat16's rules,
+//! folding case and dropping empty parts, written here from disk_fat's rules,
 //! not from `keyOf`.
 
 const std = @import("std");
@@ -395,7 +395,7 @@ const Sim = struct {
                     const to = self.spell(&other, to_name);
                     if (Disk.same(path, to)) continue;
                     if (op == .rename_fails or self.disk.get(path) == null) {
-                        // fat16's rename may fail having removed the old
+                        // disk_fat's rename may fail having removed the old
                         // `to`; io.zig forgets both.
                         if (r.boolean()) self.disk.removeName(to);
                         c.forget(path);

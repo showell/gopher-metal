@@ -1,11 +1,11 @@
 //! **THE STORE OVER FAT** (metal-vmm QUEUE item 77): the six operations
-//! (`store.zig`) on a mounted `fat16.Volume`. The Store's name rules are
+//! (`store.zig`) on a mounted `disk_fat.Volume`. The Store's name rules are
 //! checked first, so FAT never sees a name the other stores would refuse;
 //! FAT's own refusals are mapped to the Store's errors (`map`).
 //!
 //! **`replace` IS WRITE, FLUSH, RENAME.** The new bytes go to a file of the
 //! Store's own name beside the old (`store.temp_prefix`), the disk is
-//! flushed, and that file is renamed over the old one: `fat16.rename` points
+//! flushed, and that file is renamed over the old one: `disk_fat.rename` points
 //! the old name's entry at the new chain in one sector write, so a power cut
 //! at any point leaves the old file whole or the new one whole. The flush is
 //! what makes that true on a disk with a write cache: without it the rename
@@ -13,18 +13,18 @@
 //! temporary file behind leaves only a hidden name and its clusters, which
 //! the next `replace` of that file writes over.
 //!
-//! `write` is `fat16.writeFile`, which removes the old file before writing
+//! `write` is `disk_fat.writeFile`, which removes the old file before writing
 //! the new: a cut between can leave neither, as `store.zig` says it may.
-//! `append` is `fat16.writeInto` at the file's end, which links and writes
+//! `append` is `disk_fat.writeInto` at the file's end, which links and writes
 //! before it changes the entry's size: a cut leaves the old file or the new.
 
 const std = @import("std");
 const store = @import("store.zig");
-const fat16 = @import("fat16.zig");
+const disk_fat = @import("disk_fat.zig");
 const Error = store.Error;
 
 pub const FatStore = struct {
-    vol: *fat16.Volume,
+    vol: *disk_fat.Volume,
 
     pub fn store_(f: *FatStore) store.Store {
         return .{ .ptr = f, .vtable = &vtable };
@@ -42,7 +42,7 @@ pub const FatStore = struct {
     /// FAT's answer, as the Store's. A path whose parent is a file is FAT's
     /// `NotFat16`: a write meets it making a directory (`BadName`), a read or
     /// remove looking for one (`NotFound`).
-    fn map(e: fat16.Error, writing: bool) Error {
+    fn map(e: disk_fat.Error, writing: bool) Error {
         return switch (e) {
             error.NotFound => Error.NotFound,
             error.IsDirectory => Error.IsDirectory,
@@ -77,7 +77,7 @@ pub const FatStore = struct {
 
     /// The entry at `path`, or null if there is none. A part that is a file
     /// on the way names nothing.
-    fn entryAt(f: *FatStore, path: []const u8) Error!?fat16.Entry {
+    fn entryAt(f: *FatStore, path: []const u8) Error!?disk_fat.Entry {
         return f.vol.open(path) catch |e| switch (e) {
             error.NotFound, error.NotFat16 => null,
             else => map(e, false),
@@ -114,7 +114,7 @@ pub const FatStore = struct {
         var jb: [path_bytes]u8 = undefined;
         const p = join(try store.checkPath(path, &pb, false), "", &jb);
         const e = (try f.entryAt(p)) orelse return Error.NotFound;
-        // fat16.remove refuses a directory (B22); a directory goes by removeTree.
+        // disk_fat.remove refuses a directory (B22); a directory goes by removeTree.
         // Store removes files only.
         if (e.isDirectory()) return Error.IsDirectory;
         f.vol.remove(p) catch |err| return map(err, false);
@@ -140,7 +140,7 @@ pub const FatStore = struct {
     pub fn list(f: *FatStore, path: []const u8, each: store.Each) Error!void {
         var pb: [store.max_parts][]const u8 = undefined;
         const parts = try store.checkPath(path, &pb, true);
-        var cluster: fat16.Cluster = 0;
+        var cluster: disk_fat.Cluster = 0;
         if (parts.len > 0) {
             var jb: [path_bytes]u8 = undefined;
             const e = (try f.entryAt(join(parts, "", &jb))) orelse return Error.NotFound;

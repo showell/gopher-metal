@@ -463,7 +463,7 @@ def leak_a_cluster(image: str) -> int:
 
     **ON FAT32, AS THIS MACHINE'S OWN STOPPED WRITE WOULD LEAVE IT:** the
     entry is four bytes and the end mark 0x0FFFFFFF, and FSInfo's free count
-    and hint are marked unknown in both copies, which fat16.zig does on the
+    and hint are marked unknown in both copies, which disk_fat.zig does on the
     first write a mount makes (forgetFsInfo). Left as mkfs set it, the count
     is wrong by one, and the check rightly says so as a second problem."""
     sys.path.insert(0, TOOLS_DIR)

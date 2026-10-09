@@ -66,7 +66,7 @@ Today the same limit is written in several places:
 | a request's head | Linux `server.zig` (`read_buf`), metal `probe/gopher.zig` (`read_buf`) | 16 KiB each, by copy |
 | an ordinary body | Caddy (`request_body`), the app's per-route caps (`http.readLimitedBody`) | 1 MB at Caddy; per route in the app |
 | an upload | Caddy, `chat_upload.zig`'s kinds | 110 MB at Caddy; 10 MiB images, 100 MiB video |
-| a name, a path, a depth | angry-gopher `store.zig`, metal `fat16.zig` and `io.zig` | 96, 256, 16 (checked: `tools/check_limits.py`) |
+| a name, a path, a depth | angry-gopher `store.zig`, metal `disk_fat.zig` and `io.zig` | 96, 256, 16 (checked: `tools/check_limits.py`) |
 
 **Done (2026-10-07):** angry-gopher's `zig-server/src/limits.zig` holds them,
 every route reads its cap from it, both hosts size the head buffer from it

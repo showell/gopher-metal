@@ -23,7 +23,7 @@
 //! - **FAT on a damaged volume** (`fatSeed`): `fat_sim` only ever meets a
 //!   healthy volume and a failing disk. Here a small volume is formatted
 //!   (`test_disk`), given a directory and a file of a few clusters through
-//!   `fat16.zig`, then one thing is made wrong: a boot sector field, the
+//!   `disk_fat.zig`, then one thing is made wrong: a boot sector field, the
 //!   file's or directory's first cluster on the disk, its size, a link in
 //!   its chain, or a buffer or path handed in. Oracle: the operation answers
 //!   exactly the error that thing calls for, and nothing panics.
@@ -71,7 +71,7 @@ const gpt = @import("gpt.zig");
 const kernel_partition = @import("kernel_partition.zig");
 const PageCache = @import("page_cache.zig").PageCache;
 const log_ring = @import("log_ring.zig");
-const fat16 = @import("fat16.zig");
+const disk_fat = @import("disk_fat.zig");
 const test_disk = @import("test_disk.zig");
 const proto = @import("proto.zig");
 const arp = @import("arp.zig");
@@ -322,7 +322,7 @@ fn le16put(b: []u8, v: u16) void {
     std.mem.writeInt(u16, b[0..2], v, .little);
 }
 
-fn noFindings(_: void, _: fat16.Finding) void {}
+fn noFindings(_: void, _: disk_fat.Finding) void {}
 
 pub fn fatSeed(seed: u64) Failure!void {
     var prng = std.Random.DefaultPrng.init(seed ^ 0x6661_7464_616d); // "fatdam"
@@ -331,7 +331,7 @@ pub fn fatSeed(seed: u64) Failure!void {
     const d = test_disk.Disk.make("damaged-floor", test_disk.small, false) catch return fail(seed, "no disk", .{});
     defer d.deinit();
     const v = &d.vol;
-    const cluster_bytes = v.sectors_per_cluster * fat16.sector_size;
+    const cluster_bytes = v.sectors_per_cluster * disk_fat.sector_size;
     // A file of a few clusters, in a directory.
     const clusters = r.intRangeAtMost(u32, 3, 6);
     var content: [6 * 512]u8 = undefined;
@@ -345,7 +345,7 @@ pub fn fatSeed(seed: u64) Failure!void {
     const fat_at = v.fat_start * 512 + entry.first_cluster * 2;
     var out: [8 * 512]u8 = undefined;
 
-    const Want = fat16.Error;
+    const Want = disk_fat.Error;
     var want: Want = undefined;
     const got: anyerror!void = switch (wrong) {
         .fats_overflow, .sum_overflow, .too_many_clusters => blk: {
@@ -370,7 +370,7 @@ pub fn fatSeed(seed: u64) Failure!void {
                 want = Want.TooManyClusters;
             }
             var scratch: [512]u8 align(16) = undefined;
-            break :blk if (fat16.Volume.mount(&d.blk, &scratch, 0)) |_| {} else |e| e;
+            break :blk if (disk_fat.Volume.mount(&d.blk, &scratch, 0)) |_| {} else |e| e;
         },
         .cache_short => blk: {
             want = Want.TooBig;

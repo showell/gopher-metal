@@ -51,8 +51,8 @@ fn runTcp(tape: *explore.Tape) anyerror!void {
 }
 
 const all_sims = [_]Sim{
-    .{ .name = "fat", .run = runFat, .files = &.{ "fat16.zig", "fat_sim.zig" } },
-    .{ .name = "store", .run = runStore, .files = &.{ "store_sim.zig", "fat16.zig", "store.zig" } },
+    .{ .name = "fat", .run = runFat, .files = &.{ "disk_fat.zig", "fat_sim.zig" } },
+    .{ .name = "store", .run = runStore, .files = &.{ "store_sim.zig", "disk_fat.zig", "store.zig" } },
     .{ .name = "tcp", .run = runTcp, .files = &.{ "tcp.zig", "tcp_sim.zig", "tcp_check.zig" } },
 };
 

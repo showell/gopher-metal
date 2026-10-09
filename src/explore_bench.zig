@@ -56,8 +56,8 @@ const runSim: explore.RunFn = if (sim_is_store) runStore else runFat;
 /// under it.
 fn ours(site: *const coverage.Site) bool {
     const file = std.mem.span(site.file);
-    if (sim_is_store) return std.mem.endsWith(u8, file, "store_sim.zig") or std.mem.endsWith(u8, file, "fat16.zig");
-    return std.mem.endsWith(u8, file, "fat16.zig") or std.mem.endsWith(u8, file, "fat_sim.zig");
+    if (sim_is_store) return std.mem.endsWith(u8, file, "store_sim.zig") or std.mem.endsWith(u8, file, "disk_fat.zig");
+    return std.mem.endsWith(u8, file, "disk_fat.zig") or std.mem.endsWith(u8, file, "fat_sim.zig");
 }
 
 const Column = enum { blind, random_flips, aimed_flips };

@@ -28,7 +28,7 @@ What grows is the number and total size of files, not the size of any one
 of them. So FAT32's work is about the volume: the FAT's size in memory
 (§9), the free-cluster search (§8), and the sector-number ceiling (§10).
 
-## What changes in `src/fat16.zig`
+## What changes in `src/disk_fat.zig`
 
 ### 1. The cluster type: `u16` becomes `u32`
 
@@ -199,7 +199,7 @@ wanted, since the FAT-memory limit in §9 bites first.
 
 ### 11. Names
 
-The module is still called `fat16.zig`, and its error is `NotFat16`. Renaming
+The module is still called `disk_fat.zig`, and its error is `NotFat16`. Renaming
 it (`fat.zig`, with `NotFat`) touches every importer. Do it in a separate,
 mechanical commit, or not at all.
 

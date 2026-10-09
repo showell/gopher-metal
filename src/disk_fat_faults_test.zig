@@ -1,12 +1,12 @@
-//! `fat16.zig` when the machine stops, and when the disk fails or lies
+//! `disk_fat.zig` when the machine stops, and when the disk fails or lies
 //! (QUEUE.md items 79 and 80): every operation the application uses, stopped
 //! after each write, and with each request failing or lying once. Apart from
-//! `fat16_test.zig` so the two run side by side: each is a test of hundreds
+//! `disk_fat_test.zig` so the two run side by side: each is a test of hundreds
 //! of runs.
 
 const std = @import("std");
-const fat16 = @import("fat16.zig");
-const options = @import("fat16_test_options");
+const disk_fat = @import("disk_fat.zig");
+const options = @import("disk_fat_test_options");
 const test_disk = @import("test_disk.zig");
 const testing = std.testing;
 const Shape = test_disk.Shape;
@@ -72,8 +72,8 @@ const Want = struct {
 };
 const Stopped = struct {
     name: []const u8,
-    setup: *const fn (v: *fat16.Volume) anyerror!void,
-    run: *const fn (v: *fat16.Volume) fat16.Error!void,
+    setup: *const fn (v: *disk_fat.Volume) anyerror!void,
+    run: *const fn (v: *disk_fat.Volume) disk_fat.Error!void,
     want: []const Want,
     /// No two of these paths are both present (a rename's two names).
     one_of: []const []const u8 = &.{},
@@ -87,8 +87,8 @@ const Stopped = struct {
 /// (fsck reclaims them), and FAT copies apart (every FAT change writes the
 /// first copy, then the second). An append may also leave a chain longer
 /// than its file (`long`), until the next append.
-const allowed = [_]fat16.Problem{ .leaked, .fats_differ };
-const allowed_append = [_]fat16.Problem{ .leaked, .fats_differ, .long };
+const allowed = [_]disk_fat.Problem{ .leaked, .fats_differ };
+const allowed_append = [_]disk_fat.Problem{ .leaked, .fats_differ, .long };
 
 fn patterned(comptime n: usize, comptime seed: u8) [n]u8 {
     @setEvalBranchQuota(n * 8 + 1000);
@@ -108,12 +108,12 @@ const stopped_ops = [_]Stopped{
     .{
         .name = "write a new file",
         .setup = struct {
-            fn f(v: *fat16.Volume) !void {
+            fn f(v: *disk_fat.Volume) !void {
                 _ = try v.makePath("data/chat");
             }
         }.f,
         .run = struct {
-            fn f(v: *fat16.Volume) fat16.Error!void {
+            fn f(v: *disk_fat.Volume) disk_fat.Error!void {
                 return v.writeFile("data/chat/a-new-conversation.md", &old_rec);
             }
         }.f,
@@ -122,10 +122,10 @@ const stopped_ops = [_]Stopped{
     .{
         .name = "write a new file, making its directories",
         .setup = struct {
-            fn f(_: *fat16.Volume) !void {}
+            fn f(_: *disk_fat.Volume) !void {}
         }.f,
         .run = struct {
-            fn f(v: *fat16.Volume) fat16.Error!void {
+            fn f(v: *disk_fat.Volume) disk_fat.Error!void {
                 return v.writeFile("data/games/7/state", &new_rec);
             }
         }.f,
@@ -142,12 +142,12 @@ const stopped_ops = [_]Stopped{
         // write points the entry at it.
         .name = "replace a file",
         .setup = struct {
-            fn f(v: *fat16.Volume) !void {
+            fn f(v: *disk_fat.Volume) !void {
                 try v.writeFile("data/rec", &old_rec);
             }
         }.f,
         .run = struct {
-            fn f(v: *fat16.Volume) fat16.Error!void {
+            fn f(v: *disk_fat.Volume) disk_fat.Error!void {
                 return v.writeFile("data/rec", &new_rec);
             }
         }.f,
@@ -156,12 +156,12 @@ const stopped_ops = [_]Stopped{
     .{
         .name = "append inside the last cluster",
         .setup = struct {
-            fn f(v: *fat16.Volume) !void {
+            fn f(v: *disk_fat.Volume) !void {
                 try v.writeFile("data/log", &old_rec);
             }
         }.f,
         .run = struct {
-            fn f(v: *fat16.Volume) fat16.Error!void {
+            fn f(v: *disk_fat.Volume) disk_fat.Error!void {
                 return v.writeInto("data/log", old_rec.len, &tail_small);
             }
         }.f,
@@ -171,12 +171,12 @@ const stopped_ops = [_]Stopped{
     .{
         .name = "append past the last cluster",
         .setup = struct {
-            fn f(v: *fat16.Volume) !void {
+            fn f(v: *disk_fat.Volume) !void {
                 try v.writeFile("data/log", &old_rec);
             }
         }.f,
         .run = struct {
-            fn f(v: *fat16.Volume) fat16.Error!void {
+            fn f(v: *disk_fat.Volume) disk_fat.Error!void {
                 return v.writeInto("data/log", old_rec.len, &tail_big);
             }
         }.f,
@@ -186,12 +186,12 @@ const stopped_ops = [_]Stopped{
     .{
         .name = "append to an empty file",
         .setup = struct {
-            fn f(v: *fat16.Volume) !void {
+            fn f(v: *disk_fat.Volume) !void {
                 try v.writeFile("data/log", "");
             }
         }.f,
         .run = struct {
-            fn f(v: *fat16.Volume) fat16.Error!void {
+            fn f(v: *disk_fat.Volume) disk_fat.Error!void {
                 return v.writeInto("data/log", 0, &tail_big);
             }
         }.f,
@@ -201,12 +201,12 @@ const stopped_ops = [_]Stopped{
     .{
         .name = "make a directory",
         .setup = struct {
-            fn f(v: *fat16.Volume) !void {
+            fn f(v: *disk_fat.Volume) !void {
                 _ = try v.makePath("data");
             }
         }.f,
         .run = struct {
-            fn f(v: *fat16.Volume) fat16.Error!void {
+            fn f(v: *disk_fat.Volume) disk_fat.Error!void {
                 _ = try v.makePath("data/sessions");
             }
         }.f,
@@ -215,12 +215,12 @@ const stopped_ops = [_]Stopped{
     .{
         .name = "remove a file",
         .setup = struct {
-            fn f(v: *fat16.Volume) !void {
+            fn f(v: *disk_fat.Volume) !void {
                 try v.writeFile("data/a-rather-long-name-for-a-file.md", &old_rec);
             }
         }.f,
         .run = struct {
-            fn f(v: *fat16.Volume) fat16.Error!void {
+            fn f(v: *disk_fat.Volume) disk_fat.Error!void {
                 return v.remove("data/a-rather-long-name-for-a-file.md");
             }
         }.f,
@@ -231,7 +231,7 @@ const stopped_ops = [_]Stopped{
         // time, so a stop leaves part of it.
         .name = "remove a tree",
         .setup = struct {
-            fn f(v: *fat16.Volume) !void {
+            fn f(v: *disk_fat.Volume) !void {
                 try v.writeFile("data/users/7/profile", &new_rec);
                 try v.writeFile("data/users/7/games/1/state", &old_rec);
                 try v.writeFile("data/users/7/games/2/state", &tail_big);
@@ -239,7 +239,7 @@ const stopped_ops = [_]Stopped{
             }
         }.f,
         .run = struct {
-            fn f(v: *fat16.Volume) fat16.Error!void {
+            fn f(v: *disk_fat.Volume) disk_fat.Error!void {
                 return v.removeTree("data/users/7");
             }
         }.f,
@@ -257,13 +257,13 @@ const stopped_ops = [_]Stopped{
         // rename over the old.
         .name = "rename over a file",
         .setup = struct {
-            fn f(v: *fat16.Volume) !void {
+            fn f(v: *disk_fat.Volume) !void {
                 try v.writeFile("data/rec", &old_rec);
                 try v.writeFile("data/rec.tmp", &new_rec);
             }
         }.f,
         .run = struct {
-            fn f(v: *fat16.Volume) fat16.Error!void {
+            fn f(v: *disk_fat.Volume) disk_fat.Error!void {
                 return v.rename("data/rec.tmp", "data/rec");
             }
         }.f,
@@ -278,12 +278,12 @@ const stopped_ops = [_]Stopped{
         // nobody had yet (rename's doc).
         .name = "rename to a new name",
         .setup = struct {
-            fn f(v: *fat16.Volume) !void {
+            fn f(v: *disk_fat.Volume) !void {
                 try v.writeFile("data/rec.tmp", &new_rec);
             }
         }.f,
         .run = struct {
-            fn f(v: *fat16.Volume) fat16.Error!void {
+            fn f(v: *disk_fat.Volume) disk_fat.Error!void {
                 return v.rename("data/rec.tmp", "data/A-New-Record.md");
             }
         }.f,
@@ -298,7 +298,7 @@ const stopped_ops = [_]Stopped{
 /// What `path` holds on `d`, as a State; a file's bytes go in `buf`.
 fn stateOf(d: *test_disk.Disk, path: []const u8, buf: []u8) !State {
     const e = d.vol.open(path) catch |err| switch (err) {
-        fat16.Error.NotFound => return .absent,
+        disk_fat.Error.NotFound => return .absent,
         else => return err,
     };
     if (e.isDirectory()) return .dir;
@@ -324,9 +324,9 @@ fn describe(s: State) []const u8 {
 }
 
 /// The report holds only what `allowed` names.
-fn onlyAllowed(r: *const test_disk.Report, these: []const fat16.Problem, op: []const u8, kind: []const u8, when: []const u8, n: u64) !void {
+fn onlyAllowed(r: *const test_disk.Report, these: []const disk_fat.Problem, op: []const u8, kind: []const u8, when: []const u8, n: u64) !void {
     for (r.found[0..r.len]) |f| {
-        if (std.mem.indexOfScalar(fat16.Problem, these, f.problem) == null) {
+        if (std.mem.indexOfScalar(disk_fat.Problem, these, f.problem) == null) {
             std.debug.print("{s} ({s}), {s} {d}: {s} at {s}\n", .{ op, kind, when, n, @tagName(f.problem), f.text() });
             return error.TestUnexpectedResult;
         }
@@ -870,7 +870,7 @@ test "a disk that lies (a write that lands nothing or half, a read of other byte
     const virtio = @import("virtio.zig");
     // What `Volume.check` found across every run, by problem: the boot's
     // disk check is where a lie that damaged the volume is seen.
-    var found = [_]u32{0} ** @typeInfo(fat16.Problem).@"enum".fields.len;
+    var found = [_]u32{0} ** @typeInfo(disk_fat.Problem).@"enum".fields.len;
     var runs: u32 = 0;
     for ([_]@FieldType(virtio.Block.Fault, "kind"){ .lands_nothing, .torn, .garbage }) |lie| {
         for (stopped_ops) |op| {
@@ -906,7 +906,7 @@ test "a disk that lies (a write that lands nothing or half, a read of other byte
                     // more than test_disk.Report keeps.
                     const Count = struct {
                         by: *@TypeOf(found),
-                        fn each(c: *@This(), f: fat16.Finding) void {
+                        fn each(c: *@This(), f: disk_fat.Finding) void {
                             c.by[@intFromEnum(f.problem)] += 1;
                         }
                     };

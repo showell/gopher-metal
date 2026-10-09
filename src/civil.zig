@@ -2,7 +2,7 @@
 //!
 //! Two things on this machine have dates that must be the same dates. The CMOS
 //! chip reports one (rtc.zig), and every FAT16 directory entry carries one
-//! (fat16.zig) — and the second is what makes chat's "recent activity" a real
+//! (disk_fat.zig) — and the second is what makes chat's "recent activity" a real
 //! answer here, because its whole model is file modification time. Both need
 //! civil dates and Unix seconds to be the same instants, in both directions.
 //!

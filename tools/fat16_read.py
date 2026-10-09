@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 """An independent FAT16 and FAT32 reader, written from Microsoft's FAT
-specification and not from src/fat16.zig: the oracle for what this machine
+specification and not from src/disk_fat.zig: the oracle for what this machine
 writes (QUEUE.md items 4 and 17). Which FAT a volume is, it decides as the
 spec does: by its count of clusters (65,525 and up is FAT32).
 
     tools/fat16_read.py list  IMAGE            every file and directory, with sizes
     tools/fat16_read.py cat   IMAGE PATH       a file's bytes, to stdout
     tools/fat16_read.py check IMAGE...         the volume's consistency; exit 1 if not
-    tools/fat16_read.py make-foreign DIR       writes the self-test's volumes, for fat16.zig's check
+    tools/fat16_read.py make-foreign DIR       writes the self-test's volumes, for disk_fat.zig's check
     tools/fat16_read.py --self-test            checks this reader against mkfs.vfat
                                                and mtools, then against damage
 
@@ -540,7 +540,7 @@ def foreign_volumes(d, kind="FAT16"):
 
 
 def make_foreign(out):
-    """Writes foreign_volumes' images into `out`, for fat16.zig's own check
+    """Writes foreign_volumes' images into `out`, for disk_fat.zig's own check
     to judge: for FAT16 and for FAT32, healthy-mtools<kind>.img and
     damaged-mtools<kind>-<damage>.img. A change that must still check clean
     (FAT32's reserved bits) is named healthy- too."""

@@ -11,7 +11,7 @@ reduced size (`-Dsweep-optimize=ReleaseSafe -Dseeds=30 -Dfat-seeds=8
 restored after each run, and no mutant was committed anywhere.
 
 The mutants were planted on gopher-metal `a9163f2`. Of the files mutated,
-only `fat16.zig` has changed on `master` since (v19, `c481c5e`, folders held
+only `disk_fat.zig` has changed on `master` since (v19, `c481c5e`, folders held
 in memory), and every fat16 survivor's line is still there unchanged.
 
 ## The score
@@ -28,7 +28,7 @@ in memory), and every fat16 survivor's line is still there unchanged.
 | **all** | **85** | **59** | **71** | **9** | **71 / 85** |
 
 "Killed now" counts the twelve survivors that later got an oracle: T14, T16,
-R6 and S2 (item 93); F6, F10, F14 and F15 (fat16_test, item 107); S5 and S6
+R6 and S2 (item 93); F6, F10, F14 and F15 (disk_fat_test, item 107); S5 and S6
 (store_test, with a disk that has a write cache, item 112); and L7 and P1
 (floor_sim and page_sim, their generators widened, item 115). Each is named
 in the tables below, and each was re-planted and killed. S11 turned out
@@ -128,22 +128,22 @@ What the run itself shows:
 | P11 | src/page_cache.zig:311 | `k[key.len] == '/'` | `k[key.len] != 0` | killed | `page_cache`: rename moves the copy over any at the new name; a tree removed takes everything under it, and only that |
 | P12 | src/page_cache.zig:269 | `self.held += more;` | `self.held += more - 1;` | killed | `page_sim`: the page cache against a model of the disk, a handful of seeds |
 | P13 | src/page_cache.zig:227 | `self.used[i] < self.used[oldest]` | `self.used[i] > self.used[oldest]` | killed | `floor_sim`: floor_sim: GPT, built field by field with one field wrong, a handful of seeds |
-| F1 | src/fat16.zig:1091 | `self.free_clusters += 1` | `self.free_clusters += 0` | killed | `store_test`: the model and the FAT store agree on every operation, and every error |
-| F2 | src/fat16.zig:1117 | `looked == clusters` | `looked == clusters + 1` | survived | see below |
-| F3 | src/fat16.zig:1871 | `.kept => try self.readSector(lba, self.scratch),` | `.kept => @memset(self.scratch, 0),` | killed | `io_test`: the page cache is the disk: every change interleaved with reads, under evictions and failed writes |
-| F4 | src/fat16.zig:1835 | `at + have >= bytes.len` | `at + have > bytes.len` | survived | see below |
-| F5 | src/fat16.zig:1837 | `next != last + 1` | `next != last + 2` | killed | `store_sim`: store_sim: three seeds (properties: 1..1000) |
-| F6 | src/fat16.zig:1872 | `.zeros => @memset(self.scratch, 0),` | `.zeros => try self.readSector(lba, self.scratch),` | survived, now killed | fat16_test: a file ending inside a sector leaves zeros past its end, not what a file before it left (mutant F6) |
-| F7 | src/fat16.zig:1717 | `offset > entry.size` | `offset > entry.size + 1` | killed | `floor_sim`: floor_sim: GPT, built field by field with one field wrong, a handful of seeds |
-| F8 | src/fat16.zig:1753 | `need > end.clusters` | `need > end.clusters + 1` | killed | `fat16_faults_test`: every operation stopped after every write leaves an outcome its doc names, and at worst leaked clusters |
-| F9 | src/fat16.zig:2016 | `if (d.first_cluster >= 2) try self.freeChain(d.first_cluster);` | `if (false) try self.freeChain(d.first_cluster);` | killed | `fat_sim`: the same, with probes of what the volume must refuse, two seeds (properties: 1..20) |
-| F10 | src/fat16.zig:2483 | `offset >= entry.size` | `offset > entry.size` | survived, now killed | fat16_test: reading at a file's very end reads nothing, even where its chain ends there too (mutant F10) |
-| F11 | src/fat16.zig:2533 | `got + have >= want` | `got + have > want` | survived | see below |
-| F12 | src/fat16.zig:2410 | `entry.size > out.len` | `entry.size > out.len + 1` | killed | `floor_sim`: floor_sim: GPT, built field by field with one field wrong, a handful of seeds |
-| F13 | src/fat16.zig:2470 | `out.clusters > self.max_cluster` | `out.clusters > self.max_cluster * 2` | survived | see below |
-| F14 | src/fat16.zig:2236 | `if (n < need) self.report(.short, first, n);` | `if (n + 1 < need) self.report(.short, first, n);` | survived, now killed | fat16_test: the check finds a chain exactly one cluster short of its size (mutant F14) |
-| F15 | src/fat16.zig:1211 | `first == 0x00 or first == 0xE5` | `first == 0x00` | survived, now killed | fat16_test: a name removed leaves its entries for the next name of the same length (mutant F15) |
-| F16 | src/fat16.zig:1385 | `self.scratch[pos.at] = 0xE5;` | `self.scratch[pos.at] = self.scratch[pos.at];` | killed | `fat16_test`: a file rewritten under a name in another case keeps the name and alias it has |
+| F1 | src/disk_fat.zig:1091 | `self.free_clusters += 1` | `self.free_clusters += 0` | killed | `store_test`: the model and the FAT store agree on every operation, and every error |
+| F2 | src/disk_fat.zig:1117 | `looked == clusters` | `looked == clusters + 1` | survived | see below |
+| F3 | src/disk_fat.zig:1871 | `.kept => try self.readSector(lba, self.scratch),` | `.kept => @memset(self.scratch, 0),` | killed | `io_test`: the page cache is the disk: every change interleaved with reads, under evictions and failed writes |
+| F4 | src/disk_fat.zig:1835 | `at + have >= bytes.len` | `at + have > bytes.len` | survived | see below |
+| F5 | src/disk_fat.zig:1837 | `next != last + 1` | `next != last + 2` | killed | `store_sim`: store_sim: three seeds (properties: 1..1000) |
+| F6 | src/disk_fat.zig:1872 | `.zeros => @memset(self.scratch, 0),` | `.zeros => try self.readSector(lba, self.scratch),` | survived, now killed | disk_fat_test: a file ending inside a sector leaves zeros past its end, not what a file before it left (mutant F6) |
+| F7 | src/disk_fat.zig:1717 | `offset > entry.size` | `offset > entry.size + 1` | killed | `floor_sim`: floor_sim: GPT, built field by field with one field wrong, a handful of seeds |
+| F8 | src/disk_fat.zig:1753 | `need > end.clusters` | `need > end.clusters + 1` | killed | `disk_fat_faults_test`: every operation stopped after every write leaves an outcome its doc names, and at worst leaked clusters |
+| F9 | src/disk_fat.zig:2016 | `if (d.first_cluster >= 2) try self.freeChain(d.first_cluster);` | `if (false) try self.freeChain(d.first_cluster);` | killed | `fat_sim`: the same, with probes of what the volume must refuse, two seeds (properties: 1..20) |
+| F10 | src/disk_fat.zig:2483 | `offset >= entry.size` | `offset > entry.size` | survived, now killed | disk_fat_test: reading at a file's very end reads nothing, even where its chain ends there too (mutant F10) |
+| F11 | src/disk_fat.zig:2533 | `got + have >= want` | `got + have > want` | survived | see below |
+| F12 | src/disk_fat.zig:2410 | `entry.size > out.len` | `entry.size > out.len + 1` | killed | `floor_sim`: floor_sim: GPT, built field by field with one field wrong, a handful of seeds |
+| F13 | src/disk_fat.zig:2470 | `out.clusters > self.max_cluster` | `out.clusters > self.max_cluster * 2` | survived | see below |
+| F14 | src/disk_fat.zig:2236 | `if (n < need) self.report(.short, first, n);` | `if (n + 1 < need) self.report(.short, first, n);` | survived, now killed | disk_fat_test: the check finds a chain exactly one cluster short of its size (mutant F14) |
+| F15 | src/disk_fat.zig:1211 | `first == 0x00 or first == 0xE5` | `first == 0x00` | survived, now killed | disk_fat_test: a name removed leaves its entries for the next name of the same length (mutant F15) |
+| F16 | src/disk_fat.zig:1385 | `self.scratch[pos.at] = 0xE5;` | `self.scratch[pos.at] = self.scratch[pos.at];` | killed | `disk_fat_test`: a file rewritten under a name in another case keeps the name and alias it has |
 
 ## The survivors
 
@@ -195,7 +195,7 @@ on). There are three verdicts:
 - **Four are equivalent** (F2, F13), or equivalent apart from speed (F4,
   F11): one more FAT lookup, or a loop detected later.
 - **The other four were weak oracles**, and each now has the test that
-  kills it in `fat16_test.zig` (metal-vmm QUEUE 107):
+  kills it in `disk_fat_test.zig` (metal-vmm QUEUE 107):
   - F6: no test checks what is on the disk past a file's end.
   - F10: no test reads at the very end of a file.
   - F14: no test checks the checker on a chain one cluster short.

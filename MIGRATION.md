@@ -11,7 +11,7 @@ Prod's chat data is about 215 MB in about 800 files under `data/` and
 name or a tree. It moves onto a FAT32 volume that two different programs
 handle:
 - **`droplet/build_volume.py` writes it once**, with mtools, without root;
-- **this machine's own `src/fat16.zig` and `src/io.zig`** read and write
+- **this machine's own `src/disk_fat.zig` and `src/io.zig`** read and write
   it from then on.
 
 ## Which FAT
@@ -42,7 +42,7 @@ no fixed limit of 512 entries.
 
 The application can produce exactly one of the hazards below: **names that
 differ only in case**. It could also produce **names too long for
-`fat16.zig`** until `max_name` went from 64 to 96 (QUEUE.md item 8). The
+`disk_fat.zig`** until `max_name` went from 64 to 96 (QUEUE.md item 8). The
 other hazards would have to come from something other than the application.
 
 ## What the application builds
@@ -73,7 +73,7 @@ The deepest path is about 200 bytes and seven levels:
 - **FAT** does not: names are compared without case.
   - `shutil.copytree` onto a vfat mount opens the second name, finds the
     first, and writes over it. There is no error, and one session is gone.
-  - This machine's `fat16.zig` also finds names without case (`eqlFold`).
+  - This machine's `disk_fat.zig` also finds names without case (`eqlFold`).
 - **The application can produce them.** Session ids keep their case and come
   from the URL, so two topics `Plan` and `plan` in one conversation are two
   sessions on Linux. Channel names are the same.
@@ -90,7 +90,7 @@ prod has any (on 2026-10-02 it had none).
 
 - **Linux** allows 255 bytes. **VFAT** allows 255 UTF-16 characters, so the
   copy succeeds.
-- **`fat16.zig` reads and writes names up to `max_name` = 96.** A longer
+- **`disk_fat.zig` reads and writes names up to `max_name` = 96.** A longer
   name is refused on write, and on read is found only under its 8.3 alias
   (`SESSIO~1.JSO`), so the application cannot open it by name, and a
   listing shows the alias.
@@ -110,7 +110,7 @@ than the application could have made.
 
 - `io.zig` opens paths up to 256 bytes; the application's deepest is about
   200.
-- `fat16.zig`'s `removeTree` stops at 16 levels; the application's deepest
+- `disk_fat.zig`'s `removeTree` stops at 16 levels; the application's deepest
   tree is about 7.
 
 The checker reports any path past either limit.
@@ -121,7 +121,7 @@ The checker reports any path past either limit.
 |---|---|---|
 | `" * : < > ? \ \|` or a control character | VFAT refuses the name, so the copy fails with `EINVAL` | — |
 | a name ending in `.` or a space | vfat drops the trailing dots and spaces, so `notes.` is stored as `notes`, and collides with `notes` if both exist | — |
-| a character past ASCII | VFAT can store it (with `iocharset=utf8`) | `fat16.zig` reads it as `?` and cannot find the file by its name |
+| a character past ASCII | VFAT can store it (with `iocharset=utf8`) | `disk_fat.zig` reads it as `?` and cannot find the file by its name |
 
 ### Files over 4 GiB — the application cannot produce these
 
@@ -132,7 +132,7 @@ in all.
 ### Timestamps outside 1980–2107 — the application cannot produce these
 
 - **The range.** FAT dates run from 1980-01-01 to 2107-12-31. vfat clamps
-  anything outside that, and `fat16.zig` writes "no date" for it. Every file
+  anything outside that, and `disk_fat.zig` writes "no date" for it. Every file
   the application writes carries a real modification time; a file from
   elsewhere (a `tar` with zero times, say) might not.
 - **Two things change for every file**, and matter because chat's "recent"
@@ -185,7 +185,7 @@ each is reported as a hard link.
 - **The root is a fixed run** of 512 entries (`mkfs.vfat`'s default). It
   holds `data` and `auth`, 4 entries in all.
 - **Every other directory may grow to 65,536 entries** (2 MiB). Past that
-  `fsck.fat` calls it broken, and `fat16.zig` stops there too: a write
+  `fsck.fat` calls it broken, and `disk_fat.zig` stops there too: a write
   that needs more room fails, and the application answers it as a full
   disk. angry-gopher's Store header says how near each of its folders can
   come (docs/reviews/REVIEW-fixed-sizes.md, finding 1).
@@ -195,7 +195,7 @@ each is reported as a hard link.
   - **a session's `<sid>.uploads/`:** 36-character names, 4 entries each, so
     about 16,000 uploads in one session;
   - **`auth/`:** one directory per account.
-- **Speed matters long before the limit.** `fat16.zig` finds a name by
+- **Speed matters long before the limit.** `disk_fat.zig` finds a name by
   reading its directory from the start, every time.
 
 The checker reports, per directory, whether it is over its limit.

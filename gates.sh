@@ -52,7 +52,7 @@ VERDICTS="${GATES_VERDICTS:-$HOME/build/gopher-metal/gates}"
 mkdir -p "$VERDICTS"
 
 # ── the kernels and host tests ───────────────────────────────────────────────
-# The limits angry-gopher's store copies from fat16.zig and io.zig: a
+# The limits angry-gopher's store copies from disk_fat.zig and io.zig: a
 # second, so first (tools/check_limits.py).
 python3 tools/check_limits.py "$GOPHER_ROOT/zig-server/src" || failed+=(limits)
 # The whole summary is kept: each test binary's time is in it, and this step

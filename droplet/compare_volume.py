@@ -9,7 +9,7 @@ volume, as it was?
 
 The volume is read through tools/fat16_read.py, an independent FAT16 reader
 written from the spec, not through Linux's vfat driver and not through this
-machine's fat16.zig. So it needs no root and no loop device. The image may be
+machine's disk_fat.zig. So it needs no root and no loop device. The image may be
 a bare volume or a GPT disk whose first partition holds one.
 
 Each finding is one of:

@@ -11,14 +11,14 @@ const metal = @import("metal");
 const serial = metal.serial;
 const virtio = metal.virtio;
 const gpt = metal.gpt;
-const fat16 = metal.fat16;
+const disk_fat = metal.disk_fat;
 
 comptime {
     _ = metal.boot;
 }
 
 var blk_mem: virtio.BlockMemory align(4096) = .{};
-var scratch: [fat16.sector_size]u8 align(4096) = undefined;
+var scratch: [disk_fat.sector_size]u8 align(4096) = undefined;
 var buf: [4096]u8 align(4096) = undefined;
 
 /// What `probe/run.sh` asked Linux to write, and what it put in it.
@@ -33,7 +33,7 @@ pub fn kmain() noreturn {
         serial.fail("no virtio-blk device on the PCI bus or in any mmio slot");
     var blk = blk_mem.bring(base) catch serial.fail("the block device would not come up");
     const start: u32 = if (gpt.dataPartition(&blk, &scratch) catch null) |p| p.first_lba else 0;
-    var vol = fat16.Volume.mount(&blk, &scratch, start) catch
+    var vol = disk_fat.Volume.mount(&blk, &scratch, start) catch
         serial.fail("the volume would not mount");
 
     const e = vol.open(path) catch serial.fail("the path Linux wrote would not resolve");

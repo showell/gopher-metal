@@ -131,7 +131,7 @@ simulator's floor holds them.
   past the window, a segment from behind (both wait on metal-vmm's QUEUE.md
   item 39), and a reopened window announced again (a large upload, the
   box's). The metal floor holds the other fifteen.
-- Properties in FAT (`fat16.zig`), the page cache, and restart.
+- Properties in FAT (`disk_fat.zig`), the page cache, and restart.
 - An explorer: metal-vmm choosing faults, scored by which properties a run
   reaches. That's the long-term aim, and it isn't urgent.
 
@@ -173,7 +173,7 @@ under "For the box" below.)*
 | `net`, `interrupts`, `boot`, `port`, `tsc`, `serial`, `serial_gate`, `screen`, `stack`, `reset`, `restarting`, `kernel_partition` | 0 | | nothing to name: drivers and the boot path with no refusal of their own (`net`'s `poll` answers null for no frame, which is not one); everything they do is reached only under a VMM | none |
 | `metal`, `netcore` | 0 | | nothing to name: each is the list of files one build compiles | none |
 | `tcp`, `tcp_check` | 23, and `tcp_check`'s rules | 23 | `tcp_sim` (named before item 76: COVERAGE.md above, "What the runs have said"); `tcp_check` is the invariants, run by every simulator and, under B15, by a `-Dcoverage` kernel | none: `tcp` refuses a segment by dropping it |
-| the simulators and tests (`tcp_sim`, `fat_sim`, `page_sim`, `pure_sim`, `ready_sim`, `durable_sim`, `floor_sim`, `store_sim`, `properties`, `test_disk`, `tcp_test`, `fat16_test`, `fat16_faults_test`, `io_test`, `store_test`) | their own | | they are what reaches the rows above; a simulator's own properties are on the floor beside the module it drives | none |
+| the simulators and tests (`tcp_sim`, `fat_sim`, `page_sim`, `pure_sim`, `ready_sim`, `durable_sim`, `floor_sim`, `store_sim`, `properties`, `test_disk`, `tcp_test`, `disk_fat_test`, `disk_fat_faults_test`, `io_test`, `store_test`) | their own | | they are what reaches the rows above; a simulator's own properties are on the floor beside the module it drives | none |
 | `store_model`, `store_fat`, `store_linux` | | | in the `store` row above | |
 | `virtio` (`Block.flush`, the rings, negotiation) | 7 | 0 here | under metal-vmm (below) | a SCSI status, as a virtio-blk status byte |
 | `io` (`durable`) | 1 | 0 here | under metal-vmm | none: a failed flush is logged, counted, and the response goes out |
@@ -196,7 +196,7 @@ under "For the box" below.)*
   the debt ledger has it.
 - Four that were missed in `properties` before item 76 as well: *no 8.3
   alias is left*, *a directory reaches FAT's most entries*, *a directory
-  deeper than the check walks*, *a tree too deep to remove*. `fat16_test.zig`
+  deeper than the check walks*, *a tree too deep to remove*. `disk_fat_test.zig`
   drives those limits; `properties` does not run it.
 - Two met only at the long tier's 300 FAT seeds, as before: *a run of
   sectors fails to read* and *a FAT32 entry's first cluster is past 65535*
@@ -220,7 +220,7 @@ Each error a module answers, and the named refusals that answer it, read
 from the source (a property followed by its `return`). Phase B's Store
 errors are built from these.
 
-**`fat16.zig`**
+**`disk_fat.zig`**
 
 - `BadBootSector`: fat: a mount refuses FAT32 with FAT16's fields set; fat: a mount refuses FATs whose total size overflows; fat: a mount refuses a FAT of no sectors; fat: a mount refuses a FAT too short for its clusters; fat: a mount refuses a FAT16 root of no entries; fat: a mount refuses a cluster size no volume has; fat: a mount refuses a sector without the boot signature; fat: a mount refuses a volume with no data region; fat: a mount refuses no reserved sectors, or a count of FATs it does not keep; fat: a mount refuses reserved sectors and FATs whose sum overflows
 - `BadChain`: fat: a chain leads outside the data area; fat: a chain that loops is refused; fat: a directory's first cluster is outside the data; fat: a file's chain ends before its size, reading a file whole *(a guard)*; fat: a file's chain ends before its size, reading at an offset, at its start; fat: a file's chain ends before its size, reading at an offset, past its first run; fat: a file's chain points at a reserved cluster, reading at an offset, at its start *(a guard)*; fat: a file's chain points at a reserved cluster, reading at an offset, past its first run *(a guard)*; fat: a file's first cluster is outside the data; fat: a file's first cluster is outside the data, at its chain's end; fat: a file's first cluster is outside the data, when its layout is asked; fat: a file's layout counts more clusters than the volume holds: a loop; fat: a file's layout finds a reserved cluster *(a guard)*; fat: a tree too deep to remove is refused; fat: a write finds a file's chain ends before its size, writing, at its start; fat: a write finds a file's chain ends before its size, writing, past its first run; fat: a write finds a file's chain points at a reserved cluster, writing, at its start *(a guard)*; fat: a write finds a file's chain points at a reserved cluster, writing, past its first run *(a guard)*; fat: a write finds a file's first cluster outside the data *(a guard)*; fat: an overwrite past a file's end is refused

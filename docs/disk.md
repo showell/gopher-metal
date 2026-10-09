@@ -1,6 +1,6 @@
 # The disk: our own FAT, judged by Linux
 
-How `src/fat16.zig` (FAT16 and FAT32 alike) came to be ours, and what each
+How `src/disk_fat.zig` (FAT16 and FAT32 alike) came to be ours, and what each
 part is judged by. FAT32 itself is [`FAT32.md`](../FAT32.md); the caches above
 the filesystem are `src/page_cache.zig` and `src/io.zig`'s `SiteCache`.
 
@@ -43,7 +43,7 @@ time and prints each one as RFC 3339. With no dates on the files the page
 lists 1970, in the wrong order.
 
 FAT has exactly one timestamp: two 16-bit words per directory entry, the year
-counted from 1980 and the seconds counted in **twos**. So `src/fat16.zig`
+counted from 1980 and the seconds counted in **twos**. So `src/disk_fat.zig`
 writes them — at creation, and again on every write that moves a file's size,
 which is where every append and every replace lands. The filesystem has no
 clock and must not invent one, so the host hands it the machine's: `io.zig`
@@ -78,7 +78,7 @@ The application stores `auth/<id>/api-key` and `_session_secret` and
 are two directories deep — so a volume that cannot hold them cannot hold the
 data we already have.
 
-So `src/fat16.zig` has VFAT long names, subdirectory writes, directory growth
+So `src/disk_fat.zig` has VFAT long names, subdirectory writes, directory growth
 and `mkdir`. **The verdict is `fsck.vfat`'s**, not ours: dosfstools has been
 reading VFAT for decades and knows every way a long-name run can be wrong —
 the checksum, the reverse ordering, the sequence numbers, orphaned entries,
@@ -168,7 +168,7 @@ FAT:** every change writes the first copy and then the others, so a machine
 stopped between the two leaves them a sector apart, the first the newer, and
 Linux's vfat reads only the first too. At mount, each sector of another copy
 that differs is rewritten from the first, and the count is reported to the
-caller (`src/fat16.zig`, `cacheFat`). And `readAt` reads a file as **runs** of
+caller (`src/disk_fat.zig`, `cacheFat`). And `readAt` reads a file as **runs** of
 consecutive clusters: whole sectors go straight into the caller's buffer as
 one request per run, capped at 64 KB, and only a sector the read starts or
 ends inside goes through the scratch sector.

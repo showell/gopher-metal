@@ -133,7 +133,7 @@ def main(argv) -> int:
 
 def self_test(binary: str = None) -> int:
     """Volumes made by mtools (build_volume.py's tree of every name shape)
-    and by fat16.zig itself, on FAT16 and FAT32: each extracted, then
+    and by disk_fat.zig itself, on FAT16 and FAT32: each extracted, then
     compared back name for name, byte for byte and time for time; a damaged
     one refused. With a zig-server binary, the Linux server then serves a
     doc from an extracted tree."""
@@ -197,7 +197,7 @@ def self_test(binary: str = None) -> int:
                 except Refused:
                     pass
 
-        # What fat16.zig itself writes: the host tests' kept images, if a
+        # What disk_fat.zig itself writes: the host tests' kept images, if a
         # caller made them (tools/check_fat16_images.sh keeps them here).
         kept = os.environ.get("FAT16_IMAGES")
         if kept and os.path.isdir(kept):
@@ -216,7 +216,7 @@ def self_test(binary: str = None) -> int:
                 if differ:
                     failures.append(f"{name}: compare_volume finds {differ[:2]}")
                 n += 1
-            print(f"  {n} volumes fat16.zig wrote extracted and compared")
+            print(f"  {n} volumes disk_fat.zig wrote extracted and compared")
 
         if binary:
             sys.path.insert(0, os.path.join(ROOT, "probe"))

@@ -7,10 +7,10 @@
 //!     try file.writePositionalAll(io, bytes, st.size);
 //!
 //! — a chat message, a game action, an uploaded chunk, a puzzle move. So this
-//! probe writes through exactly that, not through `fat16` underneath it.
+//! probe writes through exactly that, not through `disk_fat` underneath it.
 //!
 //! **THE CASES ARE THE ONES THAT CAN ACTUALLY BREAK**, and each is a different
-//! path through fat16.writeInto:
+//! path through disk_fat.writeInto:
 //!
 //!   log.txt     600 fixed-width lines, appended one at a time. At 2 KB per
 //!               cluster that is fourteen clusters, so the chain is extended
@@ -39,7 +39,7 @@ const metal = @import("metal");
 const serial = metal.serial;
 const virtio = metal.virtio;
 const gpt = metal.gpt;
-const fat16 = metal.fat16;
+const disk_fat = metal.disk_fat;
 const Io = metal.io;
 
 comptime {
@@ -47,7 +47,7 @@ comptime {
 }
 
 var blk_mem: virtio.BlockMemory align(4096) = .{};
-var scratch: [fat16.sector_size]u8 align(4096) = undefined;
+var scratch: [disk_fat.sector_size]u8 align(4096) = undefined;
 var heap: [1024 * 1024]u8 align(16) = undefined;
 var line_buf: [64]u8 = undefined;
 var expect: [64 * 1024]u8 = undefined;
@@ -71,7 +71,7 @@ pub fn kmain() noreturn {
     const base = virtio.find(virtio.device_id_block) orelse
         serial.fail("no virtio-blk device on the PCI bus or in any mmio slot");
     var blk = blk_mem.bring(base) catch serial.fail("the block device would not come up");
-    var vol = fat16.Volume.mount(&blk, &scratch, 0) catch
+    var vol = disk_fat.Volume.mount(&blk, &scratch, 0) catch
         serial.fail("this is not the FAT16 volume the probe expects");
     Io.mount(vol);
 
@@ -193,9 +193,9 @@ pub fn kmain() noreturn {
     // **THE PROBE CHECKS ITS OWN COVERAGE.** Spanning several clusters is the
     // whole point of this case, and it is a property of the line count AND the
     // volume's geometry — neither of which this file controls. Deleting the
-    // chain extension from fat16.writeInto must fail here; when the log fitted
+    // chain extension from disk_fat.writeInto must fail here; when the log fitted
     // in one cluster it did not.
-    const cluster_bytes: usize = vol.sectors_per_cluster * fat16.sector_size;
+    const cluster_bytes: usize = vol.sectors_per_cluster * disk_fat.sector_size;
     const spanned = (want + cluster_bytes - 1) / cluster_bytes;
     if (spanned < 3) {
         serial.put("  the log spans only ");
@@ -258,8 +258,8 @@ var fat_cache: [1024 * 1024]u8 align(4096) = undefined;
 /// read against the second FAT sector by sector, so a split that put its pieces
 /// in the wrong place fails there. Then the sweep files are read again through
 /// the cached FAT, which must answer exactly as the one on disk did.
-fn readThroughCachedFat(vol: *fat16.Volume) void {
-    const fat_sectors = vol.fatBytes() / fat16.sector_size;
+fn readThroughCachedFat(vol: *disk_fat.Volume) void {
+    const fat_sectors = vol.fatBytes() / disk_fat.sector_size;
     if (fat_sectors <= metal.virtio.Block.max_sectors) {
         serial.put("  the FAT is only ");
         serial.putDec(fat_sectors);
@@ -293,7 +293,7 @@ fn readThroughCachedFat(vol: *fat16.Volume) void {
     serial.put("-sector FAT held in memory, and both sweep files read back through it\n");
 }
 
-/// **EVERY WAY A READ CAN START AND END.** fat16.readAt reads a file as runs of
+/// **EVERY WAY A READ CAN START AND END.** disk_fat.readAt reads a file as runs of
 /// consecutive clusters: whole sectors straight into the caller's buffer, one
 /// request per run, and only a sector the read starts or ends inside through the
 /// scratch sector. So its paths are: a partial first sector, whole sectors, a
@@ -308,7 +308,7 @@ fn readThroughCachedFat(vol: *fat16.Volume) void {
 ///
 /// Fifteen offsets against eleven lengths, on each: sector edges, cluster
 /// edges, the middle, the last bytes, and lengths past the end.
-fn readSweep(io: anytype, vol: *fat16.Volume) void {
+fn readSweep(io: anytype, vol: *disk_fat.Volume) void {
     var round: usize = 0;
     while (round < 40) : (round += 1) {
         appendPattern(io, "frag.txt", 0x11, round * 1500, 1500);
@@ -391,7 +391,7 @@ fn readSweep(io: anytype, vol: *fat16.Volume) void {
 /// answers an HTTP Range request with `readPositionalAll`, so a browser seeking
 /// in an image lands in the middle of a chain. Each window below is compared
 /// with `expect` — the buffer built from the format string, not from a read —
-/// and each is chosen for the path it takes through fat16.readAt.
+/// and each is chosen for the path it takes through disk_fat.readAt.
 fn readWindows(io: anytype) void {
     const Window = struct { offset: u64, len: usize, why: []const u8 };
     const cluster: u64 = 2048;

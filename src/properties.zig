@@ -14,7 +14,7 @@
 //! Each simulator runs each seed as it does under `zig build test`, but a
 //! seed whose oracle fails is a broken `always` here, named with its seed,
 //! and the sweep goes on. At the end the catalog is judged: every assertion in
-//! tcp.zig, fat16.zig, the simulators and here, the ones never satisfied
+//! tcp.zig, disk_fat.zig, the simulators and here, the ones never satisfied
 //! first.
 //!
 //! **A FAILING `sometimes` IS NOT A TCP BUG.** It says no seed reached that

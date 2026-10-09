@@ -12,7 +12,7 @@ const metal = @import("metal");
 const serial = metal.serial;
 const virtio = metal.virtio;
 const gpt = metal.gpt;
-const fat16 = metal.fat16;
+const disk_fat = metal.disk_fat;
 
 // **THE ONE LINE THE PORT CHANGES.** In zig-server this reads
 // `const Io = std.Io;`, in all 37 files that have it. Nothing below it moves.
@@ -23,7 +23,7 @@ comptime {
 }
 
 var blk_mem: virtio.BlockMemory align(4096) = .{};
-var scratch: [fat16.sector_size]u8 align(4096) = undefined;
+var scratch: [disk_fat.sector_size]u8 align(4096) = undefined;
 
 /// A bump allocator over a static arena. Nothing is ever freed, which is what
 /// a one-request machine wants and what `boot.zig` already assumes.
@@ -59,7 +59,7 @@ pub fn kmain() noreturn {
     var blk = blk_mem.bring(base) catch serial.fail("the block device would not come up");
     // A partitioned disk or a bare volume, as vfat.zig reads either.
     const start: u32 = if (gpt.dataPartition(&blk, &scratch) catch null) |p| p.first_lba else 0;
-    const vol = fat16.Volume.mount(&blk, &scratch, start) catch serial.fail("the volume would not mount");
+    const vol = disk_fat.Volume.mount(&blk, &scratch, start) catch serial.fail("the volume would not mount");
 
     Io.mount(vol);
     Io.startClock(metal.pit.calibrate() catch serial.fail("the PIT would not calibrate the TSC"));

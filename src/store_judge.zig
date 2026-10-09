@@ -2,7 +2,7 @@
 //! notes/where-the-metal-stack-stands.md, "The Store").
 //!
 //! On the droplet a chat message is angry-gopher's `store.zig`, over this
-//! repo's `io.zig`, over `fat16`. This drives that stack and angry-gopher's
+//! repo's `io.zig`, over `disk_fat`. This drives that stack and angry-gopher's
 //! same `store.zig` over Linux's `std.Io` in a temporary folder, against the
 //! model (`store_model.zig`), with the same seeded operations, and requires
 //! the same answer from all three at every step and the same tree after it.

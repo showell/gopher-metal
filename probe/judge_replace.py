@@ -51,7 +51,7 @@ def expected_sessions() -> dict:
 
 
 class Volume:
-    """Just enough FAT16 to follow a directory's chain. Independent of fat16.zig."""
+    """Just enough FAT16 to follow a directory's chain. Independent of disk_fat.zig."""
 
     def __init__(self, path: str):
         with open(path, "rb") as f:

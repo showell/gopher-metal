@@ -4,7 +4,7 @@
 # names no property fails it too, as a floor gone stale.
 #
 # Today that is every property in tcp.zig and tcp_sim.zig (500 seeds, plain,
-# rough and crowded, reach them all, 2026-10-05) and all but one of fat16.zig's and
+# rough and crowded, reach them all, 2026-10-05) and all but one of disk_fat.zig's and
 # fat_sim.zig's. A scenario change that stops reaching one is a gap opening
 # in what the simulators test.
 tcp: a stuck half-open connection gives way to a new SYN
@@ -95,7 +95,7 @@ restart: one damaged byte reads as no record
 request_heap: a request meets the limit of what backs it
 request_heap: a reset gives back what grew past what it keeps
 
-# fat16.zig's refusals and FAT32 paths, reached by fat_sim's probes (runProbeSeed).
+# disk_fat.zig's refusals and FAT32 paths, reached by fat_sim's probes (runProbeSeed).
 fat: a FAT32 entry's first cluster is past 65535
 fat: a FAT32 volume's FSInfo count is let go
 fat: a chain leads outside the data area

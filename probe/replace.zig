@@ -36,7 +36,7 @@ const std = @import("std");
 const metal = @import("metal");
 const serial = metal.serial;
 const virtio = metal.virtio;
-const fat16 = metal.fat16;
+const disk_fat = metal.disk_fat;
 const Io = metal.io;
 
 /// Built twice: once as it always was, and once with the FAT held in memory.
@@ -50,7 +50,7 @@ comptime {
 }
 
 var blk_mem: virtio.BlockMemory align(4096) = .{};
-var scratch: [fat16.sector_size]u8 align(4096) = undefined;
+var scratch: [disk_fat.sector_size]u8 align(4096) = undefined;
 var heap: [256 * 1024]u8 align(16) = undefined;
 var body_buf: [8192]u8 = undefined;
 var name_buf: [96]u8 = undefined;
@@ -134,7 +134,7 @@ pub fn kmain() noreturn {
     const base = virtio.find(virtio.device_id_block) orelse
         serial.fail("no virtio-blk device on the PCI bus or in any mmio slot");
     var blk = blk_mem.bring(base) catch serial.fail("the block device would not come up");
-    var vol = fat16.Volume.mount(&blk, &scratch, 0) catch
+    var vol = disk_fat.Volume.mount(&blk, &scratch, 0) catch
         serial.fail("this is not the FAT16 volume the probe expects");
     if (cache_fat) {
         _ = vol.cacheFat(&fat_cache) catch |e| {

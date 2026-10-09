@@ -1,11 +1,11 @@
 //! A FAT16 or FAT32 disk in memory, for host tests: formatted here from Microsoft's
-//! FAT specification (not by `fat16.zig`), served by `virtio.Block.inMemory`,
+//! FAT specification (not by `disk_fat.zig`), served by `virtio.Block.inMemory`,
 //! and checked by reading its bytes directly where a check can be. Shared by
-//! `fat16_test.zig` and `io_test.zig`.
+//! `disk_fat_test.zig` and `io_test.zig`.
 
 const std = @import("std");
 const virtio = @import("virtio.zig");
-const fat16 = @import("fat16.zig");
+const disk_fat = @import("disk_fat.zig");
 
 const testing = std.testing;
 pub const sector = 512;
@@ -17,7 +17,7 @@ pub const Shape = struct {
     sectors: u32,
     sectors_per_cluster: u8 = 1,
     root_entries: u16 = 512,
-    kind: fat16.Kind = .fat16,
+    kind: disk_fat.Kind = .fat16,
     /// Added to a kept image's name, so the two kinds' images of one test
     /// do not overwrite each other.
     suffix: []const u8 = "",
@@ -121,14 +121,14 @@ fn format16(disk: []u8, shape: Shape) void {
 }
 
 /// What the BPB on a disk says, read from its bytes, and the FAT read and
-/// written the same way: from the spec, not through fat16.zig.
+/// written the same way: from the spec, not through disk_fat.zig.
 pub const Layout = struct {
     fat_start: usize,
     fat_bytes: usize,
     clusters: usize,
     /// The sector cluster 2 starts at.
     data_sector: usize,
-    kind: fat16.Kind,
+    kind: disk_fat.Kind,
     /// FAT32's root cluster; 0 on FAT16.
     root_cluster: u32,
 
@@ -141,7 +141,7 @@ pub const Layout = struct {
         if (total == 0) total = std.mem.readInt(u32, disk[32..36], .little);
         const data_start = reserved + 2 * fat_sectors + (@as(u32, root_entries) * 32 + sector - 1) / sector;
         const clusters = (total - data_start) / disk[13];
-        const kind: fat16.Kind = if (clusters >= 65525) .fat32 else .fat16;
+        const kind: disk_fat.Kind = if (clusters >= 65525) .fat32 else .fat16;
         return .{
             .fat_start = @as(usize, reserved) * sector,
             .fat_bytes = @as(usize, fat_sectors) * sector,
@@ -207,13 +207,13 @@ pub const Disk = struct {
     /// A cached disk also reads directories in bursts, as the host's do, of
     /// three sectors: an odd size, so a burst ends inside a cluster as often
     /// as at its end.
-    dir_burst: [3 * fat16.sector_size]u8 = undefined,
-    /// A cached disk holds directory sectors too (fat16's `dirs`), in few
+    dir_burst: [3 * disk_fat.sector_size]u8 = undefined,
+    /// A cached disk holds directory sectors too (disk_fat's `dirs`), in few
     /// slots, an odd number: sectors replace each other often, as they would
     /// in a volume larger than the host's cache.
     dir_keys: [61]u32 = undefined,
-    dir_data: [61 * fat16.sector_size]u8 = undefined,
-    vol: fat16.Volume = undefined,
+    dir_data: [61 * disk_fat.sector_size]u8 = undefined,
+    vol: disk_fat.Volume = undefined,
     /// FAT sectors the last mount's `cacheFatChecked` brought into line, and
     /// which copy it trusted.
     repaired: u32 = 0,
@@ -241,7 +241,7 @@ pub const Disk = struct {
     }
 
     pub fn mount(d: *Disk, cached: bool) !void {
-        d.vol = try fat16.Volume.mount(&d.blk, &d.scratch, 0);
+        d.vol = try disk_fat.Volume.mount(&d.blk, &d.scratch, 0);
         if (d.fat_cache) |c| d.gpa.free(c);
         d.fat_cache = null;
         if (d.check_room) |r| d.gpa.free(r);
@@ -295,7 +295,7 @@ pub const Disk = struct {
     }
 
     /// The volume's kept free count (`free_clusters`) equals a fresh count of
-    /// the FAT on the disk, made here from the spec, and fat16.zig's own.
+    /// the FAT on the disk, made here from the spec, and disk_fat.zig's own.
     pub fn expectKept(d: *Disk) !void {
         try testing.expectEqual(d.free(), d.vol.free_clusters);
         try testing.expectEqual(@as(u32, @intCast(d.free())), try d.vol.countFreeAgain());
@@ -352,11 +352,11 @@ pub const Disk = struct {
     }
 
     /// The names in a directory, joined by spaces, "." and ".." left out.
-    pub fn names(d: *Disk, dir_cluster: fat16.Cluster, buf: []u8) ![]const u8 {
+    pub fn names(d: *Disk, dir_cluster: disk_fat.Cluster, buf: []u8) ![]const u8 {
         const Collect = struct {
             buf: []u8,
             len: usize = 0,
-            fn each(s: *@This(), e: fat16.Entry) void {
+            fn each(s: *@This(), e: disk_fat.Entry) void {
                 const t = e.text();
                 if (std.mem.eql(u8, t, ".") or std.mem.eql(u8, t, "..")) return;
                 if (s.len > 0) {
@@ -376,10 +376,10 @@ pub const Disk = struct {
 /// What `Volume.check` found, each finding with its path copied.
 pub const Report = struct {
     pub const Found = struct {
-        problem: fat16.Problem,
+        problem: disk_fat.Problem,
         path: [256]u8 = undefined,
         path_len: usize = 0,
-        cluster: fat16.Cluster,
+        cluster: disk_fat.Cluster,
         count: u32,
 
         pub fn text(f: *const Found) []const u8 {
@@ -389,9 +389,9 @@ pub const Report = struct {
 
     found: [16]Found = undefined,
     len: usize = 0,
-    health: fat16.Health = .{},
+    health: disk_fat.Health = .{},
 
-    pub fn each(r: *Report, f: fat16.Finding) void {
+    pub fn each(r: *Report, f: disk_fat.Finding) void {
         if (r.len == r.found.len) return;
         var k = Found{ .problem = f.problem, .cluster = f.cluster, .count = f.count };
         k.path_len = @min(f.path.len, k.path.len);
@@ -401,7 +401,7 @@ pub const Report = struct {
     }
 
     /// One finding, as a test expects it.
-    pub const Want = struct { problem: fat16.Problem, path: []const u8 = "", cluster: fat16.Cluster, count: u32 = 0 };
+    pub const Want = struct { problem: disk_fat.Problem, path: []const u8 = "", cluster: disk_fat.Cluster, count: u32 = 0 };
 
     /// Exactly these findings, in this order.
     pub fn expect(r: *const Report, want: []const Want) !void {

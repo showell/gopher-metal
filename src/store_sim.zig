@@ -486,9 +486,9 @@ test "a run under a tape replays exactly: the same draws, the same choices" {
 // order between flushes, so on one a cut breaks the promises `runSeed`
 // holds. Boot turns the volume's cache off for that (`scsi.turnCacheOff`,
 // Steve's choice over write barriers, 2026-10-09). This holds the reason:
-// if fat16 ever orders its writes with barriers instead, these seeds pass,
+// if disk_fat ever orders its writes with barriers instead, these seeds pass,
 // this fails, and the choice is worth making again.
-test "store_sim: on a disk with a write cache, a cut breaks fat16's promises (why boot turns the cache off)" {
+test "store_sim: on a disk with a write cache, a cut breaks disk_fat's promises (why boot turns the cache off)" {
     var broken: u32 = 0;
     quiet = true;
     defer quiet = false;

@@ -360,7 +360,7 @@ PID) before a morning's gates.
 | `src/proto.zig` | ethernet, IPv4 and UDP — enough to carry a datagram |
 | `src/dhcp.zig` | DISCOVER, OFFER, REQUEST, ACK |
 | `src/gpt.zig` | where the partition starts, because sector 0 is not the filesystem |
-| `src/fat16.zig` | FAT16 and FAT32: mount a volume, walk a directory, read a file, write one |
+| `src/disk_fat.zig` | FAT16 and FAT32: mount a volume, walk a directory, read a file, write one |
 | `src/arp.zig` | answering "who has this address?", which is what makes one reachable |
 | `src/tcp.zig` | a table of connections: handshake, windows, retransmission, close |
 | `src/stream.zig` | that connection as a `std.Io.Reader` and a `std.Io.Writer` |

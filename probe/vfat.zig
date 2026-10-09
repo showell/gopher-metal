@@ -15,14 +15,14 @@ const metal = @import("metal");
 const serial = metal.serial;
 const virtio = metal.virtio;
 const gpt = metal.gpt;
-const fat16 = metal.fat16;
+const disk_fat = metal.disk_fat;
 
 comptime {
     _ = metal.boot;
 }
 
 var blk_mem: virtio.BlockMemory align(4096) = .{};
-var scratch: [fat16.sector_size]u8 align(4096) = undefined;
+var scratch: [disk_fat.sector_size]u8 align(4096) = undefined;
 var buf: [4096]u8 align(4096) = undefined;
 
 /// The names that made this necessary: every one is refused by 8.3, and two
@@ -36,13 +36,13 @@ const files = [_]struct { path: []const u8, body: []const u8 }{
 };
 
 const Names = struct {
-    buf: [32][fat16.max_name]u8 = undefined,
+    buf: [32][disk_fat.max_name]u8 = undefined,
     lens: [32]u8 = undefined,
     count: usize = 0,
-    fn each(self: *Names, e: fat16.Entry) void {
+    fn each(self: *Names, e: disk_fat.Entry) void {
         if (self.count >= self.buf.len) return;
         const t = e.text();
-        const n = @min(t.len, fat16.max_name);
+        const n = @min(t.len, disk_fat.max_name);
         @memcpy(self.buf[self.count][0..n], t[0..n]);
         self.lens[self.count] = @intCast(n);
         self.count += 1;
@@ -60,7 +60,7 @@ pub fn kmain() noreturn {
     // A bare FAT16 volume starts at sector 0; a GPT disk's starts where its
     // table says. Both are in use here, so both are tried.
     const start: u32 = if (gpt.dataPartition(&blk, &scratch) catch null) |p| p.first_lba else 0;
-    var vol = fat16.Volume.mount(&blk, &scratch, start) catch
+    var vol = disk_fat.Volume.mount(&blk, &scratch, start) catch
         serial.fail("the volume would not mount");
     serial.put("  volume at LBA ");
     serial.putDec(start);
