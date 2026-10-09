@@ -994,8 +994,9 @@ pub const Volume = struct {
         walk: Walk,
         sector: [sector_size]u8 = undefined,
         at: usize = 0,
-        loaded: bool = false,
-        done: bool = false,
+        /// The walk's sector: `to_read`, or `read` with `at` the next entry
+        /// in it; `ended` once the directory's end is reached.
+        sector_is: enum { to_read, read, ended } = .to_read,
         // A long name arrives before its entry: collected here, handed over
         // with the short entry that closes it.
         long: LongName = .{},
@@ -1038,10 +1039,10 @@ pub const Volume = struct {
 
         /// The next real entry, or null at the directory's end.
         pub fn next(self: *Lister) Error!?Entry {
-            while (!self.done) {
-                if (!self.loaded) {
+            while (self.sector_is != .ended) {
+                if (self.sector_is == .to_read) {
                     try self.load();
-                    self.loaded = true;
+                    self.sector_is = .read;
                     self.at = 0;
                 }
                 const sector = self.current();
@@ -1050,7 +1051,7 @@ pub const Volume = struct {
                     self.at += dirent_size;
                     const e = sector[at..][0..dirent_size];
                     if (e[0] == 0x00) { // nothing further in this directory
-                        self.done = true;
+                        self.sector_is = .ended;
                         return null;
                     }
                     if (e[0] == 0xE5) {
@@ -1072,10 +1073,10 @@ pub const Volume = struct {
                     return entry;
                 }
                 if (!(try self.walk.next())) {
-                    self.done = true;
+                    self.sector_is = .ended;
                     return null;
                 }
-                self.loaded = false;
+                self.sector_is = .to_read;
             }
             return null;
         }
