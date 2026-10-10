@@ -185,7 +185,7 @@ SHAPES = {
     f"data/chat/1_2/sessions/{SID80}.reactions.jsonl": b"{}\n",  # 96 characters: the longest
     f"data/chat/1_2/sessions/{SID80}.uploads/{HEX}.png": bytes(range(256)) * 300,
     "data/chat/1_2/sessions/Plan-B.md": b"mixed case\n",
-    "data/chat/channels/Dev-Talk.channel": b"{}\n",
+    "data/chat/channels/Dev-Talk.channel": b"1\n7\n",
     "data/chat/channels/Dev-Talk/sessions/general.md": b"hi\n",
     f"data/chat/users/7/docs/{SLUG80}.md": b"# a doc\n",
     "data/chat/users/7/code.md": b"",
