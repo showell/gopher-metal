@@ -7,10 +7,6 @@
 const std = @import("std");
 const assets = @import("gen/assets.zig");
 
-/// The one target: a 64-bit machine with no operating system, and no SSE,
-/// because a kernel that has not enabled it faults on the first xmm register
-/// the compiler reaches for -- and it reaches for them in memcpy unless told
-/// not to.
 /// A kernel's root module: bare metal, no red zone, and **ONE THREAD, AND
 /// THERE WILL NOT BE ANOTHER.** A freestanding target is not single-threaded
 /// by default, so without it std keeps the threaded lowerings (real atomic
@@ -32,6 +28,10 @@ fn kernelModule(b: *std.Build, root: std.Build.LazyPath, optimize: std.builtin.O
     });
 }
 
+/// The one target: a 64-bit machine with no operating system, and no SSE,
+/// because a kernel that has not enabled it faults on the first xmm register
+/// the compiler reaches for -- and it reaches for them in memcpy unless told
+/// not to.
 fn bareTarget(b: *std.Build) std.Build.ResolvedTarget {
     return b.resolveTargetQuery(.{
         .cpu_arch = .x86_64,
@@ -204,9 +204,19 @@ pub fn build(b: *std.Build) void {
     // B34): a field renamed in src/ broke gopher.elf (b4463a9) and native
     // (140's Fin) with every unit test green, since no test compiles a
     // kernel. Debug, and no binary asked for, so nothing is generated: only
-    // analysis. gopher.elf needs angry-gopher's port (port.sh); without one
-    // it is not checked, and the step says so rather than pass in silence.
-    const check_step = b.step("check", "type-check every kernel, native and droplet (part of `test`)");
+    // analysis.
+    //
+    // **ANALYSIS, NOT CODEGEN OR THE LINK.** What only LLVM or the linker
+    // sees passes here and fails `zig build kernels`: a symbol named only in
+    // an asm string or link.ld (a rename of `pvh_start_info`), a bad
+    // mnemonic, an extern nothing defines (a cold review found each). Code
+    // behind `builtin.mode != .Debug` is not analyzed either. native and
+    // droplet are host programs, and are built and linked whole.
+    //
+    // gopher.elf needs angry-gopher's port (port.sh) and its checkout, for
+    // the assets; without either it is not checked, and the step says so
+    // rather than pass in silence.
+    const check_step = b.step("check", "type-check every kernel (analysis only, not codegen or link), and build native and droplet (part of `test`)");
     for (kernels) |k| {
         const probe_opts = b.addOptions();
         probe_opts.addOption(bool, "cache_fat", k.cache_fat);
@@ -217,11 +227,13 @@ pub fn build(b: *std.Build) void {
         check_step.dependOn(&exe.step);
     }
     var port_code: u8 = 0;
-    if (b.runAllowFail(&.{ "test", "-f", b.fmt("{s}/router.zig", .{gopher_port}) }, &port_code, .ignore)) |_| {
+    const have_port = if (b.runAllowFail(&.{ "test", "-f", b.fmt("{s}/router.zig", .{gopher_port}) }, &port_code, .ignore)) |_| true else |_| false;
+    const have_app = if (b.runAllowFail(&.{ "test", "-d", b.fmt("{s}/zig-server", .{gopher_root}) }, &port_code, .ignore)) |_| true else |_| false;
+    if (have_port and have_app) {
         const exe = b.addExecutable(.{ .name = "gopher.elf", .root_module = kernelModule(b, b.path("probe/gopher.zig"), .Debug, &gopher_imports) });
         check_step.dependOn(&exe.step);
-    } else |_| {
-        const say = b.addSystemCommand(&.{ "echo", b.fmt("check: gopher.elf NOT type-checked: no port at {s} (port.sh makes one; GOPHER_PORT=<dir> ./port.sh and -Dgopher=<dir> for another place)", .{gopher_port}) });
+    } else {
+        const say = b.addSystemCommand(&.{ "echo", b.fmt("check: gopher.elf NOT type-checked: {s} (port.sh makes a port; GOPHER_PORT=<dir> ./port.sh and -Dgopher=<dir> for another place; -Dgopher-root=<dir> for the checkout)", .{if (!have_port) b.fmt("no port at {s}", .{gopher_port}) else b.fmt("no angry-gopher checkout at {s}", .{gopher_root})}) });
         say.has_side_effects = true;
         check_step.dependOn(&say.step);
     }
