@@ -231,8 +231,9 @@ pub const Conn = struct {
     timed_seq: u32 = 0,
     /// Duplicate ACKs in a row (RFC 5681).
     dupacks: u8 = 0,
-    /// This run of duplicates has been answered; cleared when `una` moves.
-    resent_early: bool = false,
+    /// This run of duplicates: still `counting`, or `answered` by a resend,
+    /// until `una` moves.
+    duplicates: enum { counting, answered } = .counting,
     /// FIN-WAIT-2's deadline for the peer's FIN.
     fin_wait_until: ?i96 = null,
 
@@ -843,7 +844,7 @@ pub const Table = struct {
     fn resend(self: *Table, wire: anytype, i: usize, now: i96) void {
         const c = &self.conns[i];
         c.dupacks = 0;
-        c.resent_early = true;
+        c.duplicates = .answered;
         c.sent = 0;
         if (c.fin.is(.sent)) c.fin.fire(.resent_early);
         c.timed_at = null; // Karn, the same as after a timeout
@@ -1131,13 +1132,13 @@ pub const Table = struct {
             const bare = data.len == 0 and flags & flag_fin == 0 and flags & flag_syn == 0;
             if (c.una != was) {
                 c.dupacks = 0;
-                c.resent_early = false;
+                c.duplicates = .counting;
             } else if (bare and number == c.una and c.wnd == held and c.wnd != 0 and c.highest() != c.una) {
                 // Counted to the resend and no further: a peer repeating
                 // itself forever must not overflow the count.
                 if (c.dupacks < dupacks_before_resend) c.dupacks += 1;
                 props.alwaysLessThanOrEqualTo(@src(), c.dupacks, dupacks_before_resend, "tcp: duplicate ACKs are counted to the resend and no further", null);
-                if (c.dupacks == dupacks_before_resend and !c.resent_early) self.resend(wire, i, now);
+                if (c.dupacks == dupacks_before_resend and c.duplicates == .counting) self.resend(wire, i, now);
             }
         }
 

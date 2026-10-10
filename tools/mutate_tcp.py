@@ -112,10 +112,10 @@ MUTANTS = [
     ("fin-acked-early", "acknowledging every byte is taken as acknowledging our FIN too",
      "if (advance > bytes) {", "if (advance >= bytes) {", None),
     ("fast-retransmit-off", "three duplicate acknowledgements send nothing again",
-     "if (c.dupacks == dupacks_before_resend and !c.resent_early)", "if (false)", None),
+     "if (c.dupacks == dupacks_before_resend and c.duplicates == .counting)", "if (false)", None),
     ("dupacks-kept", "new data acknowledged does not reset the duplicate count",
-     "                c.dupacks = 0;\n                c.resent_early = false;\n",
-     "                c.resent_early = false;\n", None),
+     "                c.dupacks = 0;\n                c.duplicates = .counting;\n",
+     "                c.duplicates = .counting;\n", None),
     ("dupacks-one", "one duplicate acknowledgement sends everything again",
      "pub const dupacks_before_resend: u8 = 3;", "pub const dupacks_before_resend: u8 = 1;", None),
 
