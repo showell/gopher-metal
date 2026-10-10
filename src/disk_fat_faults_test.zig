@@ -229,6 +229,36 @@ const stopped_ops = [_]Stopped{
         .want = &.{.{ .path = "data/a-rather-long-name-for-a-file.md", .any = &.{ .{ .file = &old_rec }, .absent } }},
     },
     .{
+        // Its chain freed after the commit a FAT sector at a time (B42's
+        // frees): 300 clusters, past one FAT sector on FAT16 and FAT32.
+        .name = "remove a file spanning FAT sectors",
+        .setup = struct {
+            fn f(v: *disk_fat.Volume) !void {
+                try v.writeFile("data/LONG", &leak_long);
+            }
+        }.f,
+        .run = struct {
+            fn f(v: *disk_fat.Volume) disk_fat.Error!void {
+                return v.remove("data/LONG");
+            }
+        }.f,
+        .want = &.{.{ .path = "data/LONG", .any = &.{ .{ .file = &leak_long }, .absent } }},
+    },
+    .{
+        .name = "replace a file spanning FAT sectors",
+        .setup = struct {
+            fn f(v: *disk_fat.Volume) !void {
+                try v.writeFile("data/LONG", &leak_long);
+            }
+        }.f,
+        .run = struct {
+            fn f(v: *disk_fat.Volume) disk_fat.Error!void {
+                return v.writeFile("data/LONG", &new_rec);
+            }
+        }.f,
+        .want = &.{.{ .path = "data/LONG", .any = &.{ .{ .file = &leak_long }, .{ .file = &new_rec } } }},
+    },
+    .{
         // A person deleting their account: their tree goes one entry at a
         // time, so a stop leaves part of it.
         .name = "remove a tree",
@@ -296,6 +326,9 @@ const stopped_ops = [_]Stopped{
         .one_of = &.{ "data/rec.tmp", "data/a-new-record.md" },
     },
 };
+
+/// The largest file a State holds: `leak_long`, 300 clusters of 512 bytes.
+const state_bytes = 160 * 1024;
 
 /// What `path` holds on `d`, as a State; a file's bytes go in `buf`.
 fn stateOf(d: *test_disk.Disk, path: []const u8, buf: []u8) !State {
@@ -371,7 +404,7 @@ fn onlyAllowed(r: *const test_disk.Report, these: []const disk_fat.Problem, op: 
 }
 
 test "every operation stopped after every write leaves an outcome its doc names, and at worst leaked clusters" {
-    var buf: [8192]u8 = undefined;
+    var buf: [state_bytes]u8 = undefined;
     for (stopped_ops, 0..) |op, op_index| {
         for (configs) |cfg| {
             const kind = if (cfg.shape.kind == .fat32) "FAT32" else "FAT16";
@@ -580,7 +613,7 @@ test "a request that fails before a write's commit gives back every cluster it t
 }
 
 test "a request that fails is an error, and the machine carries on with nothing worse than a stop leaves" {
-    var buf: [8192]u8 = undefined;
+    var buf: [state_bytes]u8 = undefined;
     for (stopped_ops) |op| {
         for (configs) |cfg| {
             // FAT32 with its FAT held, as the kernel holds it; the path with
@@ -654,7 +687,7 @@ test "a write that lands and answers failure is an error, and leaves nothing wor
     // Whatever it undoes after trying its commit (the entry that points at
     // what it made) must be safe either way: a cluster freed under an entry
     // that landed is one the next file takes, two files in one cluster.
-    var buf: [8192]u8 = undefined;
+    var buf: [state_bytes]u8 = undefined;
     for (stopped_ops) |op| {
         for (configs) |cfg| {
             if (cfg.shape.kind == .fat32 and !cfg.cached) continue;
@@ -708,7 +741,7 @@ test "a write that lands and answers failure, and the read after it fails too, l
     // FAT must not take that in, nor a cluster be freed on a read-back that
     // said nothing: the machine goes on writing on this mount, and what it
     // writes next into the same FAT sector reaches every copy.
-    var buf: [8192]u8 = undefined;
+    var buf: [state_bytes]u8 = undefined;
     for (stopped_ops) |op| {
         for (configs) |cfg| {
             if (cfg.shape.kind == .fat32) continue; // the same code; FAT32's disk is 35 MB
@@ -744,6 +777,50 @@ test "a write that lands and answers failure, and the read after it fails too, l
                 const r = try d.check();
                 try onlyAllowed(&r, if (op.appends != null) &allowed_append else &allowed, op.name, kind, "write that landed and failed, and the next request failed", n);
             }
+        }
+    }
+}
+
+test "a write that lands and answers failure (or fails) to a held FAT sector, its read-back and the write again failing too: a batch freed is counted may be live (B42's frees)" {
+    // A batch's refused write whose read-back fails is unknown, and the
+    // first copy is written again once; where that fails too, the disk
+    // holds the batch freed or not, and the count must say so.
+    for (stopped_ops) |op| {
+        if (std.mem.indexOf(u8, op.name, "spanning FAT sectors") == null) continue;
+        for ([_]@FieldType(@import("virtio.zig").Block.Fault, "kind"){ .fails, .lands_and_fails }) |fault| {
+            const cfg = configs[1]; // FAT16, its FAT held
+            const total = try requestsOf(op, cfg);
+            const d = try Disk.makeUnkept("limit-held-twice", cfg.shape, true);
+            defer d.deinit();
+            try op.setup(&d.vol);
+            setFsInfo(d);
+            const before = try testing.allocator.dupe(u8, d.bytes);
+            defer testing.allocator.free(before);
+            var unsure: u64 = 0;
+            var n: u64 = 0;
+            while (n < total) : (n += 1) {
+                @memcpy(d.bytes, before);
+                try d.mount(true);
+                d.blk.fault = .{ .at = d.blk.requests + n, .kind = fault, .then_fail = 2, .seed = @truncate(n) };
+                op.run(&d.vol) catch {};
+                d.blk.fault = null;
+                if (d.vol.unsure_clusters > 1) unsure += 1;
+                try countedIsFound(d, op.name, @tagName(fault), "a held FAT sector's write failed, then its read-back and its write again", n);
+                // **AND AS THE DISK HAS IT**: the check above walks the held
+                // FAT; fsck.fat, and the next boot, read the disk's first
+                // copy, which the write again did not reach.
+                const exact = d.vol.leaked_clusters;
+                const most = exact + d.vol.unsure_clusters;
+                const unsized = d.vol.unsized_leaks;
+                try d.mount(false);
+                const r = try d.check();
+                if (r.health.leaked < exact or (unsized == 0 and r.health.leaked > most)) {
+                    std.debug.print("{s} ({t}, then 2 failed): request {d}; the disk's first FAT copy leaks {d} clusters, counted {d} to {d}\n", .{ op.name, fault, n, r.health.leaked, exact, most });
+                    return error.TestUnexpectedResult;
+                }
+            }
+            // Not vacuous: a batch's write again failed, and was counted.
+            try testing.expect(unsure > 0);
         }
     }
 }
@@ -975,9 +1052,9 @@ test "a disk that lies (a write that lands nothing or half, a read of other byte
         }
     }
     // Not vacuous: a run for every request of every operation. Fewer since
-    // a chain's FAT entries are written a sector at a time (metal-vmm B42):
-    // 804 runs there, from over 1,000.
-    try testing.expect(runs > 700);
+    // a chain's FAT entries are written a sector at a time, taken (metal-vmm
+    // B42: 804 runs, from over 1,000) and freed (596).
+    try testing.expect(runs > 550);
 }
 
 /// One operation whose failure is judged for lost clusters: what it starts
@@ -1072,6 +1149,28 @@ const leak_ops = [_]LeakOp{
     }.f, .run = struct {
         fn f(v: *disk_fat.Volume) anyerror!void {
             try v.writeFile("data/LONG", &leak_long);
+        }
+    }.f },
+    // Its chain freed (after the commit), a FAT sector at a time: two
+    // batches, each failing in turn.
+    .{ .name = "a remove of a file spanning two FAT sectors", .setup = struct {
+        fn f(v: *disk_fat.Volume) anyerror!void {
+            _ = try v.makePath("data");
+            try v.writeFile("data/LONG", &leak_long);
+        }
+    }.f, .run = struct {
+        fn f(v: *disk_fat.Volume) anyerror!void {
+            try v.remove("data/LONG");
+        }
+    }.f },
+    .{ .name = "an overwrite of a file spanning two FAT sectors", .setup = struct {
+        fn f(v: *disk_fat.Volume) anyerror!void {
+            _ = try v.makePath("data");
+            try v.writeFile("data/LONG", &leak_long);
+        }
+    }.f, .run = struct {
+        fn f(v: *disk_fat.Volume) anyerror!void {
+            try v.writeFile("data/LONG", &leak_more);
         }
     }.f },
     .{ .name = "a remove", .setup = struct {

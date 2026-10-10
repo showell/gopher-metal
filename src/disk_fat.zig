@@ -1528,7 +1528,7 @@ pub const Volume = struct {
     /// caller's commit, so a stop between the writes leaves lost clusters,
     /// as it did.
     ///
-    /// **A BATCH'S WRITE HAS ONE VERDICT** (`batchRefused`), as one mark's
+    /// **A BATCH'S WRITE HAS ONE VERDICT** (`heldRefused`), as one mark's
     /// did: not landed, the held sector goes back as it was; landed, the
     /// batch is taken and given back; unknown, taken as written and never
     /// counted taken, a counted leak.
@@ -1594,7 +1594,7 @@ pub const Volume = struct {
             if (n > 1) props.reachable(@src(), "fat: an allocation takes several clusters in one FAT sector write", .{ .clusters = n });
 
             self.writeSector(self.fat_start + in_sector, sector) catch |e| {
-                switch (self.batchRefused(self.fat_start + in_sector, sector, &was, batch_first, last)) {
+                switch (self.heldRefused(self.fat_start + in_sector, sector, &was)) {
                     .before => @memcpy(sector, &was),
                     .landed => {
                         self.keepTaken(n);
@@ -1653,23 +1653,39 @@ pub const Volume = struct {
         while (i < n) : (i += 1) self.keepCount(0, self.endMark());
     }
 
-    /// **WHETHER A BATCH'S REFUSED WRITE LANDED**, read back once into
-    /// scratch, judged on the batch's own entries (`first` to `last` in the
-    /// sector) only: the held sector may differ from the disk's elsewhere
-    /// and be right to (copies left apart, an earlier write taken as
-    /// landed). Every one as written, `landed`; every one as it was,
-    /// `before`; anything else, or a read-back that failed, `unknown`.
-    fn batchRefused(self: *Volume, lba: u32, written: *const [sector_size]u8, was: *const [sector_size]u8, first: Cluster, last: Cluster) Landing {
+    /// `n` clusters freed, in the kept count.
+    fn keepFreed(self: *Volume, n: u32) void {
+        self.free_clusters +|= n;
+    }
+
+    /// **WHETHER A HELD FAT SECTOR'S REFUSED WRITE LANDED**, read back once
+    /// into scratch and judged on the entries the write changed (where
+    /// `written` and `was` differ) only: the held sector may differ from the
+    /// disk's elsewhere and be right to (copies left apart, an earlier write
+    /// taken as landed). Every one as written, `landed`; every one as it
+    /// was, `before`; anything else, or a read-back that failed, `unknown`.
+    /// A batch taken (`allocChainHeld`) and a batch freed
+    /// (`freeAfterCommitHeld`) are judged by it.
+    fn heldRefused(self: *Volume, lba: u32, written: *const [sector_size]u8, was: *const [sector_size]u8) Landing {
         self.readSector(lba, self.scratch) catch {
-            props.reachable(@src(), "fat: a batch's FAT sector whose write failed cannot be read again", null);
+            props.reachable(@src(), "fat: a held FAT sector whose write failed cannot be read again", null);
             return .unknown;
         };
         const width = self.entryBytes();
-        const from = first * width % sector_size;
-        const to = last * width % sector_size + width;
-        if (std.mem.eql(u8, self.scratch[from..to], written[from..to])) return .landed;
-        if (std.mem.eql(u8, self.scratch[from..to], was[from..to])) return .before;
-        props.reachable(@src(), "fat: a batch's FAT sector whose write failed reads back as neither", null);
+        var as_written = true;
+        var as_was = true;
+        var i: u32 = 0;
+        while (i < sector_size / width) : (i += 1) {
+            const new = self.entryIn(written, i);
+            const old = self.entryIn(was, i);
+            if (new == old) continue;
+            const now = self.entryIn(self.scratch, i);
+            if (now != new) as_written = false;
+            if (now != old) as_was = false;
+        }
+        if (as_written) return .landed;
+        if (as_was) return .before;
+        props.reachable(@src(), "fat: a held FAT sector whose write failed reads back as neither", null);
         return .unknown;
     }
 
@@ -1814,6 +1830,7 @@ pub const Volume = struct {
     /// by walking it, and the cluster whose freeing was refused by where its
     /// FAT write stands (`fatSet`'s verdict): freed, not, or unknown.
     fn freeAfterCommit(self: *Volume, first: Cluster) void {
+        if (self.fat) |fat| return self.freeAfterCommitHeld(fat, first);
         var cluster = first;
         while (self.inData(cluster)) {
             const next = self.fatGet(cluster) catch return self.chainLeft(cluster);
@@ -1831,6 +1848,79 @@ pub const Volume = struct {
                 },
             };
             cluster = next;
+        }
+    }
+
+    /// `freeAfterCommit` with the FAT held: **A FAT SECTOR AT A TIME**, as
+    /// `allocChainHeld` takes one. The chain's clusters whose entries are in
+    /// one sector are freed in the held sector, in the chain's order, until
+    /// the chain leaves it, and the sector is written once to each copy. A
+    /// 1 MiB file's old chain was 64 writes on small's clusters, an entry at
+    /// a time.
+    ///
+    /// **A REFUSED WRITE STOPS IT, AS ONE ENTRY'S DID**, by `heldRefused`'s
+    /// verdict: not landed, the held sector goes back as it was and the
+    /// chain from the batch's first is left; landed, the batch is free and
+    /// the rest is left; unknown, the batch is taken as freed and the first
+    /// copy written again once, and the batch may be free or taken where
+    /// that fails too. What is left is a counted leak (`chainLeft`).
+    fn freeAfterCommitHeld(self: *Volume, fat: []u8, first: Cluster) void {
+        const width = self.entryBytes();
+        var cluster = first;
+        while (self.inData(cluster)) {
+            // Let go before the first change, as `fatSet` does.
+            self.forgetFsInfo() catch return self.chainLeft(cluster);
+            const in_sector = cluster * width / sector_size;
+            const sector = fat[in_sector * sector_size ..][0..sector_size];
+            var was: [sector_size]u8 = undefined;
+            @memcpy(&was, sector);
+            const batch_first = cluster;
+            var n: u32 = 0;
+            while (self.inData(cluster) and cluster * width / sector_size == in_sector) {
+                const at = cluster * width % sector_size;
+                const next = self.entryIn(sector, at / width);
+                // A free entry in a chain (rot, or a loop back to a cluster
+                // this batch freed) ends it, as one entry at a time did.
+                props.always(@src(), next != 0, "fat: every cluster freed was in use", .{ .cluster = cluster });
+                // **THE HINT IS LOWERED FIRST**: a lower hint is always
+                // sound, and a write that fails may still have freed it.
+                if (cluster < self.alloc_hint) self.alloc_hint = cluster;
+                if (next == 0) {
+                    cluster = 0;
+                    break;
+                }
+                self.putEntry(sector, at, 0);
+                n += 1;
+                cluster = next;
+            }
+            if (n == 0) return;
+            if (n > 1) props.reachable(@src(), "fat: a chain frees several clusters in one FAT sector write", .{ .clusters = n });
+            self.writeSector(self.fat_start + in_sector, sector) catch {
+                switch (self.heldRefused(self.fat_start + in_sector, sector, &was)) {
+                    .before => {
+                        @memcpy(sector, &was);
+                        self.chainLeft(batch_first);
+                    },
+                    .landed => {
+                        self.keepFreed(n);
+                        self.writeCopies(in_sector, sector);
+                        self.chainLeft(cluster);
+                    },
+                    .unknown => {
+                        self.keepFreed(n);
+                        const again = if (self.writeSector(self.fat_start + in_sector, sector)) true else |_| false;
+                        if (!again) {
+                            self.copyApart();
+                            self.unsure_clusters +|= n;
+                        }
+                        self.writeCopies(in_sector, sector);
+                        self.chainLeft(cluster);
+                    },
+                }
+                return;
+            };
+            self.keepFreed(n);
+            self.writeCopies(in_sector, sector);
         }
     }
 

@@ -2654,6 +2654,48 @@ test "a chain's FAT entries are written once per FAT sector, not once per entry 
     }
 }
 
+test "a chain is freed a FAT sector at a time, by a remove and by an overwrite (metal-vmm B42's frees)" {
+    // A remove or overwrite freed its old chain an entry at a time, each
+    // writing its sector to both copies: 64 writes for a 1 MiB file on
+    // small's clusters, where its FAT sectors are three.
+    for ([_]test_disk.Shape{ test_disk.small, test_disk.small32 }) |shape| {
+        for ([_]enum { remove, overwrite }{ .remove, .overwrite }) |how| {
+            const d = try test_disk.Disk.make("b42-frees", shape, true);
+            defer d.deinit();
+            try d.mount(true);
+            const bytes = try testing.allocator.alloc(u8, 1 << 20);
+            defer testing.allocator.free(bytes);
+            @memset(bytes, 0x5A);
+            try d.vol.writeFile("UPLOAD.BIN", bytes);
+            const free_before = (try d.vol.space()).free;
+            const w0 = d.blk.writes;
+            switch (how) {
+                .remove => try d.vol.remove("UPLOAD.BIN"),
+                .overwrite => try d.vol.writeFile("UPLOAD.BIN", "small now"),
+            }
+            const writes = d.blk.writes - w0;
+            const per_cluster = @as(u64, d.vol.sectors_per_cluster) * disk_fat.sector_size;
+            const clusters = (bytes.len + per_cluster - 1) / per_cluster;
+            const per_sector: u64 = disk_fat.sector_size / @as(u64, if (shape.kind == .fat32) 4 else 2);
+            const fat_sectors = (clusters + per_sector - 1) / per_sector + 1;
+            // Each FAT sector the chain is in, freed: written to two copies;
+            // the rest is the directory and an overwrite's new cluster.
+            const most = 2 * fat_sectors + 16;
+            if (writes > most) {
+                std.debug.print("{s} {s}: {d} clusters freed with {d} writes, more than {d}\n", .{ @tagName(shape.kind), @tagName(how), clusters, writes, most });
+                return error.TestUnexpectedResult;
+            }
+            // Every cluster came back, and the volume is as fsck would have it.
+            const free_after = (try d.vol.space()).free;
+            const new_bytes: u64 = if (how == .overwrite) per_cluster else 0;
+            try testing.expectEqual(free_before + clusters * per_cluster - new_bytes, free_after);
+            try testing.expectEqual(try d.vol.countFreeAgain(), @as(u32, @intCast(free_after / per_cluster)));
+            const r = try d.check();
+            try r.expect(&.{});
+        }
+    }
+}
+
 test "the check counts orphaned long-name parts as fsck.fat finds them: by run, number and checksum (metal-vmm 148(b))" {
     const d = try Disk.make("orphan-rules", test_disk.small, false);
     defer d.deinit();
