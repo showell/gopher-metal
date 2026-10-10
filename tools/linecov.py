@@ -114,6 +114,7 @@ def main(argv: list) -> int:
     source, binaries = argv[1], argv[2:]
     text = open(source).read().splitlines()
     have, ran = set(), set()
+    crashed = []
     for b in binaries:
         table = line_table(b, source)
         if not table:
@@ -123,6 +124,7 @@ def main(argv: list) -> int:
         ran |= hit
         if code != 0:
             print(f"linecov: {os.path.basename(b)} exited {code}: its coverage is short")
+            crashed.append(os.path.basename(b))
     if not have:
         print(f"linecov: none of the {len(binaries)} binaries has a line of {source}")
         return 2
@@ -132,6 +134,12 @@ def main(argv: list) -> int:
           f"({100 * len(ran) / max(1, len(have)):.1f}%), over {len(binaries)} binaries")
     for n in missed:
         print(f"  {n:5d}  {text[n - 1].strip()[:100]}")
+    # **A BINARY THAT DID NOT FINISH FAILS THE MEASURE** (metal-vmm 146(d)):
+    # every file's tests are one binary now, so a crash anywhere cuts every
+    # file's coverage short, and a short measure read as a clean one hides it.
+    if crashed:
+        print(f"linecov: FAILED: {', '.join(crashed)} did not finish; the lines above are short")
+        return 1
     return 0
 
 
