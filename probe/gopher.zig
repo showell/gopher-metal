@@ -1299,7 +1299,7 @@ fn mountFat(blk: *virtio.Block, scratch: *[disk_fat.sector_size]u8, what: []cons
         serial.put(": ");
         serial.putDec(mirrors.repaired);
         serial.put(" sectors of the FAT's copies differed; ");
-        if (mirrors.checked) {
+        if (mirrors.found == .weighed or mirrors.found == .tied) {
             serial.put("checked with each copy, the first had ");
             serial.putDec(mirrors.health[0].problems);
             serial.put(" problems and ");
@@ -1313,17 +1313,17 @@ fn mountFat(blk: *virtio.Block, scratch: *[disk_fat.sector_size]u8, what: []cons
         serial.put(if (mirrors.trusted == 1) "the first was written from the second\n" else "the second was written from the first\n");
     }
     if (weigh_room == null) serial.put("  no memory to weigh the FAT's copies: the first is the FAT\n");
-    if (mirrors.tied) {
+    if (mirrors.found == .tied) {
         serial.put("  ");
         serial.put(what);
         serial.put(": the FAT's copies differ and check alike: the first is held, neither written over\n");
     }
-    if (mirrors.repair_failed) {
+    if (mirrors.repair == .refused) {
         serial.put("  ");
         serial.put(what);
         serial.put(": the disk refused a repair of the FAT's copies: the FAT is held, the copies left apart\n");
     }
-    if (mirrors.unweighed) {
+    if (mirrors.found == .unweighed) {
         serial.put("  ");
         serial.put(what);
         serial.put(": the FAT's copies differ and could not be weighed (a read failed): the first is held, neither written over\n");
