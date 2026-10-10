@@ -109,8 +109,12 @@ const Bench = struct {
         return io_mod.dataVolume().?;
     }
 
-    fn placeOf(b: *Bench, lba: u64) Place {
+    fn placeOf(b: *Bench, device_lba: u64) Place {
+        var lba = device_lba;
         const v = b.vol();
+        // The volume's own sector numbers, from its partition's start.
+        if (lba < v.start_lba) return .boot;
+        lba -= v.start_lba;
         if (lba < v.fat_start) return .boot;
         if (lba < v.fat_start + @as(u64, v.num_fats) * v.sectors_per_fat) return .fat;
         if (v.dirs) |c| {
@@ -163,17 +167,18 @@ fn seed(b: *Bench) !void {
         try store.replace(mio, x, try std.fmt.allocPrint(x, "auth/{d}/name", .{id}), try std.fmt.allocPrint(x, "Person {d}", .{id}), .{});
         try store.write(mio, x, try std.fmt.allocPrint(x, "data/users/{d}/last-seen", .{id}), "1789732801", .{});
         try store.replace(mio, x, try std.fmt.allocPrint(x, "data/players/{d}/name", .{id}), try std.fmt.allocPrint(x, "Person {d}", .{id}), .{});
+        try store.write(mio, x, try std.fmt.allocPrint(x, "data/players/{d}/last-seen", .{id}), "1789732801", .{});
     }
     var m: u32 = 0;
     while (m < 20) : (m += 1) _ = try store.append(mio, x, "data/chat/1_2/sessions/1.md", "**Person 1** said: a message of some ordinary length, as people write them\n\n");
-    try store.replace(mio, x, "data/chat/1_2/sessions/1.count", "20 1600 1", .{});
+    try store.replace(mio, x, "data/chat/1_2/sessions/1.count", "20 1520\n1444 1", .{});
     try store.write(mio, x, "data/chat/1_2/sessions/1.lastauthor", "1", .{});
     try store.write(mio, x, "data/chat/users/1/last-sessions/1_2", "1", .{});
     try store.write(mio, x, "data/chat/users/1/last-conv", "1_2", .{});
     for ([_][]const u8{ "general", "uploads", "ds" }) |ch| {
         try store.replace(mio, x, try std.fmt.allocPrint(x, "data/chat/channels/{s}.channel", .{ch}), "members: 1 2", .{});
         _ = try store.append(mio, x, try std.fmt.allocPrint(x, "data/chat/channels/{s}/sessions/1.md", .{ch}), "**Person 2** said: hello\n\n");
-        try store.replace(mio, x, try std.fmt.allocPrint(x, "data/chat/channels/{s}/sessions/1.count", .{ch}), "1 26 2", .{});
+        try store.replace(mio, x, try std.fmt.allocPrint(x, "data/chat/channels/{s}/sessions/1.count", .{ch}), "1 26\n0 2", .{});
     }
     _ = try store.append(mio, x, "data/lynrummy/1/lynrummy-elm/sessions/1/actions.dsl", "start\n");
     io_mod.durable();
@@ -231,7 +236,7 @@ const prims = [_]Prim{
     }.f },
     .{ .name = "replace a small file", .run = struct {
         fn f(b: *Bench) !void {
-            try store.replace(mio, b.a(), "data/chat/1_2/sessions/1.count", "21 1630 1", .{});
+            try store.replace(mio, b.a(), "data/chat/1_2/sessions/1.count", "21 1550\n1520 1", .{});
         }
     }.f },
     .{ .name = "makeDir a folder that is there", .run = struct {
@@ -255,7 +260,7 @@ fn send(b: *Bench) !void {
     _ = try store.stat(mio, x, "data/chat/1_2/sessions/1.md");
     _ = try store.read(mio, x, "data/chat/1_2/sessions/1.count", lim);
     _ = try store.append(mio, x, "data/chat/1_2/sessions/1.md", "**Person 1** said: a message of some ordinary length\n\n");
-    try store.replace(mio, x, "data/chat/1_2/sessions/1.count", "21 1650 1", .{});
+    try store.replace(mio, x, "data/chat/1_2/sessions/1.count", "21 1574\n1520 1", .{});
     try store.write(mio, x, "data/chat/1_2/sessions/1.lastauthor", "1", .{});
     _ = try store.readOrNull(mio, x, "auth/1/name", lim);
     _ = try store.readOrNull(mio, x, "auth/2/name", lim);
@@ -263,6 +268,15 @@ fn send(b: *Bench) !void {
     try store.makeDir(mio, x, "data/chat/users/1/last-sessions");
     try store.write(mio, x, "data/chat/users/1/last-sessions/1_2", "1", .{});
     try store.write(mio, x, "data/chat/users/1/last-conv", "1_2", .{});
+}
+
+/// Where the last message begins, from a `.count`'s second line, as
+/// chat_store.zig's `lastMessage` reads it.
+fn lastOffset(count: []const u8) u64 {
+    var lines = std.mem.splitScalar(u8, count, '\n');
+    _ = lines.next();
+    var it = std.mem.tokenizeScalar(u8, lines.next() orelse return 0, ' ');
+    return std.fmt.parseInt(u64, it.next() orelse return 0, 10) catch 0;
 }
 
 /// GET /chat/recent for member 1 (recent.zig, chat_store.zig, users.zig).
@@ -286,9 +300,9 @@ fn recent(b: *Bench) !void {
         for (items) |s| {
             if (!std.mem.endsWith(u8, s.name, ".md")) continue;
             const stem = s.name[0 .. s.name.len - 3];
-            _ = try store.read(mio, x, try std.fmt.allocPrint(x, "{s}/{s}.count", .{ dir, stem }), lim);
+            const count = try store.read(mio, x, try std.fmt.allocPrint(x, "{s}/{s}.count", .{ dir, stem }), lim);
             var tail: [64 << 10]u8 = undefined;
-            _ = try store.readAt(mio, x, try std.fmt.allocPrint(x, "{s}/{s}.md", .{ dir, stem }), 0, &tail);
+            _ = try store.readAt(mio, x, try std.fmt.allocPrint(x, "{s}/{s}.md", .{ dir, stem }), lastOffset(count), &tail);
             _ = try store.read(mio, x, "auth/2/name", lim);
         }
     }
@@ -300,9 +314,9 @@ fn recent(b: *Bench) !void {
         for (try store.list(mio, x, dir)) |s| {
             if (!std.mem.endsWith(u8, s.name, ".md")) continue;
             const stem = s.name[0 .. s.name.len - 3];
-            _ = try store.read(mio, x, try std.fmt.allocPrint(x, "{s}/{s}.count", .{ dir, stem }), lim);
+            const count = try store.read(mio, x, try std.fmt.allocPrint(x, "{s}/{s}.count", .{ dir, stem }), lim);
             var tail: [64 << 10]u8 = undefined;
-            _ = try store.readAt(mio, x, try std.fmt.allocPrint(x, "{s}/{s}.md", .{ dir, stem }), 0, &tail);
+            _ = try store.readAt(mio, x, try std.fmt.allocPrint(x, "{s}/{s}.md", .{ dir, stem }), lastOffset(count), &tail);
             _ = try store.read(mio, x, "auth/2/name", lim);
         }
     }
@@ -357,7 +371,7 @@ fn sendCut(b: *Bench) !void {
     _ = try store.stat(mio, x, "data/chat/1_2/sessions/1.md");
     _ = try store.read(mio, x, "data/chat/1_2/sessions/1.count", lim);
     _ = try store.append(mio, x, "data/chat/1_2/sessions/1.md", "**Person 1** said: a message of some ordinary length\n\n");
-    try store.write(mio, x, "data/chat/1_2/sessions/1.count", "21 1650 1", .{});
+    try store.write(mio, x, "data/chat/1_2/sessions/1.count", "21 1574\n1520 1", .{});
     try store.write(mio, x, "data/users/1/last-seen", "1789732900", .{});
     _ = try store.read(mio, x, "data/chat/users/1/last-sessions/1_2", lim);
     _ = try store.read(mio, x, "data/chat/users/1/last-conv", lim);
@@ -374,7 +388,7 @@ fn sendCutSeen(b: *Bench) !void {
     _ = try store.stat(mio, x, "data/chat/1_2/sessions/1.md");
     _ = try store.read(mio, x, "data/chat/1_2/sessions/1.count", lim);
     _ = try store.append(mio, x, "data/chat/1_2/sessions/1.md", "**Person 1** said: a message of some ordinary length\n\n");
-    try store.write(mio, x, "data/chat/1_2/sessions/1.count", "21 1650 1", .{});
+    try store.write(mio, x, "data/chat/1_2/sessions/1.count", "21 1574\n1520 1", .{});
 }
 
 const Op = struct { name: []const u8, run: *const fn (b: *Bench) anyerror!void };

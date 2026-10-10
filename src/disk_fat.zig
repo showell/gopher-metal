@@ -2074,15 +2074,11 @@ pub const Volume = struct {
         while (i > 0) {
             i -= 1;
             const failed = self.partLeft(positions[i].lba, positions[i].at) orelse continue;
+            // Refused and read back cleared: cleared, so go on.
+            if (failed == .landed) continue;
             // The parts before it, never tried: left as they are.
             self.orphaned_parts +|= i;
-            if (i > 0) {
-                self.orphaned_runs +|= 1;
-            } else switch (failed) {
-                .landed => {},
-                .before => self.orphaned_runs +|= 1,
-                .unknown => self.unsure_runs +|= 1,
-            }
+            if (i > 0 or failed == .before) self.orphaned_runs +|= 1 else self.unsure_runs +|= 1;
             return;
         }
     }
