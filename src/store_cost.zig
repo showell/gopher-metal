@@ -357,10 +357,10 @@ fn move(b: *Bench) !void {
     try store.write(mio, x, "data/players/1/last-seen", "1789732902", .{});
 }
 
-/// **THE SEND, WITH THE APPLICATION'S CUTS** (proposals, not angry-gopher
-/// today): no `.lastauthor` (the `.count` carries the author), the count by
-/// `write` not `replace`, and the last session and conversation written only
-/// when they change (here they do not).
+/// **THE SEND AFTER 153** (angry-gopher 825c4da, d95dec2): no `.lastauthor`
+/// (the `.count` carries the author), the count by `write` not `replace`, no
+/// last-seen (153(2)), and the last session and conversation written only
+/// when they change (here they do not: two reads, from memory warm).
 fn sendCut(b: *Bench) !void {
     const x = b.a();
     _ = try store.readOrNull(mio, x, secret, lim);
@@ -372,23 +372,39 @@ fn sendCut(b: *Bench) !void {
     _ = try store.read(mio, x, "data/chat/1_2/sessions/1.count", lim);
     _ = try store.append(mio, x, "data/chat/1_2/sessions/1.md", "**Person 1** said: a message of some ordinary length\n\n");
     try store.write(mio, x, "data/chat/1_2/sessions/1.count", "21 1574\n1520 1", .{});
-    try store.write(mio, x, "data/users/1/last-seen", "1789732900", .{});
     _ = try store.read(mio, x, "data/chat/users/1/last-sessions/1_2", lim);
     _ = try store.read(mio, x, "data/chat/users/1/last-conv", lim);
 }
 
-/// And last-seen written at most so often (here, not this time).
-fn sendCutSeen(b: *Bench) !void {
+/// **THE LOGIN AFTER 153**: no last-seen, and the player's name read and
+/// left, unchanged (153(3), angry-gopher 0f9c858).
+fn loginCut(b: *Bench) !void {
     const x = b.a();
     _ = try store.readOrNull(mio, x, secret, lim);
-    _ = try store.has(mio, x, "auth/1/password");
-    _ = try store.statOrNull(mio, x, "auth/2");
-    _ = try store.readOrNull(mio, x, "auth/2/name", lim);
-    _ = try store.readOrNull(mio, x, "auth/1/name", lim);
-    _ = try store.stat(mio, x, "data/chat/1_2/sessions/1.md");
-    _ = try store.read(mio, x, "data/chat/1_2/sessions/1.count", lim);
-    _ = try store.append(mio, x, "data/chat/1_2/sessions/1.md", "**Person 1** said: a message of some ordinary length\n\n");
-    try store.write(mio, x, "data/chat/1_2/sessions/1.count", "21 1574\n1520 1", .{});
+    for (0..2) |_| {
+        for (try store.list(mio, x, "auth")) |e| {
+            if (e.kind != .directory) continue;
+            const p = try std.fmt.allocPrint(x, "auth/{s}", .{e.name});
+            if (!try store.has(mio, x, try std.fmt.allocPrint(x, "{s}/password", .{p}))) continue;
+            const name = try store.read(mio, x, try std.fmt.allocPrint(x, "{s}/name", .{p}), lim);
+            if (std.mem.eql(u8, name, "Person 5")) break;
+        }
+    }
+    _ = try store.readOrNull(mio, x, "auth/5/password", lim);
+    _ = try store.readOrNull(mio, x, secret, lim);
+    _ = try store.readOrNull(mio, x, secret, lim);
+    try store.write(mio, x, "data/players/5/signed", "", .{});
+    _ = try store.read(mio, x, "auth/5/name", lim);
+    _ = try store.readOrNull(mio, x, "data/players/5/name", lim);
+}
+
+/// **THE MOVE AFTER 153**: no last-seen.
+fn moveCut(b: *Bench) !void {
+    const x = b.a();
+    _ = try store.readOrNull(mio, x, secret, lim);
+    _ = try store.readOrNull(mio, x, "data/players/1/name", lim);
+    _ = try store.statOrNull(mio, x, "data/lynrummy/1/lynrummy-elm/sessions/1");
+    _ = try store.append(mio, x, "data/lynrummy/1/lynrummy-elm/sessions/1/actions.dsl", "move a b\n");
 }
 
 const Op = struct { name: []const u8, run: *const fn (b: *Bench) anyerror!void };
@@ -397,8 +413,9 @@ const ops = [_]Op{
     .{ .name = "GET /chat/recent", .run = recent },
     .{ .name = "a login", .run = login },
     .{ .name = "a game move", .run = move },
-    .{ .name = "a send, the app's cuts", .run = sendCut },
-    .{ .name = "a send, the cuts and last-seen held", .run = sendCutSeen },
+    .{ .name = "a send, after 153", .run = sendCut },
+    .{ .name = "a login, after 153", .run = loginCut },
+    .{ .name = "a game move, after 153", .run = moveCut },
 };
 
 fn Runner(comptime f: *const fn (b: *Bench) anyerror!void) type {
