@@ -343,12 +343,48 @@ fn move(b: *Bench) !void {
     try store.write(mio, x, "data/players/1/last-seen", "1789732902", .{});
 }
 
+/// **THE SEND, WITH THE APPLICATION'S CUTS** (proposals, not angry-gopher
+/// today): no `.lastauthor` (the `.count` carries the author), the count by
+/// `write` not `replace`, and the last session and conversation written only
+/// when they change (here they do not).
+fn sendCut(b: *Bench) !void {
+    const x = b.a();
+    _ = try store.readOrNull(mio, x, secret, lim);
+    _ = try store.has(mio, x, "auth/1/password");
+    _ = try store.statOrNull(mio, x, "auth/2");
+    _ = try store.readOrNull(mio, x, "auth/2/name", lim);
+    _ = try store.readOrNull(mio, x, "auth/1/name", lim);
+    _ = try store.stat(mio, x, "data/chat/1_2/sessions/1.md");
+    _ = try store.read(mio, x, "data/chat/1_2/sessions/1.count", lim);
+    _ = try store.append(mio, x, "data/chat/1_2/sessions/1.md", "**Person 1** said: a message of some ordinary length\n\n");
+    try store.write(mio, x, "data/chat/1_2/sessions/1.count", "21 1650 1", .{});
+    try store.write(mio, x, "data/users/1/last-seen", "1789732900", .{});
+    _ = try store.read(mio, x, "data/chat/users/1/last-sessions/1_2", lim);
+    _ = try store.read(mio, x, "data/chat/users/1/last-conv", lim);
+}
+
+/// And last-seen written at most so often (here, not this time).
+fn sendCutSeen(b: *Bench) !void {
+    const x = b.a();
+    _ = try store.readOrNull(mio, x, secret, lim);
+    _ = try store.has(mio, x, "auth/1/password");
+    _ = try store.statOrNull(mio, x, "auth/2");
+    _ = try store.readOrNull(mio, x, "auth/2/name", lim);
+    _ = try store.readOrNull(mio, x, "auth/1/name", lim);
+    _ = try store.stat(mio, x, "data/chat/1_2/sessions/1.md");
+    _ = try store.read(mio, x, "data/chat/1_2/sessions/1.count", lim);
+    _ = try store.append(mio, x, "data/chat/1_2/sessions/1.md", "**Person 1** said: a message of some ordinary length\n\n");
+    try store.write(mio, x, "data/chat/1_2/sessions/1.count", "21 1650 1", .{});
+}
+
 const Op = struct { name: []const u8, run: *const fn (b: *Bench) anyerror!void };
 const ops = [_]Op{
     .{ .name = "a chat send (a DM)", .run = send },
     .{ .name = "GET /chat/recent", .run = recent },
     .{ .name = "a login", .run = login },
     .{ .name = "a game move", .run = move },
+    .{ .name = "a send, the app's cuts", .run = sendCut },
+    .{ .name = "a send, the cuts and last-seen held", .run = sendCutSeen },
 };
 
 fn Runner(comptime f: *const fn (b: *Bench) anyerror!void) type {
