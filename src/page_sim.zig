@@ -216,21 +216,13 @@ const Sim = struct {
             @memset(buf[name.len + 1 ..][0..long], 'x');
             return buf[0 .. name.len + 1 + long];
         }
+        // Case only: io.zig hands the cache no path with an empty part (a
+        // doubled, leading or trailing slash; it refuses them at the door),
+        // and the cache keys none (the normalization hunt). `.read` asks for
+        // one on purpose, and finds nothing.
         var n: usize = 0;
-        if (r.uintLessThan(u8, 8) == 0) {
-            buf[n] = '/';
-            n += 1;
-        }
         for (name) |c| {
             buf[n] = if (r.uintLessThan(u8, 6) == 0) std.ascii.toUpper(c) else if (r.uintLessThan(u8, 6) == 0) std.ascii.toLower(c) else c;
-            n += 1;
-            if (c == '/' and r.uintLessThan(u8, 8) == 0) {
-                buf[n] = '/';
-                n += 1;
-            }
-        }
-        if (r.uintLessThan(u8, 8) == 0) {
-            buf[n] = '/';
             n += 1;
         }
         return buf[0..n];
@@ -323,6 +315,15 @@ const Sim = struct {
                 .read => {
                     const disk = self.disk.get(path);
                     const was_kept = self.keptUnder(path);
+                    // A kept file asked for with an empty part in its path
+                    // (a leading slash) is not found under it.
+                    if (was_kept and path.len + 1 <= spelled.len) {
+                        var mangled: [spelled.len]u8 = undefined;
+                        mangled[0] = '/';
+                        @memcpy(mangled[1..][0..path.len], path);
+                        if (c.get(mangled[0 .. path.len + 1]) != null) self.fault("a path with an empty part found a kept file");
+                        props.reachable(@src(), "page_sim: a kept file asked for with an empty part in its path is not found", null);
+                    }
                     if (c.get(path)) |kept| {
                         props.reachable(@src(), "page_sim: a read is answered from the cache", null);
                         if (!std.mem.eql(u8, name, path)) props.reachable(@src(), "page_sim: another spelling of a kept file finds it", null);

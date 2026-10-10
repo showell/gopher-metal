@@ -1641,6 +1641,8 @@ fn readConfig(io: Io, alloc: std.mem.Allocator) Config {
     defer alloc.free(text);
     var lines = std.mem.splitScalar(u8, text, '\n');
     var said_anything = false;
+    var said: [32][]const u8 = undefined;
+    var said_n: usize = 0;
     while (lines.next()) |raw| {
         const line = std.mem.trim(u8, raw, " \t\r");
         if (line.len == 0 or line[0] == '#') continue;
@@ -1649,25 +1651,31 @@ fn readConfig(io: Io, alloc: std.mem.Allocator) Config {
             serial.fail(config_path ++ ": a line with no `=`");
         const key = std.mem.trim(u8, line[0..eq], " \t");
         const value = std.mem.trim(u8, line[eq + 1 ..], " \t");
+        // **A KEY SAID TWICE STOPS THE BOOT** (the normalization hunt): the
+        // last one won, silently (`volume = A` ... `volume = B`).
+        for (said[0..said_n]) |k| if (std.mem.eql(u8, k, key)) serial.fail(config_path ++ ": a key said twice");
+        if (said_n == said.len) serial.fail(config_path ++ ": more keys than the machine reads");
+        said[said_n] = key;
+        said_n += 1;
         if (std.mem.eql(u8, key, "requests")) {
-            conf.requests = std.fmt.parseInt(u64, value, 10) catch
+            conf.requests = configNumber(u64, value) catch
                 serial.fail(config_path ++ ": `requests` is not a number");
         } else if (std.mem.eql(u8, key, "idle_timeout_ms")) {
-            const ms = std.fmt.parseInt(u64, value, 10) catch
+            const ms = configNumber(u64, value) catch
                 serial.fail(config_path ++ ": `idle_timeout_ms` is not a number");
             if (ms == 0) serial.fail(config_path ++ ": an idle timeout of zero would answer nobody");
             conf.idle_ns = ms * std.time.ns_per_ms;
         } else if (std.mem.eql(u8, key, "keepalive_ms")) {
-            const ms = std.fmt.parseInt(u64, value, 10) catch
+            const ms = configNumber(u64, value) catch
                 serial.fail(config_path ++ ": `keepalive_ms` is not a number");
             if (ms == 0) serial.fail(config_path ++ ": a keepalive of zero would ping on every turn");
             conf.keepalive_ns = ms * std.time.ns_per_ms;
         } else if (std.mem.eql(u8, key, "lose_one_sent_in")) {
-            conf.lose_one_sent_in = std.fmt.parseInt(u32, value, 10) catch
+            conf.lose_one_sent_in = configNumber(u32, value) catch
                 serial.fail(config_path ++ ": `lose_one_sent_in` is not a number");
             if (conf.lose_one_sent_in == 1) serial.fail(config_path ++ ": losing every frame would answer nobody");
         } else if (std.mem.eql(u8, key, "streams")) {
-            const n = std.fmt.parseInt(usize, value, 10) catch
+            const n = configNumber(usize, value) catch
                 serial.fail(config_path ++ ": `streams` is not a number");
             if (n == 0 or n > max_connections - reserved_for_requests)
                 serial.fail(config_path ++ ": `streams` must leave room for requests");
@@ -1687,11 +1695,11 @@ fn readConfig(io: Io, alloc: std.mem.Allocator) Config {
             @memcpy(&conf.reset_hash, r.hash[0..60]);
             conf.reset = true;
         } else if (std.mem.eql(u8, key, "page_cache_mib")) {
-            conf.page_cache_mib = std.fmt.parseInt(u32, value, 10) catch
+            conf.page_cache_mib = configNumber(u32, value) catch
                 serial.fail(config_path ++ ": `page_cache_mib` is a number of MiB, 0 for none");
             if (conf.page_cache_mib > 1024) serial.fail(config_path ++ ": `page_cache_mib` past 1024 is more memory than a droplet has to spare");
         } else if (std.mem.eql(u8, key, "page_cache_largest_kib")) {
-            conf.page_cache_largest_kib = std.fmt.parseInt(u32, value, 10) catch
+            conf.page_cache_largest_kib = configNumber(u32, value) catch
                 serial.fail(config_path ++ ": `page_cache_largest_kib` is a number of KiB");
             if (conf.page_cache_largest_kib == 0) serial.fail(config_path ++ ": `page_cache_largest_kib` is 0 — set `page_cache_mib = 0` to keep no files, not a zero cap");
             if (conf.page_cache_largest_kib > 10 << 10) serial.fail(config_path ++ ": `page_cache_largest_kib` past 10240 (10 MiB) is more than chat's image cap, so no picture reaches it");
@@ -1705,6 +1713,14 @@ fn readConfig(io: Io, alloc: std.mem.Allocator) Config {
     }
     if (!said_anything) serial.fail(config_path ++ " is present but says nothing");
     return conf;
+}
+
+/// A config number: decimal digits and nothing else. `std.fmt.parseInt` takes
+/// `+5` and `1_000` too, a spelling no setting means (the normalization hunt).
+fn configNumber(comptime T: type, value: []const u8) !T {
+    if (value.len == 0) return error.InvalidCharacter;
+    for (value) |c| if (!std.ascii.isDigit(c)) return error.InvalidCharacter;
+    return std.fmt.parseInt(T, value, 10);
 }
 
 /// **THE LOG, FOR /admin/host**: what the serial ring holds (its last 64 KiB),

@@ -677,6 +677,28 @@ test "the check finds a file whose size and chain disagree" {
     }
 }
 
+test "a path with an empty part is refused by every operation that takes a path, never read as the path it might mean (the normalization hunt)" {
+    for (configs) |cfg| {
+        const d = try Disk.make("empty-parts", cfg.shape, cfg.cached);
+        defer d.deinit();
+        try d.vol.writeFile("data/keep", "kept");
+        const free = (try d.vol.space()).free;
+        for ([_][]const u8{ "data//keep", "/data/keep", "data/keep/", "data/" }) |bad| {
+            try testing.expectError(disk_fat.Error.NotFound, d.vol.open(bad));
+            try testing.expectError(disk_fat.Error.BadName, d.vol.remove(bad));
+            try testing.expectError(disk_fat.Error.BadName, d.vol.writeFile(bad, "x"));
+            try testing.expectError(disk_fat.Error.BadName, d.vol.rename(bad, "data/other"));
+            try testing.expectError(disk_fat.Error.BadName, d.vol.rename("data/keep", bad));
+        }
+        for ([_][]const u8{ "data//sub", "/data/sub", "data/sub/" }) |bad| {
+            try testing.expectError(disk_fat.Error.BadName, d.vol.makePath(bad));
+        }
+        try testing.expectEqual(free, (try d.vol.space()).free);
+        try d.expectFile("data/keep", "kept");
+        try testing.expectError(disk_fat.Error.NotFound, d.vol.open("data/sub"));
+    }
+}
+
 test "the check a slice at a time finds what the whole check finds, and starts again when the volume changes (idle time)" {
     for (configs) |cfg| {
         const shape, const cached = .{ cfg.shape, cfg.cached };

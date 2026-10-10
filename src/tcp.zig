@@ -101,6 +101,12 @@ pub const flag_ack: u8 = 0x10;
 pub const default_mss: u16 = 536;
 /// Ours: an ethernet frame's worth, which the NIC's receive buffers hold.
 pub const our_mss: u16 = 1460;
+/// **THE LEAST SEGMENT SIZE A PEER IS SENT** (Linux's TCP_MIN_MSS): a peer
+/// that names less (0 sized every send to nothing, and each took the shut
+/// window's path, a byte a retransmission timeout) is sent this much. A peer
+/// is a stranger: its size is raised, named here, not refused (the
+/// normalization hunt, 2026-10-10).
+pub const min_mss: u16 = 88;
 pub const mss_option = [4]u8{ 2, 4, our_mss >> 8, our_mss & 0xFF };
 
 /// **THE RETRANSMISSION CLOCK IS MEASURED** (RFC 6298): one segment timed at
@@ -310,6 +316,9 @@ pub const Conn = struct {
     /// Releases `n` pending bytes. The buffer is compacted once `start`
     /// passes half of it, so the window reopens while a request is read.
     pub fn consume(self: *Conn, n: usize) void {
+        // More than is pending is the caller's bug (a parser that miscounted),
+        // said, and held to what there is (the normalization hunt).
+        props.always(@src(), n <= self.end - self.start, "tcp: a caller consumes no more than is pending", .{ .n = n, .pending = self.end - self.start });
         self.start += @min(n, self.end - self.start);
         if (self.start == self.end) {
             self.start = 0;
@@ -962,6 +971,9 @@ pub const Table = struct {
 
         const bytes = @min(advance, c.queued());
         c.tx_start += bytes;
+        // An ACK may cover more than `sent`, and rightly: a go-back sets
+        // `sent` to 0, and a late ACK then covers bytes this pass has not
+        // sent again. So each is held at 0, not past it.
         c.sent -= @min(c.sent, bytes);
         c.high -= @min(c.high, bytes);
         if (c.tx_start == c.tx_end) {
@@ -1072,7 +1084,9 @@ pub const Table = struct {
             c.rcv_nxt = seq +% 1; // their SYN takes one
             c.wl1 = seq;
             c.una = self.isn();
-            c.mss = @min(parseMss(t[header_len..offset]) orelse default_mss, our_mss);
+            const named = parseMss(t[header_len..offset]) orelse default_mss;
+            if (named < min_mss) props.reachable(@src(), "tcp: a peer names a segment size under the least, and is sent the least", .{ .named = named });
+            c.mss = std.math.clamp(named, min_mss, our_mss);
             c.wnd = window;
             c.state = .syn_received;
             c.opened_at = now;

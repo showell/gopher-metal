@@ -106,10 +106,18 @@ def main() -> int:
         print("chat.py: gopher.elf does not build")
         return 1
     serial = open(SERIAL_FILE).read().strip()
-    proxy = open(PROXY_FILE).read().strip() if os.path.isfile(PROXY_FILE) else None
-    if proxy is None:
-        print(f"chat.py: WARNING: no {PROXY_FILE}, so no trusted_proxy: every request through Caddy "
-              "will count as one address, and 5 new players an hour is then the whole site's", file=sys.stderr)
+    # **NO TRUSTED PROXY, NO IMAGE** (the normalization hunt, 2026-10-10;
+    # Steve: fail, never warn): without it every request through Caddy counts
+    # as one address, and 5 new players an hour is then the whole site's. It
+    # warned and built the image anyway.
+    if not os.path.isfile(PROXY_FILE):
+        print(f"chat.py: no {PROXY_FILE}: write the address prod's Caddy reaches the droplet from "
+              "(the private network), or every request through Caddy counts as one address")
+        return 1
+    proxy = open(PROXY_FILE).read().strip()
+    if not proxy:
+        print(f"chat.py: {PROXY_FILE} is empty")
+        return 1
     with tempfile.TemporaryDirectory() as work:
         content = os.path.join(work, "content")
         os.makedirs(content)
@@ -125,7 +133,7 @@ def main() -> int:
         # only the private card, where prod's Caddy reaches it; and the volume.
         with open(os.path.join(content, "gopher-metal.conf"), "w") as f:
             f.write(f"idle_timeout_ms = 10000\ncard = private\nvolume = {serial}\n"
-                    + (f"trusted_proxy = {proxy}\n" if proxy else "")
+                    + f"trusted_proxy = {proxy}\n"
                     + (admin_reset_line(reset) if reset else ""))
         disk = os.path.join(work, "site.img")
         judge.build_disk(disk, content, os.path.join(work, "mnt"))

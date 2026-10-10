@@ -4,6 +4,7 @@
 //! client would check.
 
 const std = @import("std");
+const props = @import("coverage");
 const proto = @import("proto.zig");
 const tcp = @import("tcp.zig");
 const invariants = @import("tcp_check.zig");
@@ -432,7 +433,20 @@ test "consuming part of a request compacts the buffer once the front is half gon
     try testing.expectEqual(@as(usize, 13), c.room());
     c.consume(3);
     try testing.expectEqual(@as(usize, 16), c.room());
-    c.consume(5); // more than there is is just all of it
+    // More than there is is the caller's bug, said (a property breaks, on
+    // purpose here), and held to all of it (the normalization hunt).
+    const Seen = struct {
+        var n: usize = 0;
+        fn count(_: *const props.Site) void {
+            n += 1;
+        }
+    };
+    const was = props.on_broken;
+    props.on_broken = Seen.count;
+    defer props.on_broken = was;
+    Seen.n = 0;
+    c.consume(5);
+    try testing.expectEqual(@as(usize, 1), Seen.n);
     try testing.expectEqual(@as(usize, 0), c.pending().len);
 }
 
@@ -695,6 +709,25 @@ test "the SYN-ACK says our segment size, and the peer's sizes what we send" {
     try testing.expectEqualSlices(usize, &.{ 100, 100, 50 }, f.wire.sizesSince(from, &sizes));
     try testing.expectEqualSlices(u8, body[200..], f.wire.last().payload);
     try testing.expectEqual(p.ack +% 200, f.wire.last().seq);
+}
+
+test "a peer that names a segment size under 88 is sent 88 bytes at a time, as Linux would (the normalization hunt)" {
+    // An MSS of 0 sized every send to nothing, so each went down the shut
+    // window's path, a byte per retransmission timeout; 1 sent a byte a
+    // segment. A peer is a stranger, so its size is raised to Linux's least
+    // (TCP_MIN_MSS), a decision named in tcp.zig `min_mss`, not refused.
+    for ([_]u16{ 0, 1, 87 }) |tiny| {
+        var f: Fixture = .{};
+        f.init();
+        var p = Peer{ .ip = .{ 10, 0, 2, 2 }, .port = 40000, .mss = tiny };
+        const i = try p.connect(&f.table, &f.wire, 1);
+        var body: [200]u8 = undefined;
+        _ = f.table.queue(i, pattern(&body));
+        const from = f.wire.count;
+        transmit(&f.table, &f.wire, 2);
+        var sizes: [8]usize = undefined;
+        try testing.expectEqualSlices(usize, &.{ 88, 88, 24 }, f.wire.sizesSince(from, &sizes));
+    }
 }
 
 test "a peer that names no segment size is sent 536 bytes at a time" {

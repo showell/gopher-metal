@@ -79,10 +79,16 @@ pub const PageCache = struct {
         return .{ .alloc = alloc, .budget = budget, .largest = largest };
     }
 
-    /// The key for `path`, in `out`, or null if it is too long to keep.
+    /// The key for `path`, in `out`, or null if it is too long to keep or has
+    /// an empty part (a doubled, leading or trailing slash: a path built
+    /// wrong, which FAT refuses too, never kept under the path it might mean).
     fn keyOf(path: []const u8, out: *[max_key]u8) ?[]const u8 {
+        if (path.len > 0 and (path[0] == '/' or path[path.len - 1] == '/' or std.mem.indexOf(u8, path, "//") != null)) {
+            props.reachable(@src(), "page cache: a path with an empty part is never kept", null);
+            return null;
+        }
         var n: usize = 0;
-        var parts = std.mem.tokenizeScalar(u8, path, '/');
+        var parts = std.mem.splitScalar(u8, path, '/');
         while (parts.next()) |part| {
             if (n != 0) {
                 if (n >= max_key) return tooLong();
@@ -345,8 +351,11 @@ test "a file put is got back, under any spelling FAT takes for it" {
     defer done(c);
     c.put("data/chat/Plan.md", "the plan");
     try testing.expectEqualStrings("the plan", c.get("data/chat/plan.md").?);
-    try testing.expectEqualStrings("the plan", c.get("DATA//chat/PLAN.MD/").?);
-    try testing.expectEqualStrings("the plan", c.get("/data/chat/plan.md").?);
+    try testing.expectEqualStrings("the plan", c.get("DATA/chat/PLAN.MD").?);
+    // A path with an empty part is no spelling FAT takes (disk_fat
+    // `hasEmptyPart`): it names nothing here either (the normalization hunt).
+    try testing.expect(c.get("DATA//chat/PLAN.MD/") == null);
+    try testing.expect(c.get("/data/chat/plan.md") == null);
     try testing.expect(c.get("data/chat/plan.m") == null);
     try testing.expect(c.get("data/plan.md") == null);
     // A second put replaces it, under another spelling too.

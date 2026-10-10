@@ -280,6 +280,13 @@ pub const Derived = struct {
     first_free: ?Cluster,
 };
 
+/// **A PATH BUILT WRONG**: a doubled, leading or trailing slash, an empty
+/// part. The empty path itself is the root, and has none.
+pub fn hasEmptyPart(path: []const u8) bool {
+    if (path.len == 0) return false;
+    return path[0] == '/' or path[path.len - 1] == '/' or std.mem.indexOf(u8, path, "//") != null;
+}
+
 pub const Volume = struct {
     blk: *virtio.Block,
     /// **EVERY SECTOR WRITE TRIED**, landed or not: a check made a slice at a
@@ -600,7 +607,10 @@ pub const Volume = struct {
                         if (c < 2 or c > self.max_cluster) continue;
                         const was = self.entryIn(&first[i], e);
                         const now = self.entryIn(&second[i], e);
-                        if (was == 0 and now != 0) self.free_clusters -|= 1;
+                        if (was == 0 and now != 0) {
+                            props.always(@src(), self.free_clusters > 0, "fat: the second copy's taken clusters were counted free in the first", null);
+                            self.free_clusters -|= 1;
+                        }
                         if (was != 0 and now == 0) self.free_clusters += 1;
                     }
                 }
@@ -1180,7 +1190,7 @@ pub const Volume = struct {
         var cluster: Cluster = 0;
         var at: usize = 0;
         var result: ?Entry = null;
-        if (path.len > 0 and (path[0] == '/' or path[path.len - 1] == '/' or std.mem.indexOf(u8, path, "//") != null)) {
+        if (hasEmptyPart(path)) {
             props.reachable(@src(), "fat: a path with an empty part names nothing", null);
             return Error.NotFound;
         }
@@ -1667,6 +1677,9 @@ pub const Volume = struct {
     /// `n` clusters freed, in the kept count.
     fn keepFreed(self: *Volume, n: u32) void {
         self.free_clusters +|= n;
+        // As keepCount's floor, a ceiling: more free than the volume holds
+        // would admit writes that then fail part way (the normalization hunt).
+        props.always(@src(), self.free_clusters <= self.max_cluster - 1, "fat: the kept free count never runs past the volume's clusters", .{ .free = self.free_clusters, .clusters = self.max_cluster - 1 });
     }
 
     /// **WHETHER A HELD FAT SECTOR'S REFUSED WRITE LANDED**, read back once
@@ -2797,6 +2810,12 @@ pub const Volume = struct {
     /// make a volume its own check calls `too_deep`. Refused `BadName`.
     pub fn makePath(self: *Volume, path: []const u8) Error!Cluster {
         defer self.balanced();
+        // "" is the root (a top-level file's folder); otherwise every part is
+        // named: `a//b/` made `a/b` (the normalization hunt).
+        if (hasEmptyPart(path)) {
+            props.reachable(@src(), "fat: a folder path with an empty part is refused", null);
+            return Error.BadName;
+        }
         var cluster: Cluster = 0;
         var at: usize = 0;
         var depth: u32 = 0;
@@ -3088,9 +3107,13 @@ pub const Volume = struct {
     const Parent = struct { cluster: Cluster, name: []const u8 };
 
     fn parentOf(self: *Volume, path: []const u8) Error!Parent {
-        var end = path.len;
-        while (end > 0 and path[end - 1] == '/') end -= 1;
-        const trimmed = path[0..end];
+        // **EVERY PART IS NAMED** (the normalization hunt): a trailing slash
+        // was trimmed away, so `remove("x/")` removed `x`.
+        if (hasEmptyPart(path)) {
+            props.reachable(@src(), "fat: a path with an empty part is refused", null);
+            return Error.BadName;
+        }
+        const trimmed = path;
         if (trimmed.len == 0) {
             props.reachable(@src(), "fat: a path with no name in it is refused", null);
             return Error.BadName;
