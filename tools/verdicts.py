@@ -222,14 +222,17 @@ def fresh() -> int:
     checkout, so a port older than the checkout fails gopher-metal's tests
     for no fault of gopher-metal's. Prints `fresh`, or why not; exits 0
     either way, so build.zig reads the answer from the output."""
-    print(freshness())
+    try:
+        print(freshness())
+    except OSError as e:  # one line on every path: build.zig reads it
+        print(f"cannot tell: {e}")
     return 0
 
 
 def freshness() -> str:
-    """`fresh`, or why not. Only the port and the checkout: not this repo's
-    or the SDK's commits, which `pair` adds and a check of the port needs
-    no more than it needs a reason to fail on them."""
+    """`fresh`, or why not: the port, the checkout and this tree's asset
+    list. Not this repo's or the SDK's commits, which `pair` adds and a
+    check of the port has no use for."""
     if not os.path.isdir(os.path.join(GOPHER_ROOT, "zig-server")):
         return f"no angry-gopher checkout at {GOPHER_ROOT}"
     theirs = ported()
