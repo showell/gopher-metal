@@ -1174,10 +1174,16 @@ pub const Volume = struct {
     }
 
     /// Walks a slash-separated path from the root. "EFI/BOOT/BOOTX64.EFI".
+    /// **EVERY PART IS NAMED**: an empty one (a doubled, leading or trailing
+    /// slash) names nothing, never the path it might have meant.
     pub fn open(self: *Volume, path: []const u8) Error!Entry {
         var cluster: Cluster = 0;
         var at: usize = 0;
         var result: ?Entry = null;
+        if (path.len > 0 and (path[0] == '/' or path[path.len - 1] == '/' or std.mem.indexOf(u8, path, "//") != null)) {
+            props.reachable(@src(), "fat: a path with an empty part names nothing", null);
+            return Error.NotFound;
+        }
         while (at < path.len) {
             var end = at;
             while (end < path.len and path[end] != '/') end += 1;
