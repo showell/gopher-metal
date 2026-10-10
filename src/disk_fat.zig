@@ -35,6 +35,7 @@ const std = @import("std");
 const builtin = @import("builtin");
 const virtio = @import("virtio.zig");
 const props = @import("coverage");
+const plant = @import("plant.zig");
 
 // Every property in this file, in the catalog, called or not (COVERAGE.md).
 comptime {
@@ -1157,6 +1158,13 @@ pub const Volume = struct {
         if (self.blk.write(self.start_lba + lba, @intFromPtr(from)) != virtio.blk_s_ok) {
             if (self.dirs) |*c| c.drop(lba, 1);
             props.reachable(@src(), "fat: a sector write fails", null);
+            // PLANT (src/plant.zig): a write the disk refused is taken as
+            // written, so the caller answers "saved" over a hole.
+            if (comptime plant.on == .disk_write_swallowed) {
+                props.reachable(@src(), "PLANT: disk-write-swallowed fires", null);
+                if (self.dirs) |*c| c.wrote(lba, 1, from);
+                return;
+            }
             return Error.WriteFailed;
         }
         if (self.dirs) |*c| c.wrote(lba, 1, from);

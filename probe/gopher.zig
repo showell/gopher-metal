@@ -53,6 +53,11 @@ const ready = metal.ready;
 const RequestHeap = metal.request_heap.RequestHeap;
 const interrupts = metal.interrupts;
 const gm_build = @import("gm_build");
+// **NO PLANT IN A RELEASE** (src/plant.zig): a deliberate bug compiles only
+// into a -Dcoverage kernel, which no release image is.
+comptime {
+    if (metal.plant.on != .none and !gm_build.coverage) @compileError("a plant (-Dplant) needs -Dcoverage: no release image may hold one");
+}
 /// B15 (metal-vmm QUEUE item 78): a `-Dcoverage` build checks the TCP table
 /// after every turn of the network (`stream.checkTable`) and the volumes after
 /// every request (`checkVolumes`). A production build has neither.

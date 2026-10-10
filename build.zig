@@ -42,6 +42,9 @@ fn bareTarget(b: *std.Build) std.Build.ResolvedTarget {
     });
 }
 
+/// The plants (src/plant.zig): one at most, by `-Dplant=<name>`.
+const Plant = enum { none, disk_write_swallowed, net_goback_byte };
+
 pub fn build(b: *std.Build) void {
     // **NOT Debug.** A Debug build pulls in zig's UBSan runtime, which wants
     // 128-bit float conversions and therefore the SSE registers this target has
@@ -74,8 +77,15 @@ pub fn build(b: *std.Build) void {
     // The seed explorer (zig-coverage-sdk's explore.zig): simulators only.
     const explore = sdk.module("explore");
     const coverage_catalog = @import("zig_coverage_sdk").addCatalog(b, sdk.artifact("coverage-scan"), coverage, b.path("src"), &.{ "tcp.zig", "tcp_sim.zig", "disk_fat.zig", "fat_sim.zig", "page_sim.zig", "pure_sim.zig", "ready_sim.zig", "durable_sim.zig", "durable.zig", "gpt.zig", "floor_sim.zig", "page_cache.zig", "log_ring.zig", "kept_log.zig", "proto.zig", "arp.zig", "request_heap.zig", "store_sim.zig", "pvh.zig", "restart.zig", "pages.zig", "rtc.zig", "pit.zig", "admin_reset.zig", "rng.zig", "ready.zig" });
+    // **ONE PLANT AT MOST** (src/plant.zig): every compilation that holds
+    // disk_fat.zig or tcp.zig takes it beside the coverage SDK.
+    const plant_opts = b.addOptions();
+    const plant = b.option(Plant, "plant", "a deliberate bug the judge must catch, for metal-vmm's plants.sh (src/plant.zig); needs -Dcoverage in gopher.elf") orelse .none;
+    plant_opts.addOption(Plant, "plant", plant);
+    const plant_options = plant_opts.createModule();
     const with_coverage = [_]std.Build.Module.Import{
         .{ .name = "coverage", .module = coverage },
+        .{ .name = "plant_options", .module = plant_options },
         .{ .name = "coverage_catalog", .module = coverage_catalog },
     };
     const metal = b.createModule(.{
@@ -217,6 +227,17 @@ pub fn build(b: *std.Build) void {
     // the assets; without either it is not checked, and the step says so
     // rather than pass in silence.
     const check_step = b.step("check", "type-check every kernel (analysis only, not codegen or link), and build native and droplet (part of `test`)");
+    // **EVERY PLANT TYPE-CHECKED** (src/plant.zig): a plant's code is
+    // analysed only when it is on, so each is checked by a `check` of its
+    // own, with -Dcoverage as gopher.elf requires. plants.sh runs it first;
+    // run it after touching a plant's lines.
+    const check_plants = b.step("check-plants", "type-check every kernel once with each plant on (src/plant.zig)");
+    for (std.enums.values(Plant)) |p| {
+        if (p == .none) continue;
+        const one = b.addSystemCommand(&.{ b.graph.zig_exe, "build", "check", "-Dcoverage", b.fmt("-Dplant={s}", .{@tagName(p)}) });
+        one.setCwd(b.path("."));
+        check_plants.dependOn(&one.step);
+    }
     for (kernels) |k| {
         const probe_opts = b.addOptions();
         probe_opts.addOption(bool, "cache_fat", k.cache_fat);
@@ -348,6 +369,7 @@ pub fn build(b: *std.Build) void {
     const unit_imports = [_]std.Build.Module.Import{
         .{ .name = "kernel_partition", .module = kernel_partition },
         .{ .name = "coverage", .module = coverage },
+        .{ .name = "plant_options", .module = plant_options },
         .{ .name = "coverage_catalog", .module = coverage_catalog },
         .{ .name = "explore", .module = explore },
     };
@@ -389,6 +411,7 @@ pub fn build(b: *std.Build) void {
         .target = b.graph.host,
         .imports = &.{
             .{ .name = "coverage", .module = coverage },
+            .{ .name = "plant_options", .module = plant_options },
             .{ .name = "coverage_catalog", .module = coverage_catalog },
         },
     });
@@ -430,6 +453,7 @@ pub fn build(b: *std.Build) void {
             .imports = &.{
                 .{ .name = "explore_options", .module = explore_opts.createModule() },
                 .{ .name = "coverage", .module = coverage },
+                .{ .name = "plant_options", .module = plant_options },
                 .{ .name = "coverage_catalog", .module = coverage_catalog },
                 .{ .name = "explore", .module = explore },
             },
@@ -454,6 +478,7 @@ pub fn build(b: *std.Build) void {
             .imports = &.{
                 .{ .name = "soak_options", .module = soak_opts.createModule() },
                 .{ .name = "coverage", .module = coverage },
+                .{ .name = "plant_options", .module = plant_options },
                 .{ .name = "coverage_catalog", .module = coverage_catalog },
                 .{ .name = "explore", .module = explore },
                 .{ .name = "kernel_partition", .module = kernel_partition },
@@ -503,6 +528,7 @@ pub fn build(b: *std.Build) void {
             .imports = &.{
                 .{ .name = "tcp_properties_options", .module = props_opts.createModule() },
                 .{ .name = "coverage", .module = coverage },
+                .{ .name = "plant_options", .module = plant_options },
                 .{ .name = "coverage_catalog", .module = coverage_catalog },
                 .{ .name = "explore", .module = explore },
             },
@@ -538,6 +564,7 @@ pub fn build(b: *std.Build) void {
             .imports = &.{
                 .{ .name = "disk_fat_test_options", .module = disk_fat_opts.createModule() },
                 .{ .name = "coverage", .module = coverage },
+                .{ .name = "plant_options", .module = plant_options },
                 .{ .name = "coverage_catalog", .module = coverage_catalog },
             },
         }),
@@ -569,6 +596,7 @@ pub fn build(b: *std.Build) void {
                 .imports = &.{
                     .{ .name = "disk_fat_test_options", .module = disk_fat_faults_opts },
                     .{ .name = "coverage", .module = coverage },
+                    .{ .name = "plant_options", .module = plant_options },
                     .{ .name = "coverage_catalog", .module = coverage_catalog },
                 },
             }),
@@ -598,6 +626,7 @@ pub fn build(b: *std.Build) void {
                 .imports = &.{
                     .{ .name = "tcp_test_start", .module = options.createModule() },
                     .{ .name = "coverage", .module = coverage },
+                    .{ .name = "plant_options", .module = plant_options },
                     .{ .name = "coverage_catalog", .module = coverage_catalog },
                 },
             }),

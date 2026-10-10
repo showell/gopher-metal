@@ -3,6 +3,7 @@
 //! that imports this and provides `kmain`.
 
 pub const boot = @import("boot.zig");
+pub const plant = @import("plant.zig");
 pub const stack = @import("stack.zig");
 pub const pvh = @import("pvh.zig");
 pub const pages = @import("pages.zig");
