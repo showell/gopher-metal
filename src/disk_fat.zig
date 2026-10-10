@@ -1842,8 +1842,8 @@ pub const Volume = struct {
     /// `allocChainHeld` takes one. The chain's clusters whose entries are in
     /// one sector are freed in the held sector, in the chain's order, until
     /// the chain leaves it, and the sector is written once to each copy. A
-    /// 1 MiB file's old chain was 64 writes on small's clusters, an entry at
-    /// a time.
+    /// 1 MiB file's old chain on the host tests' 512-byte clusters was 2,048
+    /// entries, each its sector to two copies: 4,096 writes, now ~20.
     ///
     /// **A REFUSED WRITE STOPS IT, AS ONE ENTRY'S DID**, by `heldRefused`'s
     /// verdict: not landed, the held sector goes back as it was and the
@@ -1851,6 +1851,11 @@ pub const Volume = struct {
     /// the rest is left; unknown, the batch is taken as freed and the first
     /// copy written again once, and the batch may be free or taken where
     /// that fails too. What is left is a counted leak (`chainLeft`).
+    ///
+    /// **AN UNKNOWN IS UNSURE ONLY WHERE THE WRITE AGAIN FAILS**, as in
+    /// `allocChainHeld`: written again, the batch is free on the disk too.
+    /// Without a held FAT, `fatSet` never writes again, so its unknown is
+    /// always one cluster that may be free or taken.
     fn freeAfterCommitHeld(self: *Volume, fat: []u8, first: Cluster) void {
         const width = self.entryBytes();
         var cluster = first;
