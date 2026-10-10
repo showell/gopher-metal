@@ -79,6 +79,12 @@ def main():
                 # write through it (`p.* =`) chooses a state too.
                 for m in re.finditer(r"\b(\w+)\s*:\s*([^=;,(){}]*?)\b(?:\w+\.)?" + name + r"\b", strip_comment(line)):
                     (pointers if "*" in m.group(2) else fields).add(m.group(1))
+    # A pointer taken with no type written: `var x = &c.fin;` (146(g)'s review).
+    for lines in files.values():
+        for line in lines:
+            for m in re.finditer(r"\b(?:var|const)\s+(\w+)\s*=\s*&[\w.\[\]]*\.(\w+)\s*;", strip_comment(line)):
+                if m.group(2) in fields:
+                    pointers.add(m.group(1))
 
     refusals = []
     for path, lines in files.items():
@@ -86,7 +92,7 @@ def main():
         rel = os.path.relpath(path, ROOT)
         for i, line in enumerate(lines):
             code = strip_comment(line)
-            if re.search(r"\bmachine_state\s*=[^=>]", code):
+            if re.search(r"\bmachine_state\s*=(?:[^=>]|$)", code):
                 refusals.append(f"{rel}:{i + 1}: machine_state assigned; only fire changes a machine's state")
             if i in tests:
                 continue
@@ -96,10 +102,10 @@ def main():
                 # `c.fin =` or `conns[i].fin =` or `all[2] =`, not
                 # `.{ .fin = .queued }` (a literal's field) or `.fin =>` (a
                 # switch prong).
-                if re.search(r"[\w\])]\." + f + r"(?:\[[^\]]*\])?\s*=[^=>]", code):
+                if re.search(r"[\w\])*]\." + f + r"(?:\[[^\]]*\])?\s*=(?:[^=>]|$)", code):
                     refusals.append(f"{rel}:{i + 1}: the machine field `{f}` replaced; fire an event instead")
             for p in pointers:
-                if re.search(r"\b" + p + r"\.\*\s*=[^=>]", code):
+                if re.search(r"\b" + p + r"\.\*\s*=(?:[^=>]|$)", code):
                     refusals.append(f"{rel}:{i + 1}: a machine written through `{p}.*`; fire an event instead")
     for r in refusals:
         print(r)
