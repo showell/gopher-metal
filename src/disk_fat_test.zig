@@ -2441,3 +2441,46 @@ test "a tree removes whole whatever its size within the directory limit: past 4,
         try testing.expect(r.health.clean());
     }
 }
+
+test "an append onto a chain longer than its size fills that tail first, and links only what it still needs (metal-vmm B30)" {
+    // A stop between an append's link and its size leaves the chain long:
+    // clusters in use past the size. The next append counts in the chain,
+    // not the size, so it links only what the tail does not already hold.
+    for (both) |cached| {
+        const d = try Disk.make("append-long", test_disk.small, cached);
+        defer d.deinit();
+        var first: [600]u8 = undefined;
+        try d.vol.writeFile("data/LOG", pattern(&first, 1));
+        const before = try testing.allocator.dupe(u8, d.bytes);
+        defer testing.allocator.free(before);
+        var more: [1000]u8 = undefined;
+        _ = pattern(&more, 2);
+
+        // Fail each request of a 1000-byte append in turn, until one leaves
+        // the chain long: the link landed and the size did not.
+        var n: u64 = 0;
+        const long = while (n < 64) : (n += 1) {
+            @memcpy(d.bytes, before);
+            try d.mount(cached);
+            d.blk.fault = .{ .at = d.blk.requests + n, .kind = .fails };
+            const failed = if (d.vol.writeInto("data/LOG", first.len, &more)) false else |_| true;
+            d.blk.fault = null;
+            if (!failed) continue;
+            try d.mount(cached);
+            const r = try d.check();
+            if (r.len == 1 and r.found[0].problem == .long) break r.found[0].count;
+        } else return error.NoRequestLeftTheChainLong;
+        try testing.expect(long > 0);
+
+        // Now an append that needs more than the long chain holds.
+        var tail: [3000]u8 = undefined;
+        try d.vol.writeInto("data/LOG", first.len, pattern(&tail, 3));
+        try d.mount(cached);
+        const r = try d.check();
+        try testing.expect(r.health.clean());
+        var whole: [first.len + tail.len]u8 = undefined;
+        @memcpy(whole[0..first.len], &first);
+        @memcpy(whole[first.len..], &tail);
+        try d.expectFile("data/LOG", &whole);
+    }
+}
