@@ -377,6 +377,10 @@ pub const avail_flag_no_interrupt: u16 = 1;
 /// Sized by its job. A block queue needs one chain in flight; a receive queue
 /// wants as many buffers as it can hold frames.
 pub fn Ring(comptime size: u16) type {
+    // **A POWER OF TWO** (metal-vmm 150(b)): the indexes are free-running
+    // u16s taken `% size`, which stays the slot across their wrap at 65536
+    // only if `size` divides it.
+    comptime std.debug.assert(size > 0 and size & (size - 1) == 0);
     return extern struct {
         const Self = @This();
         pub const len: u16 = size;
@@ -423,6 +427,12 @@ pub fn Queue(comptime size: u16) type {
             const used_addr = ring_addr + @offsetOf(RingType, "used_flags");
             var doorbell: usize = undefined;
             var vectored = false;
+            // **THE RINGS ZEROED BEFORE THE DEVICE IS TOLD WHERE THEY ARE**
+            // (150(c)): a device may read them once the queue is ready.
+            ring.avail_flags = 0;
+            ring.avail_idx = 0;
+            ring.used_idx = 0;
+            fence();
             switch (device) {
                 .mmio => |base| {
                     mmioWrite(base, .queue_sel, index);
@@ -467,9 +477,6 @@ pub fn Queue(comptime size: u16) type {
                 },
             }
 
-            ring.avail_flags = 0;
-            ring.avail_idx = 0;
-            ring.used_idx = 0;
             return .{ .device = device, .index = index, .vectored = vectored, .ring = ring, .doorbell = doorbell };
         }
 
@@ -507,9 +514,18 @@ pub fn Queue(comptime size: u16) type {
         }
 
         /// The next completion, or null if the device has published none.
+        ///
+        /// **THE INDEX, THEN A FENCE, THEN THE ENTRY** (virtio §2.7.13,
+        /// metal-vmm 150(a)): the device writes the entry before it moves the
+        /// index, and the entry must be read after the index is. x86 does
+        /// not reorder loads, but the compiler may: the index is a volatile
+        /// load and the entry a plain one, whose address does not depend on
+        /// it. Read in ReleaseSafe (`net.Net.reclaim`, 2026-10-10), LLVM
+        /// kept the order, by no rule that holds it.
         pub fn take(self: *Self) ?UsedElem {
             const idx = @as(*volatile u16, @ptrCast(&self.ring.used_idx)).*;
             if (idx == self.last_used) return null;
+            fence();
             const e = self.ring.used_ring[self.last_used % size];
             self.last_used +%= 1;
             return e;

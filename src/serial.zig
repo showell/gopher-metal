@@ -200,7 +200,10 @@ pub fn fail(why: []const u8) noreturn {
 }
 
 /// Moves the ring into `buf`, a region that outlives a restart
-/// (restarting.zig), with what it held so far.
+/// (restarting.zig), with what it held so far. The new ring's count of
+/// bytes lost starts again (metal-vmm 150(c), decided): `lost()` is read
+/// only to start a read at a whole line, and what moves already starts at
+/// one.
 pub fn keepIn(buf: []u8) void {
     var held: [64 * 1024]u8 = undefined;
     const text = ring.read(&held);
