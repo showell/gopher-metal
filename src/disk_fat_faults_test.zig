@@ -1401,6 +1401,7 @@ test "a write that lands and answers failure as a counted orphan run is tombston
     // An orphan run counted, as a failed new file leaves one; then the next
     // file, which tombstones it first, its every request in turn landing
     // and answering failure, its read-back exact or failing too (unknown).
+    var refused_landed: u32 = 0;
     for (both_cached) |cached| {
         for ([_]u8{ 0, 1 }) |then_fail| {
             const d = try Disk.makeUnkept("orphans-tombstone-lies", test_disk.small, cached);
@@ -1420,22 +1421,35 @@ test "a write that lands and answers failure as a counted orphan run is tombston
                 d.blk.fault = null;
                 if (d.vol.orphaned_parts > 0) break;
             } else return error.NoOrphans;
-            var tombstones_refused: u32 = 0;
+            // **THE PREMISE, EXACT** (the box's review): each request in turn
+            // both lands and answers failure, and fails landing nothing. The
+            // first leaves fewer parts counted than the second only where the
+            // request was a tombstone the read-back found landed: "B" writes
+            // no long-name parts of its own.
             var m: u64 = 0;
-            while (m < 8) : (m += 1) {
-                @memcpy(d.bytes, pristine);
-                try d.mount(cached);
-                d.blk.fault = .{ .at = d.blk.requests + n, .kind = .fails };
-                d.vol.writeFile("data/A Long Name For A First File.txt", &body) catch {};
-                const parts = d.vol.orphaned_parts;
-                d.blk.fault = .{ .at = d.blk.requests + m, .kind = .lands_and_fails, .then_fail = then_fail, .seed = @truncate(m) };
-                d.vol.writeFile("data/B", "bee") catch {};
-                d.blk.fault = null;
-                if (d.vol.orphaned_parts < parts) tombstones_refused += 1;
-                try countedIsFound(d, "a short name over a counted orphan run", kind, "a tombstone that lands and answers failure", m);
+            while (m < 40) : (m += 1) {
+                var after: [2]u64 = undefined;
+                for ([_]@FieldType(@import("virtio.zig").Block.Fault, "kind"){ .lands_and_fails, .fails }, 0..) |fault, w| {
+                    @memcpy(d.bytes, pristine);
+                    try d.mount(cached);
+                    d.blk.fault = .{ .at = d.blk.requests + n, .kind = .fails };
+                    d.vol.writeFile("data/A Long Name For A First File.txt", &body) catch {};
+                    d.blk.fault = .{ .at = d.blk.requests + m, .kind = fault, .then_fail = then_fail, .seed = @truncate(m) };
+                    d.vol.writeFile("data/B", "bee") catch {};
+                    d.blk.fault = null;
+                    after[w] = d.vol.orphaned_parts;
+                    try countedIsFound(d, "a short name over a counted orphan run", kind, @tagName(fault), m);
+                }
+                if (after[0] < after[1]) refused_landed += 1;
             }
-            // The premise: some refused tombstone was taken off the count.
-            try testing.expect(tombstones_refused > 0);
+            // A failed FAT write leaves its copies apart: the disk goes back
+            // as it began, for the check its teardown runs.
+            @memcpy(d.bytes, pristine);
+            try d.mount(cached);
         }
     }
+    // Across the disks and read-backs: some refused tombstone was found
+    // landed and taken off its count (on this disk, with the FAT held and
+    // the read-back failing too, none is; the other three find some).
+    try testing.expect(refused_landed > 0);
 }
