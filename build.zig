@@ -43,7 +43,7 @@ fn bareTarget(b: *std.Build) std.Build.ResolvedTarget {
 }
 
 /// The plants (src/plant.zig): one at most, by `-Dplant=<name>`.
-const Plant = enum { none, disk_write_swallowed, net_goback_byte };
+const Plant = enum { none, disk_write_swallowed, net_goback_byte, counted_leak_short };
 
 pub fn build(b: *std.Build) void {
     // **NOT Debug.** A Debug build pulls in zig's UBSan runtime, which wants
@@ -234,7 +234,9 @@ pub fn build(b: *std.Build) void {
     const check_plants = b.step("check-plants", "type-check every kernel once with each plant on (src/plant.zig)");
     for (std.enums.values(Plant)) |p| {
         if (p == .none) continue;
-        const one = b.addSystemCommand(&.{ b.graph.zig_exe, "build", "check", "-Dcoverage", b.fmt("-Dplant={s}", .{@tagName(p)}) });
+        // The same port and checkout as this build's, or gopher.elf is
+        // checked against the defaults' (or not at all) for every plant.
+        const one = b.addSystemCommand(&.{ b.graph.zig_exe, "build", "check", "-Dcoverage", b.fmt("-Dplant={s}", .{@tagName(p)}), b.fmt("-Dgopher={s}", .{gopher_port}), b.fmt("-Dgopher-root={s}", .{gopher_root}) });
         one.setCwd(b.path("."));
         check_plants.dependOn(&one.step);
     }

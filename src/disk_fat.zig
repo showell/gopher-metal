@@ -1729,7 +1729,14 @@ pub const Volume = struct {
 
     fn notGivenBack(self: *Volume, freed: u32, clusters: u32) void {
         self.cleanups_failed +%= 1;
-        self.leaked_clusters +|= clusters - freed;
+        // PLANT (src/plant.zig): a give-back that fails counts one cluster
+        // fewer than it leaves, so fsck.fat reclaims one more than the end
+        // line says, which the judge's counted_leak must not excuse
+        // (metal-vmm 148(d)).
+        if (comptime plant.on == .counted_leak_short) {
+            props.reachable(@src(), "PLANT: counted-leak-short fires", null);
+            self.leaked_clusters +|= (clusters - freed) -| 1;
+        } else self.leaked_clusters +|= clusters - freed;
         props.reachable(@src(), "fat: clusters taken before a failure could not be given back, and are left a leak", .{ .count = self.cleanups_failed, .freed = freed, .of = clusters });
     }
 
