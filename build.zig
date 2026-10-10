@@ -229,8 +229,8 @@ pub fn build(b: *std.Build) void {
     const check_step = b.step("check", "type-check every kernel (analysis only, not codegen or link), and build native and droplet (part of `test`)");
     // **EVERY PLANT TYPE-CHECKED** (src/plant.zig): a plant's code is
     // analysed only when it is on, so each is checked by a `check` of its
-    // own, with -Dcoverage as gopher.elf requires. plants.sh runs it first;
-    // run it after touching a plant's lines.
+    // own, with -Dcoverage as gopher.elf requires. Run it after touching a
+    // plant's lines, and before plants.sh, which does not run it itself.
     const check_plants = b.step("check-plants", "type-check every kernel once with each plant on (src/plant.zig)");
     for (std.enums.values(Plant)) |p| {
         if (p == .none) continue;
