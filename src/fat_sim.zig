@@ -185,6 +185,12 @@ const Sim = struct {
     broken: ?[]const u8 = null,
     /// How many operations failed for want of room, for the report.
     full: usize = 0,
+    /// **WHERE A FILLING RUN STANDS** (metal-vmm B33): large files, until the
+    /// volume refuses one (`Full`, the reserve kept for small writes); then
+    /// the small writes that reserve is for. Without the turn, a run never
+    /// spent the reserve, and a FAT32 volume's clusters past 65535 sat in it,
+    /// out of every seed's reach.
+    filling: enum { large, small } = .large,
     /// The last operation, and what it said, for the report.
     last: Op = .remount,
     last_said: []const u8 = "ok",
@@ -272,8 +278,12 @@ const Sim = struct {
 
     fn size(s: *Sim) usize {
         // Mostly small, now and then up to the scenario's largest; filling,
-        // mostly large.
-        if (s.sc.filling and s.rng.uintLessThan(u8, 3) != 0) return s.rng.uintAtMost(usize, s.sc.max_bytes);
+        // mostly large until one is refused, then up to what the reserve
+        // takes.
+        if (s.sc.filling and s.rng.uintLessThan(u8, 3) != 0) return switch (s.filling) {
+            .large => s.rng.uintAtMost(usize, s.sc.max_bytes),
+            .small => s.rng.uintAtMost(usize, @min(s.sc.max_bytes, disk_fat.Volume.small_bytes)),
+        };
         if (s.rng.uintLessThan(u8, 5) == 0) return s.rng.uintAtMost(usize, s.sc.max_bytes);
         return s.rng.uintAtMost(usize, @min(s.sc.max_bytes, 600));
     }
@@ -348,6 +358,10 @@ const Sim = struct {
                     s.last_said = @errorName(e);
                     s.full += 1;
                     props.reachable(@src(), "fat_sim: a write finds no room", .{ .seed = s.seed });
+                    if (s.sc.filling and s.filling == .large and e == disk_fat.Error.Full and bytes.len > disk_fat.Volume.small_bytes) {
+                        props.reachable(@src(), "fat_sim: a filling run turns to small writes, to spend the reserve", .{ .seed = s.seed });
+                        s.filling = .small;
+                    }
                     try s.settle(path, old, null);
                 }
             },
