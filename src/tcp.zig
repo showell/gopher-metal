@@ -162,7 +162,11 @@ pub const FinEvent = enum {
     /// An ACK covers every byte and the FIN.
     fin_acknowledged,
 };
-pub const FinMachine = machine.Machine("tcp.Fin", Fin, FinEvent, .none, &.{
+/// What callers ask of where our FIN is: `owed`, to the wire (never sent,
+/// or sent and rewound); `numbered`, holding a sequence number (sent, or sent
+/// and rewound).
+pub const FinGroup = enum { owed, numbered };
+pub const FinMachine = machine.Machine("tcp.Fin", Fin, FinEvent, FinGroup, .none, &.{
     .{ .from = .none, .on = .host_finished, .to = .queued },
     .{ .from = .queued, .on = .fin_emitted, .to = .sent },
     .{ .from = .resending, .on = .fin_emitted, .to = .sent },
@@ -171,6 +175,12 @@ pub const FinMachine = machine.Machine("tcp.Fin", Fin, FinEvent, .none, &.{
     .{ .from = .sent, .on = .fin_acknowledged, .to = .acknowledged },
     // The first FIN's ACK, arriving after a go-back.
     .{ .from = .resending, .on = .fin_acknowledged, .to = .acknowledged },
+}, .{
+    .none = &.{},
+    .queued = &.{.owed},
+    .sent = &.{.numbered},
+    .resending = &.{ .owed, .numbered },
+    .acknowledged = &.{},
 });
 
 pub const Conn = struct {
@@ -319,7 +329,7 @@ pub const Conn = struct {
     pub fn highest(self: *const Conn) u32 {
         var n = self.una +% @as(u32, @intCast(self.high));
         if (self.state == .syn_received) n +%= 1;
-        if (self.fin.is(.sent) or self.fin.is(.resending)) n +%= 1;
+        if (self.fin.in(.numbered)) n +%= 1;
         return n;
     }
 
@@ -792,7 +802,7 @@ pub const Table = struct {
             if (c.rto_at == null) c.rto_at = now + c.rto_ns;
         }
 
-        if ((c.fin.is(.queued) or c.fin.is(.resending)) and c.sent == c.queued()) {
+        if (c.fin.in(.owed) and c.sent == c.queued()) {
             self.emit(wire, i, flag_fin | flag_ack, c.una +% @as(u32, @intCast(c.sent)), "");
             c.fin.fire(.fin_emitted);
             if (c.rto_at == null) c.rto_at = now + c.rto_ns;
@@ -932,7 +942,7 @@ pub const Table = struct {
         if (!updated) c.wnd -= @min(c.wnd, advance);
         if (advance > bytes) {
             // Past every byte, an ACK can cover only our FIN, which takes one.
-            props.always(@src(), (c.fin.is(.sent) or c.fin.is(.resending)) and advance == @as(u32, @intCast(bytes)) + 1, "tcp: an ACK past every byte covers our FIN and nothing more", .{ .advance = advance, .bytes = bytes });
+            props.always(@src(), c.fin.in(.numbered) and advance == @as(u32, @intCast(bytes)) + 1, "tcp: an ACK past every byte covers our FIN and nothing more", .{ .advance = advance, .bytes = bytes });
             c.fin.fire(.fin_acknowledged);
             c.high = 0;
             c.sent = 0;

@@ -31,16 +31,28 @@ pub fn Edge(comptime State: type, comptime Event: type) type {
     return struct { from: State, on: Event, to: State };
 }
 
+/// **WHICH GROUPS EACH STATE IS IN** (metal-vmm 143): a field for every
+/// state, each naming its groups, so a machine with a state left out does not
+/// compile. A new state is placed in its groups once, where it is declared,
+/// and every `in(.group)` that asks after it is right.
+pub fn Membership(comptime State: type, comptime Group: type) type {
+    return std.enums.EnumFieldStruct(State, []const Group, null);
+}
+
 /// A machine named `name` (in its sites' messages), over `State` and
 /// `Event`, both enums, with `edges` its only transitions. Two edges from
-/// one state on one event are refused at compile time.
+/// one state on one event are refused at compile time. `Group` names sets of
+/// states callers ask about (`in`), and `groups` places every state.
 pub fn Machine(
     comptime name: []const u8,
     comptime State: type,
     comptime Event: type,
+    comptime Group: type,
     comptime initial: State,
     comptime edges: []const Edge(State, Event),
+    comptime groups: Membership(State, Group),
 ) type {
+    const of = std.enums.EnumArray(State, []const Group).init(groups);
     comptime {
         for (edges, 0..) |a, i| {
             for (edges[i + 1 ..]) |b| {
@@ -73,6 +85,18 @@ pub fn Machine(
 
         pub fn is(self: Self, state: State) bool {
             return self.machine_state == state;
+        }
+
+        /// Whether the state is in `group`, as `groups` placed it.
+        pub fn in(self: Self, group: Group) bool {
+            switch (self.machine_state) {
+                inline else => |state| {
+                    inline for (comptime of.get(state)) |g| {
+                        if (g == group) return true;
+                    }
+                    return false;
+                },
+            }
         }
 
         /// The edge from `from` on `on`, if the table has one.
@@ -115,12 +139,20 @@ pub fn Machine(
 
 const testing = std.testing;
 
-const Door = Machine("test.Door", enum { shut, open, locked }, enum { push, pull, lock, unlock }, .shut, &.{
+const Door = Machine("test.Door", enum { shut, open, locked }, enum { push, pull, lock, unlock }, enum { closed, passable }, .shut, &.{
     .{ .from = .shut, .on = .push, .to = .open },
     .{ .from = .open, .on = .pull, .to = .shut },
     .{ .from = .shut, .on = .lock, .to = .locked },
     .{ .from = .locked, .on = .unlock, .to = .shut },
-});
+}, .{ .shut = &.{.closed}, .open = &.{.passable}, .locked = &.{.closed} });
+
+test "a state is in the groups its machine placed it in, and no other" {
+    try testing.expect(Door.startingAt(.shut).in(.closed));
+    try testing.expect(!Door.startingAt(.shut).in(.passable));
+    try testing.expect(Door.startingAt(.locked).in(.closed));
+    try testing.expect(Door.startingAt(.open).in(.passable));
+    try testing.expect(!Door.startingAt(.open).in(.closed));
+}
 
 test "a machine moves only along its edges" {
     var d: Door = .{};

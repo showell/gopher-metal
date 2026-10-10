@@ -193,7 +193,7 @@ fn queuedUnsent(c: *const Conn) bool {
 }
 /// Owed to the wire: never sent, or sent and rewound by a go-back.
 fn finQueued(c: *const Conn) bool {
-    return c.fin.is(.queued) or c.fin.is(.resending);
+    return c.fin.in(.owed);
 }
 fn finAcknowledged(c: *const Conn) bool {
     return c.fin.is(.acknowledged);
