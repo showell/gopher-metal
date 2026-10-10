@@ -350,8 +350,18 @@ fn countedIsFoundBut(d: *test_disk.Disk, uncounted: u64, op: []const u8, kind: [
         (v.unsized_leaks > 0 or r.health.leaked <= v.leaked_clusters + v.unsure_clusters + uncounted);
     const parts_ok = r.health.orphaned_parts >= v.orphaned_parts and
         r.health.orphaned_parts <= v.orphaned_parts + v.unsure_parts;
-    if (clusters_ok and parts_ok) return;
-    std.debug.print("{s} ({s}), {s} {d}: counted {d} clusters leaked (+{d} unsure, {d} unsized) and {d} long-name parts orphaned (+{d} unsure); the check found {d} and {d}\n", .{ op, kind, when, n, v.leaked_clusters, v.unsure_clusters, v.unsized_leaks, v.orphaned_parts, v.unsure_parts, r.health.leaked, r.health.orphaned_parts });
+    // A `long` finding's count is the chain's length: past the size, it is
+    // that less what the size needs.
+    var long: u64 = 0;
+    const cluster_bytes: u64 = @as(u64, v.sectors_per_cluster) * 512;
+    for (r.found[0..r.len]) |f| {
+        if (f.problem != .long) continue;
+        const entry = try v.open(f.text()[1..]);
+        long += f.count - (entry.size + cluster_bytes - 1) / cluster_bytes;
+    }
+    const long_ok = long >= v.long_clusters and long <= v.long_clusters + v.unsure_long;
+    if (clusters_ok and parts_ok and long_ok) return;
+    std.debug.print("{s} ({s}), {s} {d}: counted {d} clusters leaked (+{d} unsure, {d} unsized), {d} long-name parts orphaned (+{d} unsure) and {d} clusters long (+{d} unsure); the check found {d}, {d} and {d}\n", .{ op, kind, when, n, v.leaked_clusters, v.unsure_clusters, v.unsized_leaks, v.orphaned_parts, v.unsure_parts, v.long_clusters, v.unsure_long, r.health.leaked, r.health.orphaned_parts, long });
     return error.TestUnexpectedResult;
 }
 

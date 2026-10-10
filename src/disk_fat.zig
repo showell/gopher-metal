@@ -358,6 +358,13 @@ pub const Volume = struct {
     /// not be walked to count it. While any is, what is found has no upper
     /// bound in the counts.
     unsized_leaks: u64 = 0,
+    /// **CLUSTERS IN A CHAIN PAST WHAT ITS SIZE NEEDS** (148(c)): an
+    /// append whose link landed and whose size did not (the check's `long`,
+    /// which fsck.fat truncates). `unsure_long` where the size's landing is
+    /// unknown. The next append fills them first, and they are not counted
+    /// down then: the count is of what failed operations left.
+    long_clusters: u64 = 0,
+    unsure_long: u64 = 0,
     /// **THE LEDGER** (`ledger_on`): clusters the operation in
     /// progress took and has not yet ended. Every cluster `allocChain`
     /// takes ends in exactly one of four ways, each of which says how many
@@ -2458,6 +2465,18 @@ pub const Volume = struct {
         var chain: enum { the_files, made_here } = .the_files;
         var commit: Commit = .{ .clusters = 0 };
         errdefer if (chain == .made_here and commit.landing == .before) self.giveBack(first, need);
+        // **CLUSTERS LINKED PAST THE SIZE** (148(c)): a link that landed and
+        // a size that did not leave the chain `long` by them, counted
+        // (`long_clusters`), or may (`unsure_long`) where the size's landing
+        // is unknown. The next append fills them first.
+        // A link whose landing is unknown leaves its clusters leaked or
+        // long, which may be live either way: both counts' ceilings.
+        var linked_past: u32 = 0;
+        var maybe_linked: u32 = 0;
+        errdefer if (commit.landing != .landed) {
+            if (commit.landing == .before) self.long_clusters +|= linked_past else self.unsure_long +|= linked_past;
+            self.unsure_long +|= maybe_linked;
+        };
         if (have == 0 and first == 0) {
             first = try self.allocChain(need, .{ .bytes = new_size });
             chain = .made_here;
@@ -2475,8 +2494,14 @@ pub const Volume = struct {
                 var link: Landing = .before;
                 defer switch (link) {
                     .before => self.giveBack(extra, more),
-                    .landed => self.linked(more),
-                    .unknown => self.leftUnsure(more),
+                    .landed => {
+                        self.linked(more);
+                        linked_past = more;
+                    },
+                    .unknown => {
+                        self.leftUnsure(more);
+                        maybe_linked = more;
+                    },
                 };
                 try self.fatSet(end.last, extra, &link);
             }
