@@ -2619,3 +2619,37 @@ test "a rename whose undo is refused too keeps the file under one whole name, or
         try testing.expect(kept_whole > 0);
     }
 }
+
+test "a chain's FAT entries are written once per FAT sector, not once per entry (metal-vmm B42)" {
+    // Production's volume answers a request in ~5.8 ms (network block
+    // storage, its write cache off), and a 1 MiB upload cost 143 writes,
+    // ~128 of them the FAT: two entries changed a cluster, each writing its
+    // sector to both copies. A held FAT now takes a chain a sector at a
+    // time: each sector written once per copy, then linked to the last.
+    for ([_]test_disk.Shape{ test_disk.small, test_disk.small32 }) |shape| {
+        const d = try test_disk.Disk.make("b42", shape, true);
+        defer d.deinit();
+        try d.mount(true);
+        const bytes = try testing.allocator.alloc(u8, 1 << 20);
+        defer testing.allocator.free(bytes);
+        @memset(bytes, 0x5A);
+        const w0 = d.blk.writes;
+        try d.vol.writeFile("UPLOAD.BIN", bytes);
+        const writes = d.blk.writes - w0;
+        const per_cluster = @as(u64, d.vol.sectors_per_cluster) * disk_fat.sector_size;
+        const clusters = (bytes.len + per_cluster - 1) / per_cluster;
+        const per_sector: u64 = disk_fat.sector_size / @as(u64, if (shape.kind == .fat32) 4 else 2);
+        const fat_sectors = (clusters + per_sector - 1) / per_sector + 1;
+        // Each FAT sector: written to two copies, and its link to the next
+        // to two; the rest is the data and the directory, a few dozen.
+        const most = 4 * fat_sectors + 32;
+        if (writes > most) {
+            std.debug.print("{s}: {d} clusters cost {d} writes, more than {d}\n", .{ @tagName(shape.kind), clusters, writes, most });
+            return error.TestUnexpectedResult;
+        }
+        const back = try testing.allocator.alloc(u8, bytes.len);
+        defer testing.allocator.free(back);
+        try testing.expectEqual(bytes.len, try d.vol.readFile(try d.vol.open("UPLOAD.BIN"), back));
+        try testing.expectEqualSlices(u8, bytes, back);
+    }
+}

@@ -1392,6 +1392,7 @@ pub const Volume = struct {
             props.reachable(@src(), "fat: a large allocation is refused to keep the reserve for small writes", .{ .count = count, .free = self.free_clusters, .bytes = spend.bytes });
             return Error.Full;
         }
+        if (self.fat) |fat| return self.allocChainHeld(fat, count);
         var first: Cluster = 0;
         var previous: Cluster = 0;
         // The clusters linked from `first`: `taken`, and a candidate whose
@@ -1464,6 +1465,149 @@ pub const Volume = struct {
         }
         self.alloc_hint = candidate;
         return first;
+    }
+
+    /// `allocChain` with the FAT held: **A FAT SECTOR AT A TIME** (metal-vmm
+    /// B42). Every free cluster the chain still needs in one sector is
+    /// marked and linked in the held sector, the last an end, and the sector
+    /// is written once to each copy; then the batch is linked to the chain
+    /// so far by one `fatSet`, as a single cluster was. Per cluster, two
+    /// entries each wrote their sector to both copies: four writes, ~5.8 ms
+    /// each on production's volume. Nothing points at the chain until the
+    /// caller's commit, so a stop between the writes leaves lost clusters,
+    /// as it did.
+    ///
+    /// **A BATCH'S WRITE HAS ONE VERDICT** (`sectorRefused`), as one mark's
+    /// did: not landed, the held sector goes back as it was; landed, the
+    /// batch is taken and given back; unknown, taken as written and never
+    /// counted taken, a counted leak.
+    fn allocChainHeld(self: *Volume, fat: []u8, count: u32) Error!Cluster {
+        var first: Cluster = 0;
+        var previous: Cluster = 0;
+        // The clusters linked from `first`: `taken`, and a batch whose
+        // failed link landed.
+        var in_chain: u32 = 0;
+        errdefer if (first != 0) self.giveBack(first, in_chain);
+        var taken: u32 = 0;
+        var candidate: Cluster = @max(self.alloc_hint, 2);
+        // Once round the volume at most: a wrong hint costs a wrap, not a
+        // wrong answer.
+        var looked: u32 = 0;
+        const clusters: u32 = self.max_cluster - 1;
+        const width = self.entryBytes();
+        try self.forgetFsInfo();
+
+        while (taken < count) {
+            // The batch's first: the next free cluster.
+            while (true) {
+                if (candidate > self.max_cluster) {
+                    props.reachable(@src(), "fat: the allocation cursor wraps around the volume", null);
+                    candidate = 2;
+                }
+                if (looked == clusters) {
+                    props.reachable(@src(), "fat: an allocation finds the volume full", .{ .count = count, .taken = taken });
+                    if (first != 0) {
+                        props.reachable(@src(), "fat: a volume full part-way through an allocation gives back what it took", .{ .taken = taken });
+                    }
+                    return Error.Full; // the errdefer gives it back
+                }
+                looked += 1;
+                if ((try self.fatGet(candidate)) == 0) break;
+                candidate += 1;
+            }
+            const in_sector = candidate * width / sector_size;
+            const sector = fat[in_sector * sector_size ..][0..sector_size];
+            var was: [sector_size]u8 = undefined;
+            @memcpy(&was, sector);
+            const batch_first = candidate;
+            var last: Cluster = 0;
+            var n: u32 = 0;
+            // Every free cluster left in this sector that the chain still
+            // needs, each linked from the one before, the last an end.
+            batch: while (true) {
+                self.putEntry(sector, candidate * width % sector_size, self.endMark());
+                if (last != 0) self.putEntry(sector, last * width % sector_size, candidate);
+                last = candidate;
+                n += 1;
+                candidate += 1;
+                if (taken + n == count) break;
+                while (candidate <= self.max_cluster and candidate * width / sector_size == in_sector and looked < clusters) {
+                    looked += 1;
+                    if ((try self.fatGet(candidate)) == 0) continue :batch;
+                    candidate += 1;
+                }
+                break;
+            }
+            if (n > 1) props.reachable(@src(), "fat: an allocation takes several clusters in one FAT sector write", .{ .clusters = n });
+
+            self.writeSector(self.fat_start + in_sector, sector) catch |e| {
+                switch (self.sectorRefused(self.fat_start + in_sector, sector, &was)) {
+                    .before => @memcpy(sector, &was),
+                    .landed => {
+                        self.keepTaken(n);
+                        self.writeCopies(in_sector, sector);
+                        self.took(n);
+                        self.giveBack(batch_first, n);
+                    },
+                    // Taken as written, the first copy written again once,
+                    // as `fatSet` does; never counted taken, as it may not
+                    // be.
+                    .unknown => {
+                        self.keepTaken(n);
+                        self.writeSector(self.fat_start + in_sector, sector) catch self.copyApart();
+                        self.writeCopies(in_sector, sector);
+                        self.leftLeaked(0);
+                    },
+                }
+                return e;
+            };
+            self.keepTaken(n);
+            self.writeCopies(in_sector, sector);
+            self.took(n);
+            // The batch linked on, by the verdict, as one cluster was.
+            // Landed: the chain has the batch, and the errdefer frees both.
+            // Not landed: the batch goes back alone, the chain by the
+            // errdefer. Unknown: batch and chain are a counted leak, and the
+            // errdefer does not walk them.
+            var link: Landing = .before;
+            if (previous != 0) self.fatSet(previous, batch_first, &link) catch |e| {
+                switch (link) {
+                    .landed => in_chain += n,
+                    .before => self.giveBack(batch_first, n),
+                    .unknown => {
+                        self.leftLeaked(taken + n);
+                        first = 0;
+                    },
+                }
+                return e;
+            };
+            if (first == 0) first = batch_first;
+            previous = last;
+            taken += n;
+            in_chain = taken;
+        }
+        self.alloc_hint = candidate;
+        return first;
+    }
+
+    /// `n` free clusters taken, in the kept count.
+    fn keepTaken(self: *Volume, n: u32) void {
+        var i: u32 = 0;
+        while (i < n) : (i += 1) self.keepCount(0, self.endMark());
+    }
+
+    /// **WHETHER A BATCH'S REFUSED SECTOR LANDED**, read back once into
+    /// scratch: the whole sector as written, `landed`; as it was, `before`;
+    /// anything else, or a read-back that failed, `unknown`.
+    fn sectorRefused(self: *Volume, lba: u32, written: *const [sector_size]u8, was: *const [sector_size]u8) Landing {
+        self.readSector(lba, self.scratch) catch {
+            props.reachable(@src(), "fat: a batch's FAT sector whose write failed cannot be read again", null);
+            return .unknown;
+        };
+        if (std.mem.eql(u8, self.scratch, written)) return .landed;
+        if (std.mem.eql(u8, self.scratch, was)) return .before;
+        props.reachable(@src(), "fat: a batch's FAT sector whose write failed reads back as neither", null);
+        return .unknown;
     }
 
     /// A cleanup after the commit: its failure is a counted leak

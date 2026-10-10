@@ -924,7 +924,10 @@ test "a disk that lies (a write that lands nothing or half, a read of other byte
             }
         }
     }
-    try testing.expect(runs > 1000);
+    // Not vacuous: a run for every request of every operation. Fewer since
+    // a chain's FAT entries are written a sector at a time (metal-vmm B42):
+    // 804 runs there, from over 1,000.
+    try testing.expect(runs > 700);
 }
 
 /// One operation whose failure is judged for lost clusters: what it starts
@@ -936,6 +939,7 @@ const LeakOp = struct {
 };
 
 const leak_first = [_]u8{'a'} ** 600;
+const leak_long = [_]u8{0x4C} ** (300 * 512);
 const leak_more = [_]u8{'m'} ** (3 * 512 + 100);
 
 const leak_ops = [_]LeakOp{
@@ -1006,6 +1010,18 @@ const leak_ops = [_]LeakOp{
     }.f, .run = struct {
         fn f(v: *disk_fat.Volume) anyerror!void {
             try v.rename("data/LOG", "data/OLD");
+        }
+    }.f },
+    // A chain past one FAT sector (FAT16's 256 entries; 512-byte
+    // clusters here): two batches and the link between them (metal-vmm
+    // B42), each failing in turn.
+    .{ .name = "a file spanning two FAT sectors", .setup = struct {
+        fn f(v: *disk_fat.Volume) anyerror!void {
+            _ = try v.makePath("data");
+        }
+    }.f, .run = struct {
+        fn f(v: *disk_fat.Volume) anyerror!void {
+            try v.writeFile("data/LONG", &leak_long);
         }
     }.f },
     .{ .name = "a remove", .setup = struct {
