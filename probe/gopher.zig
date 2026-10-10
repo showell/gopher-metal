@@ -1737,7 +1737,7 @@ fn metalFacts(io: Io, alloc: std.mem.Allocator) anyerror![]const router.host_sta
     try add(&facts, alloc, "idle time", "{d} steps in quiet moments, {d} over the {d} ms budget", .{
         idle_work.steps, idle_work.overruns, idle_work.budget_ns / std.time.ns_per_ms,
     });
-    for (volume_checks, volume_check_names) |*maybe, name| {
+    for (&volume_checks, volume_check_names) |*maybe, name| {
         if (maybe.*) |*c| try facts.append(alloc, .{ .label = name, .value = try checkFact(alloc, c) });
     }
     const work = diskWork();
