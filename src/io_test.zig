@@ -627,11 +627,9 @@ test "a picture read whole is kept; a range read keeps nothing; one past largest
     try testing.expectEqual(hits_before + 1, pc.hits);
     try testing.expectEqual(@as(usize, 1), pc.count);
 
-    // A range read in the middle of an uncached file keeps nothing: a video
-    // seek is not a file worth holding whole.
-    var clip: [3 * PageCache.page]u8 = undefined;
-    @memset(&clip, 'c');
-    try cwd.writeFile(io, .{ .sub_path = "data/chat/clip", .data = &clip });
+    // A range read (offset past the start) of an uncached file keeps nothing:
+    // a video seek is not a file worth holding whole.
+    try cwd.writeFile(io, .{ .sub_path = "data/chat/clip", .data = &pic });
     {
         const f = try cwd.openFile(io, "data/chat/clip", .{});
         _ = try f.readPositionalAll(io, buf[0..PageCache.page], PageCache.page);
@@ -761,31 +759,4 @@ test "a read tried again (boot's read_tries) answers past one refusal, and is co
     t.volume.blk.fault = .{ .at = t.volume.blk.requests, .kind = .fails };
     try testing.expectError(error.ReadFailed, cwd.statFile(io, "data/chat/log.md", .{}));
     t.volume.blk.fault = null;
-}
-
-test "a read from inside a file to its end keeps the file whole, so the next costs no disk request (gopher-metal 153(7))" {
-    // Recent reads each transcript's tail, from its last message to the end,
-    // and never the whole file: kept only when read whole, a tail was read
-    // from the disk on every visit.
-    const t = try Two.make(true);
-    defer t.deinit();
-    const pc = try testing.allocator.create(PageCache);
-    defer testing.allocator.destroy(pc);
-    pc.* = PageCache.init(testing.allocator, 64 * PageCache.page, 16 * PageCache.page);
-    io_mod.keepPages(pc);
-    defer io_mod.keepPages(null);
-    var transcript: [5000]u8 = undefined;
-    for (&transcript, 0..) |*b, i| b.* = @truncate(i *% 13 + 3);
-    try cwd.writeFile(io, .{ .sub_path = "data/chat/1_2/sessions/1.md", .data = &transcript });
-    var tail: [64 << 10]u8 = undefined;
-    for (0..2) |round| {
-        const f = try cwd.openFile(io, "data/chat/1_2/sessions/1.md", .{});
-        // The read alone (the open walks the folders, which this disk does
-        // not hold).
-        const before = t.volume.blk.requests;
-        const n = try f.readPositionalAll(io, &tail, 4000);
-        try testing.expectEqualSlices(u8, transcript[4000..], tail[0..n]);
-        if (round == 1) try testing.expectEqual(before, t.volume.blk.requests);
-    }
-    try testing.expect(pc.get("data/chat/1_2/sessions/1.md") != null);
 }

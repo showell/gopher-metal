@@ -483,24 +483,6 @@ pub const File = struct {
         const e = try openEntry(v, path);
         if (e.isDirectory()) return Error.IsDir;
         if (offset >= e.size) return 0;
-        // **A READ TO THE END KEEPS THE FILE** (gopher-metal 153(7)): Recent
-        // reads each transcript from its last message to its end, never
-        // whole, so a file kept only when read whole was read from the disk on
-        // every visit. One read to the end, of a file the cache can hold, reads
-        // it whole once and keeps it; appends keep it current after (`wrote`).
-        // A read in the middle (a video's seek) still keeps nothing.
-        if (pc) |c| if (offset > 0 and offset + buffer.len >= e.size and e.size <= c.largest) {
-            if (c.alloc.alloc(u8, e.size)) |whole| {
-                defer c.alloc.free(whole);
-                const got = v.readAt(e, 0, whole) catch return Error.ReadFailed;
-                if (got == e.size) {
-                    c.put(path, whole);
-                    const n = @min(buffer.len, whole.len - @as(usize, @intCast(offset)));
-                    @memcpy(buffer[0..n], whole[@intCast(offset)..][0..n]);
-                    return n;
-                }
-            } else |_| {}
-        };
         const n = v.readAt(e, @intCast(offset), buffer) catch return Error.ReadFailed;
         if (pc) |c| if (offset == 0 and n == e.size) c.put(path, buffer[0..n]);
         return n;
