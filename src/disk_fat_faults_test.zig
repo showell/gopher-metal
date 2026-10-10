@@ -368,6 +368,19 @@ fn describe(s: State) []const u8 {
 /// counted is one nobody knew of; one counted and not found is slack, where
 /// an uncounted one could hide.
 fn countedIsFound(d: *test_disk.Disk, op: []const u8, kind: []const u8, when: []const u8, n: u64) !void {
+    // **EVERY COPY PAST THE FIRST IS THE HELD FAT, OR COUNTED APART**: the
+    // check allows FATs that differ (a stop's), so a copy a batch's write
+    // never reached is looked for here.
+    if (d.vol.fat) |held| {
+        var copy: u32 = 1;
+        while (copy < d.vol.num_fats) : (copy += 1) {
+            const on_disk = d.bytes[(d.vol.fat_start + copy * d.vol.sectors_per_fat) * test_disk.sector ..][0..held.len];
+            if (!std.mem.eql(u8, on_disk, held) and d.vol.fat_copies_failed == 0) {
+                std.debug.print("{s} ({s}), {s} {d}: FAT copy {d} is not the held FAT, and nothing counted\n", .{ op, kind, when, n, copy });
+                return error.TestUnexpectedResult;
+            }
+        }
+    }
     const r = try d.check();
     const v = &d.vol;
     const clusters_ok = r.health.leaked >= v.leaked_clusters and
@@ -787,8 +800,9 @@ test "a write that lands and answers failure (or fails) to a held FAT sector, it
     // holds the batch freed or not, and the count must say so.
     for (stopped_ops) |op| {
         if (std.mem.indexOf(u8, op.name, "spanning FAT sectors") == null) continue;
-        for ([_]@FieldType(@import("virtio.zig").Block.Fault, "kind"){ .fails, .lands_and_fails }) |fault| {
-            const cfg = configs[1]; // FAT16, its FAT held
+        // FAT16 and FAT32, each with its FAT held.
+        for ([_]@FieldType(@import("virtio.zig").Block.Fault, "kind"){ .fails, .lands_and_fails }) |fault| for ([_]usize{ 1, 3 }) |c| {
+            const cfg = configs[c];
             const total = try requestsOf(op, cfg);
             const d = try Disk.makeUnkept("limit-held-twice", cfg.shape, true);
             defer d.deinit();
@@ -821,7 +835,7 @@ test "a write that lands and answers failure (or fails) to a held FAT sector, it
             }
             // Not vacuous: a batch's write again failed, and was counted.
             try testing.expect(unsure > 0);
-        }
+        };
     }
 }
 

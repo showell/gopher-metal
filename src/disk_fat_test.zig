@@ -2656,8 +2656,8 @@ test "a chain's FAT entries are written once per FAT sector, not once per entry 
 
 test "a chain is freed a FAT sector at a time, by a remove and by an overwrite (metal-vmm B42's frees)" {
     // A remove or overwrite freed its old chain an entry at a time, each
-    // writing its sector to both copies: 64 writes for a 1 MiB file on
-    // small's clusters, where its FAT sectors are three.
+    // writing its sector to both copies: a 1 MiB file on small's 512-byte
+    // clusters is 2,048 entries, ~4,096 writes, in 8 or 9 FAT16 sectors.
     for ([_]test_disk.Shape{ test_disk.small, test_disk.small32 }) |shape| {
         for ([_]enum { remove, overwrite }{ .remove, .overwrite }) |how| {
             const d = try test_disk.Disk.make("b42-frees", shape, true);
