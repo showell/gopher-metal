@@ -324,6 +324,37 @@ fn describe(s: State) []const u8 {
 }
 
 /// The report holds only what `allowed` names.
+/// **FOUND EQUALS COUNTED, EXACTLY** (metal-vmm 148(b)): what the
+/// volume counted its failed operation left on the disk, held to what a
+/// check finds at once, on the same mount, before anything else is written.
+/// The exact counts (`leaked_clusters`, `orphaned_parts`) are a floor, and
+/// with what may be live (`unsure_clusters`, `unsure_parts`) a ceiling;
+/// with nothing unsure the two are one number. A leftover found and not
+/// counted is one nobody knew of; one counted and not found is slack, where
+/// an uncounted one could hide.
+fn countedIsFound(d: *test_disk.Disk, op: []const u8, kind: []const u8, when: []const u8, n: u64) !void {
+    return countedIsFoundBut(d, 0, op, kind, when, n);
+}
+
+/// **ONE CLUSTER NOT YET COUNTED, AND WHERE** (148(b), for the box's B42):
+/// `allocChain` counts a cluster whose end mark's landing is unknown as
+/// nothing (`leftLeaked(0)`); counted, it is one `unsure_clusters`. The box
+/// is in `allocChain`, so the line is the box's to fold (FEEDBACK, 148), and
+/// then this is 0. It is reached only with a read-back that fails too.
+const alloc_mark_uncounted: u64 = 1;
+
+fn countedIsFoundBut(d: *test_disk.Disk, uncounted: u64, op: []const u8, kind: []const u8, when: []const u8, n: u64) !void {
+    const r = try d.check();
+    const v = &d.vol;
+    const clusters_ok = r.health.leaked >= v.leaked_clusters and
+        (v.unsized_leaks > 0 or r.health.leaked <= v.leaked_clusters + v.unsure_clusters + uncounted);
+    const parts_ok = r.health.orphaned_parts >= v.orphaned_parts and
+        r.health.orphaned_parts <= v.orphaned_parts + v.unsure_parts;
+    if (clusters_ok and parts_ok) return;
+    std.debug.print("{s} ({s}), {s} {d}: counted {d} clusters leaked (+{d} unsure, {d} unsized) and {d} long-name parts orphaned (+{d} unsure); the check found {d} and {d}\n", .{ op, kind, when, n, v.leaked_clusters, v.unsure_clusters, v.unsized_leaks, v.orphaned_parts, v.unsure_parts, r.health.leaked, r.health.orphaned_parts });
+    return error.TestUnexpectedResult;
+}
+
 fn onlyAllowed(r: *const test_disk.Report, these: []const disk_fat.Problem, op: []const u8, kind: []const u8, when: []const u8, n: u64) !void {
     for (r.found[0..r.len]) |f| {
         if (std.mem.indexOfScalar(disk_fat.Problem, these, f.problem) == null) {
@@ -564,6 +595,7 @@ test "a request that fails is an error, and the machine carries on with nothing 
                 const result = op.run(&d.vol);
                 d.blk.fault = null;
                 const said_done = if (result) |_| true else |_| false;
+                try countedIsFound(d, op.name, kind, "failed request", n);
 
                 // What the machine holds in memory is still the disk's, at
                 // once (a later change to the same FAT sector would write
@@ -637,6 +669,7 @@ test "a write that lands and answers failure is an error, and leaves nothing wor
                 // answered: a FAT sector the disk took and called failed is
                 // read again, not assumed old (QUEUE 131, #7).
                 try heldIsDisk(d, op.name, kind, n);
+                try countedIsFound(d, op.name, kind, "write that landed and failed", n);
                 try d.mount(cfg.cached);
                 for (op.want) |w| {
                     const got = try stateOf(d, w.path, &buf);
@@ -682,6 +715,7 @@ test "a write that lands and answers failure, and the read after it fails too, l
                 d.blk.fault = .{ .at = d.blk.requests + n, .kind = .lands_and_fails, .then_fail = 1, .seed = @truncate(n) };
                 op.run(&d.vol) catch {};
                 d.blk.fault = null;
+                try countedIsFoundBut(d, alloc_mark_uncounted, op.name, kind, "write that landed and failed, and the next request failed", n);
                 // The machine goes on, on the same mount: a new file, near
                 // where the operation took its clusters.
                 d.vol.writeFile("data/after", &after_bytes) catch {};
@@ -730,6 +764,7 @@ test "a write that lands and answers failure, its read-back failing too, while a
             d.blk.fault = .{ .at = d.blk.requests + n, .kind = .lands_and_fails, .then_fail = 1, .seed = @truncate(n) };
             d.vol.writeFile("data/full/BIG.DAT", &big) catch {};
             d.blk.fault = null;
+            try countedIsFoundBut(d, alloc_mark_uncounted, "a new file, growing its directory", "FAT16", "write that landed and failed, and the next request failed", n);
             // On, on the same mount: what it takes next must be free.
             d.vol.writeFile("data/after", &after_bytes) catch {};
             try d.mount(cfg.cached);
@@ -765,6 +800,7 @@ test "a write that lands and answers failure, as an allocation links its chain, 
             d.blk.fault = .{ .at = d.blk.requests + n, .kind = .lands_and_fails };
             d.vol.writeFile("data/BIG.DAT", &big) catch {};
             d.blk.fault = null;
+            try countedIsFound(d, "a new file", "FAT16", "write that landed and failed", n);
             var broke = false;
             var it = coverage.catalog();
             while (it.next()) |site| {
@@ -810,6 +846,7 @@ test "a write that lands and answers failure, its read-back rotten: the kept fre
             d.blk.fault = .{ .at = d.blk.requests + n, .kind = .lands_and_fails, .then_garbage = 1, .seed = @truncate(n) };
             d.vol.writeFile("data/BIG.DAT", &big) catch {};
             d.blk.fault = null;
+            try countedIsFoundBut(d, alloc_mark_uncounted, "a new file", "FAT16", "write that landed and failed, its read-back rotten", n);
             var held_free: u32 = 0;
             var c: u32 = 2;
             while (c <= d.vol.max_cluster) : (c += 1) {
@@ -854,6 +891,7 @@ test "a write that lands and answers failure, with the FAT on the disk and its r
         d.blk.fault = .{ .at = d.blk.requests + n, .kind = .lands_and_fails, .then_garbage = 2, .seed = @truncate(n *% 7 +% 1) };
         d.vol.writeFile("data/BIG.DAT", &big) catch {};
         d.blk.fault = null;
+        try countedIsFoundBut(d, alloc_mark_uncounted, "a new file beside another", "FAT16", "write that landed and failed, its read-backs rotten", n);
         var it = coverage.catalog();
         while (it.next()) |site| if (site.broken()) {
             std.debug.print("request {d} of {d}: broken: {s}\n", .{ n, total, std.mem.span(site.message) });

@@ -178,6 +178,12 @@ pub const Health = struct {
     /// Clusters held by the files and directories walked.
     used: u32 = 0,
     leaked: u32 = 0,
+    /// **LONG-NAME PARTS NO SHORT ENTRY CLOSES** (metal-vmm 148(b,c)): a
+    /// part not in a run that its short entry closes whole, as fsck.fat
+    /// finds and deletes them. Not a problem (a stop and a failed cleanup
+    /// both leave them, and nothing reads them): a count, for a caller to
+    /// hold `Volume.orphaned_parts` to.
+    orphaned_parts: u32 = 0,
     problems: u32 = 0,
 
     pub fn clean(self: Health) bool {
@@ -330,8 +336,9 @@ pub const Volume = struct {
     cleanups_failed: u64 = 0,
     /// **CLUSTERS LEFT A COUNTED LEAK**, where the cleanup knows how many:
     /// a failed write's chain left taken (`leftLeaked`), what a give-back
-    /// did not free (`notGivenBack`). A cleanup after a commit (`afterCommit`)
-    /// does not know, and adds none. A judge holds what fsck.fat reclaims to
+    /// did not free (`notGivenBack`), what a chain freed after a commit
+    /// left (`chainLeft`, walked to count it). Exact: a leftover that may be
+    /// live is `unsure_clusters`. A judge holds what fsck.fat reclaims to
     /// it: more found than counted is a leak nobody counted.
     leaked_clusters: u64 = 0,
     /// **LONG-NAME PARTS LEFT ORPHANED**: a part whose clearing after a
@@ -339,6 +346,18 @@ pub const Volume = struct {
     /// short entry are counted too (`writeEntry`), and one whose own write
     /// failed among them, since it may have landed.
     orphaned_parts: u64 = 0,
+    /// **LEFTOVERS THAT MAY BE LIVE** (metal-vmm 148(a)): clusters and
+    /// long-name parts a failed write may have left, where no exact read
+    /// could say (`Landing.unknown`): an entry that may point at them, or
+    /// may not. Apart from the two counts above, which are exact, so what a
+    /// check or fsck.fat finds is at least those and at most those plus
+    /// these.
+    unsure_clusters: u64 = 0,
+    unsure_parts: u64 = 0,
+    /// **LEAKS OF A SIZE NOT KNOWN**: a chain left after a commit that could
+    /// not be walked to count it. While any is, what is found has no upper
+    /// bound in the counts.
+    unsized_leaks: u64 = 0,
     /// **THE LEDGER** (`ledger_on`): clusters the operation in
     /// progress took and has not yet ended. Every cluster `allocChain`
     /// takes ends in exactly one of four ways, each of which says how many
@@ -1466,15 +1485,6 @@ pub const Volume = struct {
         return first;
     }
 
-    /// A cleanup after the commit: its failure is a counted leak
-    /// (`cleanups_failed`), not the operation's error.
-    fn afterCommit(self: *Volume, done: Error!void) void {
-        done catch {
-            self.cleanups_failed +%= 1;
-            props.reachable(@src(), "fat: a cleanup after the commit failed, and is left a leak", .{ .count = self.cleanups_failed });
-        };
-    }
-
     /// The reserve's most (`reserve_clusters`), and the largest file that may
     /// spend it.
     pub const reserve_bytes: u32 = 64 << 20;
@@ -1493,6 +1503,17 @@ pub const Volume = struct {
         self.cleanups_failed +%= 1;
         self.leaked_clusters +|= clusters;
         props.reachable(@src(), "fat: clusters left taken, what a failed write left not read exactly", .{ .count = self.cleanups_failed });
+        self.ended(clusters);
+    }
+
+    /// The `clusters` the operation took, left taken where what a failed
+    /// write left is `unknown`: an entry may point at them, or none may
+    /// (148(a)). Counted apart (`unsure_clusters`), and their end in the
+    /// ledger.
+    fn leftUnsure(self: *Volume, clusters: u32) void {
+        self.cleanups_failed +%= 1;
+        self.unsure_clusters +|= clusters;
+        props.reachable(@src(), "fat: clusters left taken, and whether an entry points at them is unknown", .{ .count = self.cleanups_failed });
         self.ended(clusters);
     }
 
@@ -1581,17 +1602,44 @@ pub const Volume = struct {
         self.ledger_open = 0;
     }
 
-    fn freeChain(self: *Volume, first: Cluster) Error!void {
+    /// **A CHAIN FREED AFTER THE COMMIT THAT LET IT GO**: a cleanup, whose
+    /// failure is no error of the operation's but a counted leak of what is
+    /// left (148(b)): the rest of the chain from where it stopped, counted
+    /// by walking it, and the cluster whose freeing was refused by where its
+    /// FAT write stands (`fatSet`'s verdict): freed, not, or unknown.
+    fn freeAfterCommit(self: *Volume, first: Cluster) void {
         var cluster = first;
         while (self.inData(cluster)) {
-            const next = try self.fatGet(cluster);
+            const next = self.fatGet(cluster) catch return self.chainLeft(cluster);
             props.always(@src(), next != 0, "fat: every cluster freed was in use", .{ .cluster = cluster });
             // **THE HINT IS LOWERED FIRST.** A lower hint is always sound,
             // and a fatSet that fails may still have freed the cluster.
             if (cluster < self.alloc_hint) self.alloc_hint = cluster;
-            try self.fatSet(cluster, 0, null);
+            var landing: Landing = .before;
+            self.fatSet(cluster, 0, &landing) catch return switch (landing) {
+                .landed => self.chainLeft(next),
+                .before => self.chainLeft(cluster),
+                .unknown => {
+                    self.unsure_clusters +|= 1;
+                    self.chainLeft(next);
+                },
+            };
             cluster = next;
         }
+    }
+
+    /// The chain from `from` left taken after a commit, nothing pointing at
+    /// it: a counted cleanup, its clusters counted by walking it, or a leak
+    /// of a size not known (`unsized_leaks`) where the walk fails.
+    fn chainLeft(self: *Volume, from: Cluster) void {
+        self.cleanups_failed +%= 1;
+        props.reachable(@src(), "fat: a chain freed after the commit could not be freed whole, and the rest is left a leak", .{ .count = self.cleanups_failed });
+        if (!self.inData(from)) return;
+        const end = self.chainEnd(from) catch {
+            self.unsized_leaks +|= 1;
+            return;
+        };
+        self.leaked_clusters +|= end.clusters;
     }
 
     /// Writes `bytes` into a chain already long enough, the last sector
@@ -1704,7 +1752,7 @@ pub const Volume = struct {
         defer switch (link) {
             .before => self.giveBack(fresh, 1),
             .landed => self.linked(1),
-            .unknown => self.leftLeaked(1),
+            .unknown => self.leftUnsure(1),
         };
         var s: u32 = 0;
         @memset(self.scratch, 0);
@@ -1773,26 +1821,35 @@ pub const Volume = struct {
 
         /// The entry is gone for good: its long name's parts go too.
         fn forget(u: *const Unlinked, vol: *Volume) void {
-            for (u.parts[0..u.part_count]) |pos| vol.partLeft(vol.clearPart(pos.lba, pos.at));
+            for (u.parts[0..u.part_count]) |pos| vol.partLeft(pos.lba, pos.at);
         }
     };
 
-    /// A long-name part's clearing after a commit: its failure leaves the
-    /// part orphaned, a counted cleanup (`cleanups_failed`) and one of
-    /// `orphaned_parts`, which fsck.fat auto-deletes.
-    fn partLeft(self: *Volume, done: Error!void) void {
-        done catch {
-            self.cleanups_failed +%= 1;
-            self.orphaned_parts +|= 1;
-            props.reachable(@src(), "fat: a long-name part could not be cleared after a commit, and is left orphaned", .{ .count = self.orphaned_parts });
-        };
+    /// **A LONG-NAME PART CLEARED AFTER A COMMIT**, where the walk found
+    /// it. A failure is a counted cleanup (`cleanups_failed`), and the part
+    /// is counted where it stands (148(b)): a read that failed wrote
+    /// nothing, and left it orphaned (`orphaned_parts`, which fsck.fat
+    /// auto-deletes); a refused write is read back, cleared or not, and
+    /// what reads as neither is `unsure_parts`.
+    fn partLeft(self: *Volume, lba: u32, at: u32) void {
+        self.readSector(lba, self.scratch) catch return self.partStands(.before);
+        const was = self.scratch[at..][0..dirent_size].*;
+        self.scratch[at] = 0xE5;
+        const written = self.scratch[at..][0..dirent_size].*;
+        self.writeSector(lba, self.scratch) catch return self.partStands(self.entryRefused(lba, at, &was, &written));
     }
 
-    /// One long-name part marked deleted, where the walk found it.
-    fn clearPart(self: *Volume, lba: u32, at: u32) Error!void {
-        try self.readSector(lba, self.scratch);
-        self.scratch[at] = 0xE5;
-        try self.writeSector(lba, self.scratch);
+    /// A part whose clearing failed, counted by where the clear stands.
+    fn partStands(self: *Volume, clear: Landing) void {
+        self.cleanups_failed +%= 1;
+        switch (clear) {
+            .landed => props.reachable(@src(), "fat: a long-name part's refused clearing landed", null),
+            .before => {
+                self.orphaned_parts +|= 1;
+                props.reachable(@src(), "fat: a long-name part could not be cleared after a commit, and is left orphaned", .{ .count = self.orphaned_parts });
+            },
+            .unknown => self.unsure_parts +|= 1,
+        }
     }
 
     /// removeEntry's work. With `.keep_chain` the chain stays allocated, for
@@ -1869,6 +1926,10 @@ pub const Volume = struct {
                     var refused: ?Error = null;
                     self.writeSector(short_lba, self.scratch) catch |err| {
                         gone.* = self.commitRefused(short_lba, at, &was, &written, 0);
+                        // Unknown: the entry may be gone, its chain and
+                        // parts left with nothing to reach them, or not
+                        // (148(b)). A rename's own undo counts its own.
+                        if (gone.* == .unknown and held == null) self.unlinkUnsure(chain, if (has_long) @intCast(run.len) else 0);
                         if (gone.* != .landed) return err;
                         refused = err;
                     };
@@ -1877,11 +1938,11 @@ pub const Volume = struct {
                     // 2. the long-name parts, each where the walk found it
                     // (unless held: the caller clears them once it is sure)
                     if (has_long and held == null) {
-                        for (run) |pos| self.partLeft(self.clearPart(pos.lba, pos.at));
+                        for (run) |pos| self.partLeft(pos.lba, pos.at);
                     }
 
                     // 3. and only now, the data
-                    if (then == .free_chain and chain >= 2) self.afterCommit(self.freeChain(chain));
+                    if (then == .free_chain and chain >= 2) self.freeAfterCommit(chain);
                     if (refused) |err| return err;
                     return;
                 }
@@ -1890,6 +1951,19 @@ pub const Volume = struct {
             }
             if (!(try walk.next())) return;
         }
+    }
+
+    /// What a tombstone whose landing is unknown may have left: the entry's
+    /// chain, counted by walking it, and its long name's parts, each a
+    /// leftover that may be live (`unsure_clusters`, `unsure_parts`).
+    fn unlinkUnsure(self: *Volume, chain: Cluster, parts: u32) void {
+        self.unsure_parts +|= parts;
+        if (!self.inData(chain)) return;
+        const end = self.chainEnd(chain) catch {
+            self.unsized_leaks +|= 1;
+            return;
+        };
+        self.unsure_clusters +|= end.clusters;
     }
 
     /// The date to stamp on an entry being written now.
@@ -1930,20 +2004,24 @@ pub const Volume = struct {
     /// the operation took is a counted leak, never given back under an entry
     /// that may point at it.
     fn commitRefused(self: *Volume, lba: u32, at: u32, was: *const [dirent_size]u8, written: *const [dirent_size]u8, clusters: u32) Landing {
-        self.readSector(lba, self.scratch) catch {
-            self.leftLeaked(clusters);
-            return .unknown;
-        };
+        const landing = self.entryRefused(lba, at, was, written);
+        switch (landing) {
+            .landed => props.reachable(@src(), "fat: a refused commit read back landed", null),
+            .before => props.reachable(@src(), "fat: a refused commit read back did not land, and is undone", null),
+            // May be live, may be lost (148(a)).
+            .unknown => self.leftUnsure(clusters),
+        }
+        return landing;
+    }
+
+    /// **WHERE A REFUSED DIRECTORY WRITE STANDS**, read back once: the
+    /// entry at `at` as `written`, landed; as `was`, before; anything else
+    /// (rot, a read that failed), unknown. Nothing counted: the caller's.
+    fn entryRefused(self: *Volume, lba: u32, at: u32, was: *const [dirent_size]u8, written: *const [dirent_size]u8) Landing {
+        self.readSector(lba, self.scratch) catch return .unknown;
         const now = self.scratch[at..][0..dirent_size];
-        if (std.mem.eql(u8, now, written)) {
-            props.reachable(@src(), "fat: a refused commit read back landed", null);
-            return .landed;
-        }
-        if (std.mem.eql(u8, now, was)) {
-            props.reachable(@src(), "fat: a refused commit read back did not land, and is undone", null);
-            return .before;
-        }
-        self.leftLeaked(clusters);
+        if (std.mem.eql(u8, now, written)) return .landed;
+        if (std.mem.eql(u8, now, was)) return .before;
         return .unknown;
     }
 
@@ -1979,13 +2057,20 @@ pub const Volume = struct {
         // **PARTS ON THE DISK WITH NO SHORT ENTRY TO CLOSE THEM** are left
         // orphaned when this returns an error before the short entry
         // landed: counted (`orphaned_parts`), a part whose own write failed
-        // among them, since it may have landed. fsck.fat auto-deletes them;
-        // the next entry written into this run tombstones them first.
+        // among them where it reads back landed (148(b)); one that reads as
+        // neither, and every part where the short entry's own landing is
+        // unknown, may be closed or not (`unsure_parts`). fsck.fat
+        // auto-deletes them; the next entry written into this run
+        // tombstones them first.
         var on_disk: u32 = 0;
         var short_entry: Landing = .before;
-        errdefer if (short_entry != .landed and on_disk > 0) {
-            self.orphaned_parts +|= on_disk;
-            props.reachable(@src(), "fat: a new entry's long-name parts are left orphaned, its short entry not written", .{ .parts = on_disk });
+        errdefer if (on_disk > 0) switch (short_entry) {
+            .landed => {},
+            .before => {
+                self.orphaned_parts +|= on_disk;
+                props.reachable(@src(), "fat: a new entry's long-name parts are left orphaned, its short entry not written", .{ .parts = on_disk });
+            },
+            .unknown => self.unsure_parts +|= on_disk,
         };
         var next: u32 = 0;
         var part: u32 = parts;
@@ -1994,6 +2079,7 @@ pub const Volume = struct {
             next += 1;
             try self.readSector(slot.lba, self.scratch);
             const e = self.scratch[slot.at..][0..dirent_size];
+            const part_was = e.*;
             @memset(e, 0);
             e[0] = @intCast(part | (if (part == parts) @as(u32, 0x40) else 0));
             e[11] = attr_long_name;
@@ -2010,8 +2096,16 @@ pub const Volume = struct {
                 e[off] = @truncate(c);
                 e[off + 1] = @truncate(c >> 8);
             }
+            const part_written = e.*;
+            self.writeSector(slot.lba, self.scratch) catch |err| {
+                switch (self.entryRefused(slot.lba, slot.at, &part_was, &part_written)) {
+                    .landed => on_disk += 1,
+                    .before => {},
+                    .unknown => self.unsure_parts +|= 1,
+                }
+                return err;
+            };
             on_disk += 1;
-            try self.writeSector(slot.lba, self.scratch);
         }
 
         const slot = run.slots[next];
@@ -2187,7 +2281,7 @@ pub const Volume = struct {
     /// may still have landed, and freeing the chain it points at would give
     /// one cluster to two files. So a failure there leaves the new chain
     /// taken (a leak at worst). A failure freeing the old chain after is a
-    /// counted leak (`afterCommit`), not the write's error.
+    /// counted leak (`freeAfterCommit`), not the write's error.
     fn overwrite(self: *Volume, old: Entry, clusters: u32, bytes: []const u8) Error!void {
         // Counted from the old size: a chain longer than its size gives back
         // more, never less.
@@ -2204,12 +2298,14 @@ pub const Volume = struct {
                 .before => self.giveBack(first, clusters),
                 // The entry points at the new chain: the old one is the
                 // cleanup, as after a commit that answered.
-                .landed => self.afterCommit(self.freeChain(old.first_cluster)),
-                .unknown => {},
+                .landed => self.freeAfterCommit(old.first_cluster),
+                // The new chain is counted by the read-back; the old one is
+                // the file's or no one's, as the entry is (148(b)).
+                .unknown => self.unlinkUnsure(old.first_cluster, 0),
             }
             return err;
         };
-        self.afterCommit(self.freeChain(old.first_cluster));
+        self.freeAfterCommit(old.first_cluster);
     }
 
     /// Makes a directory in `dir_cluster`, or answers the one already there.
@@ -2380,7 +2476,7 @@ pub const Volume = struct {
                 defer switch (link) {
                     .before => self.giveBack(extra, more),
                     .landed => self.linked(more),
-                    .unknown => self.leftLeaked(more),
+                    .unknown => self.leftUnsure(more),
                 };
                 try self.fatSet(end.last, extra, &link);
             }
@@ -2587,7 +2683,12 @@ pub const Volume = struct {
                 self.leftLeaked(clusters);
                 held.forget(self);
             },
-            .unknown => props.reachable(@src(), "fat: a rename's undo cannot be read back, and the file's chain is left a counted leak", null),
+            // Its clusters counted by the read-back; its long name's parts
+            // stay, the entry may be live, and are counted with them (148(f)).
+            .unknown => {
+                props.reachable(@src(), "fat: a rename's undo cannot be read back, and the file's chain and long name may be left", null);
+                self.unsure_parts +|= held.part_count;
+            },
         }
     }
 
@@ -2665,13 +2766,24 @@ pub const Volume = struct {
         var gone: Landing = .before;
         var held: Unlinked = .{};
         self.unlinkEntry(a.cluster, a.name, .keep_chain, &gone, &held) catch |err| {
-            // Unknown is counted by the read-back. **A REFUSED TOMBSTONE
-            // THAT LANDED IS UNDONE** (147(g)): nothing else is written
-            // yet, so the same undo keeps `from`, where the disk lets it.
-            if (gone == .landed) {
-                props.reachable(@src(), "fat: a rename's refused unlink landed, and is undone", null);
-                self.took(clusters);
-                self.undoUnlink(&held, clusters);
+            // **A REFUSED TOMBSTONE THAT LANDED IS UNDONE** (147(g)): nothing
+            // else is written yet, so the same undo keeps `from`, where the
+            // disk lets it. **ONE WHOSE LANDING IS UNKNOWN** may have left
+            // the chain and the long name with nothing to reach them, or
+            // not: both may be live (148(f)).
+            switch (gone) {
+                .before => {},
+                .landed => {
+                    props.reachable(@src(), "fat: a rename's refused unlink landed, and is undone", null);
+                    self.took(clusters);
+                    self.undoUnlink(&held, clusters);
+                },
+                .unknown => {
+                    props.reachable(@src(), "fat: a rename's unlink cannot be read back, and the file's chain and long name may be left", null);
+                    self.took(clusters);
+                    self.leftUnsure(clusters);
+                    self.unsure_parts +|= held.part_count;
+                },
             }
             return err;
         };
@@ -2712,12 +2824,18 @@ pub const Volume = struct {
             // after it is cleanup.
             self.writeSector(d.lba, self.scratch) catch |err| {
                 commit.done(self, self.commitRefused(d.lba, d.slot, &was, &written, clusters));
-                if (commit.landing == .landed and d.first_cluster >= 2) self.afterCommit(self.freeChain(d.first_cluster));
+                switch (commit.landing) {
+                    .before => {},
+                    .landed => if (d.first_cluster >= 2) self.freeAfterCommit(d.first_cluster),
+                    // `from`'s chain is counted by the read-back; `to`'s old
+                    // one is its file's or no one's, as the entry is.
+                    .unknown => self.unlinkUnsure(d.first_cluster, 0),
+                }
                 return err;
             };
             commit.done(self, .landed);
             held.forget(self);
-            if (d.first_cluster >= 2) self.afterCommit(self.freeChain(d.first_cluster));
+            if (d.first_cluster >= 2) self.freeAfterCommit(d.first_cluster);
             return;
         }
 
@@ -2771,10 +2889,35 @@ pub const Volume = struct {
             else => return e,
         };
         if (!entry.isDirectory()) return self.remove(path);
-        try self.removeTreeAt(entry.first_cluster, 0);
         // The emptied directory, by its entry (`remove` refuses one).
         const p = try self.parentOf(path);
-        try self.removeEntry(p.cluster, p.name);
+        try self.removeDirectoryIn(p.cluster, p.name, entry.first_cluster, 0);
+    }
+
+    /// A directory emptied (`removeTreeAt`), then its entry removed from
+    /// `parent`. **WHAT IT HELD IS COUNTED WHERE IT CAN BE FOUND**
+    /// (148(b)): long-name parts its emptying left orphaned in it are found
+    /// by nothing once its entry goes, and are counted no more; where that
+    /// tombstone's landing is unknown, they may be found or not.
+    fn removeDirectoryIn(self: *Volume, parent: Cluster, name: []const u8, dir_cluster: Cluster, depth: u32) Error!void {
+        const orphans_before = self.orphaned_parts;
+        const unsure_before = self.unsure_parts;
+        try self.removeTreeAt(dir_cluster, depth);
+        const inside = self.orphaned_parts -| orphans_before;
+        const unsure_inside = self.unsure_parts -| unsure_before;
+        var gone: Landing = .before;
+        defer switch (gone) {
+            .before => {},
+            .landed => {
+                self.orphaned_parts -|= inside;
+                self.unsure_parts -|= unsure_inside;
+            },
+            .unknown => {
+                self.orphaned_parts -|= inside;
+                self.unsure_parts +|= inside;
+            },
+        };
+        return self.unlinkEntry(parent, name, .free_chain, &gone, null);
     }
 
     fn removeTreeAt(self: *Volume, dir_cluster: Cluster, depth: u32) Error!void {
@@ -2800,8 +2943,9 @@ pub const Volume = struct {
             var first = First{};
             try self.list(dir_cluster, &first, First.each);
             const entry = first.entry orelse return; // empty
-            if (entry.isDirectory()) try self.removeTreeAt(entry.first_cluster, depth + 1);
-            try self.removeEntry(dir_cluster, entry.text());
+            if (entry.isDirectory()) {
+                try self.removeDirectoryIn(dir_cluster, entry.text(), entry.first_cluster, depth + 1);
+            } else try self.removeEntry(dir_cluster, entry.text());
         }
         props.reachable(@src(), "fat: a directory yields more entries than a directory holds, removing a tree, and is refused as broken", null);
         return Error.BadChain;
@@ -2945,6 +3089,8 @@ pub const Volume = struct {
                 // chain is read through `scratch`.
                 var sector: [sector_size]u8 align(16) = undefined;
                 var long: LongName = .{};
+                // The long-name parts since the last entry that was none.
+                var run_parts: u32 = 0;
 
                 const fixed_root = cluster == 0 and v.kind == .fat16;
                 const sectors: u32 = if (fixed_root) v.root_sectors else clusters * v.sectors_per_cluster;
@@ -2959,24 +3105,38 @@ pub const Volume = struct {
                     var at: usize = 0;
                     while (at + dirent_size <= sector_size) : (at += dirent_size) {
                         const e = sector[at..][0..dirent_size];
-                        if (e[0] == 0x00) return; // nothing further in this directory
+                        if (e[0] == 0x00) break; // nothing further in this directory
                         if (e[0] == 0xE5) {
+                            self.orphaned(&run_parts);
                             long.letGo();
                             continue;
                         }
                         if (e[11] == attr_long_name) {
+                            // A last part opens a run: the one before it
+                            // was closed by nothing.
+                            if (e[0] & 0x40 != 0) self.orphaned(&run_parts);
+                            run_parts += 1;
                             long.take(e);
                             continue;
                         }
                         if (e[11] & attr_volume_label != 0) {
+                            self.orphaned(&run_parts);
                             long.letGo();
                             continue;
                         }
                         var entry = v.entryFrom(e);
-                        _ = long.close(&entry);
+                        if (long.close(&entry)) run_parts = 0 else self.orphaned(&run_parts);
                         try self.entryIn(entry, cluster, parent, depth);
-                    }
+                    } else continue;
+                    break;
                 }
+                self.orphaned(&run_parts);
+            }
+
+            /// The parts of a run nothing closed, counted, and the run let go.
+            fn orphaned(self: *Self, run_parts: *u32) void {
+                self.health.orphaned_parts += run_parts.*;
+                run_parts.* = 0;
             }
 
             fn entryIn(self: *Self, entry: Entry, dir: Cluster, parent: Cluster, depth: u32) Error!void {
