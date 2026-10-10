@@ -328,7 +328,7 @@ pub const Volume = struct {
     /// reports; counted here and said by a property, never the operation's
     /// error.
     cleanups_failed: u64 = 0,
-    /// **THE LEDGER** (Debug only, `ledger_on`): clusters the operation in
+    /// **THE LEDGER** (`ledger_on`): clusters the operation in
     /// progress took and has not yet ended. Every cluster `allocChain`
     /// takes ends in exactly one of four ways, each of which says how many
     /// it ends: **committed** by the entry's write (`Commit`), **linked**
@@ -1524,8 +1524,15 @@ pub const Volume = struct {
         props.reachable(@src(), "fat: clusters taken before a failure could not be given back, and are left a leak", .{ .count = self.cleanups_failed, .freed = freed, .of = clusters });
     }
 
-    /// The ledger's checks run in Debug: the host's tests and simulators.
-    const ledger_on = builtin.mode == .Debug;
+    /// **THE LEDGER RUNS WHEREVER SAFETY DOES** (metal-vmm 146(f)): Debug
+    /// and ReleaseSafe, so the host tests, the long tier's ReleaseSafe sweep
+    /// and the served kernel. Its sites are in every catalog anyway
+    /// (`catalogFile` registers them from the source), and off they read as
+    /// never reached in every ReleaseSafe report; on, they are judged there
+    /// too. The cost is a counter per cluster taken and a compare per
+    /// operation. Off in ReleaseFast and ReleaseSmall, which this repo does
+    /// not build.
+    const ledger_on = std.debug.runtime_safety;
 
     /// Clusters `allocChain` took.
     fn took(self: *Volume, clusters: u32) void {

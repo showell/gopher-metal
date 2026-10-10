@@ -2554,6 +2554,7 @@ test "a rename whose undo is refused too keeps exactly one file, under one whole
                     _ = d.vol.rename("data/a long old name.txt", "data/a new long name.md") catch {};
                     d.blk.fault = null;
                     d.blk.second = null;
+                    const counted = d.vol.cleanups_failed; // a mount starts it again
                     try d.mount(cached);
                     const old = d.read("data/a long old name.txt") catch null;
                     defer if (old) |o| testing.allocator.free(o);
@@ -2567,6 +2568,11 @@ test "a rename whose undo is refused too keeps exactly one file, under one whole
                         std.debug.print("rename failing at {d}, then {t} at {d} ({s}): the check sees {d} files, {d} by name\n", .{ n, second, m, if (cached) "held" else "on disk", r.health.files, names });
                         return error.TestUnexpectedResult;
                     }
+                    // Whichever name reads, it reads the whole file; and with
+                    // no leak counted, the volume is clean.
+                    if (old) |o| try testing.expectEqualSlices(u8, &body, o);
+                    if (new) |o| try testing.expectEqualSlices(u8, &body, o);
+                    if (counted == 0 and names == 1) try testing.expect(r.health.clean());
                 }
             }
         }
