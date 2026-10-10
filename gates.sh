@@ -65,8 +65,8 @@ python3 tools/check_limits.py "$GOPHER_ROOT/zig-server/src" || failed+=(limits)
 # is the gates' longest.
 zig build test "${ZIG_GOPHER[@]}" --summary all > "$VERDICTS/test-summary.txt" 2>&1
 [ $? = 0 ] || failed+=(test)
-# The check's "NOT type-checked" line too: gopher.elf skipped is said here,
-# not only in the summary file (147(d)).
+# The check's "NOT type-checked" line too: a stale port fails `check` (and so
+# `test`), and its reason is said here, not only in the summary file.
 grep -E "tests passed|error|NOT type-checked" "$VERDICTS/test-summary.txt"
 lap "zig build test"
 zig build kernels "${ZIG_GOPHER[@]}" 2>&1 | grep error
