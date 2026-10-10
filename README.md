@@ -11,17 +11,19 @@ droplet through our own BIOS loader.
 
 ## Start here
 
-**Serving (2026-10-09, 20:11 UTC): the tag `v21`** — gopher-metal `81d7a35`
-with angry-gopher `a30a1542` — at **https://lynrummy.com**, the whole site, on
+**Serving (2026-10-10, 12:10 UTC): the tag `v22`** — gopher-metal `bc459b3`
+with angry-gopher `51713cd6` — at **https://lynrummy.com**, the whole site, on
 a droplet with no Linux on it, with prod's real data, since the cutover of
-2026-10-04 ([`CUTOVER.md`](CUTOVER.md)). `v20` (`a26f85d`) is the way back.
-v21 over v20, served code only: the volume's write cache is turned off at
-boot and again after a reset (WCE=0); FAT copies that check alike are not
-rewritten, copies that differ and cannot be weighed leave the first in
-charge, and a refused repair no longer stops the mount; rewriting a file
-leaves the old file or the new, whole, never a mix, and a full disk refuses
-the rewrite and keeps the old; angry-gopher's changes from `8b617f3c` to
-`a30a1542`.
+2026-10-04 ([`CUTOVER.md`](CUTOVER.md)). `v21` (`81d7a35`) is the way back.
+v22 over v21, served code only (the whole note is the tag's message): a
+peer repeating one ACK can no longer panic the kernel, and a resent SYN-ACK
+is not timed (Karn); a write the disk refuses gives back what it took or
+counts what it could not, a failed rename keeps the old file where it can,
+and a name that is another file's 8.3 alias is refused; 64 MiB of the
+volume is kept for small writes; failed cleanups, leaked clusters and
+orphaned long-name parts are counted on /admin/host; angry-gopher answers an
+error before any byte with a 500, and a failed delete is an error, never
+reported as done.
 What serves is a tag, not a branch: `master` may be ahead of it.
 
 **Branches and tags:**
