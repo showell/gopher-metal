@@ -125,15 +125,13 @@ def ported() -> str:
 
 def current_pair() -> tuple:
     """(this repo's and the SDK's commits, the ported angry-gopher content),
-    or an error."""
+    or an error: `freshness`'s, so `pair`, `ids` and build.zig's check refuse
+    the same ports (147(d))."""
     ours = ours_id()
-    theirs = ported()
-    if not theirs:
-        return ours, None, f"no stamp (or one from before B16) at {STAMP}: run ./port.sh"
-    now = content_id()
-    if theirs != now:
-        return ours, theirs, f"the port is angry-gopher {theirs}, but what it serves is now {now}: run ./port.sh"
-    return ours, theirs, None
+    why = freshness()
+    if why != "fresh":
+        return ours, ported() or None, why
+    return ours, ported(), None
 
 
 def short(c: str) -> str:

@@ -14,7 +14,7 @@ The oracle is `zig build test`. That runs:
     scenario (§1);
   - tcp_sim's seeds (§3).
 
-A mutant is **killed** when that fails, and it **survives** when that
+A mutant is **killed** when a test in it fails, and it **survives** when that
 passes: then the change it made is a property nothing checks. A mutant that
 does not compile says nothing about the tests and is reported apart. So is
 one whose text is no longer in tcp.zig, which means the list here has
@@ -28,15 +28,21 @@ otherwise throw away.
 Host only. Each mutant takes one `zig build test`: about half a minute, so
 the whole list takes a quarter of an hour.
 
+Only a test that failed kills a mutant (tools/mutate_run.py): a compile
+error in any file, a timeout, or a run that failed otherwise (a signal, fmt,
+the lint) is its own verdict.
+
 Exit 0 when every mutant is killed, 1 when any survives, is out of date,
-did not compile or timed out,
-2 on a usage error.
+did not compile, timed out or is unclassified, 2 on a usage error or when
+the unmutated tree is not green.
 """
 import os
 import re
 import subprocess
 import sys
 import time
+
+import mutate_run
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
@@ -179,24 +185,11 @@ def apply(source, old, new, nth):
 
 
 def run_tests():
-    """(outcome, seconds, tail of the output)."""
-    began = time.time()
-    try:
-        # -Dcheck=false: a mutant is judged by the tests, not by whether
-        # every kernel still type-checks (metal-vmm 146(b)).
-        p = subprocess.run(["zig", "build", "test", "-Dcheck=false"], cwd=ROOT, text=True, timeout=TIMEOUT_S,
-                           stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
-    except subprocess.TimeoutExpired:
-        # Not a kill: a test that hangs proves nothing about the mutant.
-        return "timed out", time.time() - began, ""
-    out = p.stdout
-    took = time.time() - began
-    if p.returncode == 0:
-        return "SURVIVED", took, out
-    # A compile error is reported against a line of the mutated file.
-    if re.search(rf"{re.escape(TARGET)}:\d+:\d+: error:", out):
-        return "did not compile", took, out
-    return "killed", took, out
+    """(outcome, seconds, the output): mutate_run.verdict's."""
+    # -Dcheck=false: a mutant is judged by the tests, not by whether every
+    # kernel still type-checks (metal-vmm 146(b)).
+    code, out, took = mutate_run.build(["zig", "build", "test", "-Dcheck=false"], ROOT, TIMEOUT_S)
+    return mutate_run.verdict(code, out), took, out
 
 
 def main(argv):
@@ -250,6 +243,8 @@ def main(argv):
                     if "error:" in line:
                         print(f"      {line.strip()}")
                         break
+            elif outcome == "unclassified":
+                print("      " + mutate_run.tail(out).replace("\n", "\n      "))
     finally:
         git("checkout", rev, "--", TARGET)
 
@@ -258,12 +253,14 @@ def main(argv):
     broken = [r for r in results if r[1] == "did not compile"]
     killed = [r for r in results if r[1] == "killed"]
     hung = [r for r in results if r[1] == "timed out"]
+    odd = [r for r in results if r[1] == "unclassified"]
     print(f"\n{len(killed)} killed, {len(survived)} survived, {len(broken)} did not compile, "
-          f"{len(hung)} timed out, {len(stale)} out of date, of {len(results)}")
+          f"{len(hung)} timed out, {len(odd)} unclassified, {len(stale)} out of date, of {len(results)}")
     for name, _, what in survived:
         print(f"  SURVIVED {name}: {what}. No test checks this.")
-    # A mutant that did not compile or timed out judged nothing: the run fails.
-    return 1 if survived or stale or broken or hung else 0
+    # A mutant that did not compile, timed out or failed otherwise than by a
+    # test judged nothing: the run fails.
+    return 1 if survived or stale or broken or hung or odd else 0
 
 
 if __name__ == "__main__":
