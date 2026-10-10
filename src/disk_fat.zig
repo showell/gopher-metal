@@ -3309,6 +3309,7 @@ pub const Volume = struct {
                 var run_parts: u32 = 0;
                 var run_sum: u8 = 0;
                 var run_whole = false;
+                var run_next: u8 = 0;
 
                 const fixed_root = cluster == 0 and v.kind == .fat16;
                 const sectors: u32 = if (fixed_root) v.root_sectors else clusters * v.sectors_per_cluster;
@@ -3333,11 +3334,16 @@ pub const Volume = struct {
                             // A last part opens a run: the one before it
                             // was closed by nothing. A part of another
                             // checksum spoils the run.
+                            // Each part after the last-flagged one is
+                            // numbered one less, down to 1, as fsck.fat
+                            // checks.
                             if (e[0] & 0x40 != 0) {
                                 self.orphaned(&run_parts);
                                 run_sum = e[13];
                                 run_whole = true;
-                            } else if (run_parts == 0 or e[13] != run_sum) run_whole = false;
+                                run_next = e[0] & 0x1F;
+                            } else if (run_parts == 0 or e[13] != run_sum or e[0] & 0x1F != run_next) run_whole = false;
+                            run_next -%= 1;
                             run_parts += 1;
                             long.take(e);
                             continue;
@@ -3353,7 +3359,7 @@ pub const Volume = struct {
                         // the checksum, not by whether this driver reads the
                         // name (one past `max_name` it does not, and the
                         // parts are no orphans).
-                        if (run_parts > 0 and run_whole and run_sum == shortChecksum(e[0..11].*)) run_parts = 0 else self.orphaned(&run_parts);
+                        if (run_parts > 0 and run_whole and run_next == 0 and run_sum == shortChecksum(e[0..11].*)) run_parts = 0 else self.orphaned(&run_parts);
                         try self.entryIn(entry, cluster, parent, depth);
                     } else continue;
                     break;

@@ -1709,18 +1709,20 @@ fn leakLine(what: []const u8, v: *const disk_fat.Volume) void {
     serial.put("  ");
     serial.put(what);
     serial.put(": ");
-    serial.putDec(v.leaked_clusters + v.unsure_clusters);
+    serial.putDec(v.leaked_clusters +| v.unsure_clusters);
     serial.put(" clusters left a counted leak, ");
-    serial.putDec(v.orphaned_parts + v.unsure_parts);
+    serial.putDec(v.orphaned_parts +| v.unsure_parts);
     serial.put(" long-name parts left orphaned, ");
     serial.putDec(v.fat_copies_failed);
-    serial.put(" FAT copy writes failed; of them ");
+    serial.put(" FAT copy writes failed; of the clusters and parts, ");
     serial.putDec(v.unsure_clusters);
-    serial.put(" clusters and ");
+    serial.put(" and ");
     serial.putDec(v.unsure_parts);
-    serial.put(" parts may be live, and ");
-    serial.putDec(v.long_clusters + v.unsure_long);
-    serial.put(" clusters are past a size (");
+    serial.put(" may be live; ");
+    serial.putDec(v.unsized_leaks);
+    serial.put(" leaks of a size not known (K no ceiling while any); ");
+    serial.putDec(v.long_clusters +| v.unsure_long);
+    serial.put(" clusters past a size (");
     serial.putDec(v.cleanups_failed);
     serial.put(" cleanups failed)\n");
 }
