@@ -20,6 +20,7 @@ So:
     tools/verdicts.py stamp                  (port.sh)
     tools/verdicts.py pair                   (gates.sh, long.sh: print, or refuse)
     tools/verdicts.py ids                    (the pair, as the run starts)
+    tools/verdicts.py fresh                  (build.zig's check: "fresh", or why not)
     VERDICT_PAIR="<ids>" tools/verdicts.py record gates|long PASS|FAIL
 
 **A VERDICT IS FOR THE CODE THE RUN STARTED ON.** A run takes `ids` first;
@@ -214,6 +215,18 @@ def require() -> list:
     return why
 
 
+def fresh() -> int:
+    """**IS THE PORT ANGRY-GOPHER AS IT IS NOW?** (metal-vmm 146(a)): build.zig
+    type-checks gopher.elf against the port only then. The port's asset list
+    is port.sh's gen/assets.zig, but the files are read from the live
+    checkout, so a port older than the checkout fails gopher-metal's tests
+    for no fault of gopher-metal's. Prints `fresh`, or why not; exits 0
+    either way, so build.zig reads the answer from the output."""
+    _, _, why = current_pair()
+    print(why or "fresh")
+    return 0
+
+
 def main() -> int:
     args = sys.argv[1:]
     if args == ["stamp"]:
@@ -222,6 +235,8 @@ def main() -> int:
         return pair()
     if args == ["ids"]:
         return ids()
+    if args == ["fresh"]:
+        return fresh()
     if len(args) == 3 and args[0] == "record":
         return record(args[1], args[2])
     print(__doc__)

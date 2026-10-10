@@ -227,13 +227,19 @@ pub fn build(b: *std.Build) void {
         check_step.dependOn(&exe.step);
     }
     var port_code: u8 = 0;
-    const have_port = if (b.runAllowFail(&.{ "test", "-f", b.fmt("{s}/router.zig", .{gopher_port}) }, &port_code, .ignore)) |_| true else |_| false;
-    const have_app = if (b.runAllowFail(&.{ "test", "-d", b.fmt("{s}/zig-server", .{gopher_root}) }, &port_code, .ignore)) |_| true else |_| false;
-    if (have_port and have_app) {
+    // **ONLY A PORT OF THE CHECKOUT AS IT IS NOW** (metal-vmm 146(a)): the
+    // asset list is the port's, the files the checkout's, so a stale port
+    // fails here for no fault of this repo's. tools/verdicts.py says, as
+    // gates.sh asks it.
+    const port_state: []const u8 = blk: {
+        const out = b.runAllowFail(&.{ "env", b.fmt("GOPHER_PORT={s}", .{gopher_port}), b.fmt("GOPHER_ROOT={s}", .{gopher_root}), "python3", b.pathFromRoot("tools/verdicts.py"), "fresh" }, &port_code, .ignore) catch break :blk "tools/verdicts.py could not be run";
+        break :blk std.mem.trim(u8, out, " \t\r\n");
+    };
+    if (std.mem.eql(u8, port_state, "fresh")) {
         const exe = b.addExecutable(.{ .name = "gopher.elf", .root_module = kernelModule(b, b.path("probe/gopher.zig"), .Debug, &gopher_imports) });
         check_step.dependOn(&exe.step);
     } else {
-        const say = b.addSystemCommand(&.{ "echo", b.fmt("check: gopher.elf NOT type-checked: {s} (port.sh makes a port; GOPHER_PORT=<dir> ./port.sh and -Dgopher=<dir> for another place; -Dgopher-root=<dir> for the checkout)", .{if (!have_port) b.fmt("no port at {s}", .{gopher_port}) else b.fmt("no angry-gopher checkout at {s}", .{gopher_root})}) });
+        const say = b.addSystemCommand(&.{ "echo", b.fmt("check: gopher.elf NOT type-checked: {s} (port {s}, checkout {s}; -Dgopher=<dir> and -Dgopher-root=<dir> for others)", .{ port_state, gopher_port, gopher_root }) });
         say.has_side_effects = true;
         check_step.dependOn(&say.step);
     }
