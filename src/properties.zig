@@ -108,9 +108,12 @@ test "the properties over a sweep of seeds" {
         if (!ok) failed_seeds += 1;
         at.always(@src(), ok, "durable_sim: every oracle holds for every seed", .{ .seed = seed });
     }
-    // A FAT run under a tape replays exactly, every seed to 40 at least (the
-    // 40 `zig build test` ran before metal-vmm QUEUE 136 kept four there).
-    for (1..@max(options.fat_seeds, 40) + 1) |seed| {
+    // A FAT run under a tape replays exactly: seeds 1 to 40, the 40 `zig
+    // build test` ran before metal-vmm QUEUE 136 kept four there. Fixed, not
+    // the sweep's FAT seeds: it checks the harness's replay, not the FAT
+    // code, and at 300 seeds its two runs a seed were 600 more runs, the
+    // whole of the long tier's slowdown since v21 (metal-vmm QUEUE B38).
+    for (1..41) |seed| {
         const ok = if (fat_sim.replaysExactly(seed)) true else |_| false;
         if (!ok) failed_seeds += 1;
         at.always(@src(), ok, "fat_sim: a run under a tape replays exactly", .{ .seed = seed });
