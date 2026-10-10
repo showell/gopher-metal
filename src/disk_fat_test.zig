@@ -2524,3 +2524,51 @@ test "a rename whose write fails, the disk refusing it whole, keeps the file und
         }
     }
 }
+
+test "a rename whose undo is refused too keeps exactly one file, under one whole name, and counts what it cannot tell (145's review)" {
+    // The new entry's write fails; then the undo's write fails, whole or
+    // after landing. Read back, a landed undo keeps from, long name and all;
+    // nothing may leave a file the check sees under neither name.
+    for (both) |cached| {
+        const d = try Disk.make("rename-undo", test_disk.small, cached);
+        defer d.deinit();
+        var body: [1500]u8 = undefined;
+        _ = pattern(&body, 9);
+        try d.vol.writeFile("data/a long old name.txt", &body);
+        const before = try testing.allocator.dupe(u8, d.bytes);
+        defer testing.allocator.free(before);
+        try d.mount(cached);
+        const r0 = d.blk.requests;
+        try d.vol.rename("data/a long old name.txt", "data/a new long name.md");
+        const total = d.blk.requests - r0;
+        var n: u64 = 0;
+        while (n < total) : (n += 1) {
+            for ([_]@TypeOf(@as(@import("virtio.zig").Block.Fault, undefined).kind){ .fails, .lands_and_fails }) |second| {
+                var m: u64 = n + 1;
+                while (m < n + 8) : (m += 1) {
+                    @memcpy(d.bytes, before);
+                    try d.mount(cached);
+                    const at = d.blk.requests;
+                    d.blk.fault = .{ .at = at + n, .kind = .fails };
+                    d.blk.second = .{ .at = at + m, .kind = second };
+                    _ = d.vol.rename("data/a long old name.txt", "data/a new long name.md") catch {};
+                    d.blk.fault = null;
+                    d.blk.second = null;
+                    try d.mount(cached);
+                    const old = d.read("data/a long old name.txt") catch null;
+                    defer if (old) |o| testing.allocator.free(o);
+                    const new = d.read("data/a new long name.md") catch null;
+                    defer if (new) |o| testing.allocator.free(o);
+                    const names: u32 = @as(u32, @intFromBool(old != null)) + @intFromBool(new != null);
+                    const r = try d.check();
+                    // A file the check counts is one a name reads, or the
+                    // undo left it under its alias alone.
+                    if (r.health.files != names) {
+                        std.debug.print("rename failing at {d}, then {t} at {d} ({s}): the check sees {d} files, {d} by name\n", .{ n, second, m, if (cached) "held" else "on disk", r.health.files, names });
+                        return error.TestUnexpectedResult;
+                    }
+                }
+            }
+        }
+    }
+}

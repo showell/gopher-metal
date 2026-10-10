@@ -1723,11 +1723,20 @@ pub const Volume = struct {
         parts: [max_long_parts]Slot = undefined,
         part_count: usize = 0,
 
-        /// The tombstone undone: the entry, long name and all, is back.
-        fn undo(u: *const Unlinked, vol: *Volume) Error!void {
-            try vol.readSector(u.lba, vol.scratch);
-            vol.scratch[u.at] = u.first;
-            try vol.writeSector(u.lba, vol.scratch);
+        /// The tombstone undone: the entry, long name and all, is back,
+        /// where it stands says so. **A REFUSED UNDO IS READ BACK** as every
+        /// commit is (145's review): landed, the entry is live, its long
+        /// name must stay and its chain is its own; unknown, a counted leak
+        /// (`commitRefused`, `clusters`) that leaves the parts alone, as the
+        /// entry may be live.
+        fn undo(u: *const Unlinked, vol: *Volume, clusters: u32) Landing {
+            vol.readSector(u.lba, vol.scratch) catch return .before;
+            const e = vol.scratch[u.at..][0..dirent_size];
+            const was = e.*;
+            e[0] = u.first;
+            const written = e.*;
+            vol.writeSector(u.lba, vol.scratch) catch return vol.commitRefused(u.lba, u.at, &was, &written, clusters);
+            return .landed;
         }
 
         /// The entry is gone for good: its long name's parts go too.
@@ -2508,8 +2517,9 @@ pub const Volume = struct {
     /// there (write the new under another name, rename it over the old).
     ///
     /// The order, and what a stop after each step leaves:
-    ///   1. `from`'s entry goes; its chain stays taken. `to` is the old file,
-    ///      whole, and `from`'s clusters are leaked.
+    ///   1. `from`'s entry goes; its chain stays taken, and its long name's
+    ///      parts stay until `to` lands. `to` is the old file, whole, and
+    ///      `from`'s clusters are leaked, its parts orphans.
     ///   2. an existing `to`'s short entry is pointed at `from`'s chain and
     ///      size, in one sector write. `to` is the new file, whole, and its
     ///      old clusters are leaked.
@@ -2592,13 +2602,19 @@ pub const Volume = struct {
         // undone and `from` is whole, its chain its own again. That write
         // can fail too, and then `from` is lost, its chain a counted leak.
         errdefer switch (commit.landing) {
-            .before => if (held.undo(self)) {
-                props.reachable(@src(), "fat: a rename's new entry did not land, and from is kept", null);
-                self.ended(clusters);
-            } else |_| {
-                props.reachable(@src(), "fat: a rename's new entry did not land, nor its undo, and the file's chain is left a counted leak", null);
-                self.leftLeaked(clusters);
-                held.forget(self);
+            .before => switch (held.undo(self, clusters)) {
+                .landed => {
+                    props.reachable(@src(), "fat: a rename's new entry did not land, and from is kept", null);
+                    self.ended(clusters);
+                },
+                .before => {
+                    props.reachable(@src(), "fat: a rename's new entry did not land, nor its undo, and the file's chain is left a counted leak", null);
+                    self.leftLeaked(clusters);
+                    held.forget(self);
+                },
+                // Counted by the read-back; the entry may be live, so its
+                // long name stays.
+                .unknown => props.reachable(@src(), "fat: a rename's undo cannot be read back, and the file's chain is left a counted leak", null),
             },
             .landed, .unknown => held.forget(self),
         };

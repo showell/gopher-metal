@@ -738,6 +738,11 @@ pub const Block = struct {
     /// A host test's lie, told once, at request number `at` (counted as
     /// `requests` counts) on a disk in memory (QUEUE.md item 80).
     fault: ?Fault = null,
+    /// **A SECOND FAULT, OF ITS OWN** (metal-vmm 145's review), for a
+    /// recovery that writes in its turn (rename's undo) to be failed too:
+    /// `fails` or `lands_and_fails` on the write numbered `at`. Memory disks
+    /// only, as `fault` is.
+    second: ?Fault = null,
     /// The sector the fault's write went to, for `then_garbage`.
     fault_lba: ?u64 = null,
 
@@ -822,6 +827,15 @@ pub const Block = struct {
         if (self.fault) |f| if (kind == blk_t_in and self.fault_lba == lba and number > f.at and number - f.at <= f.then_garbage) {
             for (here[0..len], 0..) |*b, i| b.* = @truncate(i *% 167 +% f.seed);
             return blk_s_ok;
+        };
+        if (self.second) |f| if (f.at == number and kind != blk_t_in) switch (f.kind) {
+            .fails => return blk_s_ioerr,
+            .lands_and_fails => {
+                @memcpy(there, here[0..len]);
+                if (self.cache) |c| c.wrote(c.context, lba, there);
+                return blk_s_ioerr;
+            },
+            else => {},
         };
         if (self.fault) |f| if (f.at == number) {
             switch (f.kind) {
