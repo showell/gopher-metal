@@ -1536,7 +1536,8 @@ pub const Volume = struct {
 
     /// Clusters `allocChain` took.
     fn took(self: *Volume, clusters: u32) void {
-        if (ledger_on) self.ledger_open += clusters;
+        // Saturating: a counter in the served kernel must not be able to panic it.
+        if (ledger_on) self.ledger_open +|= clusters;
     }
 
     /// Clusters that ended: committed, linked, given back or a counted leak.
