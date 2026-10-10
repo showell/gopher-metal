@@ -396,6 +396,18 @@ pub fn build(b: *std.Build) void {
             dirent_coverage.addArtifactArg(unit);
         }
     }
+    // **WHICH LINES OF THE STORE'S ORACLE ITS OWN TESTS RUN** (`zig build
+    // store-model-coverage`): store_model.zig's tests alone, not the
+    // simulators that lean on it, so the oracle is proven by its own tests
+    // before it judges anything else.
+    const model_unit = b.addTest(.{ .root_module = b.createModule(.{
+        .root_source_file = b.path("src/store_model.zig"),
+        .target = b.graph.host,
+        .imports = &unit_imports,
+    }) });
+    const model_coverage = b.addSystemCommand(&.{ "python3", "tools/linecov.py", "src/store_model.zig" });
+    model_coverage.addArtifactArg(model_unit);
+    b.step("store-model-coverage", "the lines of store_model.zig its own tests never run").dependOn(&model_coverage.step);
     // The test files built on their own, below.
     for ([_][]const u8{ "src/disk_fat_test.zig", "src/disk_fat_faults_test.zig", "src/tcp_test.zig" }) |path| {
         if (test_file) |only| if (std.mem.eql(u8, only, path)) {
