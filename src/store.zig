@@ -15,6 +15,13 @@
 //! `write` is the cheap one; `replace` is the one to use when losing the old
 //! file in a power cut would matter. That is the whole difference.
 //!
+//! **AN ERROR IS NOT AN UNDO.** A changing operation that answers a disk's
+//! failure (`ReadFailed`, `WriteFailed`) may still have taken effect: a
+//! disk can take a write it refuses. What it leaves is one of the outcomes
+//! the table names for a power cut, so a `remove` that failed may have
+//! removed (a retry answers `NotFound`), and a `replace` that failed may be
+//! wholly new. A caller that must know reads back.
+//!
 //! **NAMES** (`checkPath`). A path is parts between `/`; empty parts are
 //! ignored, so `data//x` and `data/x/` are `data/x`. A part is 1 to
 //! `max_part` bytes, not `.` or `..`, holds no control byte and none of

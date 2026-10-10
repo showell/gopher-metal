@@ -1492,10 +1492,15 @@ pub const Volume = struct {
     /// `clusters` of it, each next in the data region and the last an end
     /// mark. Without a held FAT each next is read from the disk, and a disk
     /// that lies reads back another value: a walk that followed it stopped
-    /// short and left the rest taken and uncounted (the ledger found it), or
-    /// went on into another file's chain. A next of any other shape stops
-    /// the walk. What is left, and a give-back whose read or write fails, is
-    /// a counted leak (`cleanups_failed`), never swallowed.
+    /// short and left the rest taken and uncounted (the ledger found it). A
+    /// next of any other shape stops the walk. What is left, and a give-back
+    /// whose read or write fails, is a counted leak (`cleanups_failed`),
+    /// never swallowed.
+    ///
+    /// **NOT EVERY LIE IS SEEN.** A read that answers some other cluster in
+    /// the data region still leads the walk on: into another file's chain at
+    /// worst, freeing up to `clusters` of it. Only a held FAT, which reads
+    /// nothing back from the disk, rules that out.
     fn giveBack(self: *Volume, first: Cluster, clusters: u32) void {
         defer self.ended(clusters);
         var cluster = first;

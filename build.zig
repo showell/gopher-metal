@@ -269,11 +269,13 @@ pub fn build(b: *std.Build) void {
     // tools/linecov.py; the lines with code that none of them ran are listed.
     const tcp_coverage = b.addSystemCommand(&.{ "python3", "tools/linecov.py", "src/tcp.zig" });
     b.step("tcp-coverage", "the lines of tcp.zig its unit tests never run").dependOn(&tcp_coverage.step);
-    // The same for the FAT: disk_fat.zig and disk_fat_dirent.zig, over their
-    // own tests, disk_fat_test and the faults and lies binaries.
+    // The same for the FAT: disk_fat.zig and disk_fat_dirent.zig, over the
+    // merged unit binary (which also runs the simulators and store tests that
+    // reach the FAT, so a line only a simulator runs counts as run) and
+    // disk_fat_test and the faults and lies binaries.
     const fat_coverage = b.addSystemCommand(&.{ "python3", "tools/linecov.py", "src/disk_fat.zig" });
     const dirent_coverage = b.addSystemCommand(&.{ "python3", "tools/linecov.py", "src/disk_fat_dirent.zig" });
-    const fat_coverage_step = b.step("fat-coverage", "the lines of disk_fat.zig and disk_fat_dirent.zig their unit tests never run");
+    const fat_coverage_step = b.step("fat-coverage", "the lines of disk_fat.zig and disk_fat_dirent.zig no host test runs (the unit binary, simulators included, and the FAT test binaries)");
     fat_coverage_step.dependOn(&fat_coverage.step);
     fat_coverage_step.dependOn(&dirent_coverage.step);
     // **ONE BINARY FOR THE FILES' OWN TESTS** (src/unit_tests.zig, metal-vmm
@@ -284,9 +286,11 @@ pub fn build(b: *std.Build) void {
     comptime {
         @setEvalBranchQuota(1_000_000);
         const root = @embedFile("src/unit_tests.zig");
-        if (std.mem.count(u8, root, "@import(") != unit_files.len) @compileError("src/unit_tests.zig imports other than build.zig's unit_files");
+        // Each import a line of its own, as `zig fmt` leaves it, so one
+        // commented out (`// _ = @import(...)`) is not counted.
+        if (std.mem.count(u8, root, "\n    _ = @import(") != unit_files.len) @compileError("src/unit_tests.zig imports other than build.zig's unit_files");
         for (unit_files) |path| {
-            if (std.mem.indexOf(u8, root, "@import(\"" ++ path["src/".len..] ++ "\")") == null) @compileError("src/unit_tests.zig does not import " ++ path);
+            if (std.mem.indexOf(u8, root, "\n    _ = @import(\"" ++ path["src/".len..] ++ "\");") == null) @compileError("src/unit_tests.zig does not import " ++ path);
         }
     }
     // Outside src/, so not importable from unit_tests.zig: its own binary.
