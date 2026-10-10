@@ -1720,9 +1720,19 @@ pub const Volume = struct {
                 props.reachable(@src(), "fat: a chain given back reads back other than it was made, and is left a counted leak", .{ .at = freed, .of = clusters, .next = next });
                 return self.notGivenBack(freed, clusters);
             }
-            // **THE HINT IS LOWERED FIRST**, as in freeChain.
+            // **THE HINT IS LOWERED FIRST**, as in freeAfterCommit.
             if (cluster < self.alloc_hint) self.alloc_hint = cluster;
-            self.fatSet(cluster, 0, null) catch return self.notGivenBack(freed, clusters);
+            // A refused free, by its verdict (148(b)): landed, the cluster
+            // is free and not left; unknown, it may be either.
+            var landing: Landing = .before;
+            self.fatSet(cluster, 0, &landing) catch return switch (landing) {
+                .before => self.notGivenBack(freed, clusters),
+                .landed => self.notGivenBack(freed + 1, clusters),
+                .unknown => {
+                    self.unsure_clusters +|= 1;
+                    self.notGivenBack(freed + 1, clusters);
+                },
+            };
             cluster = next;
         }
     }
@@ -2230,10 +2240,13 @@ pub const Volume = struct {
         }
 
         // Orphans first (see Run): a stop after leaves the run still free.
+        // Each tombstoned is one the count, if it holds it, holds no more
+        // (148(b)): the exact count first, then what may be live.
         for (run.orphans[0..run.orphans_len]) |o| {
             try self.readSector(o.lba, self.scratch);
             self.scratch[o.at] = 0xE5;
             try self.writeSector(o.lba, self.scratch);
+            if (self.orphaned_parts > 0) self.orphaned_parts -= 1 else self.unsure_parts -|= 1;
         }
 
         // **PARTS ON THE DISK WITH NO SHORT ENTRY TO CLOSE THEM** are left
@@ -2980,9 +2993,11 @@ pub const Volume = struct {
                 },
                 .unknown => {
                     props.reachable(@src(), "fat: a rename's unlink cannot be read back, and the file's chain and long name may be left", null);
+                    // The read-back counted the cleanup; the chain is walked,
+                    // as a remove's is (a chain may be longer than its size).
                     self.took(clusters);
-                    self.leftUnsure(clusters);
-                    self.unsure_parts +|= held.part_count;
+                    self.ended(clusters);
+                    self.unlinkUnsure(src.first_cluster, @intCast(held.part_count));
                 },
             }
             return err;
@@ -3289,8 +3304,11 @@ pub const Volume = struct {
                 // chain is read through `scratch`.
                 var sector: [sector_size]u8 align(16) = undefined;
                 var long: LongName = .{};
-                // The long-name parts since the last entry that was none.
+                // The long-name parts since the last entry that was none,
+                // their run's checksum, and whether every part agrees.
                 var run_parts: u32 = 0;
+                var run_sum: u8 = 0;
+                var run_whole = false;
 
                 const fixed_root = cluster == 0 and v.kind == .fat16;
                 const sectors: u32 = if (fixed_root) v.root_sectors else clusters * v.sectors_per_cluster;
@@ -3313,8 +3331,13 @@ pub const Volume = struct {
                         }
                         if (e[11] == attr_long_name) {
                             // A last part opens a run: the one before it
-                            // was closed by nothing.
-                            if (e[0] & 0x40 != 0) self.orphaned(&run_parts);
+                            // was closed by nothing. A part of another
+                            // checksum spoils the run.
+                            if (e[0] & 0x40 != 0) {
+                                self.orphaned(&run_parts);
+                                run_sum = e[13];
+                                run_whole = true;
+                            } else if (run_parts == 0 or e[13] != run_sum) run_whole = false;
                             run_parts += 1;
                             long.take(e);
                             continue;
@@ -3325,7 +3348,12 @@ pub const Volume = struct {
                             continue;
                         }
                         var entry = v.entryFrom(e);
-                        if (long.close(&entry)) run_parts = 0 else self.orphaned(&run_parts);
+                        _ = long.close(&entry);
+                        // **AN ORPHAN AS fsck.fat SEES ONE**, by the run and
+                        // the checksum, not by whether this driver reads the
+                        // name (one past `max_name` it does not, and the
+                        // parts are no orphans).
+                        if (run_parts > 0 and run_whole and run_sum == shortChecksum(e[0..11].*)) run_parts = 0 else self.orphaned(&run_parts);
                         try self.entryIn(entry, cluster, parent, depth);
                     } else continue;
                     break;

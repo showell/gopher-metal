@@ -87,6 +87,7 @@ const Stopped = struct {
 /// (fsck reclaims them), and FAT copies apart (every FAT change writes the
 /// first copy, then the second). An append may also leave a chain longer
 /// than its file (`long`), until the next append.
+const both_cached = [_]bool{ false, true };
 const allowed = [_]disk_fat.Problem{ .leaked, .fats_differ };
 const allowed_append = [_]disk_fat.Problem{ .leaked, .fats_differ, .long };
 
@@ -1171,5 +1172,68 @@ test "a disk that lies to a rename's second read of the directory, its new entry
                 };
             }
         }
+    }
+}
+
+test "a write that lands and answers failure as a cleanup gives back what a failed request took: what it left is counted exactly (metal-vmm 148(b))" {
+    // A request fails, and the cleanup after it (a give-back, a part's
+    // clearing, a chain freed) meets a write the disk took and called failed.
+    // The cleanup's own verdict decides what it left, not its answer.
+    for (stopped_ops) |op| {
+        for (configs) |cfg| {
+            if (cfg.shape.kind == .fat32) continue; // the same code; FAT32's disk is 35 MB
+            const total = try requestsOf(op, cfg);
+            const d = try Disk.makeUnkept("limit-cleanup-lands", cfg.shape, cfg.cached);
+            defer d.deinit();
+            try op.setup(&d.vol);
+            setFsInfo(d);
+            const before = try testing.allocator.dupe(u8, d.bytes);
+            defer testing.allocator.free(before);
+            var n: u64 = 0;
+            while (n < total) : (n += 1) {
+                var m: u64 = n + 1;
+                while (m < n + 8) : (m += 1) {
+                    @memcpy(d.bytes, before);
+                    try d.mount(cfg.cached);
+                    const at = d.blk.requests;
+                    d.blk.fault = .{ .at = at + n, .kind = .fails };
+                    d.blk.second = .{ .at = at + m, .kind = .lands_and_fails };
+                    op.run(&d.vol) catch {};
+                    d.blk.fault = null;
+                    d.blk.second = null;
+                    try countedIsFound(d, op.name, if (cfg.cached) "FAT16, held" else "FAT16", "write that landed and failed, a cleanup's after a failed request", n * 8 + (m - n));
+                }
+            }
+        }
+    }
+}
+
+test "a write that lands and answers failure, leaving long-name parts orphaned, and the next write over them: the count follows what is on the disk (metal-vmm 148(b))" {
+    // A new file's long name whose short entry does not land leaves its
+    // parts orphaned and counted; the next entry written into that run
+    // tombstones them first, and they are counted no more.
+    for (both_cached) |cached| {
+        const d = try Disk.makeUnkept("orphans-reused", test_disk.small, cached);
+        defer d.deinit();
+        var body: [700]u8 = undefined;
+        @memset(&body, 'o');
+        const before = try testing.allocator.dupe(u8, d.bytes);
+        defer testing.allocator.free(before);
+        var left: u32 = 0;
+        var n: u64 = 0;
+        while (n < 24) : (n += 1) {
+            @memcpy(d.bytes, before);
+            try d.mount(cached);
+            d.blk.fault = .{ .at = d.blk.requests + n, .kind = .fails };
+            d.vol.writeFile("data/A Long Name For A First File.txt", &body) catch {};
+            d.blk.fault = null;
+            if (d.vol.orphaned_parts > 0) left += 1;
+            try countedIsFound(d, "a new file", "FAT16", "failed request", n);
+            // The next file takes the same run, its orphans tombstoned first.
+            d.vol.writeFile("data/A Long Name For The Next File.txt", &body) catch {};
+            try countedIsFound(d, "the next new file", "FAT16", "after a failed request", n);
+        }
+        // The premise: some failure left parts orphaned.
+        try testing.expect(left > 0);
     }
 }
