@@ -75,6 +75,7 @@
 
 const proto = @import("proto.zig");
 const props = @import("coverage");
+const plant = @import("plant.zig");
 const machine = @import("machine.zig");
 /// Sequence numbers modulo 2^32 (seq.zig): every "after" here is one of these.
 const sq = @import("seq.zig").Seq(u32);
@@ -802,6 +803,14 @@ pub const Table = struct {
             self.retransmits += 1;
             props.reachable(@src(), "tcp: the timer goes back to the oldest unacknowledged byte", .{ .conn = i, .retries = c.retries });
             probe = .owed;
+            // PLANT (src/plant.zig): every go-back with data overwrites the
+            // oldest unacknowledged byte, so a copy the peer never had
+            // arrives wrong ('#' or '$', never back to what it was: a flip
+            // undoes itself on an even number of go-backs).
+            if (comptime plant.on == .net_goback_byte) if (c.queued() > 0) {
+                props.reachable(@src(), "PLANT: net-goback-byte fires", null);
+                c.tx[c.tx_start] = if (c.tx[c.tx_start] == '#') '$' else '#';
+            };
         }
 
         while (c.queued() > c.sent) {

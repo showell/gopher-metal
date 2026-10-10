@@ -53,6 +53,11 @@ const ready = metal.ready;
 const RequestHeap = metal.request_heap.RequestHeap;
 const interrupts = metal.interrupts;
 const gm_build = @import("gm_build");
+// **NO PLANT IN A RELEASE** (src/plant.zig): a deliberate bug compiles only
+// into a -Dcoverage kernel, which no release image is.
+comptime {
+    if (metal.plant.on != .none and !gm_build.coverage) @compileError("a plant (-Dplant) needs -Dcoverage: no release image may hold one");
+}
 /// B15 (metal-vmm QUEUE item 78): a `-Dcoverage` build checks the TCP table
 /// after every turn of the network (`stream.checkTable`) and the volumes after
 /// every request (`checkVolumes`). A production build has neither.
@@ -1707,13 +1712,15 @@ fn leakLine(what: []const u8, v: *const disk_fat.Volume) void {
     serial.putDec(v.leaked_clusters + v.unsure_clusters);
     serial.put(" clusters left a counted leak, ");
     serial.putDec(v.orphaned_parts + v.unsure_parts);
-    serial.put(" long-name parts left orphaned, of them ");
+    serial.put(" long-name parts left orphaned, ");
+    serial.putDec(v.fat_copies_failed);
+    serial.put(" FAT copy writes failed; of them ");
     serial.putDec(v.unsure_clusters);
     serial.put(" clusters and ");
     serial.putDec(v.unsure_parts);
-    serial.put(" parts that may be live; ");
+    serial.put(" parts may be live, and ");
     serial.putDec(v.long_clusters + v.unsure_long);
-    serial.put(" clusters past a size (");
+    serial.put(" clusters are past a size (");
     serial.putDec(v.cleanups_failed);
     serial.put(" cleanups failed)\n");
 }

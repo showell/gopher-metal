@@ -333,21 +333,10 @@ fn describe(s: State) []const u8 {
 /// counted is one nobody knew of; one counted and not found is slack, where
 /// an uncounted one could hide.
 fn countedIsFound(d: *test_disk.Disk, op: []const u8, kind: []const u8, when: []const u8, n: u64) !void {
-    return countedIsFoundBut(d, 0, op, kind, when, n);
-}
-
-/// **ONE CLUSTER NOT YET COUNTED, AND WHERE** (148(b), for the box's B42):
-/// `allocChain` counts a cluster whose end mark's landing is unknown as
-/// nothing (`leftLeaked(0)`); counted, it is one `unsure_clusters`. The box
-/// is in `allocChain`, so the line is the box's to fold (FEEDBACK, 148), and
-/// then this is 0. It is reached only with a read-back that fails too.
-const alloc_mark_uncounted: u64 = 1;
-
-fn countedIsFoundBut(d: *test_disk.Disk, uncounted: u64, op: []const u8, kind: []const u8, when: []const u8, n: u64) !void {
     const r = try d.check();
     const v = &d.vol;
     const clusters_ok = r.health.leaked >= v.leaked_clusters and
-        (v.unsized_leaks > 0 or r.health.leaked <= v.leaked_clusters + v.unsure_clusters + uncounted);
+        (v.unsized_leaks > 0 or r.health.leaked <= v.leaked_clusters + v.unsure_clusters);
     const parts_ok = r.health.orphaned_parts >= v.orphaned_parts and
         r.health.orphaned_parts <= v.orphaned_parts + v.unsure_parts;
     // A `long` finding's count is the chain's length: past the size, it is
@@ -725,7 +714,7 @@ test "a write that lands and answers failure, and the read after it fails too, l
                 d.blk.fault = .{ .at = d.blk.requests + n, .kind = .lands_and_fails, .then_fail = 1, .seed = @truncate(n) };
                 op.run(&d.vol) catch {};
                 d.blk.fault = null;
-                try countedIsFoundBut(d, alloc_mark_uncounted, op.name, kind, "write that landed and failed, and the next request failed", n);
+                try countedIsFound(d, op.name, kind, "write that landed and failed, and the next request failed", n);
                 // The machine goes on, on the same mount: a new file, near
                 // where the operation took its clusters.
                 d.vol.writeFile("data/after", &after_bytes) catch {};
@@ -774,7 +763,7 @@ test "a write that lands and answers failure, its read-back failing too, while a
             d.blk.fault = .{ .at = d.blk.requests + n, .kind = .lands_and_fails, .then_fail = 1, .seed = @truncate(n) };
             d.vol.writeFile("data/full/BIG.DAT", &big) catch {};
             d.blk.fault = null;
-            try countedIsFoundBut(d, alloc_mark_uncounted, "a new file, growing its directory", "FAT16", "write that landed and failed, and the next request failed", n);
+            try countedIsFound(d, "a new file, growing its directory", "FAT16", "write that landed and failed, and the next request failed", n);
             // On, on the same mount: what it takes next must be free.
             d.vol.writeFile("data/after", &after_bytes) catch {};
             try d.mount(cfg.cached);
@@ -856,7 +845,7 @@ test "a write that lands and answers failure, its read-back rotten: the kept fre
             d.blk.fault = .{ .at = d.blk.requests + n, .kind = .lands_and_fails, .then_garbage = 1, .seed = @truncate(n) };
             d.vol.writeFile("data/BIG.DAT", &big) catch {};
             d.blk.fault = null;
-            try countedIsFoundBut(d, alloc_mark_uncounted, "a new file", "FAT16", "write that landed and failed, its read-back rotten", n);
+            try countedIsFound(d, "a new file", "FAT16", "write that landed and failed, its read-back rotten", n);
             var held_free: u32 = 0;
             var c: u32 = 2;
             while (c <= d.vol.max_cluster) : (c += 1) {
@@ -901,7 +890,7 @@ test "a write that lands and answers failure, with the FAT on the disk and its r
         d.blk.fault = .{ .at = d.blk.requests + n, .kind = .lands_and_fails, .then_garbage = 2, .seed = @truncate(n *% 7 +% 1) };
         d.vol.writeFile("data/BIG.DAT", &big) catch {};
         d.blk.fault = null;
-        try countedIsFoundBut(d, alloc_mark_uncounted, "a new file beside another", "FAT16", "write that landed and failed, its read-backs rotten", n);
+        try countedIsFound(d, "a new file beside another", "FAT16", "write that landed and failed, its read-backs rotten", n);
         var it = coverage.catalog();
         while (it.next()) |site| if (site.broken()) {
             std.debug.print("request {d} of {d}: broken: {s}\n", .{ n, total, std.mem.span(site.message) });
@@ -972,7 +961,10 @@ test "a disk that lies (a write that lands nothing or half, a read of other byte
             }
         }
     }
-    try testing.expect(runs > 1000);
+    // Not vacuous: a run for every request of every operation. Fewer since
+    // a chain's FAT entries are written a sector at a time (metal-vmm B42):
+    // 804 runs there, from over 1,000.
+    try testing.expect(runs > 700);
 }
 
 /// One operation whose failure is judged for lost clusters: what it starts
@@ -984,6 +976,7 @@ const LeakOp = struct {
 };
 
 const leak_first = [_]u8{'a'} ** 600;
+const leak_long = [_]u8{0x4C} ** (300 * 512);
 const leak_more = [_]u8{'m'} ** (3 * 512 + 100);
 
 const leak_ops = [_]LeakOp{
@@ -1054,6 +1047,18 @@ const leak_ops = [_]LeakOp{
     }.f, .run = struct {
         fn f(v: *disk_fat.Volume) anyerror!void {
             try v.rename("data/LOG", "data/OLD");
+        }
+    }.f },
+    // A chain past one FAT sector (FAT16's 256 entries; 512-byte
+    // clusters here): two batches and the link between them (metal-vmm
+    // B42), each failing in turn.
+    .{ .name = "a file spanning two FAT sectors", .setup = struct {
+        fn f(v: *disk_fat.Volume) anyerror!void {
+            _ = try v.makePath("data");
+        }
+    }.f, .run = struct {
+        fn f(v: *disk_fat.Volume) anyerror!void {
+            try v.writeFile("data/LONG", &leak_long);
         }
     }.f },
     .{ .name = "a remove", .setup = struct {
