@@ -753,7 +753,8 @@ pub const Table = struct {
             return;
         }
 
-        var probe = false;
+        // A timeout owes the window one probe, if it is shut: one byte.
+        var probe: enum { none, owed } = .none;
         if (expired) {
             if (!backoff(c, now)) return self.giveUp(wire, i);
             // **GO BACK.** Everything from `una` is sent again; the peer
@@ -764,7 +765,7 @@ pub const Table = struct {
             c.timed_at = null; // Karn: no telling which copy is answered
             self.retransmits += 1;
             props.reachable(@src(), "tcp: the timer goes back to the oldest unacknowledged byte", .{ .conn = i, .retries = c.retries });
-            probe = true;
+            probe = .owed;
         }
 
         while (c.queued() > c.sent) {
@@ -773,7 +774,7 @@ pub const Table = struct {
             if (n == 0) {
                 // **A SHUT WINDOW IS PROBED WHEN THE TIMER RUNS OUT** (RFC
                 // 9293 §3.8.6.1), with one byte; the answer carries the window.
-                if (!probe) {
+                if (probe == .none) {
                     if (c.rto_at == null) c.rto_at = now + c.rto_ns;
                     break;
                 }
@@ -781,7 +782,7 @@ pub const Table = struct {
                 props.reachable(@src(), "tcp: a shut window is probed", .{ .conn = i });
                 n = 1;
             }
-            probe = false;
+            probe = .none;
             const first_time = c.sent + n > c.high;
             self.emit(wire, i, flag_psh | flag_ack, c.una +% @as(u32, @intCast(c.sent)), c.tx[c.tx_start + c.sent ..][0..n]);
             c.sent += n;

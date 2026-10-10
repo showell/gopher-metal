@@ -51,8 +51,8 @@ MUTANTS = [
      "const expired = if (c.rto_at) |at| now >= at else false;",
      "const expired = if (c.rto_at) |at| now > at else false;", None),
     ("probe-timer-unarmed", "a shut window with bytes queued arms no probe timer",
-     "                if (!probe) {\n                    if (c.rto_at == null) c.rto_at = now + c.rto_ns;\n",
-     "                if (!probe) {\n", None),
+     "                if (probe == .none) {\n                    if (c.rto_at == null) c.rto_at = now + c.rto_ns;\n",
+     "                if (probe == .none) {\n", None),
     ("data-timer-unarmed", "bytes sent arm no retransmission timer",
      "            c.high = @max(c.high, c.sent);\n            if (c.rto_at == null) c.rto_at = now + c.rto_ns;\n",
      "            c.high = @max(c.high, c.sent);\n", None),
@@ -85,7 +85,7 @@ MUTANTS = [
     ("never-probe", "a shut window is never probed",
      # Always true, but not known at compile time: `true` would leave the code
      # after the break unreachable, which Zig refuses to compile.
-     "                if (!probe) {", "                if (!probe or c.state != .closed) {", None),
+     "                if (probe == .none) {", "                if (probe == .none or c.state != .closed) {", None),
 
     # ── the clock ──────────────────────────────────────────────────────────
     ("rto-small-variance", "the timeout leaves out the variation's factor of four",
