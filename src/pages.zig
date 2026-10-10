@@ -113,6 +113,14 @@ pub const Pages = struct {
         };
     }
 
+    /// Every byte the heap uses, its bitmap included: nothing when it has
+    /// no pages.
+    pub fn span(self: *const Pages) pvh.Region {
+        if (self.count == 0) return .{ .start = 0, .len = 0 };
+        const start = @intFromPtr(self.bitmap.ptr);
+        return .{ .start = start, .len = self.base + self.count * page_size - start };
+    }
+
     fn isTaken(self: *const Pages, i: usize) bool {
         return self.bitmap[i >> 3] & (@as(u8, 1) << @intCast(i & 7)) != 0;
     }
@@ -542,4 +550,13 @@ test "a region too small to describe is no region at all" {
 
     var one = Pages.init(.{ .start = 0x100000, .len = page_size });
     try testing.expectEqual(@as(usize, 0), one.stats().pages_total);
+}
+
+test "the span is every byte the heap uses, its bitmap included, and nothing else" {
+    var ram = try Ram.init(1024 * 1024);
+    defer ram.deinit();
+    const s = ram.pages.span();
+    try testing.expectEqual(@as(u64, @intFromPtr(ram.memory.ptr)), s.start);
+    try testing.expectEqual(@as(u64, ram.memory.len), s.len);
+    try testing.expectEqual(@as(u64, 0), (Pages{}).span().len);
 }

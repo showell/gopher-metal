@@ -1,7 +1,8 @@
 //! **THE RESTART, END TO END** (RESTART.md, QUEUE.md item 16).
 //!
 //! It runs the restart path itself (`restarting.zig`) on QEMU's `pc`
-//! machine, the droplet's, without -no-reboot. Each boot:
+//! machine, the droplet's, without -no-reboot. Each boot carves its page
+//! heap as gopher.elf does, with the kept log's region cut out, and then:
 //!
 //!   1. **Reports what it found** (`restarting.begin`): the kept log of the
 //!      boot before, and the CMOS restart record.
@@ -40,6 +41,9 @@ pub fn kmain() noreturn {
     serial.init();
     serial.put("gopher-metal backoff probe\n");
     _ = metal.wallclock.start() catch serial.fail("the clocks would not come up");
+    const entries = metal.boot.memoryMap() catch serial.fail("the loader described no memory");
+    if (metal.pages.bring(metal.pvh.largestFree(entries, restarting.reserved())).pages_total == 0)
+        serial.fail("no usable region of RAM for the heap");
     const found = restarting.begin(wallNow);
     const restarts: u8 = if (found.record) |r| r.count else 0;
 

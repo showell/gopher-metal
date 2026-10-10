@@ -2,17 +2,13 @@
 //! half, the record and the back-off, is `restart.zig`; this reads and writes
 //! CMOS, keeps the log past the kernel, and resets the machine.
 //!
-//! A host uses it in three steps:
-//!
-//!   1. **Reserve** `reserved()` from the page allocator: the kernel's image
-//!      and, past it, the kept log's region.
-//!   2. **`begin(clock)`** once the wall clock is up: the log moves into the
-//!      kept region, the boot before this one and the restart record are
-//!      reported, and the answer says how long to wait before serving.
-//!   3. **`serving()`** where the main loop starts. From there on,
-//!      `serial.fail`, a panic, and a CPU exception (which ends in
-//!      `serial.fail`) restart the machine instead of halting it. Before it,
-//!      a fatal error is a refusal at boot, and still halts.
+//! `begin(clock)`, once the wall clock is up, moves the log into the kept
+//! region and says how long to wait before serving; `serving()`, where the
+//! main loop starts, makes `serial.fail`, a panic and a CPU exception restart
+//! the machine instead of halting it. **THE KEPT REGION IS NOT THE HEAP'S**:
+//! a page heap is carved with `reserved()` cut out (pvh.largestFree), and
+//! both calls fail at boot if `pages` holds any of the kept region, which the
+//! log would otherwise be written over, silently.
 //!
 //! The NMI handler is untouched: it logs and carries on.
 
@@ -24,6 +20,7 @@ const pvh = @import("pvh.zig");
 const restart = @import("restart.zig");
 const kept_log = @import("kept_log.zig");
 const reset = @import("reset.zig");
+const pages = @import("pages.zig");
 
 // In `.data`, not `.bss`: what decides a restart must not lean on how a
 // loader treated `.bss`.
@@ -75,6 +72,7 @@ pub const Boot = struct {
 /// restart path asks it for the time of a restart.
 pub fn begin(now: *const fn () ?i64) Boot {
     const region = keptRegion();
+    heapClear(region);
     const bytes: [*]u8 = @ptrFromInt(region.start);
     const k = kept_log.open(bytes[0..region.len]);
     serial.keepIn(k.bytes());
@@ -114,7 +112,13 @@ pub fn begin(now: *const fn () ?i64) Boot {
 
 /// From here on, a fatal error restarts the machine.
 pub fn serving() void {
+    heapClear(keptRegion());
     serial.on_fatal = fatal;
+}
+
+fn heapClear(region: pvh.Region) void {
+    if (pvh.overlaps(pages.global.span(), region))
+        serial.fail("the page heap holds the kept log's region: carve it with restarting.reserved() cut out");
 }
 
 /// Forgets the restart record: a run that ends on purpose (a probe) leaves no
