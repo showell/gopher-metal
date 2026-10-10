@@ -50,6 +50,7 @@ pub fn Membership(comptime State: type, comptime Group: type) type {
 ///               (`in`), and then .groups, which places every state
 pub fn Machine(comptime spec: anytype) type {
     const Spec = @TypeOf(spec);
+    if (!@hasField(Spec, "name")) @compileError("a machine's spec needs .name, for its sites' messages");
     const name: []const u8 = spec.name;
     // **A SPEC SAYS WHAT IT MEANS, OR DOES NOT COMPILE** (144's review): an
     // unknown key (`.group` for `.groups`) would be ignored, and Group
@@ -63,7 +64,7 @@ pub fn Machine(comptime spec: anytype) type {
     if (@hasField(Spec, "Group") != @hasField(Spec, "groups")) @compileError("machine " ++ name ++ ": .Group and .groups come together: the groups, and where each state is in them");
     const State: type = spec.State;
     const Event: type = spec.Event;
-    const Group: type = if (@hasField(@TypeOf(spec), "Group")) spec.Group else enum {};
+    const Group: type = if (@hasField(Spec, "Group")) spec.Group else enum {};
     const initial: State = spec.initial;
     // The literal's edges and groups are untyped tuples: each is typed here.
     const edges: []const Edge(State, Event) = comptime blk: {
@@ -74,7 +75,7 @@ pub fn Machine(comptime spec: anytype) type {
     };
     const groups: Membership(State, Group) = comptime blk: {
         var m: Membership(State, Group) = undefined;
-        if (@hasField(@TypeOf(spec), "groups")) for (std.meta.fields(@TypeOf(spec.groups))) |f| {
+        if (@hasField(Spec, "groups")) for (std.meta.fields(@TypeOf(spec.groups))) |f| {
             if (!@hasField(State, f.name)) @compileError("machine " ++ name ++ ": .groups names " ++ f.name ++ ", which is no state");
         };
         for (std.meta.fields(State)) |f| {
