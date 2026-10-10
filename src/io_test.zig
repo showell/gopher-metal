@@ -131,7 +131,7 @@ test "a path with . or .. is refused for writes and not found for reads, on eith
     for (bad) |p| {
         serial.clearCaptured();
         try testing.expectError(io_mod.Error.WriteFailed, cwd.writeFile(io, .{ .sub_path = p, .data = "x" }));
-        try testing.expect(logged("refused: a write to a path with . or ..: "));
+        try testing.expect(logged("refused: a write to a path with ., .. or an empty part: "));
         try testing.expectError(io_mod.Error.FileNotFound, cwd.readFileAlloc(io, p, testing.allocator, .limited(100)));
         try testing.expectError(io_mod.Error.FileNotFound, cwd.statFile(io, p, .{}));
         try testing.expectError(io_mod.Error.FileNotFound, cwd.openDir(io, p, .{}));
@@ -144,6 +144,31 @@ test "a path with . or .. is refused for writes and not found for reads, on eith
     try t.volume.expectFile("data/keep", "kept");
     try expectAbsent(t.volume, "x");
     try expectAbsent(t.site, "x");
+}
+
+test "a path with an empty part is refused for writes and not found for reads, on either side" {
+    // **A PATH IS ITS PARTS, EACH NAMED** (Steve, 2026-10-10: no papering
+    // over): a doubled, leading or trailing slash is a path built wrong. It
+    // was walked as the path it might have meant (`data//keep` as
+    // `data/keep`); now it names nothing, and a write to it is refused.
+    const t = try Two.make(true);
+    defer t.deinit();
+    try cwd.writeFile(io, .{ .sub_path = "data/keep", .data = "kept" });
+    const volume_free = t.volume.free();
+    const bad = [_][]const u8{ "data//keep", "/data/keep", "data/keep/", "data/chat//x", "//", "data/" };
+    for (bad) |p| {
+        serial.clearCaptured();
+        try testing.expectError(io_mod.Error.WriteFailed, cwd.writeFile(io, .{ .sub_path = p, .data = "x" }));
+        try testing.expect(logged("refused: a write to a path with ., .. or an empty part: "));
+        try testing.expectError(io_mod.Error.FileNotFound, cwd.readFileAlloc(io, p, testing.allocator, .limited(100)));
+        try testing.expectError(io_mod.Error.FileNotFound, cwd.statFile(io, p, .{}));
+        try testing.expectError(io_mod.Error.FileNotFound, cwd.openDir(io, p, .{}));
+    }
+    // Removing `data/` would be removing the data directory.
+    try testing.expectError(io_mod.Error.WriteFailed, cwd.deleteTree(io, "data/"));
+    try testing.expectError(io_mod.Error.WriteFailed, cwd.deleteTree(io, "/data"));
+    try testing.expectEqual(volume_free, t.volume.free());
+    try t.volume.expectFile("data/keep", "kept");
 }
 
 test "the first directory is matched without case, as FAT matches it" {

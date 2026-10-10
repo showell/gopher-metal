@@ -182,9 +182,20 @@ const Place = enum { site, data };
 /// compared the same way; and it resolves `.` and `..` as real entries, so a
 /// path holding either could be routed by its first directory and land
 /// somewhere else — `data/../x` at the volume's root, past the refusal in
-/// `writing`. The application never spells a path that way, so such a path is
-/// refused (null) rather than interpreted.
+/// `writing`. **AND EVERY PART IS NAMED** (Steve, 2026-10-10): a doubled,
+/// leading or trailing slash is a path built wrong, never read as the path it
+/// might have meant. The application never spells a path either way, so such
+/// a path is refused (null) rather than interpreted.
 fn placeOf(path: []const u8) ?Place {
+    if (path.len > 0) {
+        var each = std.mem.splitScalar(u8, path, '/');
+        while (each.next()) |part| {
+            if (part.len == 0) {
+                props.reachable(@src(), "io: a path with an empty part is refused", null);
+                return null;
+            }
+        }
+    }
     var parts = std.mem.tokenizeScalar(u8, path, '/');
     while (parts.next()) |part| {
         if (std.mem.eql(u8, part, ".") or std.mem.eql(u8, part, "..")) return null;
@@ -337,7 +348,7 @@ fn reading(path: []const u8) Error!*disk_fat.Volume {
 /// The volume to change `path` on, or a refusal: see `keepData`.
 fn writing(path: []const u8) Error!*disk_fat.Volume {
     const place = placeOf(path) orelse {
-        serial.put("  refused: a write to a path with . or ..: ");
+        serial.put("  refused: a write to a path with ., .. or an empty part: ");
         serial.put(path);
         serial.put("\n");
         return Error.WriteFailed;
