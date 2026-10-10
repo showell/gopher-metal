@@ -3417,7 +3417,7 @@ pub const Volume = struct {
                                 run_next = e[0] & 0x1F;
                             } else if (run_parts == 0 or e[13] != run_sum or e[0] & 0x1F != run_next) run_whole = false;
                             run_next -%= 1;
-                            run_parts += 1;
+                            run_parts +|= 1;
                             long.take(e);
                             continue;
                         }
@@ -3448,9 +3448,9 @@ pub const Volume = struct {
                 defer started.* = false;
                 if (run_parts.* > 0) {
                     if (started.*) {
-                        self.health.orphaned_parts += run_parts.*;
-                        self.health.orphaned_runs += 1;
-                    } else self.health.lfn_fragments += run_parts.*;
+                        self.health.orphaned_parts +|= run_parts.*;
+                        self.health.orphaned_runs +|= 1;
+                    } else self.health.lfn_fragments +|= run_parts.*;
                 }
                 run_parts.* = 0;
             }

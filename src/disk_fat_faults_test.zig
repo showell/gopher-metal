@@ -1191,7 +1191,11 @@ test "a write that lands and answers failure as a cleanup gives back what a fail
     // A request fails, and the cleanup after it (a give-back, a part's
     // clearing, a chain freed) meets a write the disk took and called failed.
     // The cleanup's own verdict decides what it left, not its answer.
-    var cleanups_met: u32 = 0;
+    const before_arms = [_]u64{
+        passesOf("fat: clusters taken before a failure could not be given back, and are left a leak"),
+        passesOf("fat: a long-name part could not be cleared after a commit, and is left orphaned"),
+        passesOf("fat: a chain freed after the commit could not be freed whole, and the rest is left a leak"),
+    };
     for (stopped_ops) |op| {
         for (configs) |cfg| {
             if (cfg.shape.kind == .fat32) continue; // the same code; FAT32's disk is 35 MB
@@ -1214,14 +1218,34 @@ test "a write that lands and answers failure as a cleanup gives back what a fail
                     op.run(&d.vol) catch {};
                     d.blk.fault = null;
                     d.blk.second = null;
-                    if (d.vol.cleanups_failed > 0) cleanups_met += 1;
                     try countedIsFound(d, op.name, if (cfg.cached) "FAT16, held" else "FAT16", "write that landed and failed, a cleanup's after a failed request", n * 8 + (m - n));
                 }
             }
         }
     }
-    // The premise: the second fault met a cleanup.
-    try testing.expect(cleanups_met > 0);
+    // The premise: the second fault met each cleanup it names, by the
+    // cleanup arm's own site (the box's review of 148): a give-back left
+    // short, a part left orphaned, a chain freed after its commit left.
+    for ([_][]const u8{
+        "fat: clusters taken before a failure could not be given back, and are left a leak",
+        "fat: a long-name part could not be cleared after a commit, and is left orphaned",
+        "fat: a chain freed after the commit could not be freed whole, and the rest is left a leak",
+    }, before_arms) |arm, was| {
+        if (passesOf(arm) > was) continue;
+        std.debug.print("the cleanup arm \"{s}\" was never reached\n", .{arm});
+        return error.TestUnexpectedResult;
+    }
+}
+
+/// How often the sites with `message` were reached, in all.
+fn passesOf(message: []const u8) u64 {
+    const coverage = @import("coverage");
+    var n: u64 = 0;
+    var it = coverage.catalog();
+    while (it.next()) |site| {
+        if (std.mem.eql(u8, std.mem.span(site.message), message)) n += site.passes;
+    }
+    return n;
 }
 
 test "a write that lands and answers failure, leaving long-name parts orphaned, and the next write over them: the count follows what is on the disk (metal-vmm 148(b))" {
