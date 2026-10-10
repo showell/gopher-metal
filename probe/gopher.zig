@@ -743,7 +743,7 @@ fn nextReady(table: *tcp.Table) ?usize {
     var best: ?usize = null;
     for (table.conns, 0..) |*c, i| {
         if (c.claimed or c.state != .established) continue;
-        if (ready.check(c.pending(), c.peer_done, c.rx.len) == .waiting) continue;
+        if (ready.check(c.pending(), c.peerDone(), c.rx.len) == .waiting) continue;
         if (best == null or c.serial < table.conns[best.?].serial) best = i;
     }
     return best;
@@ -975,7 +975,7 @@ fn serviceStreams(wire: *stream.Wire, table: *tcp.Table, hub: *Hub, scratch: std
     for (&held) |*slot| {
         const h = if (slot.*) |*h| h else continue;
         const c = &table.conns[h.conn];
-        if (!c.open() or c.peer_done) {
+        if (!c.open() or c.peerDone()) {
             endStream(slot, wire, table, hub, .client_left);
             continue;
         }

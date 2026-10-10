@@ -965,7 +965,7 @@ const Host = struct {
                 self.consumed += n;
                 self.last_progress = sim.now;
                 if (sim.sc.host_announces and was_tight and c.room() >= tcp.our_mss) table.ack(&wire, i);
-            } else if (c.peer_done or !c.open()) {
+            } else if (c.peerDone() or !c.open()) {
                 // The request will never be whole: answered and closed, as
                 // the host does a request that ends early.
                 self.close(sim, i);
@@ -1084,7 +1084,7 @@ const Server = struct {
         for (sim.table.conns, 0..) |*c, k| {
             if (c.claimed or c.state != .established) continue;
             const w = owner(sim, k) orelse continue;
-            if (c.pending().len < sim.clientAtConst(w).request_len and !c.peer_done) continue;
+            if (c.pending().len < sim.clientAtConst(w).request_len and !c.peerDone()) continue;
             if (best == null or c.serial < sim.table.conns[best.?].serial) best = k;
         }
         return best;
@@ -1136,7 +1136,7 @@ const Server = struct {
                 c.consume(n);
                 self.consumed[w] += n;
                 self.last_progress = sim.now;
-            } else if (c.peer_done or !c.open()) {
+            } else if (c.peerDone() or !c.open()) {
                 return self.end(sim, k, w);
             } else if (sim.now - self.last_progress >= idle_ns) {
                 return self.giveUp(sim, k, w);

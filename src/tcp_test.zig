@@ -455,7 +455,7 @@ test "the peer's FIN leaves what it sent to be read, and we can still answer" {
     _ = p.write(&f.table, &f.wire, "GET / HTTP/1.1\r\n\r\n", 2);
     const r = p.fin(&f.table, &f.wire, 3);
     try testing.expectEqual(Event.peer_done, r.event);
-    try testing.expect(f.table.conns[i].peer_done);
+    try testing.expect(f.table.conns[i].peerDone());
     try testing.expectEqualStrings("GET / HTTP/1.1\r\n\r\n", f.table.conns[i].pending());
     try testing.expectEqual(p.seq +% 1, f.wire.last().ack); // their FIN acknowledged
     try testing.expectEqual(@as(usize, 19), f.table.queue(i, "HTTP/1.1 200 OK\r\n\r\n"));
@@ -1682,7 +1682,7 @@ fn matrixCell(setup: MatrixSetup, kind: MatrixKind, want: MatrixOutcome) !void {
     const now_ack: u32 = if (setup == .syn_received) h else u;
     const was_state = c.state;
     const was_fin = c.fin.get();
-    const was_peer_done = c.peer_done;
+    const was_peer_done = c.peerDone();
     const had = c.pending().len;
     const from = f.wire.count;
 
@@ -1713,11 +1713,11 @@ fn matrixCell(setup: MatrixSetup, kind: MatrixKind, want: MatrixOutcome) !void {
     if (want.state) |state| {
         try testing.expectEqual(state, c.state);
         if (want.fin) |fin_now| try testing.expectEqual(fin_now, c.fin.get());
-        if (want.peer_done) |done| try testing.expectEqual(done, c.peer_done);
+        if (want.peer_done) |done| try testing.expectEqual(done, c.peerDone());
     } else {
         try testing.expectEqual(was_state, c.state);
         try testing.expectEqual(was_fin, c.fin.get());
-        try testing.expectEqual(was_peer_done, c.peer_done);
+        try testing.expectEqual(was_peer_done, c.peerDone());
     }
     if (c.state != .closed) try testing.expectEqual(had + want.taken, c.pending().len);
     if (want.event) |event| try testing.expectEqual(event, got.event);

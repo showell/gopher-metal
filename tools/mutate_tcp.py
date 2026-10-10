@@ -133,7 +133,7 @@ MUTANTS = [
     ("handshake-any-ack", "the handshake completes on any acknowledgement number",
      "if (number != c.una +% 1) {", "if (false) {", None),
     ("peer-fin-forgotten", "the peer's FIN is acknowledged but not recorded",
-     "            c.peer_done = true;\n", "", None),
+     "            c.peer_half.fire(.fin_received);\n", "", None),
     ("fin-wait-unbounded", "our FIN acknowledged starts no wait for the peer's",
      # `now` is then unused, which Zig refuses; `_ = now;` keeps it compiling.
      "        c.fin_wait_until = now + fin_wait_ns;\n", "        _ = now;\n", None),
@@ -152,7 +152,7 @@ MUTANTS = [
     ("data-not-heard", "data from the peer does not settle the window debt",
      "            if (n > 0) c.heard();\n", "", None),
     ("news-for-done-peer", "a window is owed to a peer that has sent its FIN",
-     "if (c.tight(w) or c.peer_done) {", "if (c.tight(w)) {", None),
+     "if (c.tight(w) or c.peerDone()) {", "if (c.tight(w)) {", None),
 
     # ── slots ──────────────────────────────────────────────────────────────
     ("claimed-slot-reused", "a slot the host still holds is handed to a new connection",

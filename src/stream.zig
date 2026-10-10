@@ -301,7 +301,7 @@ pub const Stream = struct {
             const c = self.conn();
             if (c.pending().len > 0) return c.pending();
             // Closed, or the peer has said it is done: nothing more is coming.
-            if (!c.open() or c.peer_done) {
+            if (!c.open() or c.peerDone()) {
                 props.reachable(@src(), "stream: a read finds the peer closed or done, so nothing more is coming", null);
                 return null;
             }

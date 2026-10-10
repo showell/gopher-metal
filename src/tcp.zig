@@ -131,16 +131,16 @@ pub const ns_per_ms = 1_000_000;
 pub const ns_per_s = 1_000_000_000;
 
 /// RFC 9293's states, fewer of them: the table as a whole is LISTEN, and the
-/// closing states are told apart by `fin` and `peer_done` rather than by name.
+/// closing states are told apart by `fin` and `peer_half` rather than by name.
 pub const State = enum {
     /// CLOSED. The slot is free — unless the host still holds it (`claimed`).
     closed,
     /// SYN-RECEIVED: our SYN-ACK is out, its acknowledgement not yet in.
     syn_received,
-    /// ESTABLISHED, and CLOSE-WAIT once `peer_done`.
+    /// ESTABLISHED, and CLOSE-WAIT once the peer has finished.
     established,
     /// Our FIN is queued, sent or acknowledged: FIN-WAIT-1, FIN-WAIT-2
-    /// (`fin` acknowledged), and CLOSING or LAST-ACK (`peer_done`). With
+    /// (`fin` acknowledged), and CLOSING or LAST-ACK (the peer finished). With
     /// both FINs acknowledged the slot is CLOSED at once: no TIME-WAIT.
     closing,
 };
@@ -166,21 +166,40 @@ pub const FinEvent = enum {
 /// or sent and rewound); `numbered`, holding a sequence number (sent, or sent
 /// and rewound).
 pub const FinGroup = enum { owed, numbered };
-pub const FinMachine = machine.Machine("tcp.Fin", Fin, FinEvent, FinGroup, .none, &.{
-    .{ .from = .none, .on = .host_finished, .to = .queued },
-    .{ .from = .queued, .on = .fin_emitted, .to = .sent },
-    .{ .from = .resending, .on = .fin_emitted, .to = .sent },
-    .{ .from = .sent, .on = .timed_out, .to = .resending },
-    .{ .from = .sent, .on = .resent_early, .to = .resending },
-    .{ .from = .sent, .on = .fin_acknowledged, .to = .acknowledged },
-    // The first FIN's ACK, arriving after a go-back.
-    .{ .from = .resending, .on = .fin_acknowledged, .to = .acknowledged },
-}, .{
-    .none = &.{},
-    .queued = &.{.owed},
-    .sent = &.{.numbered},
-    .resending = &.{ .owed, .numbered },
-    .acknowledged = &.{},
+pub const FinMachine = machine.Machine(.{
+    .name = "tcp.Fin",
+    .State = Fin,
+    .Event = FinEvent,
+    .Group = FinGroup,
+    .initial = .none,
+    .edges = &.{
+        .{ .from = .none, .on = .host_finished, .to = .queued },
+        .{ .from = .queued, .on = .fin_emitted, .to = .sent },
+        .{ .from = .resending, .on = .fin_emitted, .to = .sent },
+        .{ .from = .sent, .on = .timed_out, .to = .resending },
+        .{ .from = .sent, .on = .resent_early, .to = .resending },
+        .{ .from = .sent, .on = .fin_acknowledged, .to = .acknowledged },
+        // The first FIN's ACK, arriving after a go-back.
+        .{ .from = .resending, .on = .fin_acknowledged, .to = .acknowledged },
+    },
+    .groups = .{
+        .none = &.{},
+        .queued = &.{.owed},
+        .sent = &.{.numbered},
+        .resending = &.{ .owed, .numbered },
+        .acknowledged = &.{},
+    },
+});
+
+/// **THE PEER'S HALF OF THE CONNECTION** (metal-vmm 144): open, until its FIN
+/// arrives. Never back: a slot reused is a new `Conn` (`reset`).
+pub const PeerHalf = enum { open, finished };
+pub const PeerMachine = machine.Machine(.{
+    .name = "tcp.Peer",
+    .State = PeerHalf,
+    .Event = enum { fin_received },
+    .initial = .open,
+    .edges = &.{.{ .from = .open, .on = .fin_received, .to = .finished }},
 });
 
 pub const Conn = struct {
@@ -249,9 +268,10 @@ pub const Conn = struct {
     /// FIN-WAIT-2's deadline for the peer's FIN.
     fin_wait_until: ?i96 = null,
 
-    /// The peer's FIN has arrived (and is counted in `rcv_nxt`); what came
-    /// before it may still be unread.
-    peer_done: bool = false,
+    /// **THE PEER'S HALF** (`PeerMachine`): `finished` once its FIN has
+    /// arrived (and is counted in `rcv_nxt`); what came before it may still
+    /// be unread. Asked by `peerDone`.
+    peer_half: PeerMachine = .{},
 
     /// The window in the last segment we sent: RCV.WND as the peer last saw it.
     told_wnd: u16 = 0xFFFF,
@@ -356,6 +376,11 @@ pub const Conn = struct {
     }
 
     /// RCV.WND: `room()`, as much as the 16-bit field carries.
+    /// The peer has finished: its FIN arrived.
+    pub fn peerDone(self: *const Conn) bool {
+        return self.peer_half.is(.finished);
+    }
+
     pub fn window(self: *const Conn) u16 {
         return @intCast(@min(self.room(), 0xFFFF));
     }
@@ -393,7 +418,7 @@ pub const Result = struct {
 /// What `handle` decided a frame meant.
 /// What one segment did, the most of it: a segment that opens a connection
 /// and carries the peer's FIN reports `.peer_done`, not `.opened`. A host
-/// that must see every change reads the connection (`pending`, `peer_done`,
+/// that must see every change reads the connection (`pending`, `peerDone`,
 /// `state`), as probe/gopher.zig does.
 pub const Event = enum {
     nothing,
@@ -536,7 +561,7 @@ pub const Table = struct {
     fn emit(self: *Table, wire: anytype, i: usize, flags: u8, seq: u32, payload: []const u8) void {
         const c = &self.conns[i];
         const w = c.window();
-        if (c.tight(w) or c.peer_done) {
+        if (c.tight(w) or c.peerDone()) {
             // A peer that has sent its FIN is owed no window.
             c.heard();
         } else if (c.tight(c.told_wnd)) {
@@ -819,7 +844,7 @@ pub const Table = struct {
     fn announce(self: *Table, wire: anytype, i: usize, now: i96) void {
         const c = &self.conns[i];
         if (c.state != .established and c.state != .closing) return;
-        if (c.peer_done) return c.heard();
+        if (c.peerDone()) return c.heard();
         if (c.tight(c.told_wnd) and !c.tight(c.window())) {
             self.emit(wire, i, flag_ack, c.highest(), "");
         }
@@ -1162,7 +1187,7 @@ pub const Table = struct {
         }
 
         if (data.len > 0) {
-            if (c.peer_done) {
+            if (c.peerDone()) {
                 self.emit(wire, i, flag_ack, c.highest(), "");
                 return self.settle(i, event, fin_acknowledged, now);
             }
@@ -1180,9 +1205,9 @@ pub const Table = struct {
             if (n < data.len) return self.settle(i, event, fin_acknowledged, now);
         }
 
-        if (flags & flag_fin != 0 and !c.peer_done and seq +% @as(u32, @intCast(data.len)) == c.rcv_nxt) {
+        if (flags & flag_fin != 0 and !c.peerDone() and seq +% @as(u32, @intCast(data.len)) == c.rcv_nxt) {
             c.rcv_nxt +%= 1; // their FIN takes one
-            c.peer_done = true;
+            c.peer_half.fire(.fin_received);
             self.emit(wire, i, flag_ack, c.highest(), "");
             if (c.fin.is(.acknowledged)) return self.close(i);
             return .{ .event = .peer_done, .index = i };
@@ -1197,7 +1222,7 @@ pub const Table = struct {
     fn settle(self: *Table, i: usize, event: Event, fin_acknowledged: bool, now: i96) Result {
         if (!fin_acknowledged) return .{ .event = event, .index = i };
         const c = &self.conns[i];
-        if (c.peer_done) return self.close(i);
+        if (c.peerDone()) return self.close(i);
         c.fin_wait_until = now + fin_wait_ns;
         return .{ .event = event, .index = i };
     }

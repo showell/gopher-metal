@@ -73,7 +73,7 @@ pub fn kmain() noreturn {
     var spins: usize = 0;
     while (spins < 200_000_000) : (spins += 1) {
         const c = &table.conns[0];
-        if (c.state == .established and metal.ready.check(c.pending(), c.peer_done, c.rx.len) != .waiting) break;
+        if (c.state == .established and metal.ready.check(c.pending(), c.peerDone(), c.rx.len) != .waiting) break;
         if (stream.pump(&wire, &table, lease.address) == null) asm volatile ("pause");
     }
     if (table.conns[0].state != .established) serial.fail("nothing connected before the spin budget ran out");

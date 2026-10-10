@@ -126,7 +126,7 @@ fn safety(c: *const Conn) ?Rule {
     if (c.fin.is(.acknowledged) and (c.queued() != 0 or c.high != 0)) return .fin_acknowledged_with_bytes_left;
     if (c.state == .syn_received) {
         if (c.queued() != 0 or c.end != 0) return .handshake_with_bytes;
-        if (c.peer_done) return .peer_finished_during_handshake;
+        if (c.peerDone()) return .peer_finished_during_handshake;
     }
     if (c.retries > tcp.max_retries) return .retries_past_the_limit;
     // One direction only: a repeating debt with no timer is a liveness
@@ -207,7 +207,7 @@ fn repeating(c: *const Conn) bool {
 fn reopenedUnsaid(c: *const Conn) bool {
     if (c.state != .established and c.state != .closing) return false;
     // Nothing more is coming from a peer that has finished: no window to owe.
-    if (c.peer_done) return false;
+    if (c.peerDone()) return false;
     return c.tight(c.told_wnd) and !c.tight(c.window());
 }
 
@@ -285,7 +285,7 @@ test "a window the peer saw shut, with room again and nobody saying so, is owed"
     c.told_wnd = 0;
     try testing.expectEqual(@as(?Rule, null), checkConn(&c, 0, .after_handle));
     try testing.expectEqual(@as(?Rule, .reopened_window_not_announced), checkConn(&c, 0, .after_transmit));
-    c.peer_done = true; // a finished peer is owed nothing
+    c.peer_half = tcp.PeerMachine.startingAt(.finished); // a finished peer is owed nothing
     try testing.expectEqual(@as(?Rule, null), checkConn(&c, 0, .after_transmit));
 }
 

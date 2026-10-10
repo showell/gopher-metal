@@ -39,19 +39,38 @@ pub fn Membership(comptime State: type, comptime Group: type) type {
     return std.enums.EnumFieldStruct(State, []const Group, null);
 }
 
-/// A machine named `name` (in its sites' messages), over `State` and
-/// `Event`, both enums, with `edges` its only transitions. Two edges from
-/// one state on one event are refused at compile time. `Group` names sets of
-/// states callers ask about (`in`), and `groups` places every state.
-pub fn Machine(
-    comptime name: []const u8,
-    comptime State: type,
-    comptime Event: type,
-    comptime Group: type,
-    comptime initial: State,
-    comptime edges: []const Edge(State, Event),
-    comptime groups: Membership(State, Group),
-) type {
+/// **A MACHINE, DECLARED BY NAME** (`spec`, a struct literal):
+///
+///     .name     in its sites' messages ("tcp.Fin")
+///     .State    an enum; .initial, one of its values
+///     .Event    an enum
+///     .edges    its only transitions: two from one state on one event are
+///               refused at compile time
+///     .Group    optional: an enum naming sets of states callers ask about
+///               (`in`), and then .groups, which places every state
+pub fn Machine(comptime spec: anytype) type {
+    const name: []const u8 = spec.name;
+    const State: type = spec.State;
+    const Event: type = spec.Event;
+    const Group: type = if (@hasField(@TypeOf(spec), "Group")) spec.Group else enum {};
+    const initial: State = spec.initial;
+    // The literal's edges and groups are untyped tuples: each is typed here.
+    const edges: []const Edge(State, Event) = comptime blk: {
+        var es: [spec.edges.len]Edge(State, Event) = undefined;
+        for (&es, spec.edges) |*e, given| e.* = .{ .from = given.from, .on = given.on, .to = given.to };
+        const typed = es;
+        break :blk &typed;
+    };
+    const groups: Membership(State, Group) = comptime blk: {
+        var m: Membership(State, Group) = undefined;
+        if (@hasField(@TypeOf(spec), "groups")) for (std.meta.fields(@TypeOf(spec.groups))) |f| {
+            if (!@hasField(State, f.name)) @compileError("machine " ++ name ++ ": .groups names " ++ f.name ++ ", which is no state");
+        };
+        for (std.meta.fields(State)) |f| {
+            @field(m, f.name) = if (@hasField(@TypeOf(spec), "groups")) @field(spec.groups, f.name) else &.{};
+        }
+        break :blk m;
+    };
     const of = std.enums.EnumArray(State, []const Group).init(groups);
     comptime {
         for (edges, 0..) |a, i| {
@@ -66,7 +85,7 @@ pub fn Machine(
     return struct {
         const Self = @This();
 
-        /// Read it with `get` or `is`; only `fire` writes it.
+        /// Read it with `get`, `is` or `in`; only `fire` writes it.
         machine_state: State = initial,
 
         pub const Of = State;
@@ -139,12 +158,35 @@ pub fn Machine(
 
 const testing = std.testing;
 
-const Door = Machine("test.Door", enum { shut, open, locked }, enum { push, pull, lock, unlock }, enum { closed, passable }, .shut, &.{
-    .{ .from = .shut, .on = .push, .to = .open },
-    .{ .from = .open, .on = .pull, .to = .shut },
-    .{ .from = .shut, .on = .lock, .to = .locked },
-    .{ .from = .locked, .on = .unlock, .to = .shut },
-}, .{ .shut = &.{.closed}, .open = &.{.passable}, .locked = &.{.closed} });
+const Door = Machine(.{
+    .name = "test.Door",
+    .State = enum { shut, open, locked },
+    .Event = enum { push, pull, lock, unlock },
+    .Group = enum { closed, passable },
+    .initial = .shut,
+    .edges = &.{
+        .{ .from = .shut, .on = .push, .to = .open },
+        .{ .from = .open, .on = .pull, .to = .shut },
+        .{ .from = .shut, .on = .lock, .to = .locked },
+        .{ .from = .locked, .on = .unlock, .to = .shut },
+    },
+    .groups = .{ .shut = &.{.closed}, .open = &.{.passable}, .locked = &.{.closed} },
+});
+
+/// A machine with no groups declares none.
+const Switch = Machine(.{
+    .name = "test.Switch",
+    .State = enum { off, on },
+    .Event = enum { flip },
+    .initial = .off,
+    .edges = &.{ .{ .from = .off, .on = .flip, .to = .on }, .{ .from = .on, .on = .flip, .to = .off } },
+});
+
+test "a machine with no groups needs none" {
+    var s: Switch = .{};
+    s.fire(.flip);
+    try testing.expect(s.is(.on));
+}
 
 test "a state is in the groups its machine placed it in, and no other" {
     try testing.expect(Door.startingAt(.shut).in(.closed));
