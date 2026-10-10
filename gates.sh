@@ -173,6 +173,13 @@ VMM="${METAL_VMM:-$HOME/showell_repos/metal-vmm}"
 (cd "$VMM" && ./timeouts.sh 2>&1 | tail -3; exit "${PIPESTATUS[0]}") || failed+=(vmm-timeouts)
 lap "metal-vmm check, same, rest and timeouts"
 
+# **A CHECK SKIPPED IS NO PASS** (the normalization hunt, 2026-10-10; Steve:
+# fail, never warn): a probe or chat judge that could not run a check (a loop
+# mount without passwordless sudo, the soak's tools missing) says SKIPPED,
+# and the full run fails, naming each, where it said PASS.
+skipped=$( { echo "$r"; cat "$VERDICTS"/gopher-*.run 2>/dev/null; } | grep "SKIPPED" || true)
+if [ -n "$skipped" ]; then echo "$skipped"; failed+=(skipped); fi
+
 if [ ${#failed[@]} = 0 ]; then
     [ "$mode" = full ] && python3 tools/verdicts.py record gates PASS
     echo "GATES: PASS"
