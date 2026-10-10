@@ -176,7 +176,7 @@ fn seed(b: *Bench) !void {
     try store.write(mio, x, "data/chat/users/1/last-sessions/1_2", "1", .{});
     try store.write(mio, x, "data/chat/users/1/last-conv", "1_2", .{});
     for ([_][]const u8{ "general", "uploads", "ds" }) |ch| {
-        try store.replace(mio, x, try std.fmt.allocPrint(x, "data/chat/channels/{s}.channel", .{ch}), "members: 1 2", .{});
+        try store.replace(mio, x, try std.fmt.allocPrint(x, "data/chat/channels/{s}.channel", .{ch}), "1\n2\n", .{});
         _ = try store.append(mio, x, try std.fmt.allocPrint(x, "data/chat/channels/{s}/sessions/1.md", .{ch}), "**Person 2** said: hello\n\n");
         try store.replace(mio, x, try std.fmt.allocPrint(x, "data/chat/channels/{s}/sessions/1.count", .{ch}), "1 26\n0 2", .{});
     }
