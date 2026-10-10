@@ -1744,7 +1744,8 @@ pub const Volume = struct {
         // line says, which the judge's counted_leak must not excuse
         // (metal-vmm 148(d)).
         if (comptime plant.on == .counted_leak_short) {
-            props.reachable(@src(), "PLANT: counted-leak-short fires", null);
+            // Fires only where it does harm: a give-back that left some.
+            if (clusters > freed) props.reachable(@src(), "PLANT: counted-leak-short fires", null);
             self.leaked_clusters +|= (clusters - freed) -| 1;
         } else self.leaked_clusters +|= clusters - freed;
         props.reachable(@src(), "fat: clusters taken before a failure could not be given back, and are left a leak", .{ .count = self.cleanups_failed, .freed = freed, .of = clusters });

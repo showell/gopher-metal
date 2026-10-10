@@ -2653,3 +2653,45 @@ test "a chain's FAT entries are written once per FAT sector, not once per entry 
         try testing.expectEqualSlices(u8, bytes, back);
     }
 }
+
+test "the check counts orphaned long-name parts as fsck.fat finds them: by run, number and checksum (metal-vmm 148(b))" {
+    const d = try Disk.make("orphan-rules", test_disk.small, false);
+    defer d.deinit();
+    try d.vol.writeFile("data/A Rather Long Name For A Test File.txt", "x");
+    const pristine = try testing.allocator.dupe(u8, d.bytes);
+    defer testing.allocator.free(pristine);
+    // The run: its last-flagged part first, the short entry after its parts.
+    const first = blk: {
+        var at: usize = 0;
+        while (at + 32 <= d.bytes.len) : (at += 32) {
+            // This file's: the one name of three parts or more.
+            if (d.bytes[at + 11] == 0x0F and d.bytes[at] & 0x40 != 0 and d.bytes[at] != 0xE5 and d.bytes[at] & 0x1F >= 3) break :blk at;
+        }
+        return error.NoLongName;
+    };
+    const parts: u32 = d.bytes[first] & 0x1F;
+    try testing.expect(parts >= 3);
+    const short = first + parts * 32;
+    const Case = struct { name: []const u8, at: usize, value: u8, orphans: u32 };
+    const cases = [_]Case{
+        .{ .name = "whole", .at = first, .value = pristine[first], .orphans = 0 },
+        .{ .name = "its short entry tombstoned", .at = short, .value = 0xE5, .orphans = parts },
+        .{ .name = "a part of another checksum", .at = first + 32 + 13, .value = pristine[first + 32 + 13] ^ 1, .orphans = parts },
+        .{ .name = "a part numbered out of turn", .at = first + 32, .value = pristine[first + 32] +% 1, .orphans = parts },
+        .{ .name = "its last-flagged part tombstoned", .at = first, .value = 0xE5, .orphans = parts - 1 },
+        // Every part agrees, and the short entry's name is another's.
+        .{ .name = "its short entry of another checksum", .at = short + 6, .value = if (pristine[short + 6] == 'Z') 'Y' else 'Z', .orphans = parts },
+    };
+    for (cases) |c| {
+        @memcpy(d.bytes, pristine);
+        d.bytes[c.at] = c.value;
+        try d.mount(false);
+        const r = try d.check();
+        if (r.health.orphaned_parts != c.orphans) {
+            std.debug.print("{s}: the check counted {d} orphaned parts, not {d}\n", .{ c.name, r.health.orphaned_parts, c.orphans });
+            return error.TestUnexpectedResult;
+        }
+    }
+    @memcpy(d.bytes, pristine);
+    try d.mount(false);
+}

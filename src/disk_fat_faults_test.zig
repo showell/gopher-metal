@@ -83,11 +83,12 @@ const Stopped = struct {
     appends: ?struct { path: []const u8, tail: []const u8 } = null,
 };
 
+const both_cached = [_]bool{ false, true };
+
 /// What a stop may leave besides the outcome itself: clusters nothing holds
 /// (fsck reclaims them), and FAT copies apart (every FAT change writes the
 /// first copy, then the second). An append may also leave a chain longer
 /// than its file (`long`), until the next append.
-const both_cached = [_]bool{ false, true };
 const allowed = [_]disk_fat.Problem{ .leaked, .fats_differ };
 const allowed_append = [_]disk_fat.Problem{ .leaked, .fats_differ, .long };
 
@@ -324,8 +325,8 @@ fn describe(s: State) []const u8 {
     };
 }
 
-/// The report holds only what `allowed` names.
-/// **FOUND EQUALS COUNTED, EXACTLY** (metal-vmm 148(b)): what the
+/// **FOUND WITHIN WHAT WAS COUNTED, EXACTLY WHERE NOTHING IS UNSURE**
+/// (metal-vmm 148(b)): what the
 /// volume counted its failed operation left on the disk, held to what a
 /// check finds at once, on the same mount, before anything else is written.
 /// The exact counts (`leaked_clusters`, `orphaned_parts`) are a floor, and
@@ -355,6 +356,7 @@ fn countedIsFound(d: *test_disk.Disk, op: []const u8, kind: []const u8, when: []
     return error.TestUnexpectedResult;
 }
 
+/// The report holds only what `allowed` names.
 fn onlyAllowed(r: *const test_disk.Report, these: []const disk_fat.Problem, op: []const u8, kind: []const u8, when: []const u8, n: u64) !void {
     for (r.found[0..r.len]) |f| {
         if (std.mem.indexOfScalar(disk_fat.Problem, these, f.problem) == null) {
@@ -1179,6 +1181,7 @@ test "a write that lands and answers failure as a cleanup gives back what a fail
     // A request fails, and the cleanup after it (a give-back, a part's
     // clearing, a chain freed) meets a write the disk took and called failed.
     // The cleanup's own verdict decides what it left, not its answer.
+    var cleanups_met: u32 = 0;
     for (stopped_ops) |op| {
         for (configs) |cfg| {
             if (cfg.shape.kind == .fat32) continue; // the same code; FAT32's disk is 35 MB
@@ -1201,11 +1204,14 @@ test "a write that lands and answers failure as a cleanup gives back what a fail
                     op.run(&d.vol) catch {};
                     d.blk.fault = null;
                     d.blk.second = null;
+                    if (d.vol.cleanups_failed > 0) cleanups_met += 1;
                     try countedIsFound(d, op.name, if (cfg.cached) "FAT16, held" else "FAT16", "write that landed and failed, a cleanup's after a failed request", n * 8 + (m - n));
                 }
             }
         }
     }
+    // The premise: the second fault met a cleanup.
+    try testing.expect(cleanups_met > 0);
 }
 
 test "a write that lands and answers failure, leaving long-name parts orphaned, and the next write over them: the count follows what is on the disk (metal-vmm 148(b))" {
@@ -1220,6 +1226,8 @@ test "a write that lands and answers failure, leaving long-name parts orphaned, 
         const before = try testing.allocator.dupe(u8, d.bytes);
         defer testing.allocator.free(before);
         var left: u32 = 0;
+        var reused: u32 = 0;
+        const kind = if (cached) "FAT16, held" else "FAT16";
         var n: u64 = 0;
         while (n < 24) : (n += 1) {
             @memcpy(d.bytes, before);
@@ -1227,13 +1235,17 @@ test "a write that lands and answers failure, leaving long-name parts orphaned, 
             d.blk.fault = .{ .at = d.blk.requests + n, .kind = .fails };
             d.vol.writeFile("data/A Long Name For A First File.txt", &body) catch {};
             d.blk.fault = null;
-            if (d.vol.orphaned_parts > 0) left += 1;
-            try countedIsFound(d, "a new file", "FAT16", "failed request", n);
+            const orphans = d.vol.orphaned_parts;
+            if (orphans > 0) left += 1;
+            try countedIsFound(d, "a new file", kind, "failed request", n);
             // The next file takes the same run, its orphans tombstoned first.
             d.vol.writeFile("data/A Long Name For The Next File.txt", &body) catch {};
-            try countedIsFound(d, "the next new file", "FAT16", "after a failed request", n);
+            if (orphans > 0 and d.vol.orphaned_parts == 0) reused += 1;
+            try countedIsFound(d, "the next new file", kind, "after a failed request", n);
         }
-        // The premise: some failure left parts orphaned.
+        // The premises: some failure left parts orphaned, and the next write
+        // took their run.
         try testing.expect(left > 0);
+        try testing.expect(reused > 0);
     }
 }
