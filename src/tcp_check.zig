@@ -191,8 +191,9 @@ fn inFlight(c: *const Conn) bool {
 fn queuedUnsent(c: *const Conn) bool {
     return c.queued() > c.sent;
 }
+/// Owed to the wire: never sent, or sent and rewound by a go-back.
 fn finQueued(c: *const Conn) bool {
-    return c.fin.is(.queued);
+    return c.fin.is(.queued) or c.fin.is(.resending);
 }
 fn finAcknowledged(c: *const Conn) bool {
     return c.fin.is(.acknowledged);
@@ -310,6 +311,17 @@ test "a reopened window said and not yet heard, with no timer to say it again, i
     c.window_news = .none;
     c.update_at = 10;
     try testing.expectEqual(@as(?Rule, .window_timer_without_news), checkConn(&c, 0, .after_handle));
+}
+
+test "a FIN owed again after a go-back, behind nothing, is the next turn's (resending, as queued)" {
+    var rx: [64]u8 = undefined;
+    var tx: [64]u8 = undefined;
+    var c = conn(&rx, &tx);
+    c.state = .closing;
+    c.fin = tcp.FinMachine.startingAt(.resending);
+    c.rto_at = 50; // the timer is armed: only the FIN's own rule can see it
+    try testing.expectEqual(@as(?Rule, null), checkConn(&c, 0, .after_handle));
+    try testing.expectEqual(@as(?Rule, .fin_queued_and_not_sent), checkConn(&c, 0, .after_transmit));
 }
 
 test "an acknowledged FIN with no bound on the wait for the peer's is owed" {
