@@ -54,6 +54,7 @@ fat: a directory grows by a cluster
 fat: an append links clusters onto a file
 fat: a rename replaces a file
 fat_sim: a write finds no room
+fat_sim: a filling run turns to small writes, to spend the reserve
 fat_sim: an append finds no room
 fat_sim: a rename finds no room
 fat_sim: the volume is mounted again
