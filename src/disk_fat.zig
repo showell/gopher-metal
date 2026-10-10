@@ -1477,7 +1477,7 @@ pub const Volume = struct {
     /// caller's commit, so a stop between the writes leaves lost clusters,
     /// as it did.
     ///
-    /// **A BATCH'S WRITE HAS ONE VERDICT** (`sectorRefused`), as one mark's
+    /// **A BATCH'S WRITE HAS ONE VERDICT** (`batchRefused`), as one mark's
     /// did: not landed, the held sector goes back as it was; landed, the
     /// batch is taken and given back; unknown, taken as written and never
     /// counted taken, a counted leak.
@@ -1495,7 +1495,6 @@ pub const Volume = struct {
         var looked: u32 = 0;
         const clusters: u32 = self.max_cluster - 1;
         const width = self.entryBytes();
-        try self.forgetFsInfo();
 
         while (taken < count) {
             // The batch's first: the next free cluster.
@@ -1515,6 +1514,9 @@ pub const Volume = struct {
                 if ((try self.fatGet(candidate)) == 0) break;
                 candidate += 1;
             }
+            // Let go before the first change, as `fatSet` does: a full
+            // volume answers Full having written nothing.
+            try self.forgetFsInfo();
             const in_sector = candidate * width / sector_size;
             const sector = fat[in_sector * sector_size ..][0..sector_size];
             var was: [sector_size]u8 = undefined;
@@ -1533,7 +1535,7 @@ pub const Volume = struct {
                 if (taken + n == count) break;
                 while (candidate <= self.max_cluster and candidate * width / sector_size == in_sector and looked < clusters) {
                     looked += 1;
-                    if ((try self.fatGet(candidate)) == 0) continue :batch;
+                    if (self.entryIn(sector, candidate * width % sector_size / width) == 0) continue :batch;
                     candidate += 1;
                 }
                 break;
@@ -1541,7 +1543,7 @@ pub const Volume = struct {
             if (n > 1) props.reachable(@src(), "fat: an allocation takes several clusters in one FAT sector write", .{ .clusters = n });
 
             self.writeSector(self.fat_start + in_sector, sector) catch |e| {
-                switch (self.sectorRefused(self.fat_start + in_sector, sector, &was)) {
+                switch (self.batchRefused(self.fat_start + in_sector, sector, &was, batch_first, last)) {
                     .before => @memcpy(sector, &was),
                     .landed => {
                         self.keepTaken(n);
@@ -1549,14 +1551,16 @@ pub const Volume = struct {
                         self.took(n);
                         self.giveBack(batch_first, n);
                     },
-                    // Taken as written, the first copy written again once,
-                    // as `fatSet` does; never counted taken, as it may not
-                    // be.
+                    // Taken as written, and the first copy written again
+                    // once, as `fatSet` does: the batch is then taken on the
+                    // disk too, nothing pointing at it, so taken and a
+                    // counted leak, all `n` of it.
                     .unknown => {
                         self.keepTaken(n);
                         self.writeSector(self.fat_start + in_sector, sector) catch self.copyApart();
                         self.writeCopies(in_sector, sector);
-                        self.leftLeaked(0);
+                        self.took(n);
+                        self.leftLeaked(n);
                     },
                 }
                 return e;
@@ -1596,16 +1600,22 @@ pub const Volume = struct {
         while (i < n) : (i += 1) self.keepCount(0, self.endMark());
     }
 
-    /// **WHETHER A BATCH'S REFUSED SECTOR LANDED**, read back once into
-    /// scratch: the whole sector as written, `landed`; as it was, `before`;
-    /// anything else, or a read-back that failed, `unknown`.
-    fn sectorRefused(self: *Volume, lba: u32, written: *const [sector_size]u8, was: *const [sector_size]u8) Landing {
+    /// **WHETHER A BATCH'S REFUSED WRITE LANDED**, read back once into
+    /// scratch, judged on the batch's own entries (`first` to `last` in the
+    /// sector) only: the held sector may differ from the disk's elsewhere
+    /// and be right to (copies left apart, an earlier write taken as
+    /// landed). Every one as written, `landed`; every one as it was,
+    /// `before`; anything else, or a read-back that failed, `unknown`.
+    fn batchRefused(self: *Volume, lba: u32, written: *const [sector_size]u8, was: *const [sector_size]u8, first: Cluster, last: Cluster) Landing {
         self.readSector(lba, self.scratch) catch {
             props.reachable(@src(), "fat: a batch's FAT sector whose write failed cannot be read again", null);
             return .unknown;
         };
-        if (std.mem.eql(u8, self.scratch, written)) return .landed;
-        if (std.mem.eql(u8, self.scratch, was)) return .before;
+        const width = self.entryBytes();
+        const from = first * width % sector_size;
+        const to = last * width % sector_size + width;
+        if (std.mem.eql(u8, self.scratch[from..to], written[from..to])) return .landed;
+        if (std.mem.eql(u8, self.scratch[from..to], was[from..to])) return .before;
         props.reachable(@src(), "fat: a batch's FAT sector whose write failed reads back as neither", null);
         return .unknown;
     }
