@@ -222,9 +222,37 @@ def fresh() -> int:
     checkout, so a port older than the checkout fails gopher-metal's tests
     for no fault of gopher-metal's. Prints `fresh`, or why not; exits 0
     either way, so build.zig reads the answer from the output."""
-    _, _, why = current_pair()
-    print(why or "fresh")
+    print(freshness())
     return 0
+
+
+def freshness() -> str:
+    """`fresh`, or why not. Only the port and the checkout: not this repo's
+    or the SDK's commits, which `pair` adds and a check of the port needs
+    no more than it needs a reason to fail on them."""
+    if not os.path.isdir(os.path.join(GOPHER_ROOT, "zig-server")):
+        return f"no angry-gopher checkout at {GOPHER_ROOT}"
+    theirs = ported()
+    if not theirs:
+        return f"no stamp (or one from before B16) at {STAMP}: run ./port.sh"
+    now = content_id()
+    if theirs != now:
+        return f"the port is angry-gopher {theirs}, but what it serves is now {now}: run ./port.sh"
+    # **AND THIS TREE'S ASSET LIST IS THAT CHECKOUT'S** (146(a)'s review):
+    # port.sh writes gen/assets.zig in whichever tree it ran from, and the
+    # stamp sits in the shared port, so another worktree, or a branch whose
+    # committed list predates an asset's rename, can hold a list the
+    # checkout no longer matches.
+    try:
+        with open(os.path.join(GOPHER_ROOT, "zig-server", "build.zig")) as f:
+            table = ASSET_ROW.findall(f.read())
+        with open(os.path.join(ROOT, "gen", "assets.zig")) as f:
+            listed = ASSET_ROW.findall(f.read())
+    except FileNotFoundError as e:
+        return f"cannot compare the asset lists: {e.filename} is missing"
+    if table != listed:
+        return "this tree's gen/assets.zig is not the checkout's asset table: run ./port.sh here"
+    return "fresh"
 
 
 def main() -> int:
