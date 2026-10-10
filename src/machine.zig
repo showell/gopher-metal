@@ -225,8 +225,9 @@ test "an event with no edge breaks its cell and changes nothing" {
     const was = props.on_broken;
     props.on_broken = null; // broken on purpose
     defer props.on_broken = was;
-    props.reset();
-    defer props.reset();
+    // **NO reset()**: every file's tests share one process and one catalog
+    // (metal-vmm 146(e)), so this test looks at its own machine's sites only
+    // and leaves every other count as it found it.
 
     var d = Door.startingAt(.locked);
     d.fire(.push);
@@ -234,10 +235,12 @@ test "an event with no edge breaks its cell and changes nothing" {
 
     var broken: usize = 0;
     var it = props.catalog();
-    while (it.next()) |site| if (site.broken()) {
+    while (it.next()) |site| {
+        const message = std.mem.span(site.message);
+        if (!std.mem.startsWith(u8, message, "machine test.Door: ") or !site.broken()) continue;
         broken += 1;
-        try testing.expectEqualStrings("machine test.Door: nothing leaves locked on push", std.mem.span(site.message));
-    };
+        try testing.expectEqualStrings("machine test.Door: nothing leaves locked on push", message);
+    }
     try testing.expectEqual(@as(usize, 1), broken);
 }
 
