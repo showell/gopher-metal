@@ -2470,10 +2470,12 @@ test "an append onto a chain longer than its size fills that tail first, and lin
             const r = try d.check();
             if (r.len == 1 and r.found[0].problem == .long) break r.found[0].count;
         } else return error.NoRequestLeftTheChainLong;
-        try testing.expect(long > 0);
-
-        // Now an append that needs more than the long chain holds.
+        // Now an append that needs more than the long chain holds: the
+        // premise, asserted, so a change of sizes cannot make this pass
+        // without linking anything.
         var tail: [3000]u8 = undefined;
+        const cluster_bytes = @as(usize, d.vol.sectors_per_cluster) * test_disk.sector;
+        try testing.expect((first.len + tail.len + cluster_bytes - 1) / cluster_bytes > long);
         try d.vol.writeInto("data/LOG", first.len, pattern(&tail, 3));
         try d.mount(cached);
         const r = try d.check();
