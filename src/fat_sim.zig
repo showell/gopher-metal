@@ -187,9 +187,11 @@ const Sim = struct {
     full: usize = 0,
     /// **WHERE A FILLING RUN STANDS** (metal-vmm B33): large files, until the
     /// volume refuses one (`Full`, the reserve kept for small writes); then
-    /// the small writes that reserve is for. Without the turn, a run never
-    /// spent the reserve, and a FAT32 volume's clusters past 65535 sat in it,
-    /// out of every seed's reach.
+    /// a file of what still fits outside the reserve, and once nothing
+    /// does, the small writes the reserve is for, each as large as it takes.
+    /// Without the turn a run never spent the reserve: allocation takes the
+    /// lowest free cluster, so a FAT32 volume's clusters past 65535 sat in
+    /// it, out of every seed's reach.
     filling: enum { large, small } = .large,
     /// The last operation, and what it said, for the report.
     last: Op = .remount,
@@ -282,7 +284,15 @@ const Sim = struct {
         // takes.
         if (s.sc.filling and s.rng.uintLessThan(u8, 3) != 0) return switch (s.filling) {
             .large => s.rng.uintAtMost(usize, s.sc.max_bytes),
-            .small => s.rng.uintAtMost(usize, @min(s.sc.max_bytes, disk_fat.Volume.small_bytes)),
+            .small => small: {
+                const vol = &s.disk.vol;
+                const cluster: usize = @as(usize, vol.sectors_per_cluster) * test_disk.sector;
+                const outside: usize = if (vol.free_clusters > vol.reserve_clusters) (vol.free_clusters - vol.reserve_clusters) * cluster else 0;
+                break :small if (outside > disk_fat.Volume.small_bytes)
+                    @min(s.sc.max_bytes, outside - cluster) // one to spare: the directory may grow
+                else
+                    @min(s.sc.max_bytes, disk_fat.Volume.small_bytes);
+            },
         };
         if (s.rng.uintLessThan(u8, 5) == 0) return s.rng.uintAtMost(usize, s.sc.max_bytes);
         return s.rng.uintAtMost(usize, @min(s.sc.max_bytes, 600));
