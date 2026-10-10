@@ -1399,7 +1399,15 @@ fn mountFat(blk: *virtio.Block, scratch: *[disk_fat.sector_size]u8, what: []cons
 fn checkVolumes() void {
     for ([_]?*disk_fat.Volume{ Io.siteVolume(), Io.dataVolume() }) |maybe| {
         const vol = maybe orelse continue;
-        const seen = pages.allocator.alloc(u8, vol.checkBytes()) catch continue;
+        // **A CHECK THAT CANNOT RUN SAYS SO** (the normalization hunt,
+        // 2026-10-10): it went quietly unrun. Memory for its marks is the
+        // machine's own failing, a broken property; a read the disk refused
+        // is a fault's (the sweeps refuse requests by number, the check's
+        // reads among them), named and counted.
+        const seen = pages.allocator.alloc(u8, vol.checkBytes()) catch {
+            metal.coverage.always(@src(), false, "fat: after a request, a volume's check has the memory to run", .{ .bytes = vol.checkBytes() });
+            continue;
+        };
         defer pages.allocator.free(seen);
         var damage: u32 = 0;
         const Count = struct {
@@ -1407,15 +1415,32 @@ fn checkVolumes() void {
                 if (f.problem.damage()) n.* += 1;
             }
         };
-        _ = vol.check(seen, &damage, Count.each) catch continue;
+        _ = vol.check(seen, &damage, Count.each) catch |e| {
+            couldNotCheck(e);
+            continue;
+        };
         metal.coverage.always(@src(), damage == 0, "fat: after a request, a volume has no damage beyond what a stop leaves", .{ .damage = damage });
         // **WHAT THE VOLUME KEEPS OF ITS FAT IS WHAT THE FAT SAYS NOW**
         // (essay web-server-in-a-box; kernel-facts #8): the kept count, and
         // a hint with no free cluster below it.
-        const now = vol.derive() catch continue;
+        const now = vol.derive() catch |e| {
+            couldNotCheck(e);
+            continue;
+        };
         metal.coverage.always(@src(), vol.free_clusters == now.free, "fat: after a request, the kept free count is the FAT's", .{ .kept = vol.free_clusters, .fat = now.free });
         if (now.first_free) |first| metal.coverage.always(@src(), vol.alloc_hint <= first, "fat: after a request, no free cluster lies below the allocation hint", .{ .hint = vol.alloc_hint, .first_free = first });
     }
+}
+
+/// A check after a request that stopped on an error: a read the disk refused
+/// (a fault's, named), or anything else (the check's own failing, a broken
+/// property).
+fn couldNotCheck(e: anyerror) void {
+    if (e == error.ReadFailed) {
+        metal.coverage.reachable(@src(), "fat: after a request, a volume's check stops on a read the disk refused", null);
+        return;
+    }
+    metal.coverage.always(@src(), false, "fat: after a request, a volume's check stops on nothing but a refused read", .{ .err = @errorName(e) });
 }
 
 /// **THE DISK CHECK, AT EVERY MOUNT** (`disk_fat.Volume.check`, QUEUE.md item
