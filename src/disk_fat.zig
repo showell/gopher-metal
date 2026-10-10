@@ -2375,10 +2375,29 @@ pub const Volume = struct {
         }
 
         // Orphans first (see Run): a stop after leaves the run still free.
-        // Each tombstoned is one the count, if it holds it, holds no more
-        // (148(b)): the exact count first, then what may be live.
         // From the end back, as `partsLeft` clears: a stop or a failure
         // leaves the run's first parts, never a fragment (152).
+        //
+        // **TAKEN FROM A COUNT ONLY WHERE A COUNT OF THIS BOOT COVERS THE
+        // RUN** (154(b)): the counts are this boot's, and the run may be an
+        // earlier boot's, or an older kernel's, which no count holds. Nothing
+        // says which run a count was for, so a run is taken from the
+        // exact counts where they hold a run of its parts, else from the ones
+        // that may be live where those do, else from neither. Exact first:
+        // where both hold one and it is the wrong one, the exact floor drops
+        // and the sum stays, so the judge passes leniently rather than failing
+        // falsely. The counts are the judge's accounting, never the data.
+        // A part as its tombstone lands, the run once all have: a stop or a
+        // failure among them leaves the run's first parts, still counted.
+        const Held = enum { exact, unsure, none };
+        const held: Held = if (run.orphans_len == 0) .none else if (self.orphaned_runs > 0 and self.orphaned_parts >= run.orphans_len)
+            .exact
+        else if (self.unsure_runs > 0 and self.unsure_parts >= run.orphans_len)
+            .unsure
+        else blk: {
+            props.reachable(@src(), "fat: an orphan run no count of this boot holds is tombstoned", .{ .parts = run.orphans_len });
+            break :blk .none;
+        };
         var k = run.orphans_len;
         while (k > 0) {
             k -= 1;
@@ -2386,11 +2405,16 @@ pub const Volume = struct {
             try self.readSector(o.lba, self.scratch);
             self.scratch[o.at] = 0xE5;
             try self.writeSector(o.lba, self.scratch);
-            if (self.orphaned_parts > 0) self.orphaned_parts -= 1 else self.unsure_parts -|= 1;
+            switch (held) {
+                .exact => self.orphaned_parts -= 1,
+                .unsure => self.unsure_parts -= 1,
+                .none => {},
+            }
         }
-        // Those parts were one run.
-        if (run.orphans_len > 0) {
-            if (self.orphaned_runs > 0) self.orphaned_runs -= 1 else self.unsure_runs -|= 1;
+        switch (held) {
+            .exact => self.orphaned_runs -= 1,
+            .unsure => self.unsure_runs -= 1,
+            .none => {},
         }
 
         // **PARTS ON THE DISK WITH NO SHORT ENTRY TO CLOSE THEM** are left

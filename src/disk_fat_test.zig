@@ -1028,6 +1028,36 @@ test "a long name's orphan parts are tombstoned before a new entry is written af
     }
 }
 
+/// An earlier boot's orphan run of two long-name parts before a free slot;
+/// this boot's counts set to `before`; a short name written into the slot,
+/// which tombstones the run; the counts after.
+fn tombstoneUncounted(cfg: anytype, before: [4]u64) ![4]u64 {
+    const d = try Disk.make("orphan-uncounted", cfg.shape, cfg.cached);
+    defer d.deinit();
+    try d.vol.writeFile("data/abcdefghijklmnop", "");
+    const c = try d.vol.open("data/abcdefghijklmnop");
+    d.bytes[(d.vol.start_lba + c.lba) * test_disk.sector + c.slot] = 0xE5;
+    try d.mount(cfg.cached);
+    d.vol.orphaned_runs, d.vol.orphaned_parts, d.vol.unsure_runs, d.vol.unsure_parts = before;
+    try d.vol.writeFile("data/B", "bee");
+    try testing.expectError(disk_fat.Error.NotFound, d.vol.open("data/abcdefghijklmnop"));
+    return .{ d.vol.orphaned_runs, d.vol.orphaned_parts, d.vol.unsure_runs, d.vol.unsure_parts };
+}
+
+test "tombstoning an orphan run takes it from a count of this boot only where one covers it (metal-vmm 154(b))" {
+    for (configs) |cfg| {
+        // [runs, parts, runs that may be, parts that may be]. Neither count
+        // holds a run of two parts: an earlier boot's, left as counted.
+        try testing.expectEqual([4]u64{ 1, 1, 1, 1 }, try tombstoneUncounted(cfg, .{ 1, 1, 1, 1 }));
+        // Both do: the exact one first.
+        try testing.expectEqual([4]u64{ 0, 0, 1, 2 }, try tombstoneUncounted(cfg, .{ 1, 2, 1, 2 }));
+        // Only the one that may be live does.
+        try testing.expectEqual([4]u64{ 1, 1, 0, 0 }, try tombstoneUncounted(cfg, .{ 1, 1, 1, 2 }));
+        // None at all.
+        try testing.expectEqual([4]u64{ 0, 0, 0, 0 }, try tombstoneUncounted(cfg, .{ 0, 0, 0, 0 }));
+    }
+}
+
 test "a path through a file names nothing, whatever the file's bytes spell" {
     for (configs) |cfg| {
         const d = try Disk.make("through-a-file", cfg.shape, cfg.cached);
