@@ -6,9 +6,11 @@ covers the API, the catalog, and where it differs from Antithesis. This file
 covers what gopher-metal does with it. Started 2026-10-05.
 
 **The SDK is a path dependency** (`build.zig.zon`) on a sibling checkout,
-`../zig-coverage-sdk`. Its scanner reads `tcp.zig` and `tcp_sim.zig`, so their
-properties are in the catalog even in code a program never calls; every module
-that compiles either imports `"coverage"` and `"coverage_catalog"`.
+`../zig-coverage-sdk`. Its scanner reads every file in `src/` that imports
+the SDK (`build.zig` `catalogFiles`, but those `not_cataloged` names with why:
+tests, benches, the module root), so their properties are in the catalog even
+in code a program never calls, and one never reached shows as a MISS; every
+module that compiles one imports `"coverage"` and `"coverage_catalog"`.
 
 ## Decisions
 
