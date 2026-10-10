@@ -25,9 +25,12 @@ import time
 
 # A test that failed, panicked or logged an error, as zig's test runner
 # names it.
-TEST_FAILED = re.compile(r"error: '.+' (failed|logged \d+ errors|terminated with signal (ABRT|SEGV|TRAP|BUS|ILL|FPE))")
-# A test binary's summary with a failure counted in it.
-TEST_COUNTED = re.compile(r"run test \S+ .*\b\d+ (fail|crash|leak|error log)")
+# Its name is the binary's and the test's (`unit_tests.test.a name`, or
+# `test_0` unnamed), so a step's own "failed" (a lint's, a command's) is not
+# one (148(g)).
+TEST_FAILED = re.compile(r"error: '[^'\n]*\.(?:test|decltest)[._][^\n]*' (failed|logged \d+ errors|terminated with signal (ABRT|SEGV|TRAP|BUS|ILL|FPE))")
+# A test binary's summary with a failure counted in it: more than none.
+TEST_COUNTED = re.compile(r"run test \S+ .*\b[1-9]\d* (fail|crash|leak|error log)")
 # A process killed from outside, as out of memory: zig counts a test binary
 # killed so as a crash, and the test judged nothing.
 KILLED_FROM_OUTSIDE = re.compile(r"terminated with signal KILL")
