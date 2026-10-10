@@ -417,7 +417,7 @@ pub const Stream = struct {
         self.table.finish(self.index);
         var since = self.clock();
         var una = self.conn().una;
-        while (self.conn().state != .closed and self.conn().fin != .acknowledged) {
+        while (self.conn().state != .closed and !self.conn().fin.is(.acknowledged)) {
             const c = self.conn();
             if (c.una != una) {
                 since = self.clock();

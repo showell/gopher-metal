@@ -75,6 +75,7 @@
 
 const proto = @import("proto.zig");
 const props = @import("coverage");
+const machine = @import("machine.zig");
 
 // Every property in this file, in the catalog, called or not (COVERAGE.md).
 comptime {
@@ -137,13 +138,38 @@ pub const State = enum {
     /// ESTABLISHED, and CLOSE-WAIT once `peer_done`.
     established,
     /// Our FIN is queued, sent or acknowledged: FIN-WAIT-1, FIN-WAIT-2
-    /// (`fin == .acknowledged`), and CLOSING or LAST-ACK (`peer_done`). With
+    /// (`fin` acknowledged), and CLOSING or LAST-ACK (`peer_done`). With
     /// both FINs acknowledged the slot is CLOSED at once: no TIME-WAIT.
     closing,
 };
 
-/// Where our FIN is.
-pub const Fin = enum { none, queued, sent, acknowledged };
+/// **WHERE OUR FIN IS**, as a machine (machine.zig): changed only by these
+/// events, each cell a coverage site. `resending` is a FIN sent and then
+/// rewound by a timeout or an early resend, owed again; it still holds a
+/// sequence number, which `queued` (never sent) does not.
+pub const Fin = enum { none, queued, sent, resending, acknowledged };
+pub const FinEvent = enum {
+    /// The host closes its half (`finish`).
+    host_finished,
+    /// Every queued byte is out, and the FIN goes after them.
+    fin_emitted,
+    /// The retransmission timer fires: go back to `una`, FIN included.
+    timed_out,
+    /// Duplicate ACKs resend early, the same go-back.
+    resent_early,
+    /// An ACK covers every byte and the FIN.
+    fin_acknowledged,
+};
+pub const FinMachine = machine.Machine("tcp.Fin", Fin, FinEvent, .none, &.{
+    .{ .from = .none, .on = .host_finished, .to = .queued },
+    .{ .from = .queued, .on = .fin_emitted, .to = .sent },
+    .{ .from = .resending, .on = .fin_emitted, .to = .sent },
+    .{ .from = .sent, .on = .timed_out, .to = .resending },
+    .{ .from = .sent, .on = .resent_early, .to = .resending },
+    .{ .from = .sent, .on = .fin_acknowledged, .to = .acknowledged },
+    // The first FIN's ACK, arriving after a go-back.
+    .{ .from = .resending, .on = .fin_acknowledged, .to = .acknowledged },
+});
 
 pub const Conn = struct {
     state: State = .closed,
@@ -175,11 +201,9 @@ pub const Conn = struct {
     /// The most bytes past `una` ever on the wire, so an ACK of bytes sent
     /// before `sent` was rewound still counts.
     high: usize = 0,
-    /// Our FIN has been on the wire at least once.
-    fin_ever_sent: bool = false,
     /// SND.UNA. In SYN-RECEIVED it is ISS; there is no ISS field.
     una: u32 = 0,
-    fin: Fin = .none,
+    fin: FinMachine = .{},
     /// SND.WND, always measured from `una` (see `acknowledge`). At most
     /// 0xFFFF: no window scaling.
     wnd: u32 = 0,
@@ -292,7 +316,7 @@ pub const Conn = struct {
     pub fn highest(self: *const Conn) u32 {
         var n = self.una +% @as(u32, @intCast(self.high));
         if (self.state == .syn_received) n +%= 1;
-        if (self.fin_ever_sent and self.fin != .acknowledged) n +%= 1;
+        if (self.fin.is(.sent) or self.fin.is(.resending)) n +%= 1;
         return n;
     }
 
@@ -629,7 +653,7 @@ pub const Table = struct {
     /// sends it. Takes nothing unless established with no FIN queued.
     pub fn queue(self: *Table, i: usize, bytes: []const u8) usize {
         const c = &self.conns[i];
-        if (c.state != .established or c.fin != .none) return 0;
+        if (c.state != .established or !c.fin.is(.none)) return 0;
         if (c.tx_end + bytes.len > c.tx.len and c.tx_start > 0) {
             const len = c.queued();
             std.mem.copyForwards(u8, c.tx[0..len], c.tx[c.tx_start..c.tx_end]);
@@ -656,7 +680,7 @@ pub const Table = struct {
     pub fn finish(self: *Table, i: usize) void {
         const c = &self.conns[i];
         if (c.state != .established) return;
-        c.fin = .queued;
+        c.fin.fire(.host_finished);
         c.state = .closing;
     }
 
@@ -708,7 +732,7 @@ pub const Table = struct {
         const c = &self.conns[i];
         const expired = if (c.rto_at) |at| now >= at else false;
 
-        if (c.fin == .acknowledged) {
+        if (c.fin.is(.acknowledged)) {
             // FIN-WAIT-2: nothing of ours in flight.
             if (c.fin_wait_until) |until| if (now >= until) {
                 self.fin_waits_expired += 1;
@@ -735,7 +759,7 @@ pub const Table = struct {
             // drops what it has. RFC 6298 (5.4) asks only for the oldest
             // segment.
             c.sent = 0;
-            if (c.fin == .sent) c.fin = .queued;
+            if (c.fin.is(.sent)) c.fin.fire(.timed_out);
             c.timed_at = null; // Karn: no telling which copy is answered
             self.retransmits += 1;
             props.reachable(@src(), "tcp: the timer goes back to the oldest unacknowledged byte", .{ .conn = i, .retries = c.retries });
@@ -765,10 +789,9 @@ pub const Table = struct {
             if (c.rto_at == null) c.rto_at = now + c.rto_ns;
         }
 
-        if (c.fin == .queued and c.sent == c.queued()) {
+        if ((c.fin.is(.queued) or c.fin.is(.resending)) and c.sent == c.queued()) {
             self.emit(wire, i, flag_fin | flag_ack, c.una +% @as(u32, @intCast(c.sent)), "");
-            c.fin = .sent;
-            c.fin_ever_sent = true;
+            c.fin.fire(.fin_emitted);
             if (c.rto_at == null) c.rto_at = now + c.rto_ns;
         }
         // No debt without a clock: whatever the peer has not acknowledged
@@ -822,7 +845,7 @@ pub const Table = struct {
         c.dupacks = 0;
         c.resent_early = true;
         c.sent = 0;
-        if (c.fin == .sent) c.fin = .queued;
+        if (c.fin.is(.sent)) c.fin.fire(.resent_early);
         c.timed_at = null; // Karn, the same as after a timeout
         c.rto_at = now + c.rto_ns;
         self.retransmits += 1;
@@ -906,8 +929,8 @@ pub const Table = struct {
         if (!updated) c.wnd -= @min(c.wnd, advance);
         if (advance > bytes) {
             // Past every byte, an ACK can cover only our FIN, which takes one.
-            props.always(@src(), c.fin_ever_sent and advance == @as(u32, @intCast(bytes)) + 1, "tcp: an ACK past every byte covers our FIN and nothing more", .{ .advance = advance, .bytes = bytes });
-            c.fin = .acknowledged;
+            props.always(@src(), (c.fin.is(.sent) or c.fin.is(.resending)) and advance == @as(u32, @intCast(bytes)) + 1, "tcp: an ACK past every byte covers our FIN and nothing more", .{ .advance = advance, .bytes = bytes });
+            c.fin.fire(.fin_acknowledged);
             c.high = 0;
             c.sent = 0;
         }
@@ -917,7 +940,7 @@ pub const Table = struct {
         if (c.srtt_ns == 0) c.rto_ns = first_rto_ns;
         c.rto_at = if (c.highest() != c.una) now + c.rto_ns else null;
         props.always(@src(), c.sent <= c.high and c.high <= c.queued(), "tcp: after an ACK, what was sent lies within what is queued", .{ .sent = c.sent, .high = c.high, .queued = c.queued() });
-        return c.fin == .acknowledged;
+        return c.fin.is(.acknowledged);
     }
 
     /// Feeds one received frame in. `now` is the caller's clock.
@@ -1147,7 +1170,7 @@ pub const Table = struct {
             c.rcv_nxt +%= 1; // their FIN takes one
             c.peer_done = true;
             self.emit(wire, i, flag_ack, c.highest(), "");
-            if (c.fin == .acknowledged) return self.close(i);
+            if (c.fin.is(.acknowledged)) return self.close(i);
             return .{ .event = .peer_done, .index = i };
         }
 

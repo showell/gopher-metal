@@ -489,7 +489,7 @@ test "our FIN acknowledged first: the connection waits for theirs, acknowledges 
     transmit(&f.table, &f.wire, 2);
     try testing.expectEqual(Event.nothing, p.ackAll(&f.table, &f.wire, 3).event);
     try testing.expectEqual(State.closing, f.table.conns[i].state);
-    try testing.expectEqual(tcp.Fin.acknowledged, f.table.conns[i].fin);
+    try testing.expectEqual(tcp.Fin.acknowledged, f.table.conns[i].fin.get());
     // Nothing more of ours goes out while it waits.
     const sent = f.wire.count;
     transmit(&f.table, &f.wire, 3 + 10 * rto);
@@ -877,9 +877,9 @@ test "our FIN waits for the queue, and only its own acknowledgement closes" {
     try testing.expectEqual(p.ack +% 50, f.wire.last().seq);
     try testing.expectEqual(Event.nothing, p.ackUpTo(&f.table, &f.wire, p.ack +% 50, 4).event);
     try testing.expectEqual(State.closing, f.table.conns[i].state);
-    try testing.expectEqual(tcp.Fin.sent, f.table.conns[i].fin);
+    try testing.expectEqual(tcp.Fin.sent, f.table.conns[i].fin.get());
     try testing.expectEqual(Event.nothing, p.ackUpTo(&f.table, &f.wire, p.ack +% 1, 5).event);
-    try testing.expectEqual(tcp.Fin.acknowledged, f.table.conns[i].fin);
+    try testing.expectEqual(tcp.Fin.acknowledged, f.table.conns[i].fin.get());
     try testing.expectEqual(Event.closed, p.fin(&f.table, &f.wire, 6).event);
 }
 
@@ -1661,7 +1661,7 @@ fn matrixCell(setup: MatrixSetup, kind: MatrixKind, want: MatrixOutcome) !void {
     const h: u32 = if (known) c.highest() else u;
     const now_ack: u32 = if (setup == .syn_received) h else u;
     const was_state = c.state;
-    const was_fin = c.fin;
+    const was_fin = c.fin.get();
     const was_peer_done = c.peer_done;
     const had = c.pending().len;
     const from = f.wire.count;
@@ -1692,11 +1692,11 @@ fn matrixCell(setup: MatrixSetup, kind: MatrixKind, want: MatrixOutcome) !void {
 
     if (want.state) |state| {
         try testing.expectEqual(state, c.state);
-        if (want.fin) |fin_now| try testing.expectEqual(fin_now, c.fin);
+        if (want.fin) |fin_now| try testing.expectEqual(fin_now, c.fin.get());
         if (want.peer_done) |done| try testing.expectEqual(done, c.peer_done);
     } else {
         try testing.expectEqual(was_state, c.state);
-        try testing.expectEqual(was_fin, c.fin);
+        try testing.expectEqual(was_fin, c.fin.get());
         try testing.expectEqual(was_peer_done, c.peer_done);
     }
     if (c.state != .closed) try testing.expectEqual(had + want.taken, c.pending().len);
@@ -1938,4 +1938,31 @@ test "a storm of resets and FINs for connections we never had leaves no trace, a
     const r = real.write(&f.table, &f.wire, "GET / HTTP/1.1\r\n\r\n", 500 * ms);
     try testing.expectEqual(Event.data, r.event);
     try testing.expectEqualStrings("GET / HTTP/1.1\r\n\r\n", f.table.conns[i].pending());
+}
+
+test "the first FIN's ACK arriving after a go-back acknowledges the FIN still owed (machine tcp.Fin: resending --fin_acknowledged--> acknowledged)" {
+    // The sweep never reached this cell (metal-vmm QUEUE 140): after a
+    // timeout's go-back the FIN is owed again behind the bytes the window
+    // lets out, and the peer's ACK of the first one lands meanwhile.
+    var f: Fixture = .{};
+    f.init();
+    var p = Peer{ .ip = .{ 10, 0, 2, 2 }, .port = 40000, .window = 8192 };
+    const i = try p.connect(&f.table, &f.wire, ms);
+    var body: [2048]u8 = undefined;
+    _ = f.table.queue(i, pattern(&body));
+    f.table.finish(i);
+    transmit(&f.table, &f.wire, 2 * ms);
+    try testing.expectEqual(tcp.Fin.sent, f.table.conns[i].fin.get());
+
+    // The window narrows (no news of a loss), and the timer fires: the
+    // go-back resends what the window lets out, and the FIN waits.
+    p.window = 1000;
+    _ = p.ackUpTo(&f.table, &f.wire, f.table.conns[i].una, 3 * ms);
+    transmit(&f.table, &f.wire, 2 * ms + rto);
+    try testing.expectEqual(tcp.Fin.resending, f.table.conns[i].fin.get());
+
+    // The first FIN arrived after all, and its ACK covers it.
+    _ = p.ackUpTo(&f.table, &f.wire, p.ack +% @as(u32, body.len) +% 1, 2 * ms + rto + ms);
+    try testing.expectEqual(tcp.Fin.acknowledged, f.table.conns[i].fin.get());
+    try testing.expectEqual(Event.closed, p.fin(&f.table, &f.wire, 2 * ms + rto + 2 * ms).event);
 }

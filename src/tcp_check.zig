@@ -42,7 +42,6 @@ pub const Rule = enum {
     tx_out_of_bounds,
     sent_past_high_or_queue,
     closing_disagrees_with_fin,
-    fin_sent_before_queued,
     fin_acknowledged_with_bytes_left,
     handshake_with_bytes,
     peer_finished_during_handshake,
@@ -70,7 +69,6 @@ pub const Rule = enum {
             .tx_out_of_bounds => "the send queue's start and end are out of order or past its end",
             .sent_past_high_or_queue => "sent <= high <= queued() does not hold",
             .closing_disagrees_with_fin => "the state is closing exactly when our FIN is queued, sent or acknowledged, and here it is not",
-            .fin_sent_before_queued => "a FIN went on the wire though none is queued",
             .fin_acknowledged_with_bytes_left => "our FIN is acknowledged with bytes still queued or in flight",
             .handshake_with_bytes => "a connection still in its handshake has bytes queued or received",
             .peer_finished_during_handshake => "the peer's FIN was taken before the handshake completed",
@@ -124,9 +122,8 @@ fn safety(c: *const Conn) ?Rule {
     if (!(c.start <= c.end and c.end <= c.rx.len)) return .rx_out_of_bounds;
     if (!(c.tx_start <= c.tx_end and c.tx_end <= c.tx.len)) return .tx_out_of_bounds;
     if (!(c.sent <= c.high and c.high <= c.queued())) return .sent_past_high_or_queue;
-    if ((c.state == .closing) != (c.fin != .none)) return .closing_disagrees_with_fin;
-    if (c.fin_ever_sent and c.fin == .none) return .fin_sent_before_queued;
-    if (c.fin == .acknowledged and (c.queued() != 0 or c.high != 0)) return .fin_acknowledged_with_bytes_left;
+    if ((c.state == .closing) != (!c.fin.is(.none))) return .closing_disagrees_with_fin;
+    if (c.fin.is(.acknowledged) and (c.queued() != 0 or c.high != 0)) return .fin_acknowledged_with_bytes_left;
     if (c.state == .syn_received) {
         if (c.queued() != 0 or c.end != 0) return .handshake_with_bytes;
         if (c.peer_done) return .peer_finished_during_handshake;
@@ -195,10 +192,10 @@ fn queuedUnsent(c: *const Conn) bool {
     return c.queued() > c.sent;
 }
 fn finQueued(c: *const Conn) bool {
-    return c.fin == .queued;
+    return c.fin.is(.queued);
 }
 fn finAcknowledged(c: *const Conn) bool {
-    return c.fin == .acknowledged;
+    return c.fin.is(.acknowledged);
 }
 fn saidOnce(c: *const Conn) bool {
     return c.window_news == .said_once;
@@ -320,8 +317,7 @@ test "an acknowledged FIN with no bound on the wait for the peer's is owed" {
     var tx: [64]u8 = undefined;
     var c = conn(&rx, &tx);
     c.state = .closing;
-    c.fin = .acknowledged;
-    c.fin_ever_sent = true;
+    c.fin = tcp.FinMachine.startingAt(.acknowledged);
     try testing.expectEqual(@as(?Rule, .fin_wait_without_a_deadline), checkConn(&c, 0, .after_handle));
     c.fin_wait_until = 30;
     try testing.expectEqual(@as(?Rule, null), checkConn(&c, 0, .after_transmit));
@@ -332,7 +328,7 @@ test "safety rules fire on inconsistent bookkeeping" {
     var tx: [64]u8 = undefined;
     var c = conn(&rx, &tx);
     c.state = .established;
-    c.fin = .queued; // queued, but the state says otherwise
+    c.fin = tcp.FinMachine.startingAt(.queued); // queued, but the state says otherwise
     try testing.expectEqual(@as(?Rule, .closing_disagrees_with_fin), checkConn(&c, 0, .after_handle));
 
     c = conn(&rx, &tx);
