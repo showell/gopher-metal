@@ -375,12 +375,12 @@ pub const Conn = struct {
         self.* = .{ .rx = rx, .tx = tx, .claimed = claimed };
     }
 
-    /// RCV.WND: `room()`, as much as the 16-bit field carries.
     /// The peer has finished: its FIN arrived.
     pub fn peerDone(self: *const Conn) bool {
         return self.peer_half.is(.finished);
     }
 
+    /// RCV.WND: `room()`, as much as the 16-bit field carries.
     pub fn window(self: *const Conn) u16 {
         return @intCast(@min(self.room(), 0xFFFF));
     }

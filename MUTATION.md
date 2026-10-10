@@ -75,7 +75,7 @@ What the run itself shows:
 | T14 | src/tcp.zig:863 | `c.timed_at = null;` | `c.timed_at = c.timed_at;` | survived, now killed | tcp_sim Karn oracle, `3c9fceb` |
 | T15 | src/tcp.zig:1234 | `d < 0x8000_0000` | `d <= 0x8000_0000` | survived | see below |
 | T16 | src/tcp.zig:1220 | `len < 2 or` | `len < 1 or` | survived, now killed | floor_sim `mssSeed`, `9745fd1` |
-| T17 | src/tcp.zig:1199 | `if (c.peer_done) return self.close(i);` | `if (false) return self.close(i);` | killed | `tcp_test`: their FIN repeated before we close is acknowledged again, and after, reset |
+| T17 | src/tcp.zig:1225 | `if (c.peerDone()) return self.close(i);` | `if (false) return self.close(i);` | killed | `tcp_test`: their FIN repeated before we close is acknowledged again, and after, reset |
 | D1 | src/durable.zig:49 | `if (!d.unflushed) return .none;` | `if (false) return .none;` | killed | `durable`: nothing written, nothing done; written through, cleared; cached or not said, synchronized |
 | D2 | src/durable.zig:50 | `!d.asks or d.write_cache == false` | `!d.asks or d.write_cache != true` | killed | `durable`: nothing written, nothing done; written through, cleared; cached or not said, synchronized |
 | D3 | src/durable.zig:50 | `!d.asks or d.write_cache == false` | `!d.asks and d.write_cache == false` | killed | `store_test`: the model and the FAT store agree on every operation, and every error |
