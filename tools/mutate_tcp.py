@@ -28,7 +28,8 @@ otherwise throw away.
 Host only. Each mutant takes one `zig build test`: about half a minute, so
 the whole list takes a quarter of an hour.
 
-Exit 0 when every mutant is killed, 1 when any survives or is out of date,
+Exit 0 when every mutant is killed, 1 when any survives, is out of date,
+did not compile or timed out,
 2 on a usage error.
 """
 import os

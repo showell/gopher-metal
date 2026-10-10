@@ -32,19 +32,25 @@ def zig_files():
                     yield path
 
 
+STRING = re.compile(r'"(?:[^"\\]|\\.)*"' + r"|'(?:[^'\\]|\\.)*'")
+
+
 def strip_comment(line):
-    # Good enough for this code: no "//" inside the strings these rules look at.
+    """The line's code: string and character literals blanked (a `{` or a
+    `//` in a test's name is not code), then the comment cut."""
+    line = STRING.sub('""', line)
     i = line.find("//")
     return line if i < 0 else line[:i]
 
 
 def test_lines(lines):
-    """The 0-based lines inside a `test "..." {` block, by brace depth."""
+    """The 0-based lines inside a `test "..." {` or `test {` block, by brace
+    depth, braces in strings not counted (`strip_comment`)."""
     inside = set()
     depth = None
     for i, line in enumerate(lines):
         code = strip_comment(line)
-        if depth is None and re.match(r'\s*test\s+"', code) and "{" in code:
+        if depth is None and re.match(r'\s*test\s*("|\{)', code) and "{" in code:
             depth = 0
         if depth is not None:
             inside.add(i)
@@ -63,12 +69,16 @@ def main():
             if m:
                 machines.add(m.group(1))
     fields = set()
+    pointers = set()
     for lines in files.values():
         for line in lines:
             for name in machines:
-                m = re.match(r"\s*(\w+)\s*:\s*(?:\w+\.)?" + name + r"\b", line)
-                if m:
-                    fields.add(m.group(1))
+                # A field or a variable of the machine's type, however
+                # wrapped: `fin: FinMachine`, `x: ?tcp.FinMachine`,
+                # `all: [4]FinMachine`. A pointer to one is a pointer: a
+                # write through it (`p.* =`) chooses a state too.
+                for m in re.finditer(r"\b(\w+)\s*:\s*([^=;,(){}]*?)\b(?:\w+\.)?" + name + r"\b", strip_comment(line)):
+                    (pointers if "*" in m.group(2) else fields).add(m.group(1))
 
     refusals = []
     for path, lines in files.items():
@@ -83,10 +93,14 @@ def main():
             if "startingAt(" in code:
                 refusals.append(f"{rel}:{i + 1}: startingAt outside a test; a machine starts at its initial state")
             for f in fields:
-                # `c.fin =` or `conns[i].fin =`, not `.{ .fin = .queued }`
-                # (a literal's field) or `.fin =>` (a switch prong).
-                if re.search(r"[\w\])]\." + f + r"\s*=[^=>]", code):
+                # `c.fin =` or `conns[i].fin =` or `all[2] =`, not
+                # `.{ .fin = .queued }` (a literal's field) or `.fin =>` (a
+                # switch prong).
+                if re.search(r"[\w\])]\." + f + r"(?:\[[^\]]*\])?\s*=[^=>]", code):
                     refusals.append(f"{rel}:{i + 1}: the machine field `{f}` replaced; fire an event instead")
+            for p in pointers:
+                if re.search(r"\b" + p + r"\.\*\s*=[^=>]", code):
+                    refusals.append(f"{rel}:{i + 1}: a machine written through `{p}.*`; fire an event instead")
     for r in refusals:
         print(r)
     if not machines:
