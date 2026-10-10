@@ -1084,7 +1084,8 @@ pub const Table = struct {
             // sent a segment past our window; taking its ACK would let a
             // forged one set SND.WL1 to a sequence the peer never reaches,
             // after which the window rule rejects every genuine update.
-            const behind = !sq.after(seq, c.rcv_nxt);
+            // At or before rcv_nxt; half the circle away is neither, and not behind.
+            const behind = sq.atOrAfter(c.rcv_nxt, seq);
             const done = behind and c.state != .syn_received and
                 self.acknowledge(c, seq, number, window, now);
             self.emit(wire, i, flag_ack, c.highest(), "");

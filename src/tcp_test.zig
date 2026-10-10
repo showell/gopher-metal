@@ -1215,6 +1215,26 @@ test "a segment beyond the window carries nothing, not even its acknowledgement"
     try testing.expectEqual(flag_ack, f.wire.last().flags);
 }
 
+test "a segment beyond the window carries nothing at any distance past it, half the circle included (metal-vmm B37's review)" {
+    // Half the circle past rcv_nxt is neither after it nor before it; it is
+    // not behind, so its acknowledgement must be refused like any beyond.
+    for ([_]u32{ 100_000, 0x7FFF_FFFF, 0x8000_0000 }) |past| {
+        var f: Fixture = .{};
+        f.init();
+        var p = Peer{ .ip = .{ 10, 0, 2, 2 }, .port = 40000 };
+        const i = try p.connect(&f.table, &f.wire, 0);
+        _ = f.table.queue(i, "ten bytes!");
+        transmit(&f.table, &f.wire, 1);
+        const una = f.table.conns[i].una;
+        const wl1 = f.table.conns[i].wl1;
+        p.ack = una +% 10;
+        var buf: [1600]u8 = undefined;
+        _ = handle(&f.table, &f.wire, p.frame(&buf, flag_ack, p.seq +% past, ""), 2);
+        try testing.expectEqual(una, f.table.conns[i].una);
+        try testing.expectEqual(wl1, f.table.conns[i].wl1);
+    }
+}
+
 test "an older segment with a newer acknowledgement moves the window's edge too" {
     // The window rule keeps the old segment from setting the window, but its
     // acknowledgement still moves `una` — and the window is measured from

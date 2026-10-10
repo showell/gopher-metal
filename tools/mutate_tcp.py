@@ -129,7 +129,7 @@ MUTANTS = [
      "return seq != self.rcv_nxt and sq.within(seq, self.rcv_nxt, @max(self.window(), 1));",
      "return seq != self.rcv_nxt and sq.within(seq, self.rcv_nxt, @as(u32, @max(self.window(), 1)) + 1);", None),
     ("everything-behind", "a segment past the window is taken as one from behind",
-     "const behind = !sq.after(seq, c.rcv_nxt);", "const behind = true;", None),
+     "const behind = sq.atOrAfter(c.rcv_nxt, seq);", "const behind = true;", None),
     ("handshake-any-ack", "the handshake completes on any acknowledgement number",
      "if (number != c.una +% 1) {", "if (false) {", None),
     ("peer-fin-forgotten", "the peer's FIN is acknowledged but not recorded",

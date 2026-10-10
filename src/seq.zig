@@ -2,7 +2,7 @@
 //! numbers wrap, so "comes after" is a question about the distance between
 //! two of them, not their order as integers: `b` is after `a` when going
 //! forward from `a` reaches `b` in under half the circle. tcp.zig asked it
-//! four ways by hand; these are the one way.
+//! five ways by hand; these are the one way.
 //!
 //! Generic over the unsigned integer, so the tests below can walk every
 //! pair of a `u8` and prove for all of them what TCP's `u32` relies on.
@@ -138,6 +138,8 @@ test "the u32 instance TCP uses, at its edges" {
     try testing.expect(S.after(0x7FFF_FFFF, 0));
     try testing.expect(!S.after(0x8000_0000, 0)); // half the circle: neither
     try testing.expect(!S.after(0, 0x8000_0000));
+    try testing.expect(!S.atOrAfter(0x8000_0000, 0)); // nor at or after, either way
+    try testing.expect(!S.atOrAfter(0, 0x8000_0000));
     try testing.expect(S.within(2, 0xFFFF_FFFE, 5)); // across the wrap
     try testing.expect(!S.within(3, 0xFFFF_FFFE, 5));
 }
