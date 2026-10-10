@@ -1725,6 +1725,10 @@ pub const Volume = struct {
     /// where the short entry is, the byte its tombstone replaced, and its
     /// long name's parts, not yet cleared.
     const Unlinked = struct {
+        /// Whether the walk found the entry and tombstoned it: until it
+        /// has, `lba` and `at` point at nothing (sector 0 is the boot
+        /// sector), and there is nothing to undo.
+        state: enum { not_found, tombstoned } = .not_found,
         lba: u32 = 0,
         at: u32 = 0,
         first: u8 = 0,
@@ -1738,6 +1742,7 @@ pub const Volume = struct {
         /// (`commitRefused`, `clusters`) that leaves the parts alone, as the
         /// entry may be live.
         fn undo(u: *const Unlinked, vol: *Volume, clusters: u32) Landing {
+            std.debug.assert(u.state == .tombstoned);
             vol.readSector(u.lba, vol.scratch) catch return .before;
             const e = vol.scratch[u.at..][0..dirent_size];
             const was = e.*;
@@ -1825,7 +1830,7 @@ pub const Volume = struct {
                     // orphaned parts or a leaked chain, not the error.
                     const was = e.*;
                     if (held) |h| {
-                        h.* = .{ .lba = short_lba, .at = at, .first = e[0], .part_count = if (has_long) run.len else 0 };
+                        h.* = .{ .state = .tombstoned, .lba = short_lba, .at = at, .first = e[0], .part_count = if (has_long) run.len else 0 };
                         for (run, 0..) |pos, k| h.parts[k] = .{ .lba = pos.lba, .at = pos.at };
                     }
                     self.scratch[at] = 0xE5;
@@ -2603,6 +2608,14 @@ pub const Volume = struct {
             }
             return err;
         };
+        // **THE WALK MAY NOT FIND WHAT THE LISTER DID**: it reads the
+        // directory again, by another route, and a disk that lies can
+        // answer otherwise. Then nothing was unlinked and `held` points at
+        // nothing: the rename stops here, having changed nothing.
+        if (held.state == .not_found) {
+            props.reachable(@src(), "fat: a rename's unlink does not find from, which the lookup found, and nothing is changed", null);
+            return Error.NotFound;
+        }
         self.took(clusters);
         var commit: Commit = .{ .clusters = clusters };
         // **A RENAME THAT DID NOT LAND KEEPS `from`** (metal-vmm 145): the

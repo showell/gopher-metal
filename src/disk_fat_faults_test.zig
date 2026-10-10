@@ -1086,3 +1086,37 @@ test "a request that fails or lies leaves no cluster lost uncounted, its commit 
         }
     }
 }
+
+test "a disk that lies to a rename's second read of the directory, its new entry then refused: nothing is written outside the directory (145's review)" {
+    // The Lister finds `from` and the unlink's walk, reading the directory
+    // again, may not: a read that lies the second time. Then nothing was
+    // unlinked, and an undo of the new entry's refusal must not write where
+    // an unfilled `Unlinked` points: sector 0, the boot sector.
+    for (configs) |cfg| {
+        const d = try Disk.makeUnkept("rename-miss", cfg.shape, cfg.cached);
+        defer d.deinit();
+        try d.mount(cfg.cached);
+        _ = try d.vol.makePath("data");
+        try d.vol.writeFile("data/A-Long-Record.md", "kept");
+        const before = try testing.allocator.dupe(u8, d.bytes);
+        defer testing.allocator.free(before);
+        var n: u64 = 0;
+        while (n < 24) : (n += 1) {
+            var m: u64 = 1;
+            while (m < 24) : (m += 1) {
+                @memcpy(d.bytes, before);
+                try d.mount(cfg.cached);
+                const base = d.blk.requests;
+                d.blk.fault = .{ .at = base + n, .kind = .garbage, .seed = 0 };
+                d.blk.second = .{ .at = base + n + m, .kind = .fails };
+                d.vol.rename("data/A-Long-Record.md", "data/Another-Name.md") catch {};
+                d.blk.fault = null;
+                d.blk.second = null;
+                testing.expectEqualSlices(u8, before[0..512], d.bytes[0..512]) catch |e| {
+                    std.debug.print("{s}{s}, garbage at request {d}, a write refused {d} after: the boot sector was written\n", .{ @tagName(cfg.shape.kind), if (cfg.cached) " cached" else "", n, m });
+                    return e;
+                };
+            }
+        }
+    }
+}
