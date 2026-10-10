@@ -6,14 +6,11 @@
 //! each file that opens with `const Io = std.Io;`. Not one call site moves, and
 //! `std.http.Server` is the one the application already constructs.
 //!
-//! **THIS FILE IS A HOST**, and does what router.zig's host contract says any
-//! host must, with what this machine has instead of Linux:
-//!
-//!   1. mem_meter.init(base)   base is a bump allocator over a static block
-//!   2. roots.point(base, …)   data/ and auth/, on the DigitalOcean volume if one is attached
-//!   3. a Hub over base        each request gets a Bus handle on it
-//!   4. store.backfillAll(…)   every chat session's last-message record, once
-//!   5. serve what was kept    a table of held streams, drained every turn
+//! **THIS FILE IS A HOST** (router.zig's host contract): `mem_meter.init`
+//! over its own heap, one `router.start` with what this machine supplies
+//! (data/ and auth/ on the DigitalOcean volume if one is attached, the floor
+//! read off the data's FAT), and per request `router.route`, then what the
+//! request kept served from a table of held streams, drained every turn.
 //!
 //! Its clocks come from its own hardware (wallclock.zig).
 //!
@@ -259,8 +256,8 @@ const page_cache_largest_kib_default = router.whole_read_max >> 10;
 
 const config_path = "gopher-metal.conf";
 
-/// **THE APPLICATION'S DATA**: the two directories `router.roots.point` is
-/// given, and the only ones this machine writes. On a droplet they are on the
+/// **THE APPLICATION'S DATA**: the two directories `router.start` points the
+/// stores at (`Host.roots`), and the only ones this machine writes. On a droplet they are on the
 /// volume, which outlives every new image; everything else is the site's own,
 /// on the boot disk, and comes with the image.
 const data_dir = "data";
@@ -465,20 +462,14 @@ pub fn kmain() noreturn {
         if (restarted.wait_seconds > 0) waitSeconds(restarted.wait_seconds);
     }
 
-    // ── the host contract ───────────────────────────────────────────────────
-    router.host_status.provide(metalFacts);
-    router.host_status.provideLog(metalLog);
-    router.roots.point(base, .{ .data_dir = data_dir, .auth_dir = auth_dir }) catch
-        serial.fail("roots.point could not allocate the store paths");
-    // The game store's floor reads the data's volume (QUEUE.md item 52).
-    router.game_limits.free_space = dataSpace;
-    if (conf.trusted_proxy) |p| {
-        router.game_limits.trusted_proxy = ipText(&trusted_proxy_text, p);
+    // Whose X-Forwarded-For is believed: the config's trusted_proxy, handed
+    // to the host contract below (`router.start`).
+    const trusted_proxy: ?[]const u8 = if (conf.trusted_proxy) |p| ipText(&trusted_proxy_text, p) else null;
+    if (trusted_proxy) |p| {
         serial.put("  X-Forwarded-For is believed from ");
-        serial.put(router.game_limits.trusted_proxy.?);
+        serial.put(p);
         serial.put(" only\n");
     } else serial.put("  no trusted_proxy: every request is the address it came from\n");
-    var hub = Hub.init(io, base);
 
     const limit = conf.requests;
     serial.put("  a connection may make no progress for ");
@@ -539,54 +530,47 @@ pub fn kmain() noreturn {
     var request_heap = RequestHeap.init(pages.allocator, request_heap_bytes);
     if (!request_heap.preheat())
         serial.fail("the machine has not enough memory for a request heap");
-    // **THE SESSION SECRET MOVES INTO auth/, ONCE** (QUEUE.md item 106): a
-    // volume written before the move keeps it in data/chat/; carry it over
-    // before the first request so no session is lost. No-op once it is in auth/.
-    {
-        router.roots.migrateSecret(io, request_heap.allocator());
-        request_heap.reset();
+    // **THE HOST CONTRACT, ONE CALL** (angry-gopher router.zig,
+    // host_start.zig): what this machine supplies (where the data is on its
+    // volumes, the game store's floor read off the data's FAT, the trusted
+    // proxy, /admin/host's facts and the serial log), and the setup in its one
+    // order before the first request: the session secret's move, every chat
+    // session's last-message record (as Linux does, so the two hosts leave
+    // the same files behind, which the judge compares), and search's index.
+    // Each one-time pass reads on an arena `start` gives back.
+    var started = router.start(io, .{
+        .roots = .{ .data_dir = data_dir, .auth_dir = auth_dir },
+        .floor = .{ .free_space = dataSpace },
+        .trusted_proxy = trusted_proxy,
+        .facts = metalFacts,
+        .log = metalLog,
+    }) catch |e| {
+        serial.put("  ");
+        serial.put(@errorName(e));
+        serial.put("\n");
+        serial.fail("the host contract's setup (router.start) failed");
+    };
+    const hub = &started.hub;
+    if (started.backfilled > 0) {
+        serial.put("  wrote a last-message record for ");
+        serial.putDec(started.backfilled);
+        serial.put(" chat session(s)\n");
     }
-    // **THE HOST CONTRACT'S FOURTH STEP**, and the machine does it as Linux
-    // does: every chat session gets its last-message record before the first
-    // request, so /chat/recent never reads a transcript in full — and so the
-    // two hosts leave the same files behind, which the judge compares. It runs
-    // on a request's heap because that is what it is: one pass, then given
-    // back.
-    {
-        const wrote = router.store.backfillAll(io, request_heap.allocator());
-        request_heap.reset();
-        if (wrote > 0) {
-            serial.put("  wrote a last-message record for ");
-            serial.putDec(wrote);
-            serial.put(" chat session(s)\n");
-        }
-    }
-    // **HOST CONTRACT STEP 4b**: search's index, every transcript read once
-    // into memory, before the first request (angry-gopher search_index.zig).
-    // Its scratch is a request's heap, reset after, as the backfill's is; the
-    // index lives on the process allocator. Out of memory leaves no index,
-    // said here, and the first search builds it again.
-    {
-        const t0 = Io.awakeNs() orelse 0;
-        const stats = router.search_index.buildAll(io, request_heap.allocator());
-        request_heap.reset();
-        const ms: u64 = @intCast(@divTrunc((Io.awakeNs() orelse t0) - t0, std.time.ns_per_ms));
-        if (stats) |st| {
-            serial.put("  search index: ");
-            serial.putDec(st.messages);
-            serial.put(" messages in ");
-            serial.putDec(st.transcripts);
-            serial.put(" transcripts (");
-            serial.putDec(st.bytes);
-            serial.put(" bytes, ");
-            serial.putDec(st.words);
-            serial.put(" words, ");
-            serial.putDec(st.unreadable);
-            serial.put(" unreadable) in ");
-            serial.putDec(ms);
-            serial.put(" ms\n");
-        } else serial.put("  search index: not built (out of memory); the first search builds it\n");
-    }
+    if (started.search) |st| {
+        serial.put("  search index: ");
+        serial.putDec(st.messages);
+        serial.put(" messages in ");
+        serial.putDec(st.transcripts);
+        serial.put(" transcripts (");
+        serial.putDec(st.bytes);
+        serial.put(" bytes, ");
+        serial.putDec(st.words);
+        serial.put(" words, ");
+        serial.putDec(st.unreadable);
+        serial.put(" unreadable) in ");
+        serial.putDec(@intCast(started.search_ms));
+        serial.put(" ms\n");
+    } else serial.put("  search index: not built (out of memory); the first search builds it\n");
     // **IDLE TIME** (src/idle.zig, essay idle-time-on-metal): each volume's
     // check, asked again while the machine serves, a slice per quiet moment.
     for ([_]?*disk_fat.Volume{ Io.siteVolume(), Io.dataVolume() }, 0..) |maybe, k| {
@@ -598,8 +582,7 @@ pub fn kmain() noreturn {
     }
     const scratch_heap = pages.allocator.alloc(u8, stream_scratch_bytes) catch
         serial.fail("the machine has not enough memory for its streams' scratch");
-    stream_scratch = std.heap.FixedBufferAllocator.init(scratch_heap);
-    turning = .{ .wire = &wire, .table = &table, .hub = &hub, .conf = conf };
+    turning = .{ .wire = &wire, .table = &table, .hub = hub, .conf = conf, .scratch = .init(scratch_heap) };
     stream.after_arrivals = streamTurn;
 
     // From here a fatal error is a failure while serving: with the restart
@@ -649,7 +632,7 @@ pub fn kmain() noreturn {
         if (arrived != null) idle_work.busy(now);
         if (nextReady(&table)) |pick| {
             served += 1;
-            serveOne(io, &wire, &table, pick, lease.address, request_heap.allocator(), &hub, served, conf.idle_ns, conf.streams);
+            serveOne(io, &wire, &table, pick, lease.address, request_heap.allocator(), hub, served, conf.idle_ns, conf.streams);
             idle_work.busy(Io.awakeNs() orelse now);
         } else if (quiet(&table, now, conf.idle_ns)) |pick| {
             served += 1;
@@ -690,7 +673,7 @@ pub fn kmain() noreturn {
     // to finish (their turns run inside `pump`), then the rest are reset.
     const draining_from = Io.awakeNs() orelse 0;
     while (draining_now > 0 and (Io.awakeNs() orelse 0) - draining_from < conf.idle_ns) {
-        if (stream.pump(&wire, &table, lease.address) == null) interrupts.rest();
+        stream.pumpOrRestOn(&wire, &table, lease.address);
     }
     for (&draining, 0..) |*slot, i| {
         if (slot.*) |*d| {
@@ -706,11 +689,11 @@ pub fn kmain() noreturn {
     // moment to be acknowledged.
     stream.after_arrivals = null;
     for (&held) |*slot| {
-        if (slot.* != null) endStream(slot, &wire, &table, &hub, .stopping);
+        if (slot.* != null) endStream(slot, &wire, &table, hub, .stopping);
     }
     const stopping_at = Io.awakeNs() orelse 0;
     while (closing(&table) and (Io.awakeNs() orelse 0) - stopping_at < 2 * std.time.ns_per_s) {
-        if (stream.pump(&wire, &table, lease.address) == null) interrupts.rest();
+        stream.pumpOrRestOn(&wire, &table, lease.address);
     }
     // **A RESPONSE CUT BY THE STOP IS SAID TO BE.** One still unacknowledged
     // now is never finished: its request counted as answered, and its client
@@ -984,25 +967,24 @@ fn serviceDraining(wire: *stream.Wire, table: *tcp.Table, now: i96, idle_ns: u64
 }
 
 /// What a turn of the held streams needs, set once the network is up.
-var turning: ?struct { wire: *stream.Wire, table: *tcp.Table, hub: *Hub, conf: Config } = null;
+var turning: ?struct { wire: *stream.Wire, table: *tcp.Table, hub: *Hub, conf: Config, scratch: std.heap.FixedBufferAllocator } = null;
 /// The streams' own scratch: a turn can come in the middle of a request, whose
 /// heap is not the streams' to reset. Big enough for the largest frame chat
 /// renders, several times over.
 const stream_scratch_bytes = 4 * 1024 * 1024;
-var stream_scratch: std.heap.FixedBufferAllocator = undefined;
 var in_turn = false;
 
 /// Called by every turn of the network (`stream.after_arrivals`). A turn does
 /// not start another: ending a stream never waits, but it is simpler to know
 /// that than to prove it each time.
 fn streamTurn() void {
-    const t = turning orelse return;
+    const t = if (turning) |*t| t else return;
     if (in_turn) return;
     in_turn = true;
     defer in_turn = false;
     const now = Io.awakeNs() orelse 0;
-    serviceStreams(t.wire, t.table, t.hub, stream_scratch.allocator(), now, t.conf);
-    stream_scratch.reset();
+    serviceStreams(t.wire, t.table, t.hub, t.scratch.allocator(), now, t.conf);
+    t.scratch.reset();
     serviceDraining(t.wire, t.table, now, t.conf.idle_ns);
 }
 
@@ -1747,7 +1729,7 @@ fn awakeNow() i96 {
 
 /// A volume's idle check, as /admin/host says it.
 fn checkFact(alloc: std.mem.Allocator, c: *const metal.idle_check.VolumeCheck) ![]const u8 {
-    const hs = router.host_status;
+    const hs = router.host_facts;
     const last = if (c.last) |l| blk: {
         const ago: i64 = @intCast(@divFloor(awakeNow() - l.at, std.time.ns_per_s));
         const damage = if (l.tally.first) |f|
@@ -1763,8 +1745,8 @@ fn checkFact(alloc: std.mem.Allocator, c: *const metal.idle_check.VolumeCheck) !
     });
 }
 
-fn metalFacts(io: Io, alloc: std.mem.Allocator) anyerror![]const router.host_status.Fact {
-    const hs = router.host_status;
+fn metalFacts(io: Io, alloc: std.mem.Allocator) anyerror![]const router.host_facts.Fact {
+    const hs = router.host_facts;
     var facts: std.ArrayList(hs.Fact) = .empty;
     const now: i64 = @intCast(@divFloor(Io.Clock.now(.real, io).nanoseconds, std.time.ns_per_s));
     const add = struct {
@@ -1853,7 +1835,7 @@ fn kindName(v: *const disk_fat.Volume) []const u8 {
     return if (v.kind == .fat32) "FAT32" else "FAT16";
 }
 
-fn addVolume(facts: *std.ArrayList(router.host_status.Fact), alloc: std.mem.Allocator, label: []const u8, cache_label: []const u8, dirs_label: []const u8, v: *disk_fat.Volume) !void {
+fn addVolume(facts: *std.ArrayList(router.host_facts.Fact), alloc: std.mem.Allocator, label: []const u8, cache_label: []const u8, dirs_label: []const u8, v: *disk_fat.Volume) !void {
     var serial_text: [9]u8 = undefined;
     const named = if (v.serial) |n| serialText(&serial_text, n) else "no serial";
     const value = if (v.space()) |sp|
@@ -1886,7 +1868,7 @@ fn addVolume(facts: *std.ArrayList(router.host_status.Fact), alloc: std.mem.Allo
 
 /// The data's volume, free and total, for the game store's floor: the volume
 /// when one is attached, else the boot disk, which then holds the data.
-fn dataSpace() ?router.game_limits.Space {
+fn dataSpace() ?router.Space {
     const v = Io.dataVolume() orelse Io.siteVolume() orelse return null;
     const sp = v.space() catch return null;
     return .{ .free = sp.free, .total = sp.total };
@@ -1940,12 +1922,4 @@ fn waitSeconds(s: u32) void {
     serial.put(" s; serving\n");
 }
 
-pub const panic = std.debug.FullPanic(panicImpl);
-fn panicImpl(msg: []const u8, _: ?usize) noreturn {
-    serial.immediate();
-    serial.put("PANIC: ");
-    serial.put(msg);
-    serial.put("\n");
-    if (serial.on_fatal) |f| f(.panic, msg);
-    serial.exitQemu(1);
-}
+pub const panic = metal.serial.panic;

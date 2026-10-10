@@ -101,10 +101,4 @@ pub fn kmain() noreturn {
     serial.pass();
 }
 
-pub const panic = @import("std").debug.FullPanic(panicImpl);
-fn panicImpl(msg: []const u8, _: ?usize) noreturn {
-    serial.put("PANIC: ");
-    serial.put(msg);
-    serial.put("\n");
-    serial.exitQemu(1);
-}
+pub const panic = metal.serial.panic;

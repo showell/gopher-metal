@@ -116,6 +116,11 @@ pub fn cut(region: Region, hole: Region) [2]Region {
     return .{ before, after };
 }
 
+/// Whether the two share a byte. An empty region shares none.
+pub fn overlaps(a: Region, b: Region) bool {
+    return a.len > 0 and b.len > 0 and a.start < b.start +| b.len and b.start < a.start +| a.len;
+}
+
 /// Reads the header the loader left, checking every field it is about to use.
 pub fn read(start_info: u64) Error![]const MemmapEntry {
     if (start_info == 0) {
@@ -236,4 +241,16 @@ test "a region at the top of the address space does not wrap" {
     const huge = Region{ .start = std.math.maxInt(u64) - 10, .len = 100 };
     const pieces = cut(huge, .{ .start = 0, .len = 10 });
     try testing.expectEqual(huge, pieces[0]);
+}
+
+test "two regions overlap only when they share a byte" {
+    const a = Region{ .start = 0x1000, .len = 0x1000 };
+    try std.testing.expect(overlaps(a, .{ .start = 0x1800, .len = 0x1000 }));
+    try std.testing.expect(overlaps(a, .{ .start = 0x0800, .len = 0x1000 }));
+    try std.testing.expect(overlaps(a, .{ .start = 0x1100, .len = 0x10 }));
+    try std.testing.expect(overlaps(.{ .start = 0, .len = 0x10000 }, a));
+    try std.testing.expect(!overlaps(a, .{ .start = 0x2000, .len = 0x1000 }));
+    try std.testing.expect(!overlaps(a, .{ .start = 0, .len = 0x1000 }));
+    try std.testing.expect(!overlaps(a, .{ .start = 0x1800, .len = 0 }));
+    try std.testing.expect(!overlaps(.{ .start = std.math.maxInt(u64) - 0xFFF, .len = 0x2000 }, .{ .start = 0, .len = 0x1000 }));
 }

@@ -76,7 +76,7 @@ pub fn build(b: *std.Build) void {
     coverage.red_zone = false;
     // The seed explorer (zig-coverage-sdk's explore.zig): simulators only.
     const explore = sdk.module("explore");
-    const coverage_catalog = @import("zig_coverage_sdk").addCatalog(b, sdk.artifact("coverage-scan"), coverage, b.path("src"), &.{ "tcp.zig", "tcp_sim.zig", "disk_fat.zig", "fat_sim.zig", "page_sim.zig", "pure_sim.zig", "ready_sim.zig", "durable_sim.zig", "durable.zig", "gpt.zig", "floor_sim.zig", "page_cache.zig", "log_ring.zig", "kept_log.zig", "proto.zig", "arp.zig", "request_heap.zig", "store_sim.zig", "pvh.zig", "restart.zig", "pages.zig", "rtc.zig", "pit.zig", "admin_reset.zig", "rng.zig", "ready.zig" });
+    const coverage_catalog = @import("zig_coverage_sdk").addCatalog(b, sdk.artifact("coverage-scan"), coverage, b.path("src"), catalogFiles(b));
     // **ONE PLANT AT MOST** (src/plant.zig): every compilation that holds
     // disk_fat.zig or tcp.zig takes it beside the coverage SDK.
     const plant_opts = b.addOptions();
@@ -208,7 +208,8 @@ pub fn build(b: *std.Build) void {
     gopher.entry = .{ .symbol_name = "_start" };
     const gopher_copy = b.addUpdateSourceFiles();
     gopher_copy.addCopyFileToSource(gopher.getEmittedBin(), "probe/gopher.elf");
-    b.step("gopher", "the real server, once port.sh has prepared it").dependOn(&gopher_copy.step);
+    const gopher_step = b.step("gopher", "the real server, once port.sh has prepared it, of the checkout as it is now");
+    gopher_step.dependOn(&gopher_copy.step);
 
     // **EVERY KERNEL TYPE-CHECKED, ON EVERY `zig build test`** (metal-vmm
     // B34): a field renamed in src/ broke gopher.elf (b4463a9) and native
@@ -268,6 +269,11 @@ pub fn build(b: *std.Build) void {
         // that did not build (48a167f).
         const fail = b.addFail(b.fmt("check: gopher.elf NOT type-checked: {s} (port {s}, checkout {s}): run ./port.sh, or -Dgopher=<dir> and -Dgopher-root=<dir> for others", .{ port_state, gopher_port, gopher_root }));
         check_step.dependOn(&fail.step);
+        // **NOR BUILT** (the protocols-in-prose hunt, K10), with
+        // probe/gopher.elf left as it was: a kernel of a port that is not
+        // the checkout's would be judged as if it were.
+        const no_build = b.addFail(b.fmt("gopher: NOT built: {s} (port {s}, checkout {s}): run ./port.sh, or -Dgopher=<dir> and -Dgopher-root=<dir> for others", .{ port_state, gopher_port, gopher_root }));
+        gopher_copy.step.dependOn(&no_build.step);
     }
 
     b.getInstallStep().dependOn(&copy.step);
@@ -713,6 +719,49 @@ fn pinnedSdk(b: *std.Build, sdk_path: []const u8) void {
         return;
     }
     std.process.fatal("the coverage SDK at {s} is at {s}, but build.zig pins {s}: `git -C {s} fetch && git -C {s} checkout {s}`, or move the pin with the change that needs it (-Dcoverage-sdk-unpinned builds anyway)", .{ sdk_path, head, coverage_sdk_pin, sdk_path, sdk_path, coverage_sdk_pin });
+}
+
+/// **THE CATALOG IS EVERY FILE IN src/ THAT DECLARES PROPERTIES** (the
+/// protocols-in-prose hunt, 2026-10-10): it was a hand list of 26, and nine
+/// served files had properties outside it (stream, scsi, virtio, io, pci,
+/// machine, idle, idle_check, store_model), so a property there never reached
+/// was never declared, and never showed as a MISS. Now every file that
+/// imports the coverage SDK is cataloged, but those named here with why; a
+/// name here that is not a file in src/ stops the build.
+const not_cataloged = [_]struct { file: []const u8, why: []const u8 }{
+    .{ .file = "metal.zig", .why = "the kernel's module root: it re-exports, it declares nothing" },
+    .{ .file = "properties.zig", .why = "the properties tier's driver, host only: its own runs, not the kernel's" },
+    .{ .file = "explore_bench.zig", .why = "a benchmark of the seed explorer, host only" },
+    .{ .file = "explore_soak.zig", .why = "a soak of the seed explorer, host only" },
+    .{ .file = "tcp_test.zig", .why = "tests: what they assert is theirs, not a site the sweeps should reach" },
+    .{ .file = "disk_fat_faults_test.zig", .why = "tests, as tcp_test.zig" },
+};
+
+fn catalogFiles(b: *std.Build) []const []const u8 {
+    const io = b.graph.io;
+    var src = b.build_root.handle.openDir(io, "src", .{ .iterate = true }) catch |e|
+        std.process.fatal("src/ cannot be listed for the coverage catalog ({t})", .{e});
+    defer src.close(io);
+    var out: std.ArrayList([]const u8) = .empty;
+    var it = src.iterate();
+    while (it.next(io) catch |e| std.process.fatal("src/ cannot be listed ({t})", .{e})) |entry| {
+        if (entry.kind != .file or !std.mem.endsWith(u8, entry.name, ".zig")) continue;
+        const text = src.readFileAlloc(io, entry.name, b.allocator, .limited(1 << 22)) catch |e|
+            std.process.fatal("src/{s}: cannot be read for the coverage catalog ({t})", .{ entry.name, e });
+        if (std.mem.indexOf(u8, text, "@import(\"coverage\")") == null) continue;
+        for (not_cataloged) |n| {
+            if (std.mem.eql(u8, n.file, entry.name)) break;
+        } else out.append(b.allocator, b.dupe(entry.name)) catch @panic("out of memory");
+    }
+    for (not_cataloged) |n| {
+        src.access(io, n.file, .{}) catch std.process.fatal("build.zig's not_cataloged names src/{s}, which is not there", .{n.file});
+    }
+    std.mem.sort([]const u8, out.items, {}, struct {
+        fn less(_: void, x: []const u8, y: []const u8) bool {
+            return std.mem.lessThan(u8, x, y);
+        }
+    }.less);
+    return out.items;
 }
 
 /// Stops the build when a `test "..."` in `path` contains none of `filters`:

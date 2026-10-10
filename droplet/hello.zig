@@ -164,3 +164,5 @@ pub fn kmain() noreturn {
         asm volatile ("pause");
     }
 }
+
+pub const panic = metal.serial.panic;

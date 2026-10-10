@@ -191,11 +191,25 @@ pub fn exitQemu(code: u8) noreturn {
 pub var on_fatal: ?*const fn (restart.Reason, []const u8) noreturn linksection(".data") = null;
 
 pub fn fail(why: []const u8) noreturn {
+    stop(.failure, "FAIL: ", why);
+}
+
+/// **EVERY KERNEL'S PANIC HANDLER**: a kernel's root says
+/// `pub const panic = metal.serial.panic;`, and boot.zig refuses one that
+/// does not. A panic ends as `fail` does: the console written out, the
+/// message, then `on_fatal` (a restart, once serving) or halt.
+pub const panic = std.debug.FullPanic(panicked);
+
+fn panicked(msg: []const u8, _: ?usize) noreturn {
+    stop(.panic, "PANIC: ", msg);
+}
+
+fn stop(reason: restart.Reason, label: []const u8, why: []const u8) noreturn {
     immediate();
-    put("FAIL: ");
+    put(label);
     put(why);
     put("\n");
-    if (on_fatal) |f| f(.failure, why);
+    if (on_fatal) |f| f(reason, why);
     exitQemu(1);
 }
 
