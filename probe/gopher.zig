@@ -6,14 +6,11 @@
 //! each file that opens with `const Io = std.Io;`. Not one call site moves, and
 //! `std.http.Server` is the one the application already constructs.
 //!
-//! **THIS FILE IS A HOST**, and does what router.zig's host contract says any
-//! host must, with what this machine has instead of Linux:
-//!
-//!   1. mem_meter.init(base)   base is a bump allocator over a static block
-//!   2. roots.point(base, …)   data/ and auth/, on the DigitalOcean volume if one is attached
-//!   3. a Hub over base        each request gets a Bus handle on it
-//!   4. store.backfillAll(…)   every chat session's last-message record, once
-//!   5. serve what was kept    a table of held streams, drained every turn
+//! **THIS FILE IS A HOST** (router.zig's host contract): `mem_meter.init`
+//! over its own heap, one `router.start` with what this machine supplies
+//! (data/ and auth/ on the DigitalOcean volume if one is attached, the floor
+//! read off the data's FAT), and per request `router.route`, then what the
+//! request kept served from a table of held streams, drained every turn.
 //!
 //! Its clocks come from its own hardware (wallclock.zig).
 //!
@@ -259,8 +256,8 @@ const page_cache_largest_kib_default = router.whole_read_max >> 10;
 
 const config_path = "gopher-metal.conf";
 
-/// **THE APPLICATION'S DATA**: the two directories `router.roots.point` is
-/// given, and the only ones this machine writes. On a droplet they are on the
+/// **THE APPLICATION'S DATA**: the two directories `router.start` points the
+/// stores at (`Host.roots`), and the only ones this machine writes. On a droplet they are on the
 /// volume, which outlives every new image; everything else is the site's own,
 /// on the boot disk, and comes with the image.
 const data_dir = "data";
@@ -1734,7 +1731,7 @@ fn awakeNow() i96 {
 
 /// A volume's idle check, as /admin/host says it.
 fn checkFact(alloc: std.mem.Allocator, c: *const metal.idle_check.VolumeCheck) ![]const u8 {
-    const hs = router.host_status;
+    const hs = router.host_facts;
     const last = if (c.last) |l| blk: {
         const ago: i64 = @intCast(@divFloor(awakeNow() - l.at, std.time.ns_per_s));
         const damage = if (l.tally.first) |f|
@@ -1750,8 +1747,8 @@ fn checkFact(alloc: std.mem.Allocator, c: *const metal.idle_check.VolumeCheck) !
     });
 }
 
-fn metalFacts(io: Io, alloc: std.mem.Allocator) anyerror![]const router.host_status.Fact {
-    const hs = router.host_status;
+fn metalFacts(io: Io, alloc: std.mem.Allocator) anyerror![]const router.host_facts.Fact {
+    const hs = router.host_facts;
     var facts: std.ArrayList(hs.Fact) = .empty;
     const now: i64 = @intCast(@divFloor(Io.Clock.now(.real, io).nanoseconds, std.time.ns_per_s));
     const add = struct {
@@ -1840,7 +1837,7 @@ fn kindName(v: *const disk_fat.Volume) []const u8 {
     return if (v.kind == .fat32) "FAT32" else "FAT16";
 }
 
-fn addVolume(facts: *std.ArrayList(router.host_status.Fact), alloc: std.mem.Allocator, label: []const u8, cache_label: []const u8, dirs_label: []const u8, v: *disk_fat.Volume) !void {
+fn addVolume(facts: *std.ArrayList(router.host_facts.Fact), alloc: std.mem.Allocator, label: []const u8, cache_label: []const u8, dirs_label: []const u8, v: *disk_fat.Volume) !void {
     var serial_text: [9]u8 = undefined;
     const named = if (v.serial) |n| serialText(&serial_text, n) else "no serial";
     const value = if (v.space()) |sp|
@@ -1873,7 +1870,7 @@ fn addVolume(facts: *std.ArrayList(router.host_status.Fact), alloc: std.mem.Allo
 
 /// The data's volume, free and total, for the game store's floor: the volume
 /// when one is attached, else the boot disk, which then holds the data.
-fn dataSpace() ?router.game_limits.Space {
+fn dataSpace() ?router.Space {
     const v = Io.dataVolume() orelse Io.siteVolume() orelse return null;
     const sp = v.space() catch return null;
     return .{ .free = sp.free, .total = sp.total };
