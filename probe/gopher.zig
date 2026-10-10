@@ -1702,7 +1702,9 @@ fn leakLine(what: []const u8, v: *const disk_fat.Volume) void {
     serial.put(what);
     serial.put(": ");
     serial.putDec(v.leaked_clusters);
-    serial.put(" clusters left a counted leak (");
+    serial.put(" clusters left a counted leak, ");
+    serial.putDec(v.orphaned_parts);
+    serial.put(" long-name parts left orphaned (");
     serial.putDec(v.cleanups_failed);
     serial.put(" cleanups failed)\n");
 }

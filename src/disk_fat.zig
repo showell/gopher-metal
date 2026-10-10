@@ -334,6 +334,10 @@ pub const Volume = struct {
     /// does not know, and adds none. A judge holds what fsck.fat reclaims to
     /// it: more found than counted is a leak nobody counted.
     leaked_clusters: u64 = 0,
+    /// **LONG-NAME PARTS LEFT ORPHANED**: a part whose clearing after a
+    /// commit failed (`partLeft`). Parts a failed new entry wrote before its
+    /// short entry are not counted here.
+    orphaned_parts: u64 = 0,
     /// **THE LEDGER** (`ledger_on`): clusters the operation in
     /// progress took and has not yet ended. Every cluster `allocChain`
     /// takes ends in exactly one of four ways, each of which says how many
@@ -1762,9 +1766,20 @@ pub const Volume = struct {
 
         /// The entry is gone for good: its long name's parts go too.
         fn forget(u: *const Unlinked, vol: *Volume) void {
-            for (u.parts[0..u.part_count]) |pos| vol.afterCommit(vol.clearPart(pos.lba, pos.at));
+            for (u.parts[0..u.part_count]) |pos| vol.partLeft(vol.clearPart(pos.lba, pos.at));
         }
     };
+
+    /// A long-name part's clearing after a commit: its failure leaves the
+    /// part orphaned, a counted cleanup (`cleanups_failed`) and one of
+    /// `orphaned_parts`, which fsck.fat auto-deletes.
+    fn partLeft(self: *Volume, done: Error!void) void {
+        done catch {
+            self.cleanups_failed +%= 1;
+            self.orphaned_parts +|= 1;
+            props.reachable(@src(), "fat: a long-name part could not be cleared after a commit, and is left orphaned", .{ .count = self.orphaned_parts });
+        };
+    }
 
     /// One long-name part marked deleted, where the walk found it.
     fn clearPart(self: *Volume, lba: u32, at: u32) Error!void {
@@ -1854,7 +1869,7 @@ pub const Volume = struct {
                     // 2. the long-name parts, each where the walk found it
                     // (unless held: the caller clears them once it is sure)
                     if (has_long and held == null) {
-                        for (run) |pos| self.afterCommit(self.clearPart(pos.lba, pos.at));
+                        for (run) |pos| self.partLeft(self.clearPart(pos.lba, pos.at));
                     }
 
                     // 3. and only now, the data
