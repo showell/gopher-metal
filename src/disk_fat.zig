@@ -336,7 +336,8 @@ pub const Volume = struct {
     leaked_clusters: u64 = 0,
     /// **LONG-NAME PARTS LEFT ORPHANED**: a part whose clearing after a
     /// commit failed (`partLeft`). Parts a failed new entry wrote before its
-    /// short entry are not counted here.
+    /// short entry are counted too (`writeEntry`), and one whose own write
+    /// failed among them, since it may have landed.
     orphaned_parts: u64 = 0,
     /// **THE LEDGER** (`ledger_on`): clusters the operation in
     /// progress took and has not yet ended. Every cluster `allocChain`
@@ -1968,6 +1969,17 @@ pub const Volume = struct {
             try self.writeSector(o.lba, self.scratch);
         }
 
+        // **PARTS ON THE DISK WITH NO SHORT ENTRY TO CLOSE THEM** are left
+        // orphaned when this returns an error before the short entry
+        // landed: counted (`orphaned_parts`), a part whose own write failed
+        // among them, since it may have landed. fsck.fat auto-deletes them;
+        // the next entry written into this run tombstones them first.
+        var on_disk: u32 = 0;
+        var short_entry: Landing = .before;
+        errdefer if (short_entry != .landed and on_disk > 0) {
+            self.orphaned_parts +|= on_disk;
+            props.reachable(@src(), "fat: a new entry's long-name parts are left orphaned, its short entry not written", .{ .parts = on_disk });
+        };
         var next: u32 = 0;
         var part: u32 = parts;
         while (part > 0) : (part -= 1) {
@@ -1991,6 +2003,7 @@ pub const Volume = struct {
                 e[off] = @truncate(c);
                 e[off + 1] = @truncate(c >> 8);
             }
+            on_disk += 1;
             try self.writeSector(slot.lba, self.scratch);
         }
 
@@ -2013,9 +2026,13 @@ pub const Volume = struct {
         e[31] = @truncate(size >> 24);
         const written = e.*;
         self.writeSector(slot.lba, self.scratch) catch |err| {
-            if (commit) |c| c.done(self, self.commitRefused(slot.lba, slot.at, &was, &written, c.clusters));
+            if (commit) |c| {
+                short_entry = self.commitRefused(slot.lba, slot.at, &was, &written, c.clusters);
+                c.done(self, short_entry);
+            }
             return err;
         };
+        short_entry = .landed;
         if (commit) |c| c.done(self, .landed);
     }
 
