@@ -238,7 +238,7 @@ pub fn main(init: std.process.Init.Minimal) !void {
                     const c = &table.conns[r.index];
                     if (c.queued() != 0 or c.retries != 0) std.debug.print(
                         "serve: conn {d} closed owing {d} byte(s), {d} timeout(s) since the last ack, our FIN {s}\n",
-                        .{ r.index, c.queued(), c.retries, @tagName(c.fin) },
+                        .{ r.index, c.queued(), c.retries, @tagName(c.fin.get()) },
                     );
                     answers[r.index].active = false;
                     table.release(r.index);
