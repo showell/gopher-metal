@@ -58,6 +58,15 @@ At any point in the operation, then the next boot's mount:
 And when the volume is full (`NoSpaceLeft`): a replaced or appended file is
 old; a written one is old or gone (on this machine: old).
 
+**And when a write fails** (an error, not a cut), the disk may still have
+taken it, so an error is not an undo: what is left is one of the outcomes
+above. On this machine a `replace` whose rename fails keeps the old file:
+FAT's rename reads its refused write back, and where the disk says the new
+name did not land it undoes its own unlink (metal-vmm 145), so the
+temporary is whole and removed after. Where the disk cannot say, or the
+undo fails too, the temporary's chain is a counted leak, never the old
+file.
+
 **On this machine a `write` over a file is as safe as a `replace`**
 (`fat16.writeFileIn`'s `overwrite`): the new bytes go into a chain of their
 own and one sector write moves the entry onto it, so it needs room for both

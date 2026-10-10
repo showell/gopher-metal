@@ -1710,8 +1710,31 @@ pub const Volume = struct {
     /// already given away. A name not in the directory is no error.
     fn removeEntry(self: *Volume, dir_cluster: Cluster, name: []const u8) Error!void {
         var gone: Landing = .before;
-        return self.unlinkEntry(dir_cluster, name, .free_chain, &gone);
+        return self.unlinkEntry(dir_cluster, name, .free_chain, &gone, null);
     }
+
+    /// An entry `unlinkEntry` tombstoned and kept the means to undo:
+    /// where the short entry is, the byte its tombstone replaced, and its
+    /// long name's parts, not yet cleared.
+    const Unlinked = struct {
+        lba: u32 = 0,
+        at: u32 = 0,
+        first: u8 = 0,
+        parts: [max_long_parts]Slot = undefined,
+        part_count: usize = 0,
+
+        /// The tombstone undone: the entry, long name and all, is back.
+        fn undo(u: *const Unlinked, vol: *Volume) Error!void {
+            try vol.readSector(u.lba, vol.scratch);
+            vol.scratch[u.at] = u.first;
+            try vol.writeSector(u.lba, vol.scratch);
+        }
+
+        /// The entry is gone for good: its long name's parts go too.
+        fn forget(u: *const Unlinked, vol: *Volume) void {
+            for (u.parts[0..u.part_count]) |pos| vol.afterCommit(vol.clearPart(pos.lba, pos.at));
+        }
+    };
 
     /// One long-name part marked deleted, where the walk found it.
     fn clearPart(self: *Volume, lba: u32, at: u32) Error!void {
@@ -1727,7 +1750,12 @@ pub const Volume = struct {
     /// says where it stands. Landed, the cleanup runs as after one that
     /// answered, and the error is still the caller's; unknown, the chain
     /// is left, a counted leak.
-    fn unlinkEntry(self: *Volume, dir_cluster: Cluster, name: []const u8, then: enum { free_chain, keep_chain }, gone: *Landing) Error!void {
+    ///
+    /// **`held` KEEPS THE LONG NAME** (`rename`, metal-vmm 145): its parts
+    /// are left as they are and their places handed back, with the short
+    /// entry's place and first byte, so a rename whose new entry does not
+    /// land can undo the tombstone and leave `from` whole.
+    fn unlinkEntry(self: *Volume, dir_cluster: Cluster, name: []const u8, then: enum { free_chain, keep_chain }, gone: *Landing, held: ?*Unlinked) Error!void {
         const Pos = struct { lba: u32, at: u32 };
         var walk = try Walk.start(self, dir_cluster);
         // Where the open run's parts sit, to mark each deleted with its
@@ -1779,6 +1807,10 @@ pub const Volume = struct {
                     // commit. What follows is cleanup, whose failure leaves
                     // orphaned parts or a leaked chain, not the error.
                     const was = e.*;
+                    if (held) |h| {
+                        h.* = .{ .lba = short_lba, .at = at, .first = e[0], .part_count = if (has_long) run.len else 0 };
+                        for (run, 0..) |pos, k| h.parts[k] = .{ .lba = pos.lba, .at = pos.at };
+                    }
                     self.scratch[at] = 0xE5;
                     const written = e.*;
                     var refused: ?Error = null;
@@ -1790,7 +1822,8 @@ pub const Volume = struct {
                     gone.* = .landed;
 
                     // 2. the long-name parts, each where the walk found it
-                    if (has_long) {
+                    // (unless held: the caller clears them once it is sure)
+                    if (has_long and held == null) {
                         for (run) |pos| self.afterCommit(self.clearPart(pos.lba, pos.at));
                     }
 
@@ -2484,10 +2517,13 @@ pub const Volume = struct {
     /// When `to` does not exist, step 2 writes a new entry, and a stop
     /// before it loses `from`. Never two entries on one chain.
     ///
-    /// **A WRITE THAT FAILS LOSES WHAT A STOP WOULD, AND COUNTS IT.** Each
-    /// commit (`from`'s tombstone, `to`'s entry) is read back where it is
-    /// refused (`commitRefused`); a chain no entry points at after it is a
-    /// counted leak (`cleanups_failed`), kept for fsck.fat to recover.
+    /// **A WRITE THAT FAILS KEEPS `from` WHERE THE DISK SAYS IT CAN**
+    /// (metal-vmm 145). Each commit (`from`'s tombstone, `to`'s entry) is
+    /// read back where it is refused (`commitRefused`). Where `to`'s entry
+    /// did not land, `from`'s tombstone is undone, and its long name, not
+    /// cleared until `to` lands, is whole with it. That write can fail too:
+    /// **a failed rename may lose `from`**, its chain then a counted leak
+    /// (`cleanups_failed`) for fsck.fat to recover. A stop still loses it.
     ///
     /// An existing `to` keeps its name; a new one takes the case given; a
     /// name that differs from `from`'s only in case, or is its alias, is a
@@ -2537,21 +2573,34 @@ pub const Volume = struct {
         const per_cluster: u64 = @as(u64, self.sectors_per_cluster) * sector_size;
         const clusters: u32 = @intCast((@as(u64, src.size) + per_cluster - 1) / per_cluster);
         var gone: Landing = .before;
-        self.unlinkEntry(a.cluster, a.name, .keep_chain, &gone) catch |err| {
+        var held: Unlinked = .{};
+        self.unlinkEntry(a.cluster, a.name, .keep_chain, &gone, &held) catch |err| {
             // Unknown is counted by the read-back; landed, nothing points
             // at the chain now.
             if (gone == .landed) {
                 props.reachable(@src(), "fat: a rename's refused unlink landed, and the file's chain is left a counted leak", null);
                 self.took(clusters);
                 self.leftLeaked(clusters);
+                held.forget(self);
             }
             return err;
         };
         self.took(clusters);
         var commit: Commit = .{ .clusters = clusters };
-        errdefer if (commit.landing == .before) {
-            props.reachable(@src(), "fat: a rename's new entry did not land, and the file's chain is left a counted leak", null);
-            self.leftLeaked(clusters);
+        // **A RENAME THAT DID NOT LAND KEEPS `from`** (metal-vmm 145): the
+        // new entry refused and read back as it was, the tombstone is
+        // undone and `from` is whole, its chain its own again. That write
+        // can fail too, and then `from` is lost, its chain a counted leak.
+        errdefer switch (commit.landing) {
+            .before => if (held.undo(self)) {
+                props.reachable(@src(), "fat: a rename's new entry did not land, and from is kept", null);
+                self.ended(clusters);
+            } else |_| {
+                props.reachable(@src(), "fat: a rename's new entry did not land, nor its undo, and the file's chain is left a counted leak", null);
+                self.leftLeaked(clusters);
+                held.forget(self);
+            },
+            .landed, .unknown => held.forget(self),
         };
 
         if (dst) |d| {
@@ -2576,12 +2625,14 @@ pub const Volume = struct {
                 return err;
             };
             commit.done(self, .landed);
+            held.forget(self);
             if (d.first_cluster >= 2) self.afterCommit(self.freeChain(d.first_cluster));
             return;
         }
 
         const r = room.?;
         try self.writeEntry(r.run, if (needsLongName(b.name)) b.name else b.name[0..0], r.short, 0x20, src.first_cluster, src.size, &commit);
+        held.forget(self);
     }
 
     /// Deletes one file (`removeEntry`).

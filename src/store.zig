@@ -20,7 +20,7 @@
 //! disk can take a write it refuses. What it leaves is one of the outcomes
 //! the table names for a power cut, so a `remove` that failed may have
 //! removed (a retry answers `NotFound`), and a `replace` that failed may be
-//! wholly new. A caller that must know reads back.
+//! wholly new, never neither. A caller that must know reads back.
 //!
 //! **NAMES** (`checkPath`). A path is parts between `/`; empty parts are
 //! ignored, so `data//x` and `data/x/` are `data/x`. A part is 1 to

@@ -2486,3 +2486,41 @@ test "an append onto a chain longer than its size fills that tail first, and lin
         try d.expectFile("data/LOG", &whole);
     }
 }
+
+test "a rename whose write fails, the disk refusing it whole, keeps the file under one of its names (metal-vmm 145)" {
+    // A plain failure is read back as not landed: before the new entry
+    // lands, the old one's tombstone is undone, long name and all.
+    for (both) |cached| {
+        const d = try Disk.make("rename-keeps", test_disk.small, cached);
+        defer d.deinit();
+        var body: [1500]u8 = undefined;
+        _ = pattern(&body, 7);
+        try d.vol.writeFile("data/a long old name.txt", &body);
+        const before = try testing.allocator.dupe(u8, d.bytes);
+        defer testing.allocator.free(before);
+        try d.mount(cached);
+        const r0 = d.blk.requests;
+        try d.vol.rename("data/a long old name.txt", "data/a new long name.md");
+        const total = d.blk.requests - r0;
+        var n: u64 = 0;
+        while (n < total) : (n += 1) {
+            @memcpy(d.bytes, before);
+            try d.mount(cached);
+            d.blk.fault = .{ .at = d.blk.requests + n, .kind = .fails };
+            const failed = if (d.vol.rename("data/a long old name.txt", "data/a new long name.md")) false else |_| true;
+            d.blk.fault = null;
+            if (!failed) continue;
+            try d.mount(cached);
+            const old = d.read("data/a long old name.txt") catch null;
+            defer if (old) |o| testing.allocator.free(o);
+            const new = d.read("data/a new long name.md") catch null;
+            defer if (new) |o| testing.allocator.free(o);
+            const kept = if (old) |o| std.mem.eql(u8, o, &body) else false;
+            const moved = if (new) |o| std.mem.eql(u8, o, &body) else false;
+            if (!kept and !moved) {
+                std.debug.print("rename failing at request {d} of {d} ({s}): the file is under neither name\n", .{ n, total, if (cached) "FAT held" else "FAT on disk" });
+                return error.TestUnexpectedResult;
+            }
+        }
+    }
+}
