@@ -371,7 +371,7 @@ fn sendCut(b: *Bench) !void {
     _ = try store.stat(mio, x, "data/chat/1_2/sessions/1.md");
     _ = try store.read(mio, x, "data/chat/1_2/sessions/1.count", lim);
     _ = try store.append(mio, x, "data/chat/1_2/sessions/1.md", "**Person 1** said: a message of some ordinary length\n\n");
-    try store.write(mio, x, "data/chat/1_2/sessions/1.count", "21 1574\n1520 1", .{});
+    try store.write(mio, x, "data/chat/1_2/sessions/1.count", "21 1574\n1520 1\n", .{});
     _ = try store.read(mio, x, "data/chat/users/1/last-sessions/1_2", lim);
     _ = try store.read(mio, x, "data/chat/users/1/last-conv", lim);
 }
