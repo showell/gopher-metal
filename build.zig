@@ -11,6 +11,27 @@ const assets = @import("gen/assets.zig");
 /// because a kernel that has not enabled it faults on the first xmm register
 /// the compiler reaches for -- and it reaches for them in memcpy unless told
 /// not to.
+/// A kernel's root module: bare metal, no red zone, and **ONE THREAD, AND
+/// THERE WILL NOT BE ANOTHER.** A freestanding target is not single-threaded
+/// by default, so without it std keeps the threaded lowerings (real atomic
+/// instructions, thread-local storage) for a machine that has one core, no
+/// preemption and no scheduler. Saying so is what entitles src/io.zig to
+/// stub the whole concurrency family. The built kernels and `check`'s
+/// type-checked ones are made here, so the two cannot drift.
+fn kernelModule(b: *std.Build, root: std.Build.LazyPath, optimize: std.builtin.OptimizeMode, imports: []const std.Build.Module.Import) *std.Build.Module {
+    return b.createModule(.{
+        .root_source_file = root,
+        .target = bareTarget(b),
+        .optimize = optimize,
+        .sanitize_c = .off,
+        .pic = false,
+        .code_model = .kernel,
+        .red_zone = false,
+        .single_threaded = true,
+        .imports = imports,
+    });
+}
+
 fn bareTarget(b: *std.Build) std.Build.ResolvedTarget {
     return b.resolveTargetQuery(.{
         .cpu_arch = .x86_64,
@@ -97,29 +118,10 @@ pub fn build(b: *std.Build) void {
     for (kernels) |k| {
         const probe_opts = b.addOptions();
         probe_opts.addOption(bool, "cache_fat", k.cache_fat);
-        const exe = b.addExecutable(.{
-            .name = k.name,
-            .root_module = b.createModule(.{
-                .root_source_file = b.path(k.root),
-                .target = bareTarget(b),
-                .optimize = optimize,
-                .sanitize_c = .off,
-                .pic = false,
-                .code_model = .kernel,
-                .red_zone = false,
-                // **THERE IS ONE THREAD AND THERE WILL NOT BE ANOTHER.** A
-                // freestanding target is not single-threaded by default, so
-                // without this std keeps the threaded lowerings -- real atomic
-                // instructions, thread-local storage -- for a machine that has
-                // one core, no preemption and no scheduler. Saying so is what
-                // entitles src/io.zig to stub the whole concurrency family.
-                .single_threaded = true,
-                .imports = &.{
-                    .{ .name = "metal", .module = metal },
-                    .{ .name = "probe_options", .module = probe_opts.createModule() },
-                },
-            }),
-        });
+        const exe = b.addExecutable(.{ .name = k.name, .root_module = kernelModule(b, b.path(k.root), optimize, &.{
+            .{ .name = "metal", .module = metal },
+            .{ .name = "probe_options", .module = probe_opts.createModule() },
+        }) });
         exe.use_llvm = true;
         exe.setLinkerScript(b.path("probe/link.ld"));
         exe.entry = .{ .symbol_name = "_start" };
@@ -183,24 +185,12 @@ pub fn build(b: *std.Build) void {
             .root_source_file = .{ .cwd_relative = b.fmt("{s}/zig-server/{s}", .{ gopher_root, a.path }) },
         });
     }
-    const gopher = b.addExecutable(.{
-        .name = "gopher.elf",
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("probe/gopher.zig"),
-            .target = bareTarget(b),
-            .optimize = optimize,
-            .sanitize_c = .off,
-            .pic = false,
-            .code_model = .kernel,
-            .red_zone = false,
-            .single_threaded = true,
-            .imports = &.{
-                .{ .name = "metal", .module = metal },
-                .{ .name = "router.zig", .module = app },
-                .{ .name = "gm_build", .module = gm_opts.createModule() },
-            },
-        }),
-    });
+    const gopher_imports = [_]std.Build.Module.Import{
+        .{ .name = "metal", .module = metal },
+        .{ .name = "router.zig", .module = app },
+        .{ .name = "gm_build", .module = gm_opts.createModule() },
+    };
+    const gopher = b.addExecutable(.{ .name = "gopher.elf", .root_module = kernelModule(b, b.path("probe/gopher.zig"), optimize, &gopher_imports) });
     // Zig's own x86 backend, which Debug would otherwise pick, cannot yet
     // assemble this kernel's AT&T or its soft-float.
     gopher.use_llvm = true;
@@ -209,6 +199,32 @@ pub fn build(b: *std.Build) void {
     const gopher_copy = b.addUpdateSourceFiles();
     gopher_copy.addCopyFileToSource(gopher.getEmittedBin(), "probe/gopher.elf");
     b.step("gopher", "the real server, once port.sh has prepared it").dependOn(&gopher_copy.step);
+
+    // **EVERY KERNEL TYPE-CHECKED, ON EVERY `zig build test`** (metal-vmm
+    // B34): a field renamed in src/ broke gopher.elf (b4463a9) and native
+    // (140's Fin) with every unit test green, since no test compiles a
+    // kernel. Debug, and no binary asked for, so nothing is generated: only
+    // analysis. gopher.elf needs angry-gopher's port (port.sh); without one
+    // it is not checked, and the step says so rather than pass in silence.
+    const check_step = b.step("check", "type-check every kernel, native and droplet (part of `test`)");
+    for (kernels) |k| {
+        const probe_opts = b.addOptions();
+        probe_opts.addOption(bool, "cache_fat", k.cache_fat);
+        const exe = b.addExecutable(.{ .name = k.name, .root_module = kernelModule(b, b.path(k.root), .Debug, &.{
+            .{ .name = "metal", .module = metal },
+            .{ .name = "probe_options", .module = probe_opts.createModule() },
+        }) });
+        check_step.dependOn(&exe.step);
+    }
+    var port_code: u8 = 0;
+    if (b.runAllowFail(&.{ "test", "-f", b.fmt("{s}/router.zig", .{gopher_port}) }, &port_code, .ignore)) |_| {
+        const exe = b.addExecutable(.{ .name = "gopher.elf", .root_module = kernelModule(b, b.path("probe/gopher.zig"), .Debug, &gopher_imports) });
+        check_step.dependOn(&exe.step);
+    } else |_| {
+        const say = b.addSystemCommand(&.{ "echo", b.fmt("check: gopher.elf NOT type-checked: no port at {s} (port.sh makes one; GOPHER_PORT=<dir> ./port.sh and -Dgopher=<dir> for another place)", .{gopher_port}) });
+        say.has_side_effects = true;
+        check_step.dependOn(&say.step);
+    }
 
     b.getInstallStep().dependOn(&copy.step);
 
@@ -245,12 +261,15 @@ pub fn build(b: *std.Build) void {
         }),
     });
     b.step("droplet", "the disk-image builder for a droplet").dependOn(&b.addInstallArtifact(image, .{}).step);
+    check_step.dependOn(&serve.step);
+    check_step.dependOn(&image.step);
 
     // **HOST TESTS** for the parts of src/ that are pure — no ports, no
     // virtqueues — and so can run here rather than in a guest. Every mode a
     // device can report in is a way to be silently wrong, and those modes are
     // cheaper to enumerate on the host than to provoke in QEMU.
     const test_step = b.step("test", "host unit tests for the pure parts of src/");
+    test_step.dependOn(check_step);
     // **`zig fmt --check src` IS PART OF THE TESTS**, so src/ stays the way
     // the formatter writes it. It was let slip once (three files, QUEUE.md
     // item 10), and a separate step nobody runs would let it slip again.
