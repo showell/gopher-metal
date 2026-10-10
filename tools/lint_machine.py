@@ -3,9 +3,9 @@
 item 140). Zig has no private fields, so this is the guard. Run by
 `zig build test`.
 
-    tools/lint_machine.py [src]
+    tools/lint_machine.py [repo]
 
-Outside src/machine.zig it refuses:
+In src/, probe/ and native/, outside src/machine.zig, it refuses:
 - an assignment to `machine_state`, the state's field;
 - `startingAt(`, a machine made at a given state, outside a `test` block;
 - an assignment to a field whose type is a machine (`fin: FinMachine`),
@@ -19,14 +19,17 @@ import re
 import sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-SRC = sys.argv[1] if len(sys.argv) > 1 else os.path.join(os.path.dirname(HERE), "src")
+ROOT = sys.argv[1] if len(sys.argv) > 1 else os.path.dirname(HERE)
+DIRS = ["src", "probe", "native"]
 
 
 def zig_files():
-    for d, _, names in os.walk(SRC):
-        for n in sorted(names):
-            if n.endswith(".zig") and n != "machine.zig":
-                yield os.path.join(d, n)
+    for top in DIRS:
+        for d, _, names in os.walk(os.path.join(ROOT, top)):
+            for n in sorted(names):
+                path = os.path.join(d, n)
+                if n.endswith(".zig") and os.path.relpath(path, ROOT) != os.path.join("src", "machine.zig"):
+                    yield path
 
 
 def strip_comment(line):
@@ -70,7 +73,7 @@ def main():
     refusals = []
     for path, lines in files.items():
         tests = test_lines(lines)
-        rel = os.path.relpath(path, os.path.dirname(SRC))
+        rel = os.path.relpath(path, ROOT)
         for i, line in enumerate(lines):
             code = strip_comment(line)
             if re.search(r"\bmachine_state\s*=[^=>]", code):
@@ -87,7 +90,7 @@ def main():
     for r in refusals:
         print(r)
     if not machines:
-        print("lint_machine: no machine found in src; is the declaration's form one this lint reads?")
+        print("lint_machine: no machine found; is the declaration's form one this lint reads?")
         return 1
     return 1 if refusals else 0
 
