@@ -181,10 +181,13 @@ def run_tests():
     """(outcome, seconds, tail of the output)."""
     began = time.time()
     try:
-        p = subprocess.run(["zig", "build", "test"], cwd=ROOT, text=True, timeout=TIMEOUT_S,
+        # -Dcheck=false: a mutant is judged by the tests, not by whether
+        # every kernel still type-checks (metal-vmm 146(b)).
+        p = subprocess.run(["zig", "build", "test", "-Dcheck=false"], cwd=ROOT, text=True, timeout=TIMEOUT_S,
                            stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
     except subprocess.TimeoutExpired:
-        return "killed (timeout)", time.time() - began, ""
+        # Not a kill: a test that hangs proves nothing about the mutant.
+        return "timed out", time.time() - began, ""
     out = p.stdout
     took = time.time() - began
     if p.returncode == 0:
@@ -252,12 +255,14 @@ def main(argv):
     survived = [r for r in results if r[1] == "SURVIVED"]
     stale = [r for r in results if r[1] == "out of date"]
     broken = [r for r in results if r[1] == "did not compile"]
-    killed = [r for r in results if r[1].startswith("killed")]
+    killed = [r for r in results if r[1] == "killed"]
+    hung = [r for r in results if r[1] == "timed out"]
     print(f"\n{len(killed)} killed, {len(survived)} survived, {len(broken)} did not compile, "
-          f"{len(stale)} out of date, of {len(results)}")
+          f"{len(hung)} timed out, {len(stale)} out of date, of {len(results)}")
     for name, _, what in survived:
         print(f"  SURVIVED {name}: {what}. No test checks this.")
-    return 1 if survived or stale else 0
+    # A mutant that did not compile or timed out judged nothing: the run fails.
+    return 1 if survived or stale or broken or hung else 0
 
 
 if __name__ == "__main__":

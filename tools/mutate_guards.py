@@ -28,6 +28,7 @@ Not part of gates.sh: a mutant rebuilds the host tests from nothing, fat16's
 in ReleaseSafe, a minute or two each. Exit 0 when every mutant is killed.
 """
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -192,7 +193,7 @@ def run(mutants) -> int:
     if dirty:
         print(f"mutate_guards: uncommitted changes in a file it would touch; commit or stash them first:\n{dirty}")
         return 2
-    counts = {"killed": 0, "SURVIVED": 0, "did not compile": 0, "STALE": 0}
+    counts = {"killed": 0, "SURVIVED": 0, "did not compile": 0, "timed out": 0, "STALE": 0}
     try:
         for file, name, old, new in mutants:
             p = os.path.join(ROOT, path_of(file))
@@ -202,25 +203,36 @@ def run(mutants) -> int:
             else:
                 open(p, "w").write(text.replace(old, new))
                 cache = tempfile.mkdtemp(prefix="mutate-guards-")
+                r = None
                 try:
-                    r = subprocess.run(["zig", "build", "test", "--cache-dir", cache], cwd=ROOT,
+                    # -Dcheck=false: judged by the tests, not by whether every
+                    # kernel still type-checks (metal-vmm 146(b)).
+                    r = subprocess.run(["zig", "build", "test", "-Dcheck=false", "--cache-dir", cache], cwd=ROOT,
                                        capture_output=True, text=True, timeout=1800)
+                except subprocess.TimeoutExpired:
+                    pass
                 finally:
                     subprocess.run(["git", "checkout", "--", path_of(file)], cwd=ROOT, check=True)
                     shutil.rmtree(cache, ignore_errors=True)
-                out = r.stdout + r.stderr
-                if r.returncode == 0:
-                    verdict = "SURVIVED"
-                elif "failed:" in out or "failed without output" in out or "terminated with signal" in out or "panic" in out:
-                    verdict = "killed"
+                if r is None:
+                    verdict = "timed out"
                 else:
-                    verdict = "did not compile"
+                    out = r.stdout + r.stderr
+                    # A compile error names a file, line and column; a test's
+                    # panic message may say "panic" or "error" too.
+                    if r.returncode == 0:
+                        verdict = "SURVIVED"
+                    elif re.search(r"\.zig:\d+:\d+: error:", out) and "compile" in out and not ("failed:" in out or "terminated with signal" in out):
+                        verdict = "did not compile"
+                    else:
+                        verdict = "killed"
             counts[verdict] += 1
             print(f"{verdict:16} {file}:{name}", flush=True)
     finally:
         subprocess.run(["git", "checkout", "--", *map(path_of, files)], cwd=ROOT)
     print("mutate_guards: " + ", ".join(f"{n} {k}" for k, n in counts.items()))
-    return 0 if counts["SURVIVED"] == 0 and counts["STALE"] == 0 else 1
+    # A mutant that did not compile or timed out judged nothing: the run fails.
+    return 0 if all(counts[k] == 0 for k in ("SURVIVED", "STALE", "did not compile", "timed out")) else 1
 
 
 def main(argv) -> int:

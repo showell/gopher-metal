@@ -287,19 +287,28 @@ pub fn build(b: *std.Build) void {
     // device can report in is a way to be silently wrong, and those modes are
     // cheaper to enumerate on the host than to provoke in QEMU.
     const test_step = b.step("test", "host unit tests for the pure parts of src/");
-    test_step.dependOn(check_step);
-    // **`zig fmt --check src` IS PART OF THE TESTS**, so src/ stays the way
-    // the formatter writes it. It was let slip once (three files, QUEUE.md
-    // item 10), and a separate step nobody runs would let it slip again.
-    test_step.dependOn(&b.addFmt(.{ .paths = &.{"src"}, .check = true }).step);
-    // **ONLY `fire` CHANGES A MACHINE'S STATE** (src/machine.zig): Zig has
-    // no private fields, so tools/lint_machine.py is the guard.
-    const lint_machine = b.addSystemCommand(&.{ "python3", "tools/lint_machine.py" });
-    lint_machine.has_side_effects = true;
-    test_step.dependOn(&lint_machine.step);
     // One file's tests in seconds, while working on it: the whole step takes
     // minutes. A name that matches none of the files is an error.
     const test_file = b.option([]const u8, "test-file", "run only this file's unit tests (src/io_test.zig)");
+    // **THE WHOLE-TREE CHECKS ARE THE WHOLE STEP'S** (metal-vmm 146(b),(c)):
+    // every kernel analyzed, the formatter and the machine lint. One file's
+    // run (-Dtest-file) skips them, so it is seconds again; -Dcheck=false
+    // skips the kernels, for the mutation tools, which judge a mutant by the
+    // tests and rebuild every one from nothing.
+    const with_check = b.option(bool, "check", "zig build test analyzes every kernel too (default; -Dcheck=false for mutation runs)") orelse true;
+    if (test_file == null) {
+        if (with_check) test_step.dependOn(check_step);
+        // **`zig fmt --check src` IS PART OF THE TESTS**, so src/ stays the
+        // way the formatter writes it. It was let slip once (three files,
+        // QUEUE.md item 10), and a separate step nobody runs would let it
+        // slip again.
+        test_step.dependOn(&b.addFmt(.{ .paths = &.{"src"}, .check = true }).step);
+        // **ONLY `fire` CHANGES A MACHINE'S STATE** (src/machine.zig): Zig
+        // has no private fields, so tools/lint_machine.py is the guard.
+        const lint_machine = b.addSystemCommand(&.{ "python3", "tools/lint_machine.py" });
+        lint_machine.has_side_effects = true;
+        test_step.dependOn(&lint_machine.step);
+    }
     var test_file_found = test_file == null;
     // **WHICH LINES OF tcp.zig ITS UNIT TESTS RUN** (`zig build tcp-coverage`):
     // tcp_test.zig at every start below, each run once under
