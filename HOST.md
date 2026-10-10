@@ -55,40 +55,24 @@ and a slow handler is a bug on metal already.
 application never flushes; the host flushes at the one moment that matters,
 before the first byte of a response, and a failed flush is logged and the
 response still goes. On Linux the same promise is an `fsync` of what the
-request wrote. *(Built on angry-gopher's `request-door` branch, for v21.)*
+request wrote.
 
 ## Limits: one source of truth *(Steve, 2026-10-07)*
 
-Today the same limit is written in several places:
+**Each limit is defined once, in angry-gopher**, where the application that
+depends on it lives (`zig-server/src/limits.zig`, which the router exports),
+and every other place either reads it or is checked against it:
 
-| limit | written in | today |
+| limit | defined | read or checked by |
 |---|---|---|
-| a request's head | Linux `server.zig` (`read_buf`), metal `probe/gopher.zig` (`read_buf`) | 16 KiB each, by copy |
-| an ordinary body | Caddy (`request_body`), the app's per-route caps (`http.readLimitedBody`) | 1 MB at Caddy; per route in the app |
-| an upload | Caddy, `chat_upload.zig`'s kinds | 110 MB at Caddy; 10 MiB images, 100 MiB video |
-| a name, a path, a depth | angry-gopher `store.zig`, metal `disk_fat.zig` and `io.zig` | 96, 256, 16 (checked: `tools/check_limits.py`) |
+| a request's head (16 KiB) | `limits.zig` | both hosts size their head buffers from it (`router.request_limits.head_bytes`); metal asserts at compile time that a connection's receive buffer holds one |
+| an ordinary body, per route | `limits.zig` | every route's `http.readLimitedBody`; Caddy's `request_body`, held to it by `tools/check_caddy_limits.py` in `ops/check_zig` |
+| an upload (10 MiB images, 100 MiB video) | `chat_upload.zig`'s kinds | Caddy, by the same script |
+| a name, a path, a depth (96, 256, 16) | angry-gopher `store.zig` | metal's `disk_fat.zig` and `io.zig`, by `tools/check_limits.py` (the FAT driver needs them at compile time and can't import angry-gopher) |
 
-**Done (2026-10-07):** angry-gopher's `zig-server/src/limits.zig` holds them,
-every route reads its cap from it, both hosts size the head buffer from it
-(`router.request_limits.head_bytes`; metal also asserts at compile time that
-a connection's receive buffer holds a head), and `tools/check_caddy_limits.py`
-in `ops/check_zig` holds the Caddyfile to it. It found Caddy's ordinary cap at
-1,000,000 bytes where a document may be 1,048,576 (fixed in the repo; prod's
-Caddy needs a reload).
-
-**The rule:** each limit is defined once, in angry-gopher, where the
-application that depends on it lives (a `limits.zig` the router exports), and
-every other place either reads it or is checked against it:
-
-- **Both hosts read it.** `server.zig` and `probe/gopher.zig` size their head
-  buffers from it, so the two can't drift.
-- **Caddy is checked against it.** A script reads `deploy/Caddyfile` and fails
-  if Caddy's caps are below the application's (then a request the app allows
-  is refused at the door) or far above them (then Caddy passes what the app
-  refuses, which is harmless but means one of them is stale).
-- **The store's limits stay where they are**, in `store.zig`, checked against
-  metal's by `tools/check_limits.py`, because `fat16` needs them at compile
-  time and can't import angry-gopher.
+The Caddy check fails if Caddy's caps are below the application's (a request
+the app allows would be refused at the door) or far above them (harmless,
+but one of the two is stale).
 
 ## Live streams
 
@@ -105,10 +89,8 @@ contract, as `bus.zig` has it and both hosts serve it:
 runs", 300 runs, slow readers included so the overflow is met): a reader
 sees exactly its key's events since it opened, in order, nothing skipped,
 and ends with `EventsMissed` if and only if its mailbox was full when an
-event arrived. Writing it found the one difference: Linux's `serveKept`
-carried on past an overflow with a hole in the conversation, where metal's
-`nextFrame` ends the stream and the browser resumes; Linux now ends it too
-(2026-10-07).
+event arrived. On both hosts an overflow ends the stream, and the browser
+resumes.
 
 ## The clock and random bytes
 
@@ -125,11 +107,21 @@ A value by name, typed when read. A malformed value stops the boot; **so
 does a file that exists but can't be read** (Steve, 2026-10-07: halting is
 right; B21). A missing file is the defaults.
 
-## What's owed, in order
+## Idle time *(Steve, 2026-10-10; metal only, for now)*
 
-1. ~~One handler at a time on Linux; the application's locks deleted; a
-   small body read before the turn~~ (done: angry-gopher `master`, and the
-   locks' removal on `request-door` for v21).
-2. ~~`limits.zig`~~ (done).
-3. ~~Durability on Linux~~ (on `request-door`, v21).
-4. ~~The Bus simulator~~ (done).
+**Work that is not time-critical runs when the machine is quiet**, a step at
+a time, under a request's rules: a step is bounded (200 ms), and a request
+that arrives meanwhile waits for at most one step. Metal's loop gives the
+next task a step when it would otherwise rest and nothing has arrived for
+200 ms (`src/idle.zig`); `/admin/host` says the steps, the overruns, and each
+task's state.
+
+- **Today it is the host's alone:** the one task is each volume's check,
+  asked again while the machine serves (`src/idle_check.zig`), reading and
+  writing nothing else. A write under a check starts it again.
+- **Not yet in the contract:** the application cannot queue a task, and
+  Linux runs none. When the application has one (search's index, built
+  lazily), the router declares it as it declares a kept stream, and Linux
+  runs it under the same turn when no request waits.
+- **A task that writes** would need the fault testing a request gets; the
+  first tasks only read.
