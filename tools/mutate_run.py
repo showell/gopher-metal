@@ -23,11 +23,26 @@ import signal
 import subprocess
 import time
 
-# A test that failed or panicked, as zig's test runner names it.
-TEST_FAILED = re.compile(r"error: '[^']+' (failed|terminated with signal (ABRT|SEGV|TRAP|BUS|ILL|FPE))")
+# A test that failed, panicked or logged an error, as zig's test runner
+# names it.
+TEST_FAILED = re.compile(r"error: '.+' (failed|logged \d+ errors|terminated with signal (ABRT|SEGV|TRAP|BUS|ILL|FPE))")
 # A test binary's summary with a failure counted in it.
-TEST_COUNTED = re.compile(r"run test \S+ .*\b\d+ (fail|crash|leak)")
+TEST_COUNTED = re.compile(r"run test \S+ .*\b\d+ (fail|crash|leak|error log)")
+# A process killed from outside, as out of memory: zig counts a test binary
+# killed so as a crash, and the test judged nothing.
+KILLED_FROM_OUTSIDE = re.compile(r"terminated with signal KILL")
 COMPILE_ERROR = re.compile(r"\.zig:\d+:\d+: error:")
+
+
+def _raise_exit(signum, _frame):
+    raise SystemExit(128 + signum)
+
+
+# **A HANG-UP OR A TERM IS AN INTERRUPT**: the build runs in its own process
+# group, out of the terminal's, so it would outlive the tool; raised, it is
+# killed by `build` and the tools' `finally` puts the mutated file back.
+for _sig in (signal.SIGTERM, signal.SIGHUP):
+    signal.signal(_sig, _raise_exit)
 
 
 def build(args, cwd, timeout_s):
@@ -64,6 +79,8 @@ def verdict(code, out):
     # built the mutant at all.
     if COMPILE_ERROR.search(out):
         return "did not compile"
+    if KILLED_FROM_OUTSIDE.search(out):
+        return "unclassified"
     if TEST_FAILED.search(out) or TEST_COUNTED.search(out):
         return "killed"
     return "unclassified"

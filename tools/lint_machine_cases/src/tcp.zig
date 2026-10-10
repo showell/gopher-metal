@@ -22,3 +22,13 @@ test "a test may build a case" {
     var c: Conn = .{};
     c.fin = FinMachine.startingAt(.x);
 }
+fn throughPointers(c: *Conn) void {
+    const e = &c.fins[0];
+    e.* = .{}; // refused
+    const t: *[2]FinMachine = &c.fins;
+    t[0] = .{}; // refused
+}
+fn notAMachine(ev: FinMachine.Event) void {
+    var other = ev;
+    other = ev;
+}

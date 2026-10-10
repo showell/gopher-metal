@@ -89,7 +89,7 @@ def main():
         more = set()
         for lines in files.values():
             for line in lines:
-                m = re.match(r"\s*(?:pub\s+)?const\s+(\w+)\s*=\s*(?:\w+\.)*(\w+)\s*;", strip_comment(line))
+                m = re.match(r"\s*(?:pub\s+)?const\s+(\w+)\s*=\s*(?:@import\(\"[^\"]*\"\)\.|\w+\.)*(\w+)\s*;", strip_comment(line))
                 if m and m.group(2) in machines and m.group(1) not in machines:
                     more.add(m.group(1))
         if not more:
@@ -97,19 +97,26 @@ def main():
         machines |= more
     fields = set()
     pointers = set()
-    for lines in files.values():
+    # The names each file declares of a machine's type: a bare `fin =` is
+    # judged only where `fin` is one (147's review: `var fin = false;` in
+    # another file is no machine).
+    declared_in = {path: set() for path in files}
+    for path, lines in files.items():
         for line in lines:
             for name in machines:
                 # A field or a variable of the machine's type, however
                 # wrapped: `fin: FinMachine`, `x: ?tcp.FinMachine`,
                 # `all: [4]FinMachine`. A pointer to one is a pointer: a
                 # write through it (`p.* =`) chooses a state too.
-                for m in re.finditer(r"\b(\w+)\s*:\s*([^=;,(){}]*?)\b(?:\w+\.)?" + name + r"\b", strip_comment(line)):
+                # Not `FinMachine.Event`, a type the machine declares.
+                for m in re.finditer(r"\b(\w+)\s*:\s*([^=;,(){}]*?)\b(?:\w+\.)?" + name + r"\b(?!\s*\.)", strip_comment(line)):
                     (pointers if "*" in m.group(2) else fields).add(m.group(1))
+                    if "*" not in m.group(2):
+                        declared_in[path].add(m.group(1))
     # A pointer taken with no type written: `var x = &c.fin;` (146(g)'s review).
     for lines in files.values():
         for line in lines:
-            for m in re.finditer(r"\b(?:var|const)\s+(\w+)\s*=\s*&[\w.\[\]]*\.(\w+)\s*;", strip_comment(line)):
+            for m in re.finditer(r"\b(?:var|const)\s+(\w+)\s*=\s*&[\w.\[\]]*\.(\w+)(?:\[[^\]]*\])?\s*;", strip_comment(line)):
                 if m.group(2) in fields:
                     pointers.add(m.group(1))
 
@@ -133,11 +140,11 @@ def main():
                     refusals.append(f"{rel}:{i + 1}: the machine field `{f}` replaced; fire an event instead")
                 # A local, bare: `fins[1] =` or `fin =`; not its declaration
                 # (`var fin: T = ...`, `const fin = ...`).
-                elif (re.search(r"(?:^|[^.\w])" + f + r"(?:\[[^\]]*\])?\s*=(?:[^=>]|$)", code)
+                elif (f in declared_in[path] and re.search(r"(?:^|[^.\w])" + f + r"(?:\[[^\]]*\])?\s*=(?:[^=>]|$)", code)
                       and not re.search(r"\b(?:var|const)\s+" + f + r"\b", code)):
                     refusals.append(f"{rel}:{i + 1}: the machine `{f}` replaced; fire an event instead")
             for p in pointers:
-                if re.search(r"\b" + p + r"\.\*\s*=(?:[^=>]|$)", code):
+                if re.search(r"\b" + p + r"(?:\.\*|\[[^\]]*\])\s*=(?:[^=>]|$)", code):
                     refusals.append(f"{rel}:{i + 1}: a machine written through `{p}.*`; fire an event instead")
             # A capture by pointer of anything naming a machine field:
             # `for (&c.fins) |*m| m.* = ...`, judged in the block it opens.

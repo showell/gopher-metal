@@ -30,7 +30,6 @@ Not part of gates.sh: a mutant rebuilds the host tests from nothing, fat16's
 in ReleaseSafe, a minute or two each. Exit 0 when every mutant is killed.
 """
 import os
-import re
 import shutil
 import subprocess
 import sys
