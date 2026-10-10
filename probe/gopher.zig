@@ -561,6 +561,15 @@ pub fn kmain() noreturn {
             serial.put(" chat session(s)\n");
         }
     }
+    // **IDLE TIME** (src/idle.zig, essay idle-time-on-metal): each volume's
+    // check, asked again while the machine serves, a slice per quiet moment.
+    for ([_]?*disk_fat.Volume{ Io.siteVolume(), Io.dataVolume() }, 0..) |maybe, k| {
+        const vol = maybe orelse continue;
+        const seen = pages.allocator.alloc(u8, vol.checkBytes()) catch
+            serial.fail("the machine has not enough memory for a volume's idle check");
+        volume_checks[k] = .{ .vol = vol, .seen = seen };
+        idle_work.add(volume_checks[k].?.init(volume_check_names[k])) catch unreachable;
+    }
     const scratch_heap = pages.allocator.alloc(u8, stream_scratch_bytes) catch
         serial.fail("the machine has not enough memory for its streams' scratch");
     stream_scratch = std.heap.FixedBufferAllocator.init(scratch_heap);
@@ -611,9 +620,11 @@ pub fn kmain() noreturn {
         busiest = @max(busiest, open_now);
         const arrived = stream.pump(&wire, &table, lease.address);
         const now = Io.awakeNs() orelse 0;
+        if (arrived != null) idle_work.busy(now);
         if (nextReady(&table)) |pick| {
             served += 1;
             serveOne(io, &wire, &table, pick, lease.address, request_heap.allocator(), &hub, served, conf.idle_ns, conf.streams);
+            idle_work.busy(Io.awakeNs() orelse now);
         } else if (quiet(&table, now, conf.idle_ns)) |pick| {
             served += 1;
             letGo(&wire, &table, pick, served);
@@ -624,6 +635,8 @@ pub fn kmain() noreturn {
                 serial.drain(console_budget);
                 continue;
             }
+            // Then idle work, a step, once nothing has arrived for a while.
+            if (idle_work.turn(now, awakeNow)) continue;
             if (arrived == null) interrupts.rest();
             continue;
         }
@@ -1655,6 +1668,34 @@ fn metalLog(io: Io, alloc: std.mem.Allocator) anyerror!?[]const u8 {
 /// **WHAT THIS MACHINE SAYS ABOUT ITSELF**, for /admin/host: what a Linux
 /// host reads from /proc, read here from this machine's own counters, clocks
 /// and volumes.
+/// **IDLE TIME** (src/idle.zig): the work queued for quiet moments, and a
+/// check of each volume in it, the boot disk's first.
+var idle_work: metal.idle.Idle = .{};
+var volume_checks: [2]?metal.idle_check.VolumeCheck = .{ null, null };
+const volume_check_names = [2][]const u8{ "the boot disk's check", "the volume's check" };
+
+fn awakeNow() i96 {
+    return Io.awakeNs() orelse 0;
+}
+
+/// A volume's idle check, as /admin/host says it.
+fn checkFact(alloc: std.mem.Allocator, c: *const metal.idle_check.VolumeCheck) ![]const u8 {
+    const hs = router.host_status;
+    const last = if (c.last) |l| blk: {
+        const ago: i64 = @intCast(@divFloor(awakeNow() - l.at, std.time.ns_per_s));
+        const damage = if (l.tally.first) |f|
+            try std.fmt.allocPrint(alloc, "{d} damaged, the first {s} at cluster {d}", .{ l.tally.damage, @tagName(f.problem), f.cluster })
+        else
+            "no damage";
+        break :blk try std.fmt.allocPrint(alloc, "last finished {s} ago: {d} files, {d} folders, {s}, {d} clusters leaked, {d} problems in all", .{
+            try hs.duration(alloc, ago), l.health.files, l.health.directories, damage, l.health.leaked, l.health.problems,
+        });
+    } else "not finished yet";
+    return std.fmt.allocPrint(alloc, "{s}; {d} finished, {d} started again (a write under it), {d} ended by a read that failed; {d} steps, the longest {d} ms", .{
+        last, c.finished, c.restarts, c.failed, c.task.steps, c.task.longest_ns / std.time.ns_per_ms,
+    });
+}
+
 fn metalFacts(io: Io, alloc: std.mem.Allocator) anyerror![]const router.host_status.Fact {
     const hs = router.host_status;
     var facts: std.ArrayList(hs.Fact) = .empty;
@@ -1693,6 +1734,12 @@ fn metalFacts(io: Io, alloc: std.mem.Allocator) anyerror![]const router.host_sta
             pc.count, pc.held >> 20, pc.budget >> 20, pc.largest >> 10, pc.hits, pc.misses, pc.evicted,
         });
     } else try add(&facts, alloc, "data files in memory", "none (page_cache_mib = 0)", .{});
+    try add(&facts, alloc, "idle time", "{d} steps in quiet moments, {d} over the {d} ms budget", .{
+        idle_work.steps, idle_work.overruns, idle_work.budget_ns / std.time.ns_per_ms,
+    });
+    for (&volume_checks, volume_check_names) |*maybe, name| {
+        if (maybe.*) |*c| try facts.append(alloc, .{ .label = name, .value = try checkFact(alloc, c) });
+    }
     const work = diskWork();
     try add(&facts, alloc, "disk requests", "{d}, busy {d} ms in all", .{ work.requests, @divTrunc(Io.ticksToNs(work.ticks), std.time.ns_per_ms) });
     try add(&facts, alloc, "NMIs", "{d}", .{interrupts.nmis});

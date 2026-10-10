@@ -677,6 +677,56 @@ test "the check finds a file whose size and chain disagree" {
     }
 }
 
+test "the check a slice at a time finds what the whole check finds, and starts again when the volume changes (idle time)" {
+    for (configs) |cfg| {
+        const shape, const cached = .{ cfg.shape, cfg.cached };
+        const d = try Disk.make("damaged-check-run", shape, cached);
+        defer d.deinit();
+        var data: [1500]u8 = undefined;
+        try d.vol.writeFile("a", pattern(&data, 3));
+        try d.vol.writeFile("b", pattern(&data, 4));
+        try d.vol.writeFile("short", "x" ** 1000);
+        var chain: [8]disk_fat.Cluster = undefined;
+        const a = chainOf(d, (try d.vol.open("a")).first_cluster, &chain)[0..3].*;
+        const b = chainOf(d, (try d.vol.open("b")).first_cluster, &chain)[0..3].*;
+        try damageFat(d, cached, a[2], b[1]); // crossed, and a long
+        setEntry(d, try d.vol.open("short"), .size, 5000); // short
+        try d.mount(cached);
+        const whole = try d.check();
+        var damage: u32 = 0;
+        for (whole.found[0..whole.len]) |f| {
+            if (f.problem.damage()) damage += 1;
+        }
+        try testing.expect(damage >= 2);
+
+        const seen = try testing.allocator.alloc(u8, d.vol.checkBytes());
+        defer testing.allocator.free(seen);
+        var run: disk_fat.Volume.CheckRun = .{};
+        try run.begin(&d.vol, seen);
+        var steps: u32 = 0;
+        while (true) {
+            steps += 1;
+            switch (try run.step(1)) {
+                .more => continue,
+                .done => break,
+                .changed => return error.TestUnexpectedResult,
+            }
+        }
+        // The walk, then a step a run of the FAT: more than one slice.
+        try testing.expect(steps >= 2 + (d.vol.sectors_per_fat - 1) / 64);
+        try testing.expectEqual(whole.health, run.health());
+        try testing.expectEqual(damage, run.tally.damage);
+        try testing.expect(run.tally.first != null);
+
+        // A write between two steps: the run says so and stops.
+        try run.begin(&d.vol, seen);
+        try testing.expectEqual(disk_fat.Volume.CheckRun.Step.more, try run.step(1));
+        try d.vol.writeFile("new", "y");
+        try testing.expectEqual(disk_fat.Volume.CheckRun.Step.changed, try run.step(1));
+        try testing.expectEqual(disk_fat.Volume.CheckRun.Step.done, try run.step(1));
+    }
+}
+
 test "the check finds FAT copies that differ" {
     for (configs) |cfg| {
         const shape, const cached = .{ cfg.shape, cfg.cached };

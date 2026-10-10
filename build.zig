@@ -252,8 +252,9 @@ pub fn build(b: *std.Build) void {
     var port_code: u8 = 0;
     // **ONLY A PORT OF THE CHECKOUT AS IT IS NOW** (metal-vmm 146(a)): the
     // asset list is the port's, the files the checkout's, so a stale port
-    // fails here for no fault of this repo's. tools/verdicts.py says, as
-    // gates.sh asks it.
+    // would fail the build for no fault of this repo's. tools/verdicts.py
+    // says whether it is fresh, as gates.sh asks it, and a port not fresh
+    // fails the check.
     const port_state: []const u8 = blk: {
         const out = b.runAllowFail(&.{ "env", b.fmt("GOPHER_PORT={s}", .{gopher_port}), b.fmt("GOPHER_ROOT={s}", .{gopher_root}), "python3", b.pathFromRoot("tools/verdicts.py"), "fresh" }, &port_code, .ignore) catch break :blk "tools/verdicts.py could not be run";
         break :blk std.mem.trim(u8, out, " \t\r\n");
@@ -262,9 +263,11 @@ pub fn build(b: *std.Build) void {
         const exe = b.addExecutable(.{ .name = "gopher.elf", .root_module = kernelModule(b, b.path("probe/gopher.zig"), .Debug, &gopher_imports) });
         check_step.dependOn(&exe.step);
     } else {
-        const say = b.addSystemCommand(&.{ "echo", b.fmt("check: gopher.elf NOT type-checked: {s} (port {s}, checkout {s}; -Dgopher=<dir> and -Dgopher-root=<dir> for others)", .{ port_state, gopher_port, gopher_root }) });
-        say.has_side_effects = true;
-        check_step.dependOn(&say.step);
+        // **A KERNEL NOT CHECKED FAILS THE CHECK** (Steve, 2026-10-10: fail,
+        // never warn). It printed and passed; a stale port then hid a kernel
+        // that did not build (48a167f).
+        const fail = b.addFail(b.fmt("check: gopher.elf NOT type-checked: {s} (port {s}, checkout {s}): run ./port.sh, or -Dgopher=<dir> and -Dgopher-root=<dir> for others", .{ port_state, gopher_port, gopher_root }));
+        check_step.dependOn(&fail.step);
     }
 
     b.getInstallStep().dependOn(&copy.step);
@@ -355,7 +358,7 @@ pub fn build(b: *std.Build) void {
     // QUEUE 142): one compile of the runner, std and the shared imports,
     // and each file's tests run once, not in every binary that imports it.
     // This list is the authority; unit_tests.zig must import exactly it.
-    const unit_files = [_][]const u8{ "src/rtc.zig", "src/pit.zig", "src/stack.zig", "src/civil.zig", "src/disk_fat.zig", "src/disk_fat_dirent.zig", "src/machine.zig", "src/seq.zig", "src/ring_pieces.zig", "src/pvh.zig", "src/pages.zig", "src/tcp.zig", "src/tcp_check.zig", "src/tcp_sim.zig", "src/fat_sim.zig", "src/page_sim.zig", "src/pure_sim.zig", "src/ready_sim.zig", "src/durable_sim.zig", "src/durable.zig", "src/scsi_mode.zig", "src/floor_sim.zig", "src/store.zig", "src/store_model.zig", "src/store_test.zig", "src/store_linux.zig", "src/store_sim.zig", "src/scratch_dir.zig", "src/io_test.zig", "src/log_ring.zig", "src/restart.zig", "src/kept_log.zig", "src/ready.zig", "src/request_heap.zig", "src/page_cache.zig", "src/admin_reset.zig", "src/dhcp.zig", "src/screen.zig", "src/serial_gate.zig", "src/net.zig" };
+    const unit_files = [_][]const u8{ "src/rtc.zig", "src/pit.zig", "src/stack.zig", "src/civil.zig", "src/disk_fat.zig", "src/disk_fat_dirent.zig", "src/machine.zig", "src/seq.zig", "src/ring_pieces.zig", "src/pvh.zig", "src/pages.zig", "src/tcp.zig", "src/tcp_check.zig", "src/tcp_sim.zig", "src/fat_sim.zig", "src/page_sim.zig", "src/pure_sim.zig", "src/ready_sim.zig", "src/durable_sim.zig", "src/durable.zig", "src/scsi_mode.zig", "src/floor_sim.zig", "src/store.zig", "src/store_model.zig", "src/store_test.zig", "src/store_linux.zig", "src/store_sim.zig", "src/scratch_dir.zig", "src/io_test.zig", "src/log_ring.zig", "src/restart.zig", "src/kept_log.zig", "src/ready.zig", "src/request_heap.zig", "src/page_cache.zig", "src/admin_reset.zig", "src/dhcp.zig", "src/screen.zig", "src/serial_gate.zig", "src/net.zig", "src/idle.zig", "src/idle_check.zig" };
     comptime {
         @setEvalBranchQuota(1_000_000);
         const root = @embedFile("src/unit_tests.zig");
