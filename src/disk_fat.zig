@@ -1790,7 +1790,8 @@ pub const Volume = struct {
     /// **`held` KEEPS THE LONG NAME** (`rename`, metal-vmm 145): its parts
     /// are left as they are and their places handed back, with the short
     /// entry's place and first byte, so a rename whose new entry does not
-    /// land can undo the tombstone and leave `from` whole.
+    /// land, or whose refused tombstone landed, can undo the tombstone and
+    /// leave `from` whole (`undoUnlink`).
     fn unlinkEntry(self: *Volume, dir_cluster: Cluster, name: []const u8, then: enum { free_chain, keep_chain }, gone: *Landing, held: ?*Unlinked) Error!void {
         const Pos = struct { lba: u32, at: u32 };
         var walk = try Walk.start(self, dir_cluster);

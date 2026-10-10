@@ -308,6 +308,10 @@ pub fn build(b: *std.Build) void {
         const lint_machine = b.addSystemCommand(&.{ "python3", "tools/lint_machine.py" });
         lint_machine.has_side_effects = true;
         test_step.dependOn(&lint_machine.step);
+        // And its own cases: each write it must refuse, refused (147(f)).
+        const lint_cases = b.addSystemCommand(&.{ "python3", "tools/lint_machine.py", "--self-test" });
+        lint_cases.has_side_effects = true;
+        test_step.dependOn(&lint_cases.step);
     }
     var test_file_found = test_file == null;
     // **WHICH LINES OF tcp.zig ITS UNIT TESTS RUN** (`zig build tcp-coverage`):

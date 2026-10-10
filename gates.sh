@@ -42,6 +42,12 @@ t=$SECONDS
 lap() { echo "time: $1 $((SECONDS - t)) s"; t=$SECONDS; }
 
 GOPHER_ROOT="${GOPHER_ROOT:-$HOME/showell_repos/angry-gopher}"
+GOPHER_PORT="${GOPHER_PORT:-$HOME/build/gopher-metal/port}"
+export GOPHER_ROOT GOPHER_PORT
+# **ONE CHECKOUT, ONE PORT, FOR EVERY JUDGE** (metal-vmm 147(d)): verdicts.py
+# reads them from the environment, build.zig from its options, whose defaults
+# are the same places only while neither is set elsewhere.
+ZIG_GOPHER=(-Dgopher="$GOPHER_PORT" -Dgopher-root="$GOPHER_ROOT")
 # **WHICH CODE THIS RUN JUDGES** (tools/verdicts.py): both commits, printed,
 # and a port that is not angry-gopher's HEAD refused. A full run keeps its
 # verdict for exactly this pair, which droplet/chat.py requires.
@@ -57,13 +63,15 @@ mkdir -p "$VERDICTS"
 python3 tools/check_limits.py "$GOPHER_ROOT/zig-server/src" || failed+=(limits)
 # The whole summary is kept: each test binary's time is in it, and this step
 # is the gates' longest.
-zig build test --summary all > "$VERDICTS/test-summary.txt" 2>&1
+zig build test "${ZIG_GOPHER[@]}" --summary all > "$VERDICTS/test-summary.txt" 2>&1
 [ $? = 0 ] || failed+=(test)
-grep -E "tests passed|error" "$VERDICTS/test-summary.txt"
+# The check's "NOT type-checked" line too: gopher.elf skipped is said here,
+# not only in the summary file (147(d)).
+grep -E "tests passed|error|NOT type-checked" "$VERDICTS/test-summary.txt"
 lap "zig build test"
-zig build kernels 2>&1 | grep error
+zig build kernels "${ZIG_GOPHER[@]}" 2>&1 | grep error
 [ "${PIPESTATUS[0]}" = 0 ] || failed+=(kernels)
-zig build gopher 2>&1 | grep error
+zig build gopher "${ZIG_GOPHER[@]}" 2>&1 | grep error
 [ "${PIPESTATUS[0]}" = 0 ] || failed+=(gopher-build)
 lap "kernels and gopher.elf"
 
