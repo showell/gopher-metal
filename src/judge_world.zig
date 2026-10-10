@@ -7,3 +7,4 @@ pub const test_disk = @import("test_disk.zig");
 pub const disk_fat = @import("disk_fat.zig");
 pub const store = @import("store.zig");
 pub const store_model = @import("store_model.zig");
+pub const page_cache = @import("page_cache.zig");

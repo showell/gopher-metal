@@ -751,6 +751,9 @@ pub const Block = struct {
     fail_after_writes: ?u64 = null,
     /// Writes served, on a disk in memory.
     writes: u64 = 0,
+    /// **EACH REQUEST, TOLD** (metal-vmm 151): a host bench's way to see
+    /// what a disk in memory is asked, by kind and place. Memory disks only.
+    observe: ?Observe = null,
     /// A host test's lie, told once, at request number `at` (counted as
     /// `requests` counts) on a disk in memory (QUEUE.md item 80).
     fault: ?Fault = null,
@@ -773,6 +776,11 @@ pub const Block = struct {
         context: *anyopaque,
         wrote: *const fn (context: *anyopaque, lba: u64, bytes: []const u8) void,
         flushed: *const fn (context: *anyopaque) void,
+    };
+
+    pub const Observe = struct {
+        context: *anyopaque,
+        each: *const fn (context: *anyopaque, write: bool, lba: u64, sectors: u32) void,
     };
 
     pub const Fault = struct {
@@ -826,6 +834,7 @@ pub const Block = struct {
         if (self.fail_after_writes) |n| if (self.writes >= n) return blk_s_ioerr;
         const number = self.requests;
         self.requests +%= 1;
+        if (self.observe) |o| o.each(o.context, kind != blk_t_in, lba, len / 512);
         if (kind != blk_t_in) {
             self.writes +%= 1;
             self.unflushed = true;

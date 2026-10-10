@@ -434,6 +434,25 @@ pub fn build(b: *std.Build) void {
     });
     b.step("store-judge", "angry-gopher's store on Linux and on metal against the model (needs ../angry-gopher and a port)").dependOn(&b.addRunArtifact(store_judge).step);
 
+    // **WHAT EACH STORE CALL COSTS THE DISK** (src/store_cost.zig, metal-vmm
+    // 151): angry-gopher's store over io.zig, the disk requests of each call
+    // and of four common requests, by kind and place. A bench, not a gate.
+    const store_cost = b.addTest(.{
+        .name = "store-cost",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/store_cost.zig"),
+            .target = b.graph.host,
+            .imports = &.{
+                .{ .name = "judge_world", .module = judge_world },
+                .{ .name = "ag_store_metal", .module = b.createModule(.{
+                    .root_source_file = .{ .cwd_relative = b.fmt("{s}/store.zig", .{gopher_port}) },
+                    .imports = &.{.{ .name = "metal", .module = judge_world }},
+                }) },
+            },
+        }),
+    });
+    b.step("store-cost", "the disk requests each store call and four common requests make (needs a port)").dependOn(&b.addRunArtifact(store_cost).step);
+
     // **THE SEED EXPLORER AGAINST BLIND SEEDS** (src/explore_bench.zig): a
     // tool, not a gate (Steve, 2026-10-07). ReleaseSafe by default: it is
     // nearly all running.
