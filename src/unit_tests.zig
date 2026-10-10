@@ -19,6 +19,7 @@ test {
     _ = @import("disk_fat_dirent.zig");
     _ = @import("machine.zig");
     _ = @import("seq.zig");
+    _ = @import("ring_pieces.zig");
     _ = @import("pvh.zig");
     _ = @import("pages.zig");
     _ = @import("tcp.zig");

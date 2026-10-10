@@ -7,6 +7,7 @@ const std = @import("std");
 const port = @import("port.zig");
 const screen = @import("screen.zig");
 const log_ring = @import("log_ring.zig");
+const ring_pieces = @import("ring_pieces.zig");
 const restart = @import("restart.zig");
 const serial_gate = @import("serial_gate.zig");
 pub const outb = port.outb;
@@ -64,11 +65,11 @@ pub var ring: log_ring.Ring linksection(".data") = .{ .buf = &ring_bytes };
 
 pub fn put(bytes: []const u8) void {
     ring.write(bytes);
-    if (deferred and pend_len + bytes.len <= pend.len) {
-        for (bytes) |b| {
-            pend[(pend_at + pend_len) % pend.len] = b;
-            pend_len += 1;
-        }
+    if (deferred and pending() + bytes.len <= pend.len) {
+        const p = ring_pieces.pieces(pend.len, pend_written, bytes.len);
+        @memcpy(p[0].into(&pend), bytes[0..p[0].len]);
+        @memcpy(p[1].into(&pend), bytes[p[0].len..]);
+        pend_written += bytes.len;
         return;
     }
     // Not deferring, or the backlog is full: what waits goes first, so the
@@ -94,31 +95,32 @@ pub var deferred: bool = false;
 /// The most the console may fall behind before `put` writes out directly.
 pub const backlog = 256 * 1024;
 var pend: [backlog]u8 = undefined;
-var pend_at: usize = 0;
-var pend_len: usize = 0;
+/// **TWO POSITIONS THAT ONLY COUNT UP** (metal-vmm B36): bytes ever put in
+/// the backlog, and ever drained out of it. What waits is the difference,
+/// and where it lies is `ring_pieces.pieces`.
+var pend_written: u64 = 0;
+var pend_drained: u64 = 0;
 
 /// Bytes waiting for the screen and the port.
 pub fn pending() usize {
-    return pend_len;
+    return @intCast(pend_written - pend_drained);
 }
 
 /// Writes at most `budget` waiting bytes to the screen and the port.
 pub fn drain(budget: usize) void {
-    var left = @min(budget, pend_len);
-    while (left > 0) {
-        const run = @min(left, pend.len - pend_at);
-        const chunk = pend[pend_at .. pend_at + run];
+    const n = @min(budget, pending());
+    for (ring_pieces.pieces(pend.len, pend_drained, n)) |piece| {
+        const chunk = piece.of(&pend);
+        if (chunk.len == 0) continue;
         screen.put(chunk);
         putPort(chunk);
-        pend_at = (pend_at + run) % pend.len;
-        pend_len -= run;
-        left -= run;
+        pend_drained += chunk.len;
     }
 }
 
 /// Writes every waiting byte.
 pub fn flushPending() void {
-    drain(pend_len);
+    drain(pending());
 }
 
 /// Stops deferring, and writes what waits: before anything that must be seen

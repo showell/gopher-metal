@@ -57,8 +57,10 @@ const Header = extern struct {
     }
 
     fn valid(h: Header) bool {
+        // The head is the count modulo the slot, always (metal-vmm B36): a
+        // header that says otherwise is not one this machine wrote.
         return h.magic == magic and h.check == h.sum() and h.head < slot_bytes and
-            (h.total >= slot_bytes or h.head == h.total);
+            h.head == h.total % slot_bytes;
     }
 };
 
@@ -97,7 +99,7 @@ pub const Kept = struct {
     /// Writes this boot's header from `ring`, which writes into `bytes()`:
     /// the next boot will find this log. Called on the way to a restart.
     pub fn seal(k: *const Kept, ring: *const log_ring.Ring) void {
-        var h = Header{ .magic = magic, .boot = k.boot, .head = ring.head, .total = ring.total, .check = 0 };
+        var h = Header{ .magic = magic, .boot = k.boot, .head = ring.next(), .total = ring.total, .check = 0 };
         h.check = h.sum();
         headerAt(k.region, k.slot).* = h;
     }
@@ -132,7 +134,7 @@ pub fn open(region: []u8) Kept {
     }
     const previous: ?Previous = if (best) |b| blk: {
         const h = headerAt(region, b).*;
-        break :blk .{ .boot = h.boot, .ring = .{ .buf = slotBytes(region, b), .head = @intCast(h.head), .total = h.total } };
+        break :blk .{ .boot = h.boot, .ring = .{ .buf = slotBytes(region, b), .total = h.total } };
     } else null;
     const slot: u1 = if (best) |b| ~b else 0;
     if (best == null) props.reachable(@src(), "kept log: no boot before this one is found", null);
@@ -251,6 +253,13 @@ test "a header that does not check is no log: its checksum, its head, its count"
     // own bound refuses it, and reading it would run past the slot.
     h.head = slot_bytes;
     h.total = slot_bytes;
+    h.check = h.sum();
+    try testing.expectEqual(@as(?Previous, null), open(r).previous);
+    h.* = good;
+    // A ring that has wrapped, its head not where its count puts it
+    // (metal-vmm B36): the head is always the count modulo the slot.
+    h.total = slot_bytes + 7;
+    h.head = 3;
     h.check = h.sum();
     try testing.expectEqual(@as(?Previous, null), open(r).previous);
     h.* = good;

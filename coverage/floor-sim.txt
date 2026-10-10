@@ -198,7 +198,6 @@ log ring: an upload's id is taken out of its path
 log ring: bytes lost and no whole line held, so a read answers what is held
 log ring: it holds no more than its capacity
 log ring: once bytes are lost, a read starts at the first whole line
-log ring: the next byte's place is inside the ring
 log ring: the rest of a cookie or authorization line is taken out
 
 # FAT's refusals named in item 76: fat_sim, and floor_sim's damaged volumes.

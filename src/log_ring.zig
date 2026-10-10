@@ -33,6 +33,7 @@
 
 const std = @import("std");
 const props = @import("coverage");
+const ring_pieces = @import("ring_pieces.zig");
 
 comptime {
     props.catalogFile(@import("coverage_catalog"), here());
@@ -64,9 +65,9 @@ test "the request log keeps the path and drops the query, secret or not" {
 /// while the buffer lives in `.bss` (see `serial.ring`).
 pub const Ring = struct {
     buf: []u8,
-    /// Where the next byte goes.
-    head: usize = 0,
-    /// Bytes ever stored. Past `buf.len`, the oldest are gone.
+    /// Bytes ever stored, and so where the next goes (`next`). Past
+    /// `buf.len`, the oldest are gone. **THE ONE POSITION** (metal-vmm B36):
+    /// a head kept beside it could disagree with it, and nothing checked.
     total: u64 = 0,
     redactor: Redactor = .{},
 
@@ -79,14 +80,17 @@ pub const Ring = struct {
     pub fn write(self: *Ring, bytes: []const u8) void {
         for (bytes) |b| self.redactor.feed(b, self, store);
         // Once a write, not once a byte: this is the kernel's logging path.
-        props.alwaysLessThan(@src(), self.head, self.buf.len, "log ring: the next byte's place is inside the ring", null);
         props.alwaysLessThanOrEqualTo(@src(), self.len(), self.buf.len, "log ring: it holds no more than its capacity", null);
     }
 
     fn store(self: *Ring, b: u8) void {
-        self.buf[self.head] = b;
-        self.head = (self.head + 1) % self.buf.len;
+        self.buf[self.next()] = b;
         self.total += 1;
+    }
+
+    /// Where the next byte goes.
+    pub fn next(self: *const Ring) usize {
+        return @intCast(self.total % self.buf.len);
     }
 
     /// How many bytes are held.
@@ -101,8 +105,8 @@ pub const Ring = struct {
 
     /// What is held, oldest first, as at most two pieces of the ring.
     pub fn parts(self: *const Ring) [2][]const u8 {
-        if (self.total < self.buf.len) return .{ self.buf[0..self.head], self.buf[0..0] };
-        return .{ self.buf[self.head..], self.buf[0..self.head] };
+        const p = ring_pieces.pieces(self.buf.len, self.total - self.len(), self.len());
+        return .{ p[0].of(self.buf), p[1].of(self.buf) };
     }
 
     /// What is held, oldest first, copied into `out`: everything, unless
@@ -279,6 +283,37 @@ fn joined(r: anytype, out: []u8) []u8 {
     @memcpy(out[0..p[0].len], p[0]);
     @memcpy(out[p[0].len..][0..p[1].len], p[1]);
     return out[0 .. p[0].len + p[1].len];
+}
+
+test "the ring against a plain model, over random writes (metal-vmm B36): it holds the last cap bytes written, in order" {
+    // Bytes no key in the redactor can match: digits and newlines.
+    var prng = std.Random.DefaultPrng.init(36);
+    const r = prng.random();
+    var cap: usize = 1;
+    while (cap <= 9) : (cap += 1) {
+        var round: usize = 0;
+        while (round < 50) : (round += 1) {
+            var store: [9]u8 = undefined;
+            var ring = Ring.init(store[0..cap]);
+            var model: std.ArrayList(u8) = .empty;
+            defer model.deinit(testing.allocator);
+            var writes: usize = 0;
+            while (writes < 30) : (writes += 1) {
+                var bytes: [12]u8 = undefined;
+                const n = r.uintAtMost(usize, bytes.len);
+                for (bytes[0..n]) |*c| c.* = if (r.uintLessThan(u8, 5) == 0) '\n' else '0' + r.uintLessThan(u8, 10);
+                ring.write(bytes[0..n]);
+                try model.appendSlice(testing.allocator, bytes[0..n]);
+                const kept = model.items[model.items.len - @min(model.items.len, cap) ..];
+                const p = ring.parts();
+                try testing.expectEqual(kept.len, p[0].len + p[1].len);
+                try testing.expectEqualStrings(kept[0..p[0].len], p[0]);
+                try testing.expectEqualStrings(kept[p[0].len..], p[1]);
+                try testing.expectEqual(@as(u64, model.items.len), ring.total);
+                try testing.expectEqual(@as(u64, model.items.len - kept.len), ring.lost());
+            }
+        }
+    }
 }
 
 test "what is written is read back, oldest first" {
