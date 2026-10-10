@@ -1540,6 +1540,12 @@ pub const Volume = struct {
     /// too. The cost is a counter per cluster taken and a compare per
     /// operation. Off in ReleaseFast and ReleaseSmall, which this repo does
     /// not build.
+    ///
+    /// **IN THE SERVED KERNEL IT JUDGES NOTHING** (147): an unbalanced
+    /// operation breaks a site, and outside `-Dcoverage` `on_broken` is
+    /// null and the sink unset, so the break is a counter no one reads. It
+    /// is a check in the tests, coverage builds and sweeps, not in
+    /// production.
     const ledger_on = std.debug.runtime_safety;
 
     /// Clusters `allocChain` took.
@@ -2533,6 +2539,25 @@ pub const Volume = struct {
         return .{ .cluster = dir.first_cluster, .name = trimmed[at + 1 ..] };
     }
 
+    /// **A RENAME'S UNLINK UNDONE**, its chain (`clusters`, taken) ended
+    /// where the undo lands, so `from` is whole again; refused and read back
+    /// as before, a counted leak, its long name cleared. Unknown is counted
+    /// by the read-back, and the long name stays, as the entry may be live.
+    fn undoUnlink(self: *Volume, held: *const Unlinked, clusters: u32) void {
+        switch (held.undo(self, clusters)) {
+            .landed => {
+                props.reachable(@src(), "fat: a rename's unlink is undone, and from is kept", null);
+                self.ended(clusters);
+            },
+            .before => {
+                props.reachable(@src(), "fat: a rename's undo did not land, and the file's chain is left a counted leak", null);
+                self.leftLeaked(clusters);
+                held.forget(self);
+            },
+            .unknown => props.reachable(@src(), "fat: a rename's undo cannot be read back, and the file's chain is left a counted leak", null),
+        }
+    }
+
     /// **RENAMES A FILE WITHIN ITS DIRECTORY, OVER ANY FILE OF THE NEW NAME**:
     /// how a file is replaced with no moment when neither old nor new is
     /// there (write the new under another name, rename it over the old).
@@ -2551,8 +2576,9 @@ pub const Volume = struct {
     /// **A WRITE THAT FAILS KEEPS `from` WHERE THE DISK SAYS IT CAN**
     /// (metal-vmm 145). Each commit (`from`'s tombstone, `to`'s entry) is
     /// read back where it is refused (`commitRefused`). Where `to`'s entry
-    /// did not land, `from`'s tombstone is undone, and its long name, not
-    /// cleared until `to` lands, is whole with it. That write can fail too:
+    /// did not land, or `from`'s tombstone landed though refused (147(g)),
+    /// the tombstone is undone, and its long name, not cleared until `to`
+    /// lands, is whole with it (`undoUnlink`). That write can fail too:
     /// **a failed rename may lose `from`**, its chain then a counted leak
     /// (`cleanups_failed`) for fsck.fat to recover. A stop still loses it.
     ///
@@ -2606,13 +2632,13 @@ pub const Volume = struct {
         var gone: Landing = .before;
         var held: Unlinked = .{};
         self.unlinkEntry(a.cluster, a.name, .keep_chain, &gone, &held) catch |err| {
-            // Unknown is counted by the read-back; landed, nothing points
-            // at the chain now.
+            // Unknown is counted by the read-back. **A REFUSED TOMBSTONE
+            // THAT LANDED IS UNDONE** (147(g)): nothing else is written
+            // yet, so the same undo keeps `from`, where the disk lets it.
             if (gone == .landed) {
-                props.reachable(@src(), "fat: a rename's refused unlink landed, and the file's chain is left a counted leak", null);
+                props.reachable(@src(), "fat: a rename's refused unlink landed, and is undone", null);
                 self.took(clusters);
-                self.leftLeaked(clusters);
-                held.forget(self);
+                self.undoUnlink(&held, clusters);
             }
             return err;
         };
@@ -2631,20 +2657,7 @@ pub const Volume = struct {
         // undone and `from` is whole, its chain its own again. That write
         // can fail too, and then `from` is lost, its chain a counted leak.
         errdefer switch (commit.landing) {
-            .before => switch (held.undo(self, clusters)) {
-                .landed => {
-                    props.reachable(@src(), "fat: a rename's new entry did not land, and from is kept", null);
-                    self.ended(clusters);
-                },
-                .before => {
-                    props.reachable(@src(), "fat: a rename's new entry did not land, nor its undo, and the file's chain is left a counted leak", null);
-                    self.leftLeaked(clusters);
-                    held.forget(self);
-                },
-                // Counted by the read-back; the entry may be live, so its
-                // long name stays.
-                .unknown => props.reachable(@src(), "fat: a rename's undo cannot be read back, and the file's chain is left a counted leak", null),
-            },
+            .before => self.undoUnlink(&held, clusters),
             .landed, .unknown => held.forget(self),
         };
 

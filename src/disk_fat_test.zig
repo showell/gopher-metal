@@ -2487,9 +2487,12 @@ test "an append onto a chain longer than its size fills that tail first, and lin
     }
 }
 
-test "a rename whose write fails, the disk refusing it whole, keeps the file under one of its names (metal-vmm 145)" {
-    // A plain failure is read back as not landed: before the new entry
-    // lands, the old one's tombstone is undone, long name and all.
+test "a rename whose write fails, refused whole or landed, keeps the file under exactly one of its names (metal-vmm 145, 147(c,g))" {
+    // One write fails, at each request in turn and of each kind. Every
+    // refused commit is read back: a new entry that did not land has the
+    // tombstone undone, long name and all; a tombstone that landed though
+    // refused is undone the same way. So one fault never loses the file,
+    // nor leaves it under both names, and the volume checks clean.
     for (both) |cached| {
         const d = try Disk.make("rename-keeps", test_disk.small, cached);
         defer d.deinit();
@@ -2502,30 +2505,40 @@ test "a rename whose write fails, the disk refusing it whole, keeps the file und
         const r0 = d.blk.requests;
         try d.vol.rename("data/a long old name.txt", "data/a new long name.md");
         const total = d.blk.requests - r0;
-        var n: u64 = 0;
-        while (n < total) : (n += 1) {
-            @memcpy(d.bytes, before);
-            try d.mount(cached);
-            d.blk.fault = .{ .at = d.blk.requests + n, .kind = .fails };
-            const failed = if (d.vol.rename("data/a long old name.txt", "data/a new long name.md")) false else |_| true;
-            d.blk.fault = null;
-            if (!failed) continue;
-            try d.mount(cached);
-            const old = d.read("data/a long old name.txt") catch null;
-            defer if (old) |o| testing.allocator.free(o);
-            const new = d.read("data/a new long name.md") catch null;
-            defer if (new) |o| testing.allocator.free(o);
-            const kept = if (old) |o| std.mem.eql(u8, o, &body) else false;
-            const moved = if (new) |o| std.mem.eql(u8, o, &body) else false;
-            if (!kept and !moved) {
-                std.debug.print("rename failing at request {d} of {d} ({s}): the file is under neither name\n", .{ n, total, if (cached) "FAT held" else "FAT on disk" });
-                return error.TestUnexpectedResult;
+        for ([_]@TypeOf(@as(@import("virtio.zig").Block.Fault, undefined).kind){ .fails, .lands_and_fails }) |kind| {
+            var failures: u32 = 0;
+            var n: u64 = 0;
+            while (n < total) : (n += 1) {
+                @memcpy(d.bytes, before);
+                try d.mount(cached);
+                d.blk.fault = .{ .at = d.blk.requests + n, .kind = kind };
+                const failed = if (d.vol.rename("data/a long old name.txt", "data/a new long name.md")) false else |_| true;
+                d.blk.fault = null;
+                if (!failed) continue;
+                failures += 1;
+                try d.mount(cached);
+                const old = d.read("data/a long old name.txt") catch null;
+                defer if (old) |o| testing.allocator.free(o);
+                const new = d.read("data/a new long name.md") catch null;
+                defer if (new) |o| testing.allocator.free(o);
+                const names: u32 = @as(u32, @intFromBool(old != null)) + @intFromBool(new != null);
+                if (names != 1) {
+                    std.debug.print("rename failing ({t}) at request {d} of {d} ({s}): the file is under {d} names\n", .{ kind, n, total, if (cached) "FAT held" else "FAT on disk", names });
+                    return error.TestUnexpectedResult;
+                }
+                if (old) |o| try testing.expectEqualSlices(u8, &body, o);
+                if (new) |o| try testing.expectEqualSlices(u8, &body, o);
+                const r = try d.check();
+                try testing.expectEqual(@as(u32, 1), r.health.files);
+                try testing.expect(r.health.clean());
             }
+            // The premise: faults were injected, and renames failed.
+            try testing.expect(failures > 0);
         }
     }
 }
 
-test "a rename whose undo is refused too keeps exactly one file, under one whole name, and counts what it cannot tell (145's review)" {
+test "a rename whose undo is refused too keeps the file under one whole name, or loses it and counts it, never under two (145's review, 147(c))" {
     // The new entry's write fails; then the undo's write fails, whole or
     // after landing. Read back, a landed undo keeps from, long name and all;
     // nothing may leave a file the check sees under neither name.
@@ -2541,6 +2554,8 @@ test "a rename whose undo is refused too keeps exactly one file, under one whole
         const r0 = d.blk.requests;
         try d.vol.rename("data/a long old name.txt", "data/a new long name.md");
         const total = d.blk.requests - r0;
+        var lost: u32 = 0;
+        var kept_whole: u32 = 0;
         var n: u64 = 0;
         while (n < total) : (n += 1) {
             for ([_]@TypeOf(@as(@import("virtio.zig").Block.Fault, undefined).kind){ .fails, .lands_and_fails }) |second| {
@@ -2568,13 +2583,25 @@ test "a rename whose undo is refused too keeps exactly one file, under one whole
                         std.debug.print("rename failing at {d}, then {t} at {d} ({s}): the check sees {d} files, {d} by name\n", .{ n, second, m, if (cached) "held" else "on disk", r.health.files, names });
                         return error.TestUnexpectedResult;
                     }
+                    // Never both names; none only where the undo was
+                    // refused, and then counted (147(c)).
+                    if (names > 1 or (names == 0 and counted == 0)) {
+                        std.debug.print("rename failing at {d}, then {t} at {d} ({s}): the file is under {d} names, {d} cleanups counted\n", .{ n, second, m, if (cached) "held" else "on disk", names, counted });
+                        return error.TestUnexpectedResult;
+                    }
+                    if (counted > 0) lost += 1;
+                    if (r.health.files == 1 and counted == 0) kept_whole += 1;
                     // Whichever name reads, it reads the whole file; and with
                     // no leak counted, the volume is clean.
                     if (old) |o| try testing.expectEqualSlices(u8, &body, o);
                     if (new) |o| try testing.expectEqualSlices(u8, &body, o);
-                    if (counted == 0 and names == 1) try testing.expect(r.health.clean());
+                    if (counted == 0) try testing.expect(r.health.clean());
                 }
             }
         }
+        // The premise: both faults struck, some undos were refused and
+        // counted, and some kept the file whole.
+        try testing.expect(lost > 0);
+        try testing.expect(kept_whole > 0);
     }
 }
