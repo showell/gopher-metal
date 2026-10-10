@@ -282,6 +282,9 @@ pub const Derived = struct {
 
 pub const Volume = struct {
     blk: *virtio.Block,
+    /// **EVERY SECTOR WRITE TRIED**, landed or not: a check made a slice at a
+    /// time (`CheckRun`) starts again when this moves under it.
+    changes: u64 = 0,
 
     /// **WHERE THE DATES COME FROM**: the host's wall clock (io.zig sets it
     /// once the RTC is read). Null, or answering null, writes entries with
@@ -1194,6 +1197,7 @@ pub const Volume = struct {
     }
 
     fn writeSector(self: *Volume, lba: u32, from: *[sector_size]u8) Error!void {
+        self.changes +%= 1;
         if (self.blk.write(self.start_lba + lba, @intFromPtr(from)) != virtio.blk_s_ok) {
             if (self.dirs) |*c| c.drop(lba, 1);
             props.reachable(@src(), "fat: a sector write fails", null);
@@ -1217,6 +1221,7 @@ pub const Volume = struct {
             props.@"unreachable"(@src(), "fat: a write of more sectors than one request", null);
             return Error.TooBig;
         }
+        self.changes +%= 1;
         if (self.blk.writeMany(self.start_lba + lba, @intFromPtr(from), count) != virtio.blk_s_ok) {
             if (self.dirs) |*c| c.drop(lba, count);
             props.reachable(@src(), "fat: a run of sectors fails to write", null);
@@ -3377,6 +3382,86 @@ pub const Volume = struct {
         return c.health;
     }
 
+    /// **THE CHECK, A SLICE AT A TIME** (essay `idle-time-on-metal`): the
+    /// same walk and the same FAT pass as `check`, cut into steps for the
+    /// kernel's idle time. The tree is walked in the first step, through the
+    /// held FAT and the held directory sectors where the volume has them;
+    /// the FAT on the disk is read `runs` runs a step. It writes nothing.
+    ///
+    /// **A VOLUME THAT CHANGES UNDER IT STARTS IT AGAIN**: a write between
+    /// two steps would make the tree walked and the FAT read disagree, and
+    /// the findings would be the check's, not the volume's. So every step
+    /// first compares `Volume.changes` with what it was at the start, and
+    /// answers `changed` if it moved.
+    ///
+    /// It lives where the caller puts it (the kernel's long-lived memory),
+    /// and must not move between `begin` and its last step: the checker
+    /// points at its own tally.
+    pub const CheckRun = struct {
+        tally: Tally = .{},
+        checker: Checker(*Tally, Tally.each) = undefined,
+        phase: enum { walk, fat, done } = .done,
+        changes_at_start: u64 = 0,
+
+        /// What a run found, in counts: what `/admin/host` says.
+        pub const Tally = struct {
+            damage: u32 = 0,
+            /// The first damage found, its kind and cluster.
+            first: ?struct { problem: Problem, cluster: Cluster } = null,
+
+            fn each(t: *Tally, f: Finding) void {
+                if (!f.problem.damage()) return;
+                t.damage +|= 1;
+                if (t.first == null) t.first = .{ .problem = f.problem, .cluster = f.cluster };
+            }
+        };
+
+        pub const Step = enum { more, done, changed };
+
+        /// A run over `vol`, its marks in `seen` (`checkBytes` long), from
+        /// the start. Nothing is read until the first step.
+        pub fn begin(self: *CheckRun, vol: *Volume, seen: []u8) Error!void {
+            if (seen.len < vol.checkBytes()) return Error.TooBig;
+            self.tally = .{};
+            self.checker = .{ .vol = vol, .seen = seen[0..vol.checkBytes()], .context = &self.tally };
+            self.phase = .walk;
+            self.changes_at_start = vol.changes;
+        }
+
+        /// One step: the tree's walk, or `runs` runs of the FAT on the disk.
+        pub fn step(self: *CheckRun, runs: u32) Error!Step {
+            const c = &self.checker;
+            const v = c.vol;
+            if (self.phase == .done) return .done;
+            if (v.changes != self.changes_at_start) {
+                props.reachable(@src(), "fat: a check a slice at a time meets a volume changed under it", null);
+                self.phase = .done;
+                return .changed;
+            }
+            switch (self.phase) {
+                .walk => {
+                    @memset(c.seen, 0);
+                    const root_clusters: u32 = if (v.kind == .fat32) try c.chain(v.root_cluster, null) else 0;
+                    if (v.kind == .fat16 or root_clusters > 0) try c.directory(0, 0, root_clusters, 0);
+                    self.phase = .fat;
+                    return .more;
+                },
+                .fat => {
+                    if (!try c.fatSome(runs)) return .more;
+                    self.phase = .done;
+                    props.reachable(@src(), "fat: a check a slice at a time finishes", .{ .damage = self.tally.damage });
+                    return .done;
+                },
+                .done => unreachable,
+            }
+        }
+
+        /// What the run walked and found, as `check` answers it.
+        pub fn health(self: *const CheckRun) Health {
+            return self.checker.health;
+        }
+    };
+
     fn Checker(comptime Context: type, comptime each: fn (Context, Finding) void) type {
         return struct {
             vol: *Volume,
@@ -3389,6 +3474,15 @@ pub const Volume = struct {
             /// The path being walked, for the findings.
             path: [max_tree_depth * (max_name + 1)]u8 = undefined,
             path_len: usize = 0,
+            /// Where the FAT's pass stands (`fatSome`), between slices.
+            fat: struct {
+                base: u32 = 0,
+                differ: u32 = 0,
+                differ_at: Cluster = 0,
+                run_start: Cluster = 0,
+                run: u32 = 0,
+                free: u32 = 0,
+            } = .{},
 
             const Self = @This();
 
@@ -3584,16 +3678,25 @@ pub const Volume = struct {
             /// against what the walk held, and FSInfo's count against the
             /// free clusters. Read `run_sectors` at a time.
             fn fatOnDisk(self: *Self) Error!void {
+                while (!try self.fatSome(std.math.maxInt(u32))) {}
+            }
+
+            /// **THE FAT ON THE DISK, `runs` RUNS AT A TIME** (`run_sectors`
+            /// each, every copy read): the copies compared, and the leaks and
+            /// the free count found by the FAT the machine uses. Answers
+            /// whether it is done; where it stops is kept in `fat`, so the
+            /// next call goes on from there (`CheckRun`, a slice per idle
+            /// step; `fatOnDisk`, all at once).
+            fn fatSome(self: *Self, runs: u32) Error!bool {
                 const v = self.vol;
+                const f = &self.fat;
                 var firsts: [run_sectors * sector_size]u8 align(16) = undefined;
                 var others: [run_sectors * sector_size]u8 align(16) = undefined;
-                var differ: u32 = 0;
-                var differ_at: Cluster = 0;
-                var run_start: Cluster = 0;
-                var run: u32 = 0;
-                var free: u32 = 0;
-                var base: u32 = 0;
-                while (base < v.sectors_per_fat) {
+                var done_runs: u32 = 0;
+                while (f.base < v.sectors_per_fat) {
+                    if (done_runs == runs) return false;
+                    done_runs += 1;
+                    const base = f.base;
                     const n = @min(run_sectors, v.sectors_per_fat - base);
                     try v.readSectors(v.fat_start + base, n, &firsts);
                     var copy: u32 = 1;
@@ -3604,43 +3707,44 @@ pub const Volume = struct {
                             const first = firsts[k * sector_size ..][0..sector_size];
                             const other = others[k * sector_size ..][0..sector_size];
                             if (std.mem.eql(u8, first, other)) continue;
-                            if (differ == 0) {
+                            if (f.differ == 0) {
                                 var i: usize = 0;
                                 while (first[i] == other[i]) i += 1;
-                                differ_at = @intCast((base + k) * v.entriesPerSector() + i / v.entryBytes());
+                                f.differ_at = @intCast((base + k) * v.entriesPerSector() + i / v.entryBytes());
                             }
-                            differ += 1;
+                            f.differ += 1;
                         }
                     }
                     var k: u32 = 0;
                     while (k < n) : (k += 1) {
-                        const s = base + k;
+                        const sec = base + k;
                         // Leaks and the free count by the FAT the machine
                         // uses, the held one when there is one; the copies
                         // were compared as the disk holds them.
-                        const entries: *const [sector_size]u8 = if (v.fat) |fat| fat[s * sector_size ..][0..sector_size] else firsts[k * sector_size ..][0..sector_size];
+                        const entries: *const [sector_size]u8 = if (v.fat) |fat| fat[sec * sector_size ..][0..sector_size] else firsts[k * sector_size ..][0..sector_size];
                         var i: u32 = 0;
                         const per = v.entriesPerSector();
                         while (i < per) : (i += 1) {
-                            const c = s * per + i;
+                            const c = sec * per + i;
                             if (c < 2) continue;
                             if (c > v.max_cluster) break;
                             const value = v.entryIn(entries, i);
-                            if (value == 0) free += 1;
+                            if (value == 0) f.free += 1;
                             const leaked = self.walked == .every_directory and value != 0 and value != v.badMark() and !self.held(@intCast(c));
                             if (leaked) {
-                                if (run == 0) run_start = @intCast(c);
-                                run += 1;
-                            } else if (run > 0) {
-                                self.leak(run_start, run);
-                                run = 0;
+                                if (f.run == 0) f.run_start = @intCast(c);
+                                f.run += 1;
+                            } else if (f.run > 0) {
+                                self.leak(f.run_start, f.run);
+                                f.run = 0;
                             }
                         }
                     }
-                    base += n;
+                    f.base += n;
                 }
-                if (run > 0) self.leak(run_start, run);
-                if (differ > 0) self.report(.fats_differ, differ_at, differ);
+                if (f.run > 0) self.leak(f.run_start, f.run);
+                f.run = 0;
+                if (f.differ > 0) self.report(.fats_differ, f.differ_at, f.differ);
                 if (v.kind == .fat32 and v.fsinfo_sector != 0 and v.fsinfo_sector < v.fat_start) {
                     var fsinfo: [sector_size]u8 align(16) = undefined;
                     try v.readSector(v.fsinfo_sector, &fsinfo);
@@ -3648,10 +3752,11 @@ pub const Volume = struct {
                         self.path_len = 0;
                         const count = le32(fsinfo[488..492]);
                         const hint = le32(fsinfo[492..496]);
-                        if (count != 0xFFFF_FFFF and count != free) self.report(.fsinfo, 0, count);
+                        if (count != 0xFFFF_FFFF and count != f.free) self.report(.fsinfo, 0, count);
                         if (hint != 0xFFFF_FFFF and !v.inData(hint)) self.report(.fsinfo, hint, 0);
                     }
                 }
+                return true;
             }
 
             fn leak(self: *Self, start: Cluster, count: u32) void {

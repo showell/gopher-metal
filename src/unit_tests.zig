@@ -51,4 +51,6 @@ test {
     _ = @import("screen.zig");
     _ = @import("serial_gate.zig");
     _ = @import("net.zig");
+    _ = @import("idle.zig");
+    _ = @import("idle_check.zig");
 }
