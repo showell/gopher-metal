@@ -189,6 +189,11 @@ pub const Health = struct {
     /// "Orphaned long file name part" line a run, the whole name, so a judge
     /// holds its lines to runs, not parts.
     orphaned_runs: u32 = 0,
+    /// **LONG-NAME PARTS IN A RUN THAT DOES NOT START AS ONE**: no part
+    /// flagged last (0x40) before them. fsck.fat calls each a fragment
+    /// "outside a LFN sequence" and leaves it; this driver never leaves one
+    /// (it clears a name from its end, 152).
+    lfn_fragments: u32 = 0,
     problems: u32 = 0,
 
     pub fn clean(self: Health) bool {
@@ -2027,22 +2032,21 @@ pub const Volume = struct {
     };
 
     /// **A LONG-NAME PART CLEARED AFTER A COMMIT**, where the walk found
-    /// it. A failure is a counted cleanup (`cleanups_failed`), and the part
-    /// is counted where it stands (148(b)): a read that failed wrote
-    /// nothing, and left it orphaned (`orphaned_parts`, which fsck.fat
-    /// auto-deletes); a refused write is read back, cleared or not, and
-    /// what reads as neither is `unsure_parts`.
-    fn partLeft(self: *Volume, lba: u32, at: u32) Landing {
+    /// it: null when it is, else where the refused clear stands (148(b)): a
+    /// read that failed wrote nothing (`before`); a refused write is read
+    /// back. A failure is a counted cleanup, and the part is counted where it
+    /// stands (`orphaned_parts`, or `unsure_parts` where neither).
+    fn partLeft(self: *Volume, lba: u32, at: u32) ?Landing {
         self.readSector(lba, self.scratch) catch return self.partStands(.before);
         const was = self.scratch[at..][0..dirent_size].*;
         self.scratch[at] = 0xE5;
         const written = self.scratch[at..][0..dirent_size].*;
         self.writeSector(lba, self.scratch) catch return self.partStands(self.entryRefused(lba, at, &was, &written));
-        return .landed;
+        return null;
     }
 
     /// A part whose clearing failed, counted by where the clear stands,
-    /// which it answers (`.landed`: cleared).
+    /// which it answers.
     fn partStands(self: *Volume, clear: Landing) Landing {
         self.cleanups_failed +%= 1;
         switch (clear) {
@@ -2056,40 +2060,31 @@ pub const Volume = struct {
         return clear;
     }
 
-    /// **A NAME'S PARTS CLEARED, AND THE RUNS THEY LEAVE** (metal-vmm
-    /// 152): each part by `partLeft`, in the order they sit; the parts left
-    /// form runs, a line each in fsck.fat's report. A part whose clearing is
-    /// unknown may join its neighbours or part them, so the fewer runs it
-    /// could leave are counted (`orphaned_runs`), and the more beside them
-    /// (`unsure_runs`).
+    /// **A NAME'S PARTS CLEARED FROM ITS END, STOPPING AT THE FIRST THAT
+    /// FAILS** (metal-vmm 152): `positions` in the order they sit, the part
+    /// flagged last (0x40) first. Cleared from the short entry's side back,
+    /// what a failure leaves is always the name's first parts, a run that
+    /// starts as a run does: fsck.fat deletes it, one "Orphaned long file
+    /// name part" line, where parts left after a cleared start would be a
+    /// fragment it reports and leaves. Its parts are `orphaned_parts`, and
+    /// it is one run (`orphaned_runs`), or one that may be (`unsure_runs`)
+    /// where it is the one part whose clear is unknown.
     fn partsLeft(self: *Volume, positions: anytype) void {
-        // Runs with every unknown part cleared, and with every one left.
-        var if_cleared: u32 = 0;
-        var if_left: u32 = 0;
-        var open_cleared = false;
-        var open_left = false;
-        for (positions) |pos| {
-            switch (self.partLeft(pos.lba, pos.at)) {
-                .landed => {
-                    open_cleared = false;
-                    open_left = false;
-                },
-                .before => {
-                    if (!open_cleared) if_cleared += 1;
-                    if (!open_left) if_left += 1;
-                    open_cleared = true;
-                    open_left = true;
-                },
-                .unknown => {
-                    open_cleared = false;
-                    if (!open_left) if_left += 1;
-                    open_left = true;
-                },
+        var i = positions.len;
+        while (i > 0) {
+            i -= 1;
+            const failed = self.partLeft(positions[i].lba, positions[i].at) orelse continue;
+            // The parts before it, never tried: left as they are.
+            self.orphaned_parts +|= i;
+            if (i > 0) {
+                self.orphaned_runs +|= 1;
+            } else switch (failed) {
+                .landed => {},
+                .before => self.orphaned_runs +|= 1,
+                .unknown => self.unsure_runs +|= 1,
             }
+            return;
         }
-        const fewer = @min(if_cleared, if_left);
-        self.orphaned_runs +|= fewer;
-        self.unsure_runs +|= @max(if_cleared, if_left) - fewer;
     }
 
     /// removeEntry's work. With `.keep_chain` the chain stays allocated, for
@@ -2291,7 +2286,12 @@ pub const Volume = struct {
         // Orphans first (see Run): a stop after leaves the run still free.
         // Each tombstoned is one the count, if it holds it, holds no more
         // (148(b)): the exact count first, then what may be live.
-        for (run.orphans[0..run.orphans_len]) |o| {
+        // From the end back, as `partsLeft` clears: a stop or a failure
+        // leaves the run's first parts, never a fragment (152).
+        var k = run.orphans_len;
+        while (k > 0) {
+            k -= 1;
+            const o = run.orphans[k];
             try self.readSector(o.lba, self.scratch);
             self.scratch[o.at] = 0xE5;
             try self.writeSector(o.lba, self.scratch);
@@ -3384,6 +3384,8 @@ pub const Volume = struct {
                 var run_sum: u8 = 0;
                 var run_whole = false;
                 var run_next: u8 = 0;
+                // Whether the run began with a part flagged last (0x40).
+                var run_started = false;
 
                 const fixed_root = cluster == 0 and v.kind == .fat16;
                 const sectors: u32 = if (fixed_root) v.root_sectors else clusters * v.sectors_per_cluster;
@@ -3400,7 +3402,7 @@ pub const Volume = struct {
                         const e = sector[at..][0..dirent_size];
                         if (e[0] == 0x00) break; // nothing further in this directory
                         if (e[0] == 0xE5) {
-                            self.orphaned(&run_parts);
+                            self.orphaned(&run_parts, &run_started);
                             long.letGo();
                             continue;
                         }
@@ -3412,7 +3414,8 @@ pub const Volume = struct {
                             // numbered one less, down to 1, as fsck.fat
                             // checks.
                             if (e[0] & 0x40 != 0) {
-                                self.orphaned(&run_parts);
+                                self.orphaned(&run_parts, &run_started);
+                                run_started = true;
                                 run_sum = e[13];
                                 run_whole = true;
                                 run_next = e[0] & 0x1F;
@@ -3423,7 +3426,7 @@ pub const Volume = struct {
                             continue;
                         }
                         if (e[11] & attr_volume_label != 0) {
-                            self.orphaned(&run_parts);
+                            self.orphaned(&run_parts, &run_started);
                             long.letGo();
                             continue;
                         }
@@ -3433,18 +3436,26 @@ pub const Volume = struct {
                         // the checksum, not by whether this driver reads the
                         // name (one past `max_name` it does not, and the
                         // parts are no orphans).
-                        if (run_parts > 0 and run_whole and run_next == 0 and run_sum == shortChecksum(e[0..11].*)) run_parts = 0 else self.orphaned(&run_parts);
+                        if (run_parts > 0 and run_whole and run_next == 0 and run_sum == shortChecksum(e[0..11].*)) {
+                            run_parts = 0;
+                            run_started = false;
+                        } else self.orphaned(&run_parts, &run_started);
                         try self.entryIn(entry, cluster, parent, depth);
                     } else continue;
                     break;
                 }
-                self.orphaned(&run_parts);
+                self.orphaned(&run_parts, &run_started);
             }
 
             /// The parts of a run nothing closed, counted, and the run let go.
-            fn orphaned(self: *Self, run_parts: *u32) void {
-                self.health.orphaned_parts += run_parts.*;
-                if (run_parts.* > 0) self.health.orphaned_runs += 1;
+            fn orphaned(self: *Self, run_parts: *u32, started: *bool) void {
+                defer started.* = false;
+                if (run_parts.* > 0) {
+                    if (started.*) {
+                        self.health.orphaned_parts += run_parts.*;
+                        self.health.orphaned_runs += 1;
+                    } else self.health.lfn_fragments += run_parts.*;
+                }
                 run_parts.* = 0;
             }
 

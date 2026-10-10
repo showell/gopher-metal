@@ -353,8 +353,10 @@ fn countedIsFound(d: *test_disk.Disk, op: []const u8, kind: []const u8, when: []
         long += f.count - (entry.size + cluster_bytes - 1) / cluster_bytes;
     }
     const long_ok = long >= v.long_clusters and long <= v.long_clusters + v.unsure_long;
-    if (clusters_ok and parts_ok and long_ok) return;
-    std.debug.print("{s} ({s}), {s} {d}: counted {d} clusters leaked (+{d} unsure, {d} unsized), {d} long-name parts orphaned (+{d} unsure) in {d} runs (+{d} unsure) and {d} clusters long (+{d} unsure); the check found {d}, {d} in {d} runs and {d}\n", .{ op, kind, when, n, v.leaked_clusters, v.unsure_clusters, v.unsized_leaks, v.orphaned_parts, v.unsure_parts, v.orphaned_runs, v.unsure_runs, v.long_clusters, v.unsure_long, r.health.leaked, r.health.orphaned_parts, r.health.orphaned_runs, long });
+    // A fragment fsck.fat would leave: never, whatever failed (152).
+    const no_fragments = r.health.lfn_fragments == 0;
+    if (clusters_ok and parts_ok and long_ok and no_fragments) return;
+    std.debug.print("{s} ({s}), {s} {d}: counted {d} clusters leaked (+{d} unsure, {d} unsized), {d} long-name parts orphaned (+{d} unsure) in {d} runs (+{d} unsure) and {d} clusters long (+{d} unsure); the check found {d}, {d} in {d} runs (and {d} parts in fragments) and {d}\n", .{ op, kind, when, n, v.leaked_clusters, v.unsure_clusters, v.unsized_leaks, v.orphaned_parts, v.unsure_parts, v.orphaned_runs, v.unsure_runs, v.long_clusters, v.unsure_long, r.health.leaked, r.health.orphaned_parts, r.health.orphaned_runs, r.health.lfn_fragments, long });
     return error.TestUnexpectedResult;
 }
 
@@ -444,6 +446,12 @@ test "every operation stopped after every write leaves an outcome its doc names,
                 }
                 const r = try d.check();
                 try onlyAllowed(&r, if (op.appends != null) &allowed_append else &allowed, op.name, kind, "stopped after write", stop);
+                // A stop leaves no long-name fragment fsck.fat would leave
+                // (152): a name is cleared from its end.
+                if (r.health.lfn_fragments != 0) {
+                    std.debug.print("{s} ({s}), stopped after {d} writes: {d} long-name parts in fragments\n", .{ op.name, kind, stop, r.health.lfn_fragments });
+                    return error.TestUnexpectedResult;
+                }
                 if (finished) try testing.expect(r.health.clean());
 
                 // The image as the next boot finds it, for the oracle.
