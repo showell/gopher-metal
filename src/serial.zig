@@ -57,7 +57,7 @@ const Com1 = struct {
 /// **THE RING IS IN `.data`, ITS BYTES IN `.bss`.** probe/link.ld warns that
 /// nothing in `.bss` may be assumed zero. The two loaders this machine has
 /// do zero it, on every boot and every restart (RESTART.md measures it), but
-/// the ring's head indexes memory, so it does not lean on that: in `.data`
+/// the ring's count places every write (`next()`), so it does not lean on that: in `.data`
 /// the loader writes it empty from the file. The bytes may be anything until
 /// written, and nothing reads past what the ring says it holds.
 var ring_bytes: [64 * 1024]u8 = undefined;
