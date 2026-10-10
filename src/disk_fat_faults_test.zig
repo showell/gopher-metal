@@ -386,7 +386,9 @@ fn countedIsFound(d: *test_disk.Disk, op: []const u8, kind: []const u8, when: []
     const clusters_ok = r.health.leaked >= v.leaked_clusters and
         (v.unsized_leaks > 0 or r.health.leaked <= v.leaked_clusters + v.unsure_clusters);
     const parts_ok = r.health.orphaned_parts >= v.orphaned_parts and
-        r.health.orphaned_parts <= v.orphaned_parts + v.unsure_parts;
+        r.health.orphaned_parts <= v.orphaned_parts + v.unsure_parts and
+        r.health.orphaned_runs >= v.orphaned_runs and
+        r.health.orphaned_runs <= v.orphaned_runs + v.unsure_runs;
     // A `long` finding's count is the chain's length: past the size, it is
     // that less what the size needs.
     var long: u64 = 0;
@@ -397,8 +399,10 @@ fn countedIsFound(d: *test_disk.Disk, op: []const u8, kind: []const u8, when: []
         long += f.count - (entry.size + cluster_bytes - 1) / cluster_bytes;
     }
     const long_ok = long >= v.long_clusters and long <= v.long_clusters + v.unsure_long;
-    if (clusters_ok and parts_ok and long_ok) return;
-    std.debug.print("{s} ({s}), {s} {d}: counted {d} clusters leaked (+{d} unsure, {d} unsized), {d} long-name parts orphaned (+{d} unsure) and {d} clusters long (+{d} unsure); the check found {d}, {d} and {d}\n", .{ op, kind, when, n, v.leaked_clusters, v.unsure_clusters, v.unsized_leaks, v.orphaned_parts, v.unsure_parts, v.long_clusters, v.unsure_long, r.health.leaked, r.health.orphaned_parts, long });
+    // A fragment fsck.fat would leave: never, whatever failed (152).
+    const no_fragments = r.health.lfn_fragments == 0;
+    if (clusters_ok and parts_ok and long_ok and no_fragments) return;
+    std.debug.print("{s} ({s}), {s} {d}: counted {d} clusters leaked (+{d} unsure, {d} unsized), {d} long-name parts orphaned (+{d} unsure) in {d} runs (+{d} unsure) and {d} clusters long (+{d} unsure); the check found {d}, {d} in {d} runs (and {d} parts in fragments) and {d}\n", .{ op, kind, when, n, v.leaked_clusters, v.unsure_clusters, v.unsized_leaks, v.orphaned_parts, v.unsure_parts, v.orphaned_runs, v.unsure_runs, v.long_clusters, v.unsure_long, r.health.leaked, r.health.orphaned_parts, r.health.orphaned_runs, r.health.lfn_fragments, long });
     return error.TestUnexpectedResult;
 }
 
@@ -488,6 +492,12 @@ test "every operation stopped after every write leaves an outcome its doc names,
                 }
                 const r = try d.check();
                 try onlyAllowed(&r, if (op.appends != null) &allowed_append else &allowed, op.name, kind, "stopped after write", stop);
+                // A stop leaves no long-name fragment fsck.fat would leave
+                // (152): a name is cleared from its end.
+                if (r.health.lfn_fragments != 0) {
+                    std.debug.print("{s} ({s}), stopped after {d} writes: {d} long-name parts in fragments\n", .{ op.name, kind, stop, r.health.lfn_fragments });
+                    return error.TestUnexpectedResult;
+                }
                 if (finished) try testing.expect(r.health.clean());
 
                 // The image as the next boot finds it, for the oracle.
@@ -1294,7 +1304,11 @@ test "a write that lands and answers failure as a cleanup gives back what a fail
     // A request fails, and the cleanup after it (a give-back, a part's
     // clearing, a chain freed) meets a write the disk took and called failed.
     // The cleanup's own verdict decides what it left, not its answer.
-    var cleanups_met: u32 = 0;
+    const before_arms = [_]u64{
+        passesOf("fat: clusters taken before a failure could not be given back, and are left a leak"),
+        passesOf("fat: a long-name part could not be cleared after a commit, and is left orphaned"),
+        passesOf("fat: a chain freed after the commit could not be freed whole, and the rest is left a leak"),
+    };
     for (stopped_ops) |op| {
         for (configs) |cfg| {
             if (cfg.shape.kind == .fat32) continue; // the same code; FAT32's disk is 35 MB
@@ -1317,14 +1331,34 @@ test "a write that lands and answers failure as a cleanup gives back what a fail
                     op.run(&d.vol) catch {};
                     d.blk.fault = null;
                     d.blk.second = null;
-                    if (d.vol.cleanups_failed > 0) cleanups_met += 1;
                     try countedIsFound(d, op.name, if (cfg.cached) "FAT16, held" else "FAT16", "write that landed and failed, a cleanup's after a failed request", n * 8 + (m - n));
                 }
             }
         }
     }
-    // The premise: the second fault met a cleanup.
-    try testing.expect(cleanups_met > 0);
+    // The premise: the second fault met each cleanup it names, by the
+    // cleanup arm's own site (the box's review of 148): a give-back left
+    // short, a part left orphaned, a chain freed after its commit left.
+    for ([_][]const u8{
+        "fat: clusters taken before a failure could not be given back, and are left a leak",
+        "fat: a long-name part could not be cleared after a commit, and is left orphaned",
+        "fat: a chain freed after the commit could not be freed whole, and the rest is left a leak",
+    }, before_arms) |arm, was| {
+        if (passesOf(arm) > was) continue;
+        std.debug.print("the cleanup arm \"{s}\" was never reached\n", .{arm});
+        return error.TestUnexpectedResult;
+    }
+}
+
+/// How often the sites with `message` were reached, in all.
+fn passesOf(message: []const u8) u64 {
+    const coverage = @import("coverage");
+    var n: u64 = 0;
+    var it = coverage.catalog();
+    while (it.next()) |site| {
+        if (std.mem.eql(u8, std.mem.span(site.message), message)) n += site.passes;
+    }
+    return n;
 }
 
 test "a write that lands and answers failure, leaving long-name parts orphaned, and the next write over them: the count follows what is on the disk (metal-vmm 148(b))" {

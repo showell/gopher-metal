@@ -1712,7 +1712,10 @@ fn leakLine(what: []const u8, v: *const disk_fat.Volume) void {
     serial.putDec(v.leaked_clusters +| v.unsure_clusters);
     serial.put(" clusters left a counted leak, ");
     serial.putDec(v.orphaned_parts +| v.unsure_parts);
-    serial.put(" long-name parts left orphaned, ");
+    serial.put(" long-name parts left orphaned in ");
+    // R, the names: fsck.fat says a line a run (metal-vmm 152).
+    serial.putDec(v.orphaned_runs +| v.unsure_runs);
+    serial.put(" runs, ");
     serial.putDec(v.fat_copies_failed);
     serial.put(" FAT copy writes failed; of the clusters and parts, ");
     serial.putDec(v.unsure_clusters);
@@ -1735,9 +1738,10 @@ fn addVolume(facts: *std.ArrayList(router.host_status.Fact), alloc: std.mem.Allo
     var serial_text: [9]u8 = undefined;
     const named = if (v.serial) |n| serialText(&serial_text, n) else "no serial";
     const value = if (v.space()) |sp|
-        try std.fmt.allocPrint(alloc, "{s}, serial {s}: {d} MB free of {d} MB, {d} MB of it kept for small writes; {d} cleanups after a commit failed (leaks, {d} clusters counted), {d} FAT copy writes failed (copies apart)", .{
-            kindName(v),                                                      named,             sp.free >> 20,     sp.total >> 20,
-            @as(u64, v.reserve_clusters) * v.sectors_per_cluster * 512 >> 20, v.cleanups_failed, v.leaked_clusters, v.fat_copies_failed,
+        try std.fmt.allocPrint(alloc, "{s}, serial {s}: {d} MB free of {d} MB, {d} MB of it kept for small writes; {d} cleanups after a commit failed (leaks, {d} clusters counted, {d} more may be live; {d} long names left orphaned, {d} more may be), {d} FAT copy writes failed (copies apart)", .{
+            kindName(v),                                                      named,             sp.free >> 20,       sp.total >> 20,
+            @as(u64, v.reserve_clusters) * v.sectors_per_cluster * 512 >> 20, v.cleanups_failed, v.leaked_clusters,   v.unsure_clusters,
+            v.orphaned_runs,                                                  v.unsure_runs,     v.fat_copies_failed,
         })
     else |e|
         try std.fmt.allocPrint(alloc, "{s}, serial {s}: free space unreadable ({s})", .{ kindName(v), named, @errorName(e) });

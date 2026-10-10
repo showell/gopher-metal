@@ -2714,13 +2714,16 @@ test "the check counts orphaned long-name parts as fsck.fat finds them: by run, 
     const parts: u32 = d.bytes[first] & 0x1F;
     try testing.expect(parts >= 3);
     const short = first + parts * 32;
-    const Case = struct { name: []const u8, at: usize, value: u8, orphans: u32 };
+    const Case = struct { name: []const u8, at: usize, value: u8, orphans: u32, runs: u32 = 1, fragments: u32 = 0 };
     const cases = [_]Case{
-        .{ .name = "whole", .at = first, .value = pristine[first], .orphans = 0 },
+        .{ .name = "whole", .at = first, .value = pristine[first], .orphans = 0, .runs = 0 },
+        // A middle part tombstoned: the run before it, which fsck.fat calls
+        // orphaned, and after it a fragment it leaves (metal-vmm 152).
+        .{ .name = "a middle part tombstoned", .at = first + 32, .value = 0xE5, .orphans = 1, .runs = 1, .fragments = parts - 2 },
         .{ .name = "its short entry tombstoned", .at = short, .value = 0xE5, .orphans = parts },
         .{ .name = "a part of another checksum", .at = first + 32 + 13, .value = pristine[first + 32 + 13] ^ 1, .orphans = parts },
         .{ .name = "a part numbered out of turn", .at = first + 32, .value = pristine[first + 32] +% 1, .orphans = parts },
-        .{ .name = "its last-flagged part tombstoned", .at = first, .value = 0xE5, .orphans = parts - 1 },
+        .{ .name = "its last-flagged part tombstoned", .at = first, .value = 0xE5, .orphans = 0, .runs = 0, .fragments = parts - 1 },
         // Every part agrees, and the short entry's name is another's.
         .{ .name = "its short entry of another checksum", .at = short + 6, .value = if (pristine[short + 6] == 'Z') 'Y' else 'Z', .orphans = parts },
     };
@@ -2729,8 +2732,8 @@ test "the check counts orphaned long-name parts as fsck.fat finds them: by run, 
         d.bytes[c.at] = c.value;
         try d.mount(false);
         const r = try d.check();
-        if (r.health.orphaned_parts != c.orphans) {
-            std.debug.print("{s}: the check counted {d} orphaned parts, not {d}\n", .{ c.name, r.health.orphaned_parts, c.orphans });
+        if (r.health.orphaned_parts != c.orphans or r.health.orphaned_runs != c.runs or r.health.lfn_fragments != c.fragments) {
+            std.debug.print("{s}: the check counted {d} orphaned parts in {d} runs and {d} in fragments, not {d} in {d} and {d}\n", .{ c.name, r.health.orphaned_parts, r.health.orphaned_runs, r.health.lfn_fragments, c.orphans, c.runs, c.fragments });
             return error.TestUnexpectedResult;
         }
     }
