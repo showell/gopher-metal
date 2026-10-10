@@ -1396,3 +1396,46 @@ test "a write that lands and answers failure, leaving long-name parts orphaned, 
         try testing.expect(reused > 0);
     }
 }
+
+test "a write that lands and answers failure as a counted orphan run is tombstoned: the count follows what is on the disk (metal-vmm 154(b)'s review)" {
+    // An orphan run counted, as a failed new file leaves one; then the next
+    // file, which tombstones it first, its every request in turn landing
+    // and answering failure, its read-back exact or failing too (unknown).
+    for (both_cached) |cached| {
+        for ([_]u8{ 0, 1 }) |then_fail| {
+            const d = try Disk.makeUnkept("orphans-tombstone-lies", test_disk.small, cached);
+            defer d.deinit();
+            var body: [700]u8 = undefined;
+            @memset(&body, 'o');
+            const kind = if (cached) "FAT16, held" else "FAT16";
+            const pristine = try testing.allocator.dupe(u8, d.bytes);
+            defer testing.allocator.free(pristine);
+            // The first failure that leaves orphans.
+            var n: u64 = 0;
+            while (n < 24) : (n += 1) {
+                @memcpy(d.bytes, pristine);
+                try d.mount(cached);
+                d.blk.fault = .{ .at = d.blk.requests + n, .kind = .fails };
+                d.vol.writeFile("data/A Long Name For A First File.txt", &body) catch {};
+                d.blk.fault = null;
+                if (d.vol.orphaned_parts > 0) break;
+            } else return error.NoOrphans;
+            var tombstones_refused: u32 = 0;
+            var m: u64 = 0;
+            while (m < 8) : (m += 1) {
+                @memcpy(d.bytes, pristine);
+                try d.mount(cached);
+                d.blk.fault = .{ .at = d.blk.requests + n, .kind = .fails };
+                d.vol.writeFile("data/A Long Name For A First File.txt", &body) catch {};
+                const parts = d.vol.orphaned_parts;
+                d.blk.fault = .{ .at = d.blk.requests + m, .kind = .lands_and_fails, .then_fail = then_fail, .seed = @truncate(m) };
+                d.vol.writeFile("data/B", "bee") catch {};
+                d.blk.fault = null;
+                if (d.vol.orphaned_parts < parts) tombstones_refused += 1;
+                try countedIsFound(d, "a short name over a counted orphan run", kind, "a tombstone that lands and answers failure", m);
+            }
+            // The premise: some refused tombstone was taken off the count.
+            try testing.expect(tombstones_refused > 0);
+        }
+    }
+}

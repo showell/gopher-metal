@@ -427,11 +427,13 @@ pub fn Queue(comptime size: u16) type {
             const used_addr = ring_addr + @offsetOf(RingType, "used_flags");
             var doorbell: usize = undefined;
             var vectored = false;
-            // **THE RINGS ZEROED BEFORE THE DEVICE IS TOLD WHERE THEY ARE**
-            // (150(c)): a device may read them once the queue is ready.
-            ring.avail_flags = 0;
-            ring.avail_idx = 0;
-            ring.used_idx = 0;
+            // **THE WHOLE RING ZEROED BEFORE THE DEVICE IS TOLD WHERE IT IS**
+            // (150(c), 154(a)): a device may read it once the queue is ready,
+            // and the memory is `undefined`: a stale NO_NOTIFY in the used
+            // ring's flags, which only the device writes, would stop every
+            // doorbell. Linux zeroes a ring as it allocates it. Every caller
+            // fills its descriptors after this.
+            @memset(std.mem.asBytes(ring), 0);
             fence();
             switch (device) {
                 .mmio => |base| {
