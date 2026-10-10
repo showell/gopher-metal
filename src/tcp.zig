@@ -76,6 +76,8 @@
 const proto = @import("proto.zig");
 const props = @import("coverage");
 const machine = @import("machine.zig");
+/// Sequence numbers modulo 2^32 (seq.zig): every "after" here is one of these.
+const sq = @import("seq.zig").Seq(u32);
 
 // Every property in this file, in the catalog, called or not (COVERAGE.md).
 comptime {
@@ -333,8 +335,7 @@ pub const Conn = struct {
     /// acceptable to RFC 9293's sequence test (§3.10.7.4) but not the next
     /// byte. A shut window has nothing ahead.
     fn ahead(self: *const Conn, seq: u32) bool {
-        const off = seq -% self.rcv_nxt;
-        return off != 0 and off < @max(self.window(), 1);
+        return seq != self.rcv_nxt and sq.within(seq, self.rcv_nxt, @max(self.window(), 1));
     }
 
     fn reset(self: *Conn) void {
@@ -860,7 +861,7 @@ pub const Table = struct {
     /// RFC 6298 §2 says (alpha 1/8, beta 1/4).
     fn measure(self: *Table, c: *Conn, number: u32, now: i96) void {
         const at = c.timed_at orelse return;
-        if (number -% c.timed_seq >= 1 << 31) return; // not there yet
+        if (!sq.atOrAfter(number, c.timed_seq)) return; // not there yet
         c.timed_at = null;
         const rtt: u64 = @intCast(@max(0, now - at));
         if (c.srtt_ns == 0) {
@@ -900,14 +901,14 @@ pub const Table = struct {
     /// ESTABLISHED: SND.UNA < SEG.ACK =< SND.NXT moves `una`, and SND.WL1/WL2
     /// decide whether `wnd` moves. True if this ACK covers our FIN.
     fn acknowledge(self: *Table, c: *Conn, seq: u32, number: u32, window: u16, now: i96) bool {
-        const flight = c.highest() -% c.una;
-        const advance = number -% c.una;
+        const flight = sq.offset(c.una, c.highest());
+        const advance = sq.offset(c.una, number);
         // An ACK of something never sent, or an old one (wrapping to a huge
         // advance), is ignored, window included. The RFC also drops and
         // answers a segment that acknowledges what was never sent; here only
         // its ACK is ignored.
         if (advance > flight) return false;
-        const updated = after(seq, c.wl1) or (seq == c.wl1 and !after(c.wl2, number));
+        const updated = sq.after(seq, c.wl1) or (seq == c.wl1 and !sq.after(c.wl2, number));
         if (updated) {
             c.wnd = window;
             c.wl1 = seq;
@@ -1083,7 +1084,7 @@ pub const Table = struct {
             // sent a segment past our window; taking its ACK would let a
             // forged one set SND.WL1 to a sequence the peer never reaches,
             // after which the window rule rejects every genuine update.
-            const behind = (c.rcv_nxt -% seq) < (1 << 31);
+            const behind = !sq.after(seq, c.rcv_nxt);
             const done = behind and c.state != .syn_received and
                 self.acknowledge(c, seq, number, window, now);
             self.emit(wire, i, flag_ack, c.highest(), "");
@@ -1216,12 +1217,6 @@ pub fn parseMss(options: []const u8) ?u16 {
 }
 
 const std = @import("std");
-
-/// Sequence number `a` comes after `b`, modulo 2^32.
-fn after(a: u32, b: u32) bool {
-    const d = a -% b;
-    return d != 0 and d < 0x8000_0000;
-}
 
 fn eql(a: []const u8, b: []const u8) bool {
     if (a.len != b.len) return false;
