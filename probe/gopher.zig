@@ -561,6 +561,32 @@ pub fn kmain() noreturn {
             serial.put(" chat session(s)\n");
         }
     }
+    // **HOST CONTRACT STEP 4b**: search's index, every transcript read once
+    // into memory, before the first request (angry-gopher search_index.zig).
+    // Its scratch is a request's heap, reset after, as the backfill's is; the
+    // index lives on the process allocator. Out of memory leaves no index,
+    // said here, and the first search builds it again.
+    {
+        const t0 = Io.awakeNs() orelse 0;
+        const stats = router.search_index.buildAll(io, request_heap.allocator());
+        request_heap.reset();
+        const ms: u64 = @intCast(@divTrunc((Io.awakeNs() orelse t0) - t0, std.time.ns_per_ms));
+        if (stats) |st| {
+            serial.put("  search index: ");
+            serial.putDec(st.messages);
+            serial.put(" messages in ");
+            serial.putDec(st.transcripts);
+            serial.put(" transcripts (");
+            serial.putDec(st.bytes);
+            serial.put(" bytes, ");
+            serial.putDec(st.words);
+            serial.put(" words, ");
+            serial.putDec(st.unreadable);
+            serial.put(" unreadable) in ");
+            serial.putDec(ms);
+            serial.put(" ms\n");
+        } else serial.put("  search index: not built (out of memory); the first search builds it\n");
+    }
     // **IDLE TIME** (src/idle.zig, essay idle-time-on-metal): each volume's
     // check, asked again while the machine serves, a slice per quiet moment.
     for ([_]?*disk_fat.Volume{ Io.siteVolume(), Io.dataVolume() }, 0..) |maybe, k| {
