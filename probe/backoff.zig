@@ -76,11 +76,4 @@ pub fn kmain() noreturn {
     serial.pass();
 }
 
-pub const panic = std.debug.FullPanic(panicImpl);
-fn panicImpl(msg: []const u8, _: ?usize) noreturn {
-    serial.put("PANIC: ");
-    serial.put(msg);
-    serial.put("\n");
-    if (serial.on_fatal) |f| f(.panic, msg);
-    serial.exitQemu(1);
-}
+pub const panic = metal.serial.panic;

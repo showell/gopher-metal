@@ -17,6 +17,12 @@ const stack = @import("stack.zig");
 const pvh = @import("pvh.zig");
 
 comptime {
+    // **ONE PANIC HANDLER** (serial.zig): the root names it, or the build stops.
+    if (!@hasDecl(root, "panic") or root.panic != @import("serial.zig").panic)
+        @compileError("a kernel's root says `pub const panic = metal.serial.panic;`");
+}
+
+comptime {
     // The stack region and the telemetry that reads it are declared there; the
     // stub below is what paints it and what points %rsp at it.
     _ = stack;

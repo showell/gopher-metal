@@ -1924,12 +1924,4 @@ fn waitSeconds(s: u32) void {
     serial.put(" s; serving\n");
 }
 
-pub const panic = std.debug.FullPanic(panicImpl);
-fn panicImpl(msg: []const u8, _: ?usize) noreturn {
-    serial.immediate();
-    serial.put("PANIC: ");
-    serial.put(msg);
-    serial.put("\n");
-    if (serial.on_fatal) |f| f(.panic, msg);
-    serial.exitQemu(1);
-}
+pub const panic = metal.serial.panic;

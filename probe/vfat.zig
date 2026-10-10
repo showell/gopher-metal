@@ -118,10 +118,4 @@ fn eql(a: []const u8, b: []const u8) bool {
     return true;
 }
 
-pub const panic = std.debug.FullPanic(panicImpl);
-fn panicImpl(msg: []const u8, _: ?usize) noreturn {
-    serial.put("PANIC: ");
-    serial.put(msg);
-    serial.put("\n");
-    serial.exitQemu(1);
-}
+pub const panic = metal.serial.panic;
