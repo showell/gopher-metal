@@ -117,10 +117,13 @@ pub const Store = struct {
 };
 
 /// A path's parts, checked against the rules (the file's comment), into
-/// `out`. `allow_root`: the empty path, which only `list` takes.
+/// `out`. `allow_root`: the empty path, which only `list` takes. **Every part
+/// is named**: an empty one (a doubled, leading or trailing slash) is a path
+/// built wrong, refused by `checkPart`, never read as what it might mean.
 pub fn checkPath(path: []const u8, out: *[max_parts][]const u8, allow_root: bool) Error![]const []const u8 {
+    if (path.len == 0) return if (allow_root) out[0..0] else Error.BadName;
     var n: usize = 0;
-    var parts = std.mem.tokenizeScalar(u8, path, '/');
+    var parts = std.mem.splitScalar(u8, path, '/');
     while (parts.next()) |part| {
         if (n == max_parts) return Error.BadName;
         try checkPart(part);
@@ -159,11 +162,18 @@ pub fn sameName(a: []const u8, b: []const u8) bool {
 
 const testing = std.testing;
 
-test "paths: empty parts ignored, FAT's rules kept, the Store's prefix refused" {
+test "paths: an empty part refused, FAT's rules kept, the Store's prefix refused" {
     var buf: [max_parts][]const u8 = undefined;
-    const p = try checkPath("data//chat/x.md/", &buf, false);
+    const p = try checkPath("data/chat/x.md", &buf, false);
     try testing.expectEqual(@as(usize, 3), p.len);
     try testing.expectEqualStrings("x.md", p[2]);
+    // **A PATH IS ITS PARTS, EACH NAMED** (Steve, 2026-10-10: no papering
+    // over): a doubled, leading or trailing slash is a path built wrong, and
+    // is refused, never read as the path it might have meant.
+    for ([_][]const u8{ "data//chat/x.md", "/data", "data/", "data/chat//", "//" }) |bad| {
+        try testing.expectError(Error.BadName, checkPath(bad, &buf, false));
+        try testing.expectError(Error.BadName, checkPath(bad, &buf, true));
+    }
     for ([_][]const u8{ "", "/", "a/./b", "a/../b", "a:b", "what?", "trailing.", "trailing ", ".~mine", "a\x01b", "a\x7fb", "caf\xc3\xa9", "a/b/c/d/e/f/g/h/i" }) |bad| {
         try testing.expectError(Error.BadName, checkPath(bad, &buf, false));
     }

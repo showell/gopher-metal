@@ -262,6 +262,9 @@ SECRET-LEAK.md and ADMIN-PASSWORD-LOST.md and when each is needed):
 | the kept free count | **works** — `/admin/host`'s free space is a field read, equal to the oracle's count after every operation |
 | `/admin/backup` | **works against Linux** — everything the Store keeps as one streamed tar, after the admin's password again, ending with a manifest that `droplet/check_backup.py` holds it to; the judge compares both hosts' archives member by member. Taken from metal over the private network by `droplet/backup.sh` (CUTOVER.md); routine backups are not set up (above) |
 | the log on `/admin/host` | **built** — the serial ring's newest lines; the judge checks its shape |
+| a chain's FAT entries a sector at a time | **works, on master, not served** — taken (B42) and freed (batched frees) a FAT sector per write: a 1 MiB upload ~143 disk writes to ~15-20, a remove of one ~4,097 to a few on the host tests' small clusters. v22 serves the old path |
+| exact accounting of what a failure leaves | **works, on master** — leaked clusters, orphaned names (by run, as fsck counts them) and chains past a size, exact or "may be live", on the run's end line and `/admin/host`; the judge holds fsck's findings to them |
+| idle time | **built, on master, not served** — a quiet machine (200 ms with nothing arriving) runs a step of the next task, at most 200 ms ([HOST.md](HOST.md), "Idle time"); the one task checks each volume again, a slice a step. Seen on metal-vmm (steps ~9 ms); not yet on a droplet, so a full walk's cost on production's volume is unmeasured |
 
 ## Running the gates
 
