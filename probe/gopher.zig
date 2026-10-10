@@ -1721,11 +1721,16 @@ fn leakLine(what: []const u8, v: *const disk_fat.Volume) void {
     serial.putDec(v.unsure_clusters);
     serial.put(" and ");
     serial.putDec(v.unsure_parts);
-    serial.put(" may be live; ");
+    serial.put(" may be live, and ");
+    // W and Y, apart (metal-vmm 154(c)): the floors are R - W and L - Y.
+    serial.putDec(v.unsure_runs);
+    serial.put(" of the runs; ");
     serial.putDec(v.unsized_leaks);
     serial.put(" leaks of a size not known (K no ceiling while any); ");
     serial.putDec(v.long_clusters +| v.unsure_long);
-    serial.put(" clusters past a size (");
+    serial.put(" clusters past a size, ");
+    serial.putDec(v.unsure_long);
+    serial.put(" of them may be live (");
     serial.putDec(v.cleanups_failed);
     serial.put(" cleanups failed)\n");
 }
