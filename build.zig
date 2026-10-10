@@ -276,21 +276,41 @@ pub fn build(b: *std.Build) void {
     const fat_coverage_step = b.step("fat-coverage", "the lines of disk_fat.zig and disk_fat_dirent.zig their unit tests never run");
     fat_coverage_step.dependOn(&fat_coverage.step);
     fat_coverage_step.dependOn(&dirent_coverage.step);
-    for ([_][]const u8{ "src/rtc.zig", "src/pit.zig", "src/stack.zig", "src/civil.zig", "src/disk_fat.zig", "src/disk_fat_dirent.zig", "src/machine.zig", "src/pvh.zig", "src/pages.zig", "src/tcp.zig", "src/tcp_check.zig", "src/tcp_sim.zig", "src/fat_sim.zig", "src/page_sim.zig", "src/pure_sim.zig", "src/ready_sim.zig", "src/durable_sim.zig", "src/durable.zig", "src/scsi_mode.zig", "src/floor_sim.zig", "src/store.zig", "src/store_model.zig", "src/store_test.zig", "src/store_linux.zig", "src/store_sim.zig", "src/scratch_dir.zig", "src/io_test.zig", "src/log_ring.zig", "src/restart.zig", "src/kept_log.zig", "src/ready.zig", "src/request_heap.zig", "src/page_cache.zig", "src/admin_reset.zig", "droplet/image.zig", "src/dhcp.zig", "src/screen.zig", "src/serial_gate.zig", "src/net.zig" }) |path| {
-        if (test_file) |only| if (!std.mem.eql(u8, only, path)) continue;
+    // **ONE BINARY FOR THE FILES' OWN TESTS** (src/unit_tests.zig, metal-vmm
+    // QUEUE 142): one compile of the runner, std and the shared imports,
+    // and each file's tests run once, not in every binary that imports it.
+    // This list is the authority; unit_tests.zig must import exactly it.
+    const unit_files = [_][]const u8{ "src/rtc.zig", "src/pit.zig", "src/stack.zig", "src/civil.zig", "src/disk_fat.zig", "src/disk_fat_dirent.zig", "src/machine.zig", "src/pvh.zig", "src/pages.zig", "src/tcp.zig", "src/tcp_check.zig", "src/tcp_sim.zig", "src/fat_sim.zig", "src/page_sim.zig", "src/pure_sim.zig", "src/ready_sim.zig", "src/durable_sim.zig", "src/durable.zig", "src/scsi_mode.zig", "src/floor_sim.zig", "src/store.zig", "src/store_model.zig", "src/store_test.zig", "src/store_linux.zig", "src/store_sim.zig", "src/scratch_dir.zig", "src/io_test.zig", "src/log_ring.zig", "src/restart.zig", "src/kept_log.zig", "src/ready.zig", "src/request_heap.zig", "src/page_cache.zig", "src/admin_reset.zig", "src/dhcp.zig", "src/screen.zig", "src/serial_gate.zig", "src/net.zig" };
+    comptime {
+        @setEvalBranchQuota(1_000_000);
+        const root = @embedFile("src/unit_tests.zig");
+        if (std.mem.count(u8, root, "@import(") != unit_files.len) @compileError("src/unit_tests.zig imports other than build.zig's unit_files");
+        for (unit_files) |path| {
+            if (std.mem.indexOf(u8, root, "@import(\"" ++ path["src/".len..] ++ "\")") == null) @compileError("src/unit_tests.zig does not import " ++ path);
+        }
+    }
+    // Outside src/, so not importable from unit_tests.zig: its own binary.
+    const own_binary = [_][]const u8{"droplet/image.zig"};
+    const unit_imports = [_]std.Build.Module.Import{
+        .{ .name = "kernel_partition", .module = kernel_partition },
+        .{ .name = "coverage", .module = coverage },
+        .{ .name = "coverage_catalog", .module = coverage_catalog },
+        .{ .name = "explore", .module = explore },
+    };
+    const unit_roots: []const []const u8 = if (test_file) |only| blk: {
+        for (unit_files ++ own_binary) |path| if (std.mem.eql(u8, only, path)) break :blk &.{path};
+        break :blk &.{};
+    } else &(.{"src/unit_tests.zig"} ++ own_binary);
+    for (unit_roots) |path| {
         test_file_found = true;
         const unit = b.addTest(.{ .root_module = b.createModule(.{
             .root_source_file = b.path(path),
             .target = b.graph.host,
-            .imports = &.{
-                .{ .name = "kernel_partition", .module = kernel_partition },
-                .{ .name = "coverage", .module = coverage },
-                .{ .name = "coverage_catalog", .module = coverage_catalog },
-                .{ .name = "explore", .module = explore },
-            },
+            .imports = &unit_imports,
         }) });
         test_step.dependOn(&b.addRunArtifact(unit).step);
-        if (std.mem.eql(u8, path, "src/disk_fat.zig") or std.mem.eql(u8, path, "src/disk_fat_dirent.zig")) {
+        // disk_fat's lines run in the merged binary, or in its own.
+        if (std.mem.eql(u8, path, "src/unit_tests.zig") or std.mem.eql(u8, path, "src/disk_fat.zig") or std.mem.eql(u8, path, "src/disk_fat_dirent.zig")) {
             fat_coverage.addArtifactArg(unit);
             dirent_coverage.addArtifactArg(unit);
         }
