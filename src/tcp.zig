@@ -400,7 +400,6 @@ pub const revival_slots = 256;
 
 /// What a given-way half-open's completing ACK needs of it.
 pub const Revivable = struct {
-    used: bool = false,
     ip: [4]u8 = @splat(0),
     mac: [6]u8 = @splat(0),
     port: u16 = 0,
@@ -435,7 +434,8 @@ pub const Table = struct {
     /// real client whose handshake outlasted `min_rto_ns` (a lost SYN-ACK or
     /// ACK) can lose its slot to a flood's SYN; its ACK finds its entry here
     /// and the connection is rebuilt.
-    revivable: [revival_slots]Revivable = @splat(.{}),
+    /// Null where nothing is kept.
+    revivable: [revival_slots]?Revivable = @splat(null),
     /// How many of `revivable` are used: all in the kernel, fewer where a
     /// simulator measures a smaller ring.
     revival_cap: u16 = revival_slots,
@@ -547,7 +547,6 @@ pub const Table = struct {
         if (cap == 0) return;
         const at = self.revival_next % cap;
         self.revivable[at] = .{
-            .used = true,
             .ip = c.peer_ip,
             .mac = c.peer_mac,
             .port = c.peer_port,
@@ -566,11 +565,12 @@ pub const Table = struct {
     /// number, the revived `syn_received` treats it as the original would.
     /// A blind sender must still guess the 32-bit ISS. The caller asks only
     /// for an ACK without SYN; resets are handled before.
-    fn revivableFor(self: *Table, ip: [4]u8, port: u16, number: u32) ?*Revivable {
-        for (&self.revivable) |*e| {
-            if (!e.used or e.port != port or !eql(&e.ip, &ip)) continue;
+    fn revivableFor(self: *Table, ip: [4]u8, port: u16, number: u32) ?*?Revivable {
+        for (&self.revivable) |*slot| {
+            const e = slot.* orelse continue;
+            if (e.port != port or !eql(&e.ip, &ip)) continue;
             if (number != e.iss +% 1) continue;
-            return e;
+            return slot;
         }
         return null;
     }
@@ -987,14 +987,14 @@ pub const Table = struct {
         // is handled as usual. With no room it is dropped without a reset,
         // so the client sends again and may find room then.
         if (found == null and flags & flag_ack != 0 and flags & flag_syn == 0) {
-            if (self.revivableFor(pkt.src_ip, src_port, number)) |e| {
+            if (self.revivableFor(pkt.src_ip, src_port, number)) |slot| {
                 // The entry leaves the ring first: a revival into a stuck
                 // half-open's slot puts that one in the ring, maybe here.
                 // With no room nothing gave way, and the entry goes back.
-                const kept = e.*;
-                e.used = false;
+                const kept = slot.*.?;
+                slot.* = null;
                 found = self.revive(kept, now) orelse {
-                    e.* = kept;
+                    slot.* = kept;
                     self.revival_no_room += 1;
                     props.reachable(@src(), "tcp: a revival finds no slot, and the ACK is dropped", null);
                     return .{ .event = .nothing };
