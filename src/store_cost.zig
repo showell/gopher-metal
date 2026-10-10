@@ -407,6 +407,31 @@ fn moveCut(b: *Bench) !void {
     _ = try store.append(mio, x, "data/lynrummy/1/lynrummy-elm/sessions/1/actions.dsl", "move a b\n");
 }
 
+/// **SEARCH'S BOOT BUILD** (metal-vmm 155(b)), as angry-gopher's
+/// `search_index.buildAll` reads: every conversation listed, every
+/// transcript read whole (`chat_store.rawSession`).
+fn indexBuild(b: *Bench) !void {
+    const x = b.a();
+    var dirs: std.ArrayList([]const u8) = .empty;
+    for (try store.list(mio, x, "data/chat")) |e| {
+        if (e.kind != .directory or std.mem.eql(u8, e.name, "users")) continue;
+        if (std.mem.eql(u8, e.name, "channels")) {
+            for (try store.list(mio, x, "data/chat/channels")) |ch| {
+                if (ch.kind == .directory) try dirs.append(x, try std.fmt.allocPrint(x, "data/chat/channels/{s}", .{ch.name}));
+            }
+            continue;
+        }
+        try dirs.append(x, try std.fmt.allocPrint(x, "data/chat/{s}", .{e.name}));
+    }
+    for (dirs.items) |dir| {
+        const sessions = try std.fmt.allocPrint(x, "{s}/sessions", .{dir});
+        for (store.list(mio, x, sessions) catch continue) |s| {
+            if (s.kind == .directory or !std.mem.endsWith(u8, s.name, ".md")) continue;
+            _ = try store.readOrNull(mio, x, try std.fmt.allocPrint(x, "{s}/{s}", .{ sessions, s.name }), .unlimited);
+        }
+    }
+}
+
 const Op = struct { name: []const u8, run: *const fn (b: *Bench) anyerror!void };
 const ops = [_]Op{
     .{ .name = "a chat send (a DM)", .run = send },
@@ -446,4 +471,13 @@ test "what each store call and each common request costs the disk (metal-vmm 151
         row(o.name ++ ", cold", cold);
         row(o.name ++ ", warm", warm);
     }
+
+    // **AFTER 155** (153(7), measured as QUEUE 153 asks): the boot's index
+    // build reads every transcript whole, which the page cache keeps; then
+    // the first Recent.
+    try b.mount();
+    row("search's boot build, every transcript", try b.cost(Runner(indexBuild){}));
+    row("GET /chat/recent, first after it", try b.cost(Runner(recent){}));
+    // Warm: 2 without the build (its tails, never read whole), 0 with.
+    row("GET /chat/recent, warm after it", try b.cost(Runner(recent){}));
 }
