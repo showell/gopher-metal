@@ -2352,6 +2352,56 @@ pub const Volume = struct {
         return .unknown;
     }
 
+    /// Which of this boot's counts holds an orphan run of `len` parts about
+    /// to be tombstoned (154(b)), as the counts can tell with no state:
+    ///
+    /// - `exact`: a run, and `len` parts, in the exact counts;
+    /// - `mixed`: a run and `len - 1` parts in the exact counts, and a part
+    ///   that may be live: the run `partsLeft` or a failed `writeEntry`
+    ///   leaves where one part's write is unknown, that part the one
+    ///   nearest the short entry, tombstoned first;
+    /// - `unsure`: a run, and `len` parts, that may be live;
+    /// - `none`: no count of this boot holds it (an earlier boot's run, an
+    ///   older kernel's), and the counts are left.
+    ///
+    /// **EXACT FIRST**: where the run taken is the wrong one, the exact floor
+    /// drops and the sum stays, so the judge passes leniently; taken from
+    /// the counts that may be live when it was exact, the floor would stand
+    /// above what fsck.fat finds, a false failure. The counts are the
+    /// judge's accounting, never the data.
+    fn heldBy(self: *const Volume, len: u32) Held {
+        if (len == 0) return .none;
+        if (self.orphaned_runs > 0 and self.orphaned_parts >= len) return .exact;
+        if (len >= 2 and self.orphaned_runs > 0 and self.orphaned_parts >= len - 1 and self.unsure_parts >= 1) return .mixed;
+        if (self.unsure_runs > 0 and self.unsure_parts >= len) return .unsure;
+        props.reachable(@src(), "fat: an orphan run no count of this boot holds is tombstoned", .{ .parts = len });
+        return .none;
+    }
+
+    const Held = enum { exact, mixed, unsure, none };
+
+    /// The orphan part `k` of a run of `len`, tombstoned (`landed`) or
+    /// maybe (`unknown`), taken from the count `held` says. A part as it
+    /// lands, so a stop leaves the run's first parts still counted; the run
+    /// with its first part (`k == 0`), the last tombstoned. One that may
+    /// have landed moves to the counts that may be live.
+    fn tombstoned(self: *Volume, held: Held, k: u32, len: u32, how: Landing) void {
+        const exact_part = switch (held) {
+            .exact => true,
+            .mixed => k != len - 1,
+            .unsure, .none => false,
+        };
+        const exact_run = held == .exact or held == .mixed;
+        if (held != .none) {
+            if (exact_part) self.orphaned_parts -= 1 else self.unsure_parts -= 1;
+            if (how == .unknown) self.unsure_parts += 1;
+            if (k == 0) {
+                if (exact_run) self.orphaned_runs -= 1 else self.unsure_runs -= 1;
+                if (how == .unknown) self.unsure_runs += 1;
+            }
+        }
+    }
+
     /// Tombstones the run's orphans, then writes the long-name parts and the
     /// short entry that closes them.
     fn writeEntry(
@@ -2381,40 +2431,29 @@ pub const Volume = struct {
         // **TAKEN FROM A COUNT ONLY WHERE A COUNT OF THIS BOOT COVERS THE
         // RUN** (154(b)): the counts are this boot's, and the run may be an
         // earlier boot's, or an older kernel's, which no count holds. Nothing
-        // says which run a count was for, so a run is taken from the
-        // exact counts where they hold a run of its parts, else from the ones
-        // that may be live where those do, else from neither. Exact first:
-        // where both hold one and it is the wrong one, the exact floor drops
-        // and the sum stays, so the judge passes leniently rather than failing
-        // falsely. The counts are the judge's accounting, never the data.
-        // A part as its tombstone lands, the run once all have: a stop or a
-        // failure among them leaves the run's first parts, still counted.
-        const Held = enum { exact, unsure, none };
-        const held: Held = if (run.orphans_len == 0) .none else if (self.orphaned_runs > 0 and self.orphaned_parts >= run.orphans_len)
-            .exact
-        else if (self.unsure_runs > 0 and self.unsure_parts >= run.orphans_len)
-            .unsure
-        else blk: {
-            props.reachable(@src(), "fat: an orphan run no count of this boot holds is tombstoned", .{ .parts = run.orphans_len });
-            break :blk .none;
-        };
+        // says which run a count was for, so a run is taken as `heldBy`
+        // finds a count that holds it, else from none.
+        const held = self.heldBy(run.orphans_len);
         var k = run.orphans_len;
         while (k > 0) {
             k -= 1;
             const o = run.orphans[k];
             try self.readSector(o.lba, self.scratch);
-            self.scratch[o.at] = 0xE5;
-            try self.writeSector(o.lba, self.scratch);
-            switch (held) {
-                .exact => self.orphaned_parts -= 1,
-                .unsure => self.unsure_parts -= 1,
-                .none => {},
-            }
-        }
-        switch (held) {
-            .exact => self.orphaned_runs -= 1,
-            .unsure => self.unsure_runs -= 1,
-            .none => {},
+            const e = self.scratch[o.at..][0..dirent_size];
+            const was = e.*;
+            e[0] = 0xE5;
+            const written = e.*;
+            // A refused tombstone is read back, as `partsLeft`'s clears are:
+            // one that landed is gone, whatever the answer said.
+            self.writeSector(o.lba, self.scratch) catch |err| {
+                switch (self.entryRefused(o.lba, o.at, &was, &written)) {
+                    .landed => self.tombstoned(held, k, run.orphans_len, .landed),
+                    .before => {},
+                    .unknown => self.tombstoned(held, k, run.orphans_len, .unknown),
+                }
+                return err;
+            };
+            self.tombstoned(held, k, run.orphans_len, .landed);
         }
 
         // **PARTS ON THE DISK WITH NO SHORT ENTRY TO CLOSE THEM** are left

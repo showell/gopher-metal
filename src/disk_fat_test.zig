@@ -1046,13 +1046,21 @@ fn tombstoneUncounted(cfg: anytype, before: [4]u64) ![4]u64 {
 
 test "tombstoning an orphan run takes it from a count of this boot only where one covers it (metal-vmm 154(b))" {
     for (configs) |cfg| {
-        // [runs, parts, runs that may be, parts that may be]. Neither count
-        // holds a run of two parts: an earlier boot's, left as counted.
-        try testing.expectEqual([4]u64{ 1, 1, 1, 1 }, try tombstoneUncounted(cfg, .{ 1, 1, 1, 1 }));
+        // [runs, parts, runs that may be, parts that may be]. No count holds
+        // a run of two parts: an earlier boot's, left as counted.
+        try testing.expectEqual([4]u64{ 1, 1, 0, 0 }, try tombstoneUncounted(cfg, .{ 1, 1, 0, 0 }));
+        // The exact counts do.
+        try testing.expectEqual([4]u64{ 0, 0, 0, 0 }, try tombstoneUncounted(cfg, .{ 1, 2, 0, 0 }));
         // Both do: the exact one first.
         try testing.expectEqual([4]u64{ 0, 0, 1, 2 }, try tombstoneUncounted(cfg, .{ 1, 2, 1, 2 }));
+        // A run and one part exact, one part that may be live: the run
+        // `partsLeft` leaves where its last clear is unknown (the review).
+        try testing.expectEqual([4]u64{ 0, 0, 0, 0 }, try tombstoneUncounted(cfg, .{ 1, 1, 0, 1 }));
         // Only the one that may be live does.
-        try testing.expectEqual([4]u64{ 1, 1, 0, 0 }, try tombstoneUncounted(cfg, .{ 1, 1, 1, 2 }));
+        try testing.expectEqual([4]u64{ 0, 0, 0, 0 }, try tombstoneUncounted(cfg, .{ 0, 0, 1, 2 }));
+        // Mixed before what may be live, as exact before it: wrong, the
+        // judge passes leniently; the other way, it fails falsely.
+        try testing.expectEqual([4]u64{ 0, 0, 1, 1 }, try tombstoneUncounted(cfg, .{ 1, 1, 1, 2 }));
         // None at all.
         try testing.expectEqual([4]u64{ 0, 0, 0, 0 }, try tombstoneUncounted(cfg, .{ 0, 0, 0, 0 }));
     }
