@@ -340,7 +340,9 @@ fn countedIsFound(d: *test_disk.Disk, op: []const u8, kind: []const u8, when: []
     const clusters_ok = r.health.leaked >= v.leaked_clusters and
         (v.unsized_leaks > 0 or r.health.leaked <= v.leaked_clusters + v.unsure_clusters);
     const parts_ok = r.health.orphaned_parts >= v.orphaned_parts and
-        r.health.orphaned_parts <= v.orphaned_parts + v.unsure_parts;
+        r.health.orphaned_parts <= v.orphaned_parts + v.unsure_parts and
+        r.health.orphaned_runs >= v.orphaned_runs and
+        r.health.orphaned_runs <= v.orphaned_runs + v.unsure_runs;
     // A `long` finding's count is the chain's length: past the size, it is
     // that less what the size needs.
     var long: u64 = 0;
@@ -352,7 +354,7 @@ fn countedIsFound(d: *test_disk.Disk, op: []const u8, kind: []const u8, when: []
     }
     const long_ok = long >= v.long_clusters and long <= v.long_clusters + v.unsure_long;
     if (clusters_ok and parts_ok and long_ok) return;
-    std.debug.print("{s} ({s}), {s} {d}: counted {d} clusters leaked (+{d} unsure, {d} unsized), {d} long-name parts orphaned (+{d} unsure) and {d} clusters long (+{d} unsure); the check found {d}, {d} and {d}\n", .{ op, kind, when, n, v.leaked_clusters, v.unsure_clusters, v.unsized_leaks, v.orphaned_parts, v.unsure_parts, v.long_clusters, v.unsure_long, r.health.leaked, r.health.orphaned_parts, long });
+    std.debug.print("{s} ({s}), {s} {d}: counted {d} clusters leaked (+{d} unsure, {d} unsized), {d} long-name parts orphaned (+{d} unsure) in {d} runs (+{d} unsure) and {d} clusters long (+{d} unsure); the check found {d}, {d} in {d} runs and {d}\n", .{ op, kind, when, n, v.leaked_clusters, v.unsure_clusters, v.unsized_leaks, v.orphaned_parts, v.unsure_parts, v.orphaned_runs, v.unsure_runs, v.long_clusters, v.unsure_long, r.health.leaked, r.health.orphaned_parts, r.health.orphaned_runs, long });
     return error.TestUnexpectedResult;
 }
 

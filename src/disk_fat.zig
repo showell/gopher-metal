@@ -185,6 +185,10 @@ pub const Health = struct {
     /// both leave them, and nothing reads them): a count, for a caller to
     /// hold `Volume.orphaned_parts` to.
     orphaned_parts: u32 = 0,
+    /// **AND THE RUNS THEY ARE IN** (metal-vmm 152): fsck.fat says one
+    /// "Orphaned long file name part" line a run, the whole name, so a judge
+    /// holds its lines to runs, not parts.
+    orphaned_runs: u32 = 0,
     problems: u32 = 0,
 
     pub fn clean(self: Health) bool {
@@ -347,6 +351,10 @@ pub const Volume = struct {
     /// short entry are counted too (`writeEntry`), and one whose own write
     /// failed among them, since it may have landed.
     orphaned_parts: u64 = 0,
+    /// **THE RUNS THOSE PARTS ARE IN** (metal-vmm 152): what fsck.fat
+    /// counts, a line a run. `unsure_runs` beside `unsure_parts`.
+    orphaned_runs: u64 = 0,
+    unsure_runs: u64 = 0,
     /// **LEFTOVERS THAT MAY BE LIVE** (metal-vmm 148(a)): clusters and
     /// long-name parts a failed write may have left, where no exact read
     /// could say (`Landing.unknown`): an entry that may point at them, or
@@ -2014,7 +2022,7 @@ pub const Volume = struct {
 
         /// The entry is gone for good: its long name's parts go too.
         fn forget(u: *const Unlinked, vol: *Volume) void {
-            for (u.parts[0..u.part_count]) |pos| vol.partLeft(pos.lba, pos.at);
+            vol.partsLeft(u.parts[0..u.part_count]);
         }
     };
 
@@ -2024,16 +2032,18 @@ pub const Volume = struct {
     /// nothing, and left it orphaned (`orphaned_parts`, which fsck.fat
     /// auto-deletes); a refused write is read back, cleared or not, and
     /// what reads as neither is `unsure_parts`.
-    fn partLeft(self: *Volume, lba: u32, at: u32) void {
+    fn partLeft(self: *Volume, lba: u32, at: u32) Landing {
         self.readSector(lba, self.scratch) catch return self.partStands(.before);
         const was = self.scratch[at..][0..dirent_size].*;
         self.scratch[at] = 0xE5;
         const written = self.scratch[at..][0..dirent_size].*;
         self.writeSector(lba, self.scratch) catch return self.partStands(self.entryRefused(lba, at, &was, &written));
+        return .landed;
     }
 
-    /// A part whose clearing failed, counted by where the clear stands.
-    fn partStands(self: *Volume, clear: Landing) void {
+    /// A part whose clearing failed, counted by where the clear stands,
+    /// which it answers (`.landed`: cleared).
+    fn partStands(self: *Volume, clear: Landing) Landing {
         self.cleanups_failed +%= 1;
         switch (clear) {
             .landed => props.reachable(@src(), "fat: a long-name part's refused clearing landed", null),
@@ -2043,6 +2053,43 @@ pub const Volume = struct {
             },
             .unknown => self.unsure_parts +|= 1,
         }
+        return clear;
+    }
+
+    /// **A NAME'S PARTS CLEARED, AND THE RUNS THEY LEAVE** (metal-vmm
+    /// 152): each part by `partLeft`, in the order they sit; the parts left
+    /// form runs, a line each in fsck.fat's report. A part whose clearing is
+    /// unknown may join its neighbours or part them, so the fewer runs it
+    /// could leave are counted (`orphaned_runs`), and the more beside them
+    /// (`unsure_runs`).
+    fn partsLeft(self: *Volume, positions: anytype) void {
+        // Runs with every unknown part cleared, and with every one left.
+        var if_cleared: u32 = 0;
+        var if_left: u32 = 0;
+        var open_cleared = false;
+        var open_left = false;
+        for (positions) |pos| {
+            switch (self.partLeft(pos.lba, pos.at)) {
+                .landed => {
+                    open_cleared = false;
+                    open_left = false;
+                },
+                .before => {
+                    if (!open_cleared) if_cleared += 1;
+                    if (!open_left) if_left += 1;
+                    open_cleared = true;
+                    open_left = true;
+                },
+                .unknown => {
+                    open_cleared = false;
+                    if (!open_left) if_left += 1;
+                    open_left = true;
+                },
+            }
+        }
+        const fewer = @min(if_cleared, if_left);
+        self.orphaned_runs +|= fewer;
+        self.unsure_runs +|= @max(if_cleared, if_left) - fewer;
     }
 
     /// removeEntry's work. With `.keep_chain` the chain stays allocated, for
@@ -2131,7 +2178,7 @@ pub const Volume = struct {
                     // 2. the long-name parts, each where the walk found it
                     // (unless held: the caller clears them once it is sure)
                     if (has_long and held == null) {
-                        for (run) |pos| self.partLeft(pos.lba, pos.at);
+                        self.partsLeft(run);
                     }
 
                     // 3. and only now, the data
@@ -2151,6 +2198,7 @@ pub const Volume = struct {
     /// leftover that may be live (`unsure_clusters`, `unsure_parts`).
     fn unlinkUnsure(self: *Volume, chain: Cluster, parts: u32) void {
         self.unsure_parts +|= parts;
+        if (parts > 0) self.unsure_runs +|= 1;
         if (!self.inData(chain)) return;
         const end = self.chainEnd(chain) catch {
             self.unsized_leaks +|= 1;
@@ -2249,6 +2297,10 @@ pub const Volume = struct {
             try self.writeSector(o.lba, self.scratch);
             if (self.orphaned_parts > 0) self.orphaned_parts -= 1 else self.unsure_parts -|= 1;
         }
+        // Those parts were one run.
+        if (run.orphans_len > 0) {
+            if (self.orphaned_runs > 0) self.orphaned_runs -= 1 else self.unsure_runs -|= 1;
+        }
 
         // **PARTS ON THE DISK WITH NO SHORT ENTRY TO CLOSE THEM** are left
         // orphaned when this returns an error before the short entry
@@ -2260,13 +2312,22 @@ pub const Volume = struct {
         // tombstones them first.
         var on_disk: u32 = 0;
         var short_entry: Landing = .before;
-        errdefer if (on_disk > 0) switch (short_entry) {
+        // The parts on the disk are one run, the first ones of the name
+        // (152); a part of unknown landing after them is in it, or alone.
+        var part_unsure = false;
+        errdefer switch (short_entry) {
             .landed => {},
             .before => {
-                self.orphaned_parts +|= on_disk;
-                props.reachable(@src(), "fat: a new entry's long-name parts are left orphaned, its short entry not written", .{ .parts = on_disk });
+                if (on_disk > 0) {
+                    self.orphaned_parts +|= on_disk;
+                    self.orphaned_runs +|= 1;
+                    props.reachable(@src(), "fat: a new entry's long-name parts are left orphaned, its short entry not written", .{ .parts = on_disk });
+                } else if (part_unsure) self.unsure_runs +|= 1;
             },
-            .unknown => self.unsure_parts +|= on_disk,
+            .unknown => if (on_disk > 0) {
+                self.unsure_parts +|= on_disk;
+                self.unsure_runs +|= 1;
+            },
         };
         var next: u32 = 0;
         var part: u32 = parts;
@@ -2297,7 +2358,10 @@ pub const Volume = struct {
                 switch (self.entryRefused(slot.lba, slot.at, &part_was, &part_written)) {
                     .landed => on_disk += 1,
                     .before => {},
-                    .unknown => self.unsure_parts +|= 1,
+                    .unknown => {
+                        self.unsure_parts +|= 1;
+                        part_unsure = true;
+                    },
                 }
                 return err;
             };
@@ -2902,6 +2966,7 @@ pub const Volume = struct {
             .unknown => {
                 props.reachable(@src(), "fat: a rename's undo cannot be read back, and the file's chain and long name may be left", null);
                 self.unsure_parts +|= held.part_count;
+                if (held.part_count > 0) self.unsure_runs +|= 1;
             },
         }
     }
@@ -3118,19 +3183,27 @@ pub const Volume = struct {
     fn removeDirectoryIn(self: *Volume, parent: Cluster, name: []const u8, dir_cluster: Cluster, depth: u32) Error!void {
         const orphans_before = self.orphaned_parts;
         const unsure_before = self.unsure_parts;
+        const runs_before = self.orphaned_runs;
+        const unsure_runs_before = self.unsure_runs;
         try self.removeTreeAt(dir_cluster, depth);
         const inside = self.orphaned_parts -| orphans_before;
         const unsure_inside = self.unsure_parts -| unsure_before;
+        const runs_inside = self.orphaned_runs -| runs_before;
+        const unsure_runs_inside = self.unsure_runs -| unsure_runs_before;
         var gone: Landing = .before;
         defer switch (gone) {
             .before => {},
             .landed => {
                 self.orphaned_parts -|= inside;
                 self.unsure_parts -|= unsure_inside;
+                self.orphaned_runs -|= runs_inside;
+                self.unsure_runs -|= unsure_runs_inside;
             },
             .unknown => {
                 self.orphaned_parts -|= inside;
                 self.unsure_parts +|= inside;
+                self.orphaned_runs -|= runs_inside;
+                self.unsure_runs +|= runs_inside;
             },
         };
         return self.unlinkEntry(parent, name, .free_chain, &gone, null);
@@ -3371,6 +3444,7 @@ pub const Volume = struct {
             /// The parts of a run nothing closed, counted, and the run let go.
             fn orphaned(self: *Self, run_parts: *u32) void {
                 self.health.orphaned_parts += run_parts.*;
+                if (run_parts.* > 0) self.health.orphaned_runs += 1;
                 run_parts.* = 0;
             }
 
