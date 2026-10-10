@@ -328,6 +328,12 @@ pub const Volume = struct {
     /// reports; counted here and said by a property, never the operation's
     /// error.
     cleanups_failed: u64 = 0,
+    /// **CLUSTERS LEFT A COUNTED LEAK**, where the cleanup knows how many:
+    /// a failed write's chain left taken (`leftLeaked`), what a give-back
+    /// did not free (`notGivenBack`). A cleanup after a commit (`afterCommit`)
+    /// does not know, and adds none. A judge holds what fsck.fat reclaims to
+    /// it: more found than counted is a leak nobody counted.
+    leaked_clusters: u64 = 0,
     /// **THE LEDGER** (`ledger_on`): clusters the operation in
     /// progress took and has not yet ended. Every cluster `allocChain`
     /// takes ends in exactly one of four ways, each of which says how many
@@ -1480,6 +1486,7 @@ pub const Volume = struct {
     /// (`cleanups_failed`), and their end in the ledger.
     fn leftLeaked(self: *Volume, clusters: u32) void {
         self.cleanups_failed +%= 1;
+        self.leaked_clusters +|= clusters;
         props.reachable(@src(), "fat: clusters left taken, what a failed write left not read exactly", .{ .count = self.cleanups_failed });
         self.ended(clusters);
     }
@@ -1521,6 +1528,7 @@ pub const Volume = struct {
 
     fn notGivenBack(self: *Volume, freed: u32, clusters: u32) void {
         self.cleanups_failed +%= 1;
+        self.leaked_clusters +|= clusters - freed;
         props.reachable(@src(), "fat: clusters taken before a failure could not be given back, and are left a leak", .{ .count = self.cleanups_failed, .freed = freed, .of = clusters });
     }
 

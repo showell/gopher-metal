@@ -10,12 +10,17 @@
 # window (the peer keeps to the guest's window), and a segment from behind
 # (the peer must time out on lost ACKs, which needs more of the guest's
 # frames lost than WIRE_EAT takes). metal-vmm's QUEUE.md has them.
+#
+# Not here: a round trip faster than the estimate. metal-vmm's wire keeps
+# one delay for a run, and a resent segment is not timed (Karn), so only an
+# estimate taken from a resent SYN-ACK was ever beaten, which 7fcca2f made
+# impossible (1-6 of ~200 nightly runs before it; 0 of 110 long runs after).
+# floor-sim.txt holds it, where the simulator varies the delay.
 tcp: a lost SYN-ACK is sent again
 tcp: the timer goes back to the oldest unacknowledged byte
 tcp: three duplicate ACKs resend at once
 tcp: a backed-off RTO stays under the cap
 tcp: a measured RTO is within its bounds
-tcp: a round trip comes in faster than the estimate
 # off the metal floor, 2026-10-07 (metal-vmm QUEUE 102): reached only by timing luck
 # on the coverage kernel; floor-sim.txt holds it. tcp: an exact reset closes a connection
 # off the metal floor, 2026-10-07 (metal-vmm QUEUE 102): reached only by timing luck
