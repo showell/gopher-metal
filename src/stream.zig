@@ -149,6 +149,13 @@ pub var after_arrivals: ?*const fn () void = null;
 /// up.
 pub const max_frames_per_turn: usize = 8 * net.rx_buffers;
 
+/// One turn of the network, and a rest if nothing arrived: what every wait
+/// on the network does between looking at what it waits for. A rest only
+/// after an empty turn: one that took a frame may have more behind it.
+pub fn pumpOrRestOn(wire: *Wire, table: *tcp.Table, ip: [4]u8) void {
+    if (pump(wire, table, ip) == null) interrupts.rest();
+}
+
 pub fn pump(wire: *Wire, table: *tcp.Table, ip: [4]u8) ?tcp.Result {
     const now = io.awakeNs() orelse 0;
     const nic = wire.nic;
@@ -284,10 +291,8 @@ pub const Stream = struct {
         _ = pump(self.wire, self.table, self.ip);
     }
 
-    /// One turn of the network, and a rest if nothing arrived: what every
-    /// wait here does between looking at its connection.
     fn pumpOrRest(self: *Stream) void {
-        if (pump(self.wire, self.table, self.ip) == null) interrupts.rest();
+        pumpOrRestOn(self.wire, self.table, self.ip);
     }
 
     /// Bytes the peer has sent that we have not handed out, waiting for some

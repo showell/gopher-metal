@@ -582,8 +582,7 @@ pub fn kmain() noreturn {
     }
     const scratch_heap = pages.allocator.alloc(u8, stream_scratch_bytes) catch
         serial.fail("the machine has not enough memory for its streams' scratch");
-    stream_scratch = std.heap.FixedBufferAllocator.init(scratch_heap);
-    turning = .{ .wire = &wire, .table = &table, .hub = hub, .conf = conf };
+    turning = .{ .wire = &wire, .table = &table, .hub = hub, .conf = conf, .scratch = .init(scratch_heap) };
     stream.after_arrivals = streamTurn;
 
     // From here a fatal error is a failure while serving: with the restart
@@ -674,7 +673,7 @@ pub fn kmain() noreturn {
     // to finish (their turns run inside `pump`), then the rest are reset.
     const draining_from = Io.awakeNs() orelse 0;
     while (draining_now > 0 and (Io.awakeNs() orelse 0) - draining_from < conf.idle_ns) {
-        if (stream.pump(&wire, &table, lease.address) == null) interrupts.rest();
+        stream.pumpOrRestOn(&wire, &table, lease.address);
     }
     for (&draining, 0..) |*slot, i| {
         if (slot.*) |*d| {
@@ -694,7 +693,7 @@ pub fn kmain() noreturn {
     }
     const stopping_at = Io.awakeNs() orelse 0;
     while (closing(&table) and (Io.awakeNs() orelse 0) - stopping_at < 2 * std.time.ns_per_s) {
-        if (stream.pump(&wire, &table, lease.address) == null) interrupts.rest();
+        stream.pumpOrRestOn(&wire, &table, lease.address);
     }
     // **A RESPONSE CUT BY THE STOP IS SAID TO BE.** One still unacknowledged
     // now is never finished: its request counted as answered, and its client
@@ -968,25 +967,24 @@ fn serviceDraining(wire: *stream.Wire, table: *tcp.Table, now: i96, idle_ns: u64
 }
 
 /// What a turn of the held streams needs, set once the network is up.
-var turning: ?struct { wire: *stream.Wire, table: *tcp.Table, hub: *Hub, conf: Config } = null;
+var turning: ?struct { wire: *stream.Wire, table: *tcp.Table, hub: *Hub, conf: Config, scratch: std.heap.FixedBufferAllocator } = null;
 /// The streams' own scratch: a turn can come in the middle of a request, whose
 /// heap is not the streams' to reset. Big enough for the largest frame chat
 /// renders, several times over.
 const stream_scratch_bytes = 4 * 1024 * 1024;
-var stream_scratch: std.heap.FixedBufferAllocator = undefined;
 var in_turn = false;
 
 /// Called by every turn of the network (`stream.after_arrivals`). A turn does
 /// not start another: ending a stream never waits, but it is simpler to know
 /// that than to prove it each time.
 fn streamTurn() void {
-    const t = turning orelse return;
+    const t = if (turning) |*t| t else return;
     if (in_turn) return;
     in_turn = true;
     defer in_turn = false;
     const now = Io.awakeNs() orelse 0;
-    serviceStreams(t.wire, t.table, t.hub, stream_scratch.allocator(), now, t.conf);
-    stream_scratch.reset();
+    serviceStreams(t.wire, t.table, t.hub, t.scratch.allocator(), now, t.conf);
+    t.scratch.reset();
     serviceDraining(t.wire, t.table, now, t.conf.idle_ns);
 }
 

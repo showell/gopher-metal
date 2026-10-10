@@ -208,7 +208,8 @@ pub fn build(b: *std.Build) void {
     gopher.entry = .{ .symbol_name = "_start" };
     const gopher_copy = b.addUpdateSourceFiles();
     gopher_copy.addCopyFileToSource(gopher.getEmittedBin(), "probe/gopher.elf");
-    b.step("gopher", "the real server, once port.sh has prepared it").dependOn(&gopher_copy.step);
+    const gopher_step = b.step("gopher", "the real server, once port.sh has prepared it, of the checkout as it is now");
+    gopher_step.dependOn(&gopher_copy.step);
 
     // **EVERY KERNEL TYPE-CHECKED, ON EVERY `zig build test`** (metal-vmm
     // B34): a field renamed in src/ broke gopher.elf (b4463a9) and native
@@ -268,6 +269,11 @@ pub fn build(b: *std.Build) void {
         // that did not build (48a167f).
         const fail = b.addFail(b.fmt("check: gopher.elf NOT type-checked: {s} (port {s}, checkout {s}): run ./port.sh, or -Dgopher=<dir> and -Dgopher-root=<dir> for others", .{ port_state, gopher_port, gopher_root }));
         check_step.dependOn(&fail.step);
+        // **NOR BUILT** (the protocols-in-prose hunt, K10), with
+        // probe/gopher.elf left as it was: a kernel of a port that is not
+        // the checkout's would be judged as if it were.
+        const no_build = b.addFail(b.fmt("gopher: NOT built: {s} (port {s}, checkout {s}): run ./port.sh, or -Dgopher=<dir> and -Dgopher-root=<dir> for others", .{ port_state, gopher_port, gopher_root }));
+        gopher_copy.step.dependOn(&no_build.step);
     }
 
     b.getInstallStep().dependOn(&copy.step);
