@@ -178,11 +178,22 @@ pub fn build(b: *std.Build) void {
     gm_opts.addOption(bool, "coverage", b.option(bool, "coverage", "gopher.elf writes its coverage-property lines to the serial port") orelse false);
     build_opts.addOption(bool, "fake_leak", false);
 
+    // **THE `webbox` LIBRARY, ITS OWN MODULE**, as the application's build
+    // makes it: the application's files import it by name (`@import("webbox")`),
+    // never its files by path (angry-gopher's tools/lint_portable.py), so each
+    // ported file belongs to one module. Its Linux half (`webbox_linux`) is
+    // ported with the rest and never compiled here: nothing imports it.
+    const webbox = b.createModule(.{
+        .root_source_file = .{ .cwd_relative = b.fmt("{s}/webbox.zig", .{gopher_port}) },
+        .red_zone = false,
+        .imports = &.{.{ .name = "metal", .module = metal }},
+    });
     const app = b.createModule(.{
         .root_source_file = .{ .cwd_relative = b.fmt("{s}/router.zig", .{gopher_port}) },
         .red_zone = false,
         .imports = &.{
             .{ .name = "metal", .module = metal },
+            .{ .name = "webbox", .module = webbox },
             .{ .name = "build_options", .module = build_opts.createModule() },
         },
     });
