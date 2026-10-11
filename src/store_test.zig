@@ -400,3 +400,30 @@ test "a write under a file is a bad name, on FAT as in the model; a read or a re
         try testing.expectEqualStrings("a file", buf[0..n]);
     }
 }
+
+test "the deepest, longest path a Store takes works on FAT as in the model; one part more, or one byte more, is a bad name on both" {
+    const d = try test_disk.Disk.make("store-edge-path", test_disk.small, false);
+    defer d.deinit();
+    var f = FatStore{ .vol = &d.vol };
+    var m = Model.init(testing.allocator);
+    defer m.deinit();
+    const part = "p" ** store.max_part;
+    // max_parts parts of max_part bytes: replace's hidden name on the last
+    // is temp_prefix longer, within disk_fat's max_name.
+    const deepest = (part ++ "/") ** (store.max_parts - 1) ++ part;
+    const too_deep = deepest ++ "/x";
+    const too_long = (part ++ "/") ** (store.max_parts - 1) ++ part ++ "p";
+    var buf: [32]u8 = undefined;
+    for ([_]store.Store{ m.store_(), f.store_() }) |s| {
+        try s.write(deepest, "written");
+        try s.replace(deepest, "replaced");
+        try s.append(deepest, "+");
+        const n = try s.read(deepest, &buf);
+        try testing.expectEqualStrings("replaced+", buf[0..n]);
+        try testing.expectError(Error.BadName, s.write(too_deep, "x"));
+        try testing.expectError(Error.BadName, s.replace(too_long, "x"));
+        try testing.expectError(Error.BadName, s.read(too_long, &buf));
+        try s.remove(deepest);
+        try testing.expectError(Error.NotFound, s.read(deepest, &buf));
+    }
+}
