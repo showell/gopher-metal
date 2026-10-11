@@ -191,11 +191,9 @@ under "For the box" below.)*
   short chain if the disk answers its second read of the FAT differently.
   No metal-vmm knob does that on purpose; **a knob that answers one read
   with other bytes** (as `Block.Fault.garbage` does in host tests) would.
-- *a long name of more parts than FAT allows cannot be removed* and *a tree
-  with more entries than a volume holds is refused as broken*: each needs a
-  directory written by something other than this driver (a long name of 21
-  parts; a directory whose entries come back after removal). Not built yet:
-  the debt ledger has it.
+- *a tree with more entries than a volume holds is refused as broken*: it
+  needs a directory written by something other than this driver (one whose
+  entries come back after removal). Not built yet: the debt ledger has it.
 - Four that were missed in `properties` before item 76 as well: *no 8.3
   alias is left*, *a directory reaches FAT's most entries*, *a directory
   deeper than the check walks*, *a tree too deep to remove*. `disk_fat_test.zig`
@@ -226,7 +224,7 @@ errors are built from these.
 
 - `BadBootSector`: fat: a mount refuses FAT32 with FAT16's fields set; fat: a mount refuses FATs whose total size overflows; fat: a mount refuses a FAT of no sectors; fat: a mount refuses a FAT too short for its clusters; fat: a mount refuses a FAT16 root of no entries; fat: a mount refuses a cluster size no volume has; fat: a mount refuses a sector without the boot signature; fat: a mount refuses a volume with no data region; fat: a mount refuses no reserved sectors, or a count of FATs it does not keep; fat: a mount refuses reserved sectors and FATs whose sum overflows
 - `BadChain`: fat: a chain leads outside the data area; fat: a chain that loops is refused; fat: a directory's first cluster is outside the data; fat: a file's chain ends before its size, reading a file whole *(a guard)*; fat: a file's chain ends before its size, reading at an offset, at its start; fat: a file's chain ends before its size, reading at an offset, past its first run; fat: a file's chain points at a reserved cluster, reading at an offset, at its start *(a guard)*; fat: a file's chain points at a reserved cluster, reading at an offset, past its first run *(a guard)*; fat: a file's first cluster is outside the data; fat: a file's first cluster is outside the data, at its chain's end; fat: a file's first cluster is outside the data, when its layout is asked; fat: a file's layout counts more clusters than the volume holds: a loop; fat: a file's layout finds a reserved cluster *(a guard)*; fat: a tree too deep to remove is refused; fat: a write finds a file's chain ends before its size, writing, at its start; fat: a write finds a file's chain ends before its size, writing, past its first run; fat: a write finds a file's chain points at a reserved cluster, writing, at its start *(a guard)*; fat: a write finds a file's chain points at a reserved cluster, writing, past its first run *(a guard)*; fat: a write finds a file's first cluster outside the data *(a guard)*; fat: an overwrite past a file's end is refused
-- `BadName`: fat: a directory deeper than the check walks is refused; fat: a directory run sized for another name *(a guard)*; fat: a directory to be made is a file's name; fat: a long name of more parts than FAT allows cannot be removed; fat: a name needing more long-name parts than FAT allows *(a guard)*; fat: a path with no name in it is refused; fat: a rename across directories is refused; fat: a rename of a directory is refused; fat: a write's name is empty or too long; fat: an overwrite of a directory is refused; fat: no 8.3 alias is left for a name
+- `BadName`: fat: a directory deeper than the check walks is refused; fat: a directory run sized for another name *(a guard)*; fat: a directory to be made is a file's name; fat: a name needing more long-name parts than FAT allows *(a guard)*; fat: a path with no name in it is refused; fat: a rename across directories is refused; fat: a rename of a directory is refused; fat: a write's name is empty or too long; fat: an overwrite of a directory is refused; fat: no 8.3 alias is left for a name
 - `BadRoot`: fat: a mount refuses a FAT32 root outside the data
 - `DirectoryFull`: fat: a FAT16 root directory is full; fat: a directory reaches FAT's most entries; fat: a tree with more entries than a volume holds is refused as broken
 - `FatVersion`: fat: a mount refuses a FAT32 version it does not know

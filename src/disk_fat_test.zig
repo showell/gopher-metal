@@ -2370,26 +2370,21 @@ test "more orphan long-name parts in a row than a name has: the ones before a ne
     }
 }
 
-test "a long name of more parts than FAT allows is found, and its remove is refused whole, taking nothing" {
+test "a run of long-name parts out of turn is no name: the file is found by its short name only" {
     for (both) |cached| {
-        const d = try Disk.make("long-name-too-many-parts", small, cached);
+        const d = try Disk.make("long-name-out-of-turn", small, cached);
         defer d.deinit();
         try d.vol.writeFile("ABC", "hello"); // one short entry, the root's first
         const root = rootAt(d);
         var short: [32]u8 = d.bytes[root..][0..32].*;
-        // Twenty-one parts before it, each of the name "a-long-name": the
-        // first opens the name, the rest repeat its only part.
+        // Twenty-one parts before it, each numbered 1: the first opens the
+        // name, the rest are out of turn (Linux and fsck.fat refuse them too).
         const sum = dirent.shortChecksum(short[0..11].*);
         for (0..21) |k| longPart(d.bytes[root + k * 32 ..][0..32], 1, k == 0, sum, "a-long-name");
         @memcpy(d.bytes[root + 21 * 32 ..][0..32], &short);
         try d.mount(cached);
-        const before = d.free();
-        const e = try d.vol.open("a-long-name");
-        try testing.expectEqualStrings("a-long-name", e.text());
-        try testing.expectError(disk_fat.Error.BadName, d.vol.remove("a-long-name"));
-        try d.expectFile("a-long-name", "hello");
-        try testing.expectEqual(before, d.free());
-        for (0..22) |k| try testing.expect(d.bytes[root + k * 32] != 0xE5);
+        try testing.expectError(disk_fat.Error.NotFound, d.vol.open("a-long-name"));
+        try d.expectFile("ABC", "hello");
     }
 }
 

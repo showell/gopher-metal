@@ -144,8 +144,8 @@ pub const LongName = struct {
     buf: [max_name]u8 = undefined,
     len: usize = 0,
     sum: u8 = 0,
-    /// One less than the number of the part taken last: 0 once part 1, the
-    /// run's first characters, is in.
+    /// The number the run's next part must carry: one less than the part
+    /// taken last, and 0 once part 1, the run's first characters, is in.
     next: u8 = 0,
 
     pub const Stands = enum {
@@ -153,8 +153,9 @@ pub const LongName = struct {
         none,
         /// A run whose parts so far agree; `sum` is theirs.
         collecting,
-        /// A run gone wrong (a part numbered out of range, a checksum that
-        /// differs, a character past `max_name`): nothing closes it. Only a
+        /// A run gone wrong (a part numbered out of range or out of turn, a
+        /// checksum that differs, a character past `max_name`): nothing
+        /// closes it. Only a
         /// new last part opens another.
         spoiled,
     };
@@ -171,7 +172,10 @@ pub const LongName = struct {
             self.len = 0;
             self.sum = e[13];
             self.stands = .collecting;
-        } else if (self.stands != .collecting or self.sum != e[13]) {
+        } else if (self.stands != .collecting or self.sum != e[13] or seq != self.next) {
+            // Parts count down by one to part 1, as Linux and fsck.fat
+            // require: one out of turn would put its characters over
+            // whatever the buffer held.
             self.stands = .spoiled;
             return;
         }
@@ -647,5 +651,22 @@ test "LongName.close: a run counted down to part 1 puts its name, one stopped at
         entry.long_len = 0;
         try testing.expectEqual(put, long.close(&entry));
         if (put) try testing.expectEqualStrings("abcdefghijklmno", entry.text());
+    }
+}
+
+test "LongName: after a last part numbered n, a part numbered n - 1 continues the name, one numbered n + 1 spoils it" {
+    // A run of two parts, "abcdefghijklm" + "no", the last part first. A
+    // rotten run whose second part is numbered past the first's would put
+    // its characters past the name's end, over whatever the buffer held.
+    var entries: [2][dirent_size]u8 = undefined;
+    _ = longEntriesFor("abcdefghijklmno", 0x5A, &entries);
+    try testing.expectEqual(@as(u8, 0x42), entries[0][0]);
+    for ([_]u8{ 1, 3 }, [_]LongName.Stands{ .collecting, .spoiled }) |seq, want| {
+        var long: LongName = .{};
+        long.take(&entries[0]);
+        var e = entries[1];
+        e[0] = seq;
+        long.take(&e);
+        try testing.expectEqual(want, long.stands);
     }
 }
