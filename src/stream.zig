@@ -440,12 +440,13 @@ fn streamFn(r: *Reader, w: *Writer, limit: std.Io.Limit) Reader.StreamError!usiz
         return if (self.timed_out) error.ReadFailed else error.EndOfStream;
     const n = try w.write(limit.slice(bytes));
     const c = self.conn();
-    // A window that had shrunk below a segment is announced when it reopens,
-    // so a peer that filled it does not sit waiting for its own probe.
-    const was_tight = c.room() < tcp.our_mss;
+    // A window that was tight (tcp's own rule, `Conn.tight`) is announced
+    // when it reopens, so a peer that filled it does not sit waiting for its
+    // own probe.
+    const was_tight = c.tight(c.window());
     // Handed on, the bytes are the reader's: the table releases them.
     c.consume(n);
-    if (was_tight and c.room() >= tcp.our_mss) self.table.ack(self.wire, self.index);
+    if (was_tight and !c.tight(c.window())) self.table.ack(self.wire, self.index);
     return n;
 }
 
