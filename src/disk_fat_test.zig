@@ -2954,3 +2954,154 @@ test "the check counts orphaned long-name parts as fsck.fat finds them: by run, 
     @memcpy(d.bytes, pristine);
     try d.mount(false);
 }
+
+// ---- boundaries, side by side (the off-by-one hunt) -------------------------
+
+test "a link to max_cluster is followed and to max_cluster + 1 is a broken chain; to 2 is followed and to 1 is broken" {
+    for (configs) |cfg| {
+        const shape, const cached = .{ cfg.shape, cfg.cached };
+        const d = try Disk.make("damaged-edge-links", shape, cached);
+        defer d.deinit();
+        try d.vol.writeFile("z", "x"); // cluster 2 on FAT16; FAT32's root is 2
+        var data: [1000]u8 = undefined; // two clusters
+        try d.vol.writeFile("f", pattern(&data, 3));
+        const e = try d.vol.open("f");
+        const l = Layout.of(d.bytes);
+        const max_cluster: disk_fat.Cluster = @intCast(l.clusters + 1);
+        try testing.expectEqual(max_cluster, d.vol.max_cluster);
+        for (0..2) |copy| l.set(d.bytes, copy, max_cluster, l.end());
+        try testing.expect(e.first_cluster > 2);
+        for ([_]disk_fat.Cluster{ max_cluster, max_cluster + 1, 2, 1 }, [_]bool{ true, false, true, false }) |link, followed| {
+            try damageFat(d, cached, e.first_cluster, link);
+            var out: [1000]u8 = undefined;
+            if (followed) {
+                try testing.expectEqual(data.len, try d.vol.readFile(e, &out));
+                try testing.expectEqualSlices(u8, data[0..512], out[0..512]);
+                try testing.expectEqual(@as(u32, 2), (try d.vol.layout(e)).clusters);
+            } else {
+                try testing.expectError(disk_fat.Error.BadChain, d.vol.readFile(e, &out));
+                try testing.expectError(disk_fat.Error.BadChain, d.vol.layout(e));
+            }
+        }
+    }
+}
+
+test "an entry whose first cluster is max_cluster reads, one at max_cluster + 1 is a broken chain" {
+    for (configs) |cfg| {
+        const shape, const cached = .{ cfg.shape, cfg.cached };
+        const d = try Disk.make("damaged-edge-first-cluster", shape, cached);
+        defer d.deinit();
+        try d.vol.writeFile("f", "some bytes");
+        const e = try d.vol.open("f");
+        const l = Layout.of(d.bytes);
+        const max_cluster: disk_fat.Cluster = @intCast(l.clusters + 1);
+        for (0..2) |copy| l.set(d.bytes, copy, max_cluster, l.end());
+        var out: [64]u8 = undefined;
+        setEntry(d, e, .first_cluster, max_cluster);
+        try d.mount(cached);
+        try testing.expectEqual(@as(usize, 10), try d.vol.readFile(try d.vol.open("f"), &out));
+        setEntry(d, e, .first_cluster, max_cluster + 1);
+        try d.mount(cached);
+        try testing.expectError(disk_fat.Error.BadChain, d.vol.readFile(try d.vol.open("f"), &out));
+    }
+}
+
+test "FAT32: a root at max_cluster mounts, at max_cluster + 1 is refused; at 2 mounts, at 1 is refused" {
+    const bytes = try testing.allocator.alloc(u8, test_disk.small32.sectors * test_disk.sector);
+    defer testing.allocator.free(bytes);
+    var blk = virtio.Block.inMemory(bytes);
+    var scratch: [test_disk.sector]u8 align(16) = undefined;
+    test_disk.format(bytes, test_disk.small32);
+    const max_cluster: u32 = @intCast(Layout.of(bytes).clusters + 1);
+    for ([_]u32{ max_cluster, max_cluster + 1, 2, 1 }, [_]bool{ true, false, true, false }) |root, mounts| {
+        test_disk.format(bytes, test_disk.small32);
+        std.mem.writeInt(u32, bytes[44..48], root, .little);
+        const l = Layout.of(bytes);
+        if (root <= max_cluster) for (0..2) |copy| l.set(bytes, copy, root, l.end());
+        if (mounts) {
+            const v = try disk_fat.Volume.mount(&blk, &scratch, 0);
+            try testing.expectEqual(root, v.root_cluster);
+        } else try testing.expectError(disk_fat.Error.BadRoot, disk_fat.Volume.mount(&blk, &scratch, 0));
+    }
+}
+
+test "a chain ending at a FAT sector's last entry, and one ending at the next sector's first, are written, read, freed and checked whole" {
+    for (configs) |cfg| {
+        const shape, const cached = .{ cfg.shape, cfg.cached };
+        const per_sector: u32 = disk_fat.sector_size / @as(u32, if (shape.kind == .fat32) 4 else 2);
+        var remove_writes: [2]u64 = undefined;
+        for ([_]u32{ per_sector - 1, per_sector }, 0..) |last, side| {
+            const d = try Disk.make("edge-fat-sector", shape, cached);
+            defer d.deinit();
+            // The first free cluster: where a fresh volume's next chain starts.
+            try d.vol.writeFile("probe", "x");
+            const start = (try d.vol.open("probe")).first_cluster;
+            try d.vol.remove("probe");
+            const clusters = last - start + 1;
+            const bytes = try testing.allocator.alloc(u8, clusters * disk_fat.sector_size);
+            defer testing.allocator.free(bytes);
+            _ = pattern(bytes, @intCast(side));
+            const free_before = d.free();
+            try d.vol.writeFile("f", bytes);
+            var chain: [300]disk_fat.Cluster = undefined;
+            const c = chainOf(d, (try d.vol.open("f")).first_cluster, &chain);
+            try testing.expectEqual(@as(usize, clusters), c.len);
+            try testing.expectEqual(start, c[0]);
+            try testing.expectEqual(last, c[c.len - 1]);
+            try testing.expect(Layout.of(d.bytes).ends(Layout.of(d.bytes).get(d.bytes, 0, last)));
+            try testing.expect(d.fatsAgree());
+            try d.expectFile("f", bytes);
+            const w0 = d.blk.writes;
+            try d.vol.remove("f");
+            remove_writes[side] = d.blk.writes - w0;
+            try testing.expectEqual(free_before, d.free());
+            try testing.expectEqual(@as(u32, @intCast(free_before)), try d.vol.countFreeAgain());
+            try testing.expect(d.fatsAgree());
+            const r = try d.check();
+            try r.expect(&.{});
+        }
+        // One more cluster, in the next FAT sector: freed by that sector
+        // written to both copies, held FAT or not (one entry, its sector).
+        try testing.expectEqual(remove_writes[0] + 2, remove_writes[1]);
+    }
+}
+
+test "the ~N alias: ~9 keeps six of the name's characters, ~10 keeps five" {
+    for (configs) |cfg| {
+        const d = try Disk.make("edge-alias-tail", cfg.shape, cfg.cached);
+        defer d.deinit();
+        var path: [64]u8 = undefined;
+        for (1..11) |k| try d.vol.writeFile(try std.fmt.bufPrint(&path, "data/abcdefghij-{d}.txt", .{k}), "x");
+        try testing.expectEqualStrings("ABCDEF~1.TXT", (try d.vol.open("data/abcdefghij-1.txt")).alias());
+        try testing.expectEqualStrings("ABCDEF~9.TXT", (try d.vol.open("data/abcdefghij-9.txt")).alias());
+        try testing.expectEqualStrings("ABCDE~10.TXT", (try d.vol.open("data/abcdefghij-10.txt")).alias());
+        const r = try d.check();
+        try r.expect(&.{});
+    }
+}
+
+test "a name of max_name is written and renamed to, one of max_name + 1 is refused by both and takes nothing" {
+    for (configs) |cfg| {
+        const d = try Disk.make("edge-name-length", cfg.shape, cfg.cached);
+        defer d.deinit();
+        const longest = [_]u8{'n'} ** disk_fat.max_name;
+        const too_long = [_]u8{'n'} ** (disk_fat.max_name + 1);
+        var path: [disk_fat.max_name + 8]u8 = undefined;
+        try d.vol.writeFile(try std.fmt.bufPrint(&path, "data/{s}", .{&longest}), "longest");
+        try d.expectFile(try std.fmt.bufPrint(&path, "data/{s}", .{&longest}), "longest");
+        const before = d.free();
+        try testing.expectError(disk_fat.Error.BadName, d.vol.writeFile(try std.fmt.bufPrint(&path, "data/{s}", .{&too_long}), "x"));
+        try testing.expectEqual(before, d.free());
+
+        try d.vol.writeFile("data/r", "renamed");
+        try testing.expectError(disk_fat.Error.BadName, d.vol.rename("data/r", try std.fmt.bufPrint(&path, "data/{s}", .{&too_long})));
+        try d.expectFile("data/r", "renamed");
+        var other = longest;
+        other[0] = 'm';
+        try d.vol.rename("data/r", try std.fmt.bufPrint(&path, "data/{s}", .{&other}));
+        try d.expectFile(try std.fmt.bufPrint(&path, "data/{s}", .{&other}), "renamed");
+        try testing.expectError(disk_fat.Error.NotFound, d.vol.open("data/r"));
+        const r = try d.check();
+        try r.expect(&.{});
+    }
+}
