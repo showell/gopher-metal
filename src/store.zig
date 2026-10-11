@@ -181,3 +181,17 @@ test "paths: an empty part refused, FAT's rules kept, the Store's prefix refused
     try testing.expectError(Error.BadName, checkPart("x" ** (max_part + 1)));
     try checkPart("x" ** max_part);
 }
+
+test "paths: max_parts parts are a path, max_parts + 1 are not; a part of max_part is a name, max_part + 1 is not" {
+    var buf: [max_parts][]const u8 = undefined;
+    const deepest = "a/" ** (max_parts - 1) ++ "a";
+    try testing.expectEqual(@as(usize, max_parts), (try checkPath(deepest, &buf, false)).len);
+    try testing.expectError(Error.BadName, checkPath(deepest ++ "/a", &buf, false));
+    try testing.expectError(Error.BadName, checkPath(deepest ++ "/a", &buf, true));
+    const longest = "x" ** max_part;
+    try testing.expectEqual(@as(usize, 2), (try checkPath("data/" ++ longest, &buf, false)).len);
+    try testing.expectError(Error.BadName, checkPath("data/" ++ longest ++ "x", &buf, false));
+    // A part of one byte is a name; of none, a path built wrong.
+    try checkPart("x");
+    try testing.expectError(Error.BadName, checkPart(""));
+}
