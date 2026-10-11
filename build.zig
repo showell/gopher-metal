@@ -703,7 +703,7 @@ fn commitOf(b: *std.Build, dir: []const u8) []const u8 {
 /// build stops and names both. Moving the SDK is moving this line, in the
 /// same commit as whatever needed the move.
 /// `-Dcoverage-sdk-unpinned` builds against any commit, and says so.
-const coverage_sdk_pin = "c7baca92b046b2afb0ea059ef2662096871a2f66";
+const coverage_sdk_pin = "5bdd97b7e3b5b8b373033a2782307881864c100d";
 
 fn pinnedSdk(b: *std.Build, sdk_path: []const u8) void {
     const unpinned = b.option(bool, "coverage-sdk-unpinned", "build against whatever commit ../zig-coverage-sdk holds, not the one build.zig pins") orelse false;

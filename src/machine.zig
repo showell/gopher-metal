@@ -104,6 +104,14 @@ pub fn Machine(comptime spec: anytype) type {
         pub const Of = State;
         pub const On = Event;
 
+        // **EVERY CELL IN THE CATALOG, FIRED OR NOT** (metal-vmm QUEUE 165):
+        // the scan cannot read the cells' messages (made at comptime), so the
+        // machine itself compiles `fire`, every prong of it, wherever the
+        // machine's type is: a cell no program reaches is still a site, unhit.
+        comptime {
+            _ = &fire;
+        }
+
         /// **A MACHINE MADE AT A GIVEN STATE**, not reached by its edges:
         /// for tests that build a case directly. The lint refuses it
         /// outside a test.
@@ -147,9 +155,11 @@ pub fn Machine(comptime spec: anytype) type {
                 inline else => |from| switch (event) {
                     inline else => |on| {
                         if (comptime target(from, on)) |to| {
+                            // coverage: not scanned, one site a cell, its message made at comptime, cataloged by the comptime reference to fire above
                             props.reachable(@src(), comptime edgeMessage(from, on, to), null);
                             self.machine_state = to;
                         } else {
+                            // coverage: not scanned, one site a cell, its message made at comptime, cataloged by the comptime reference to fire above
                             props.@"unreachable"(@src(), comptime noEdgeMessage(from, on), null);
                         }
                     },
@@ -194,6 +204,27 @@ const Switch = Machine(.{
     .initial = .off,
     .edges = &.{ .{ .from = .off, .on = .flip, .to = .on }, .{ .from = .on, .on = .flip, .to = .off } },
 });
+
+/// A machine no test fires: its cells are in the catalog all the same.
+const Unfired = Machine(.{
+    .name = "test.Unfired",
+    .State = enum { here, there },
+    .Event = enum { go },
+    .initial = .here,
+    .edges = &.{.{ .from = .here, .on = .go, .to = .there }},
+});
+
+test "a machine nothing fires still has every cell in the catalog, unhit" {
+    _ = Unfired.Of.here;
+    var cells: usize = 0;
+    var it = props.catalog();
+    while (it.next()) |site| {
+        if (!std.mem.startsWith(u8, std.mem.span(site.message), "machine test.Unfired: ")) continue;
+        cells += 1;
+        try testing.expect(!site.hit());
+    }
+    try testing.expectEqual(@as(usize, 2), cells);
+}
 
 test "a machine with no groups needs none" {
     var s: Switch = .{};
