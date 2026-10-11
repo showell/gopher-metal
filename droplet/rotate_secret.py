@@ -53,12 +53,12 @@ class Site:
             c.close()
 
     def login(self, name: str, password: str):
-        """The gopher_auth cookie a login sets, or None."""
+        """The __Host-gopher_auth cookie a login sets, or None."""
         status, set_cookie, _ = self.ask("POST", "/login/full", form={"name": name, "password": password,
                                                                        "action": "login", "next": "/"})
         for part in set_cookie.split(","):
             part = part.strip()
-            if part.startswith("gopher_auth=") and not part.startswith("gopher_auth=;"):
+            if part.startswith("__Host-gopher_auth=") and not part.startswith("__Host-gopher_auth=;"):
                 return part.split(";", 1)[0]
         return None
 
@@ -133,7 +133,7 @@ def self_test(binary: str) -> int:
             failures.append(f"{name}: the procedure did not check out")
             return
         status, set_cookie, _ = site.ask("GET", "/play", old_uid)
-        if status != 303 or "gopher_uid=p1." not in set_cookie:
+        if status != 303 or "__Host-gopher_uid=p1." not in set_cookie:
             failures.append(f"{name}: a player's old cookie answered {status}, not renewed")
         new_uid = set_cookie.split(";", 1)[0]
         if b"Currently playing as <strong>Nikhil</strong>" not in site.ask("GET", "/play", new_uid)[2]:

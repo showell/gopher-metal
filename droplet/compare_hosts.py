@@ -62,11 +62,11 @@ ROOT = os.path.dirname(HERE)
 
 
 def mint_session(secret: bytes, uid: str, issued: int) -> str:
-    """A gopher_auth cookie in users.zig's signSession format, as
+    """A __Host-gopher_auth cookie in users.zig's signSession format, as
     judge_gopher.mint_session makes one, from any secret."""
     b64 = lambda b: base64.urlsafe_b64encode(b).rstrip(b"=").decode()
     mac = hmac.new(secret, f"{uid}\n{issued}".encode(), hashlib.sha256).digest()
-    return f"gopher_auth={b64(uid.encode())}.{issued}.{b64(mac)}"
+    return f"__Host-gopher_auth={b64(uid.encode())}.{issued}.{b64(mac)}"
 
 
 def pages(copy: str, uid: str) -> list:

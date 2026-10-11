@@ -85,7 +85,7 @@ class MoreNormalize(unittest.TestCase):
 
     def test_a_session_minted_in_the_window_loses_its_time_and_mac(self):
         cookie = G.mint_session("1", 1789600050).encode()
-        self.assertEqual(G.normalize(cookie, self.W), b"gopher_auth=MQ.<NOW>.<MAC>")
+        self.assertEqual(G.normalize(cookie, self.W), b"__Host-gopher_auth=MQ.<NOW>.<MAC>")
 
     def test_a_session_minted_outside_the_window_keeps_both(self):
         cookie = G.mint_session("1", 1758000000).encode()
@@ -96,12 +96,12 @@ class Sessions(unittest.TestCase):
     def test_the_minted_format_is_signsessions(self):
         # Checked once against users.signSession itself, for this secret.
         self.assertEqual(G.mint_session("1", 1789600000),
-                         "gopher_auth=MQ.1789600000.b89_jCbiAAoR-wSNNVBb2hogDPNxtibiP_8VnsWvtUs")
+                         "__Host-gopher_auth=MQ.1789600000.b89_jCbiAAoR-wSNNVBb2hogDPNxtibiP_8VnsWvtUs")
 
     def test_a_forgery_claims_one_id_with_anothers_mac(self):
         real2 = G.mint_session("2", 1789600000)
         forged = G.forge_session("1", "2", 1789600000)
-        self.assertTrue(forged.startswith("gopher_auth=MQ."))
+        self.assertTrue(forged.startswith("__Host-gopher_auth=MQ."))
         self.assertEqual(forged.split(".", 1)[1], real2.split(".", 1)[1])
         self.assertNotEqual(forged, G.mint_session("1", 1789600000))
 
@@ -151,33 +151,40 @@ class Eastern(unittest.TestCase):
 
 class Cookies(unittest.TestCase):
     def test_a_set_cookie_replaces_the_jar(self):
-        a = {"headers": {"set-cookie": "gopher_uid=p1; Path=/; Max-Age=31536000; HttpOnly; SameSite=Lax"}}
-        self.assertEqual(G.cookie_from(a, None), "gopher_uid=p1")
-        self.assertEqual(G.cookie_from(a, "gopher_uid=9"), "gopher_uid=p1")
+        a = {"headers": {"set-cookie": "__Host-gopher_uid=p1; Path=/; Max-Age=31536000; HttpOnly; SameSite=Lax"}}
+        self.assertEqual(G.cookie_from(a, None), "__Host-gopher_uid=p1")
+        self.assertEqual(G.cookie_from(a, "gopher_uid=9"), "__Host-gopher_uid=p1")
+
+    def test_a_legacy_one_cleared_beside_the_new_is_not_kept(self):
+        # The move of a legacy cookie (angry-gopher, metal-vmm QUEUE 170.8):
+        # the new one set, the legacy one cleared, in either order.
+        for sc in ("__Host-gopher_uid=p1.1.m; Path=/\ngopher_uid=; Path=/; Max-Age=0",
+                   "gopher_uid=; Path=/; Max-Age=0\n__Host-gopher_uid=p1.1.m; Path=/"):
+            self.assertEqual(G.cookie_from({"headers": {"set-cookie": sc}}, "gopher_uid=p1"), "__Host-gopher_uid=p1.1.m")
 
     def test_a_signed_uid_is_kept_whole(self):
-        a = {"headers": {"set-cookie": "gopher_uid=p1.1790000000.ab-c_d; Path=/; HttpOnly"}}
-        self.assertEqual(G.cookie_from(a, None), "gopher_uid=p1.1790000000.ab-c_d")
+        a = {"headers": {"set-cookie": "__Host-gopher_uid=p1.1790000000.ab-c_d; Path=/; HttpOnly"}}
+        self.assertEqual(G.cookie_from(a, None), "__Host-gopher_uid=p1.1790000000.ab-c_d")
 
     def test_mint_uid_is_uid_cookie_zigs_format(self):
         # uid_cookie.zig's frozen vector: the judge's mint and the server's
         # sign must agree, or every minted cookie would be refused alike.
         self.assertEqual(G.mint_uid("p3", 1790000000, b"a secret of thirty-two bytes or more, for tests"),
-                         "gopher_uid=p3.1790000000.BTTIGQI3slTgQ_iFwX0DSWx8EhfbUkaIsSuUFfQayP4")
+                         "__Host-gopher_uid=p3.1790000000.BTTIGQI3slTgQ_iFwX0DSWx8EhfbUkaIsSuUFfQayP4")
 
     def test_a_signed_uid_normalizes_like_a_session(self):
         w = (1790000000, 1790000001)
         one = G.normalize(G.mint_uid("p1", 1790000000).encode(), w)
         two = G.normalize(G.mint_uid("p1", 1790000001).encode(), w)
         self.assertEqual(one, two)
-        self.assertEqual(one, b"gopher_uid=p1.<NOW>.<MAC>")
+        self.assertEqual(one, b"__Host-gopher_uid=p1.<NOW>.<MAC>")
 
     def test_no_set_cookie_keeps_the_jar(self):
         self.assertEqual(G.cookie_from({"headers": {}}, "gopher_uid=p2"), "gopher_uid=p2")
         self.assertIsNone(G.cookie_from({"error": "refused"}, None))
 
     def test_a_different_cookie_is_not_the_identity(self):
-        a = {"headers": {"set-cookie": "gopher_auth=abc; Path=/"}}
+        a = {"headers": {"set-cookie": "__Host-gopher_auth=abc; Path=/"}}
         self.assertEqual(G.cookie_from(a, "gopher_uid=p1"), "gopher_uid=p1")
 
     def test_with_jar_only_touches_the_placeholder(self):

@@ -109,11 +109,11 @@ def count_files(*dirs):
 
 
 def mint(uid, issued, secret):
-    """A gopher_auth cookie in users.zig's signSession format, from the copy's
+    """A __Host-gopher_auth cookie in users.zig's signSession format, from the copy's
     own secret (so both hosts honor it), the way judge_gopher mints one."""
     b64 = lambda b: base64.urlsafe_b64encode(b).rstrip(b"=").decode()
     mac = hmac.new(secret, f"{uid}\n{issued}".encode(), hashlib.sha256).digest()
-    return f"gopher_auth={b64(uid.encode())}.{issued}.{b64(mac)}"
+    return f"__Host-gopher_auth={b64(uid.encode())}.{issued}.{b64(mac)}"
 
 
 # ── the proxy that stands in for prod's Caddy ─────────────────────────────────
@@ -460,7 +460,7 @@ def first_day(port, scratch):
     # ask for the archive with it, and let check_backup.py say it is whole.
     body = (f"name=Steve&password={urllib.parse.quote_plus(ADMIN_PASSWORD)}&action=login&next=%2Fchat")
     _, _, cookies = through_proxy(port, "POST", "/login/full", {"Content-Type": "application/x-www-form-urlencoded"}, body)
-    jar = next((c.split(";", 1)[0] for c in cookies if c.startswith("gopher_auth=")), None)
+    jar = next((c.split(";", 1)[0] for c in cookies if c.startswith("__Host-gopher_auth=")), None)
     if not jar:
         say("first day: a backup, whole", "NO-GO",
             f"the admin password did not log in (set DRILL_ADMIN_PASSWORD)")
