@@ -49,8 +49,10 @@ hands them `src/host_io_metal.zig` as `host_io`. It prints how many files it
 copied and how many take their `Io` from `host_io`, and refuses a file that
 aliases std's instead (Phase B step 2a, 2026-10-11: 97 files, 63 of them).
 
-`probe/gopher.zig` is a HOST in the sense angry-gopher's `router.zig` defines —
-the contract any host meets before calling the route table:
+`probe/gopher.zig` is a HOST in the sense webbox's `site.zig` defines, taking
+the application as the `app` module (`app.site`, `app.hosting`) and the
+library as `webbox` — the contract any host meets before calling the route
+table:
 
     mem_meter.init(base)        base: std's general-purpose allocator, on this
                                 machine's pages
@@ -60,7 +62,7 @@ the contract any host meets before calling the route table:
     an arena per request
 
 — with the site on a GPT disk whose first partition is FAT16 or FAT32, and
-clocks from its own hardware. Then it calls `router.route`: the application's
+clocks from its own hardware. Then it calls `app.site.route`: the application's
 real dispatch, every page — a table of up to 256 connections, one request
 served at a time, each request with its own heap that is reset afterwards.
 `gopher-metal.conf` on the boot disk says how many requests to serve

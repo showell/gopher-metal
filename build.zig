@@ -217,7 +217,8 @@ pub fn build(b: *std.Build) void {
     }
     const gopher_imports = [_]std.Build.Module.Import{
         .{ .name = "metal", .module = metal },
-        .{ .name = "router.zig", .module = app },
+        .{ .name = "app", .module = app },
+        .{ .name = "webbox", .module = webbox },
         .{ .name = "gm_build", .module = gm_opts.createModule() },
     };
     const gopher = b.addExecutable(.{ .name = "gopher.elf", .root_module = kernelModule(b, b.path("probe/gopher.zig"), optimize, &gopher_imports) });

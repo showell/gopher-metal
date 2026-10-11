@@ -11,8 +11,11 @@ fails on the laptop first.
 
 ## What a host does before the first request
 
-angry-gopher's webbox library declares the host contract (`site.zig`), and
-`router.zig` exports it by the names both hosts use: Linux in `server.zig`,
+angry-gopher's webbox library declares the host contract (`site.zig`). A host
+takes two modules: the library, `webbox`, and the application's root, `app`,
+which exports `site` (its `Site(App)`: `start`, `route`, the body rule's two
+questions) and `hosting` (what only it can say: its data's name, its largest
+whole read, its setup's report in words). Linux in angry-gopher's `server.zig`,
 metal in `probe/gopher.zig`. Three calls:
 
 1. `mem_meter.init(base)`: the process-lifetime allocator, before anything

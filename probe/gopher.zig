@@ -60,12 +60,16 @@ comptime {
 /// every request (`checkVolumes`). A production build has neither.
 pub const coverage_checks = gm_build.coverage;
 
-/// The application, as it is.
-const router = @import("router.zig");
-const edge = router.edge;
-const Bus = router.Bus;
-const Hub = router.Hub;
-const streams = router.streams;
+/// **THE APPLICATION, AS A HOST TAKES IT** (Phase B step 1): its root as the
+/// `app` module, `site` (start, route, the body rule's questions) and
+/// `hosting` (what only it can say about itself), and the library it is
+/// built on as `webbox`. Nothing else of either is reached from here.
+const app = @import("app");
+const webbox = @import("webbox");
+const edge = webbox.edge;
+const Bus = webbox.bus.Bus;
+const Hub = webbox.bus.Hub;
+const streams = webbox.bus;
 
 comptime {
     _ = metal.boot;
@@ -142,7 +146,7 @@ const rx_bytes = 16 * 1024;
 comptime {
     // A head the application allows must fit a connection's receive buffer,
     // or ready.zig would wait for one that cannot arrive.
-    std.debug.assert(rx_bytes >= router.request_limits.head_bytes);
+    std.debug.assert(rx_bytes >= webbox.http.head_bytes);
 }
 /// A send queue holds what the peer has not yet acknowledged. A response
 /// larger than this waits for acknowledgements as it goes; a held stream whose
@@ -256,7 +260,7 @@ const Drain = struct {
     /// A chunked body's scan, kept between passes, so each chunk is parsed
     /// once (169's cold review: re-parsing a body of tiny chunks each pass
     /// stalled the loop).
-    scan: router.body_rule.ChunkedScan = .{},
+    scan: webbox.body.ChunkedScan = .{},
 };
 
 var body_waits: [max_connections]BodyWait = @splat(.{});
@@ -266,8 +270,8 @@ var body_gpa: std.mem.Allocator = undefined;
 
 /// The upload slots (body.zig): three, one a human, and the connection
 /// reading in each (so a human's new upload can take over their old one).
-var upload_slots: router.body_rule.Slots = .{};
-var slot_conn: [router.body_rule.upload_slots]?usize = @splat(null);
+var upload_slots: webbox.body.Slots = .{};
+var slot_conn: [webbox.body.upload_slots]?usize = @splat(null);
 
 /// **SMALL BODIES DRAINED, AT MOST THIS MUCH AT ONCE**: a small body is at
 /// most 1 MiB and needs no slot, so the many connections draining one are
@@ -320,8 +324,8 @@ const Begun = enum { begun, wait, no_memory };
 /// The first room a drain is given past its head; it doubles as bytes come.
 const drain_first_bytes = 64 * 1024;
 
-fn beginDrain(w: *BodyWait, head_len: usize, read: router.body_rule.Read, chunked: bool, cap: u64, upload: bool, now: i96, deadline_ms: u64) Begun {
-    const body_most: u64 = if (chunked) router.body_rule.chunkedRawMost(cap) else read.bytes;
+fn beginDrain(w: *BodyWait, head_len: usize, read: webbox.body.Read, chunked: bool, cap: u64, upload: bool, now: i96, deadline_ms: u64) Begun {
+    const body_most: u64 = if (chunked) webbox.body.chunkedRawMost(cap) else read.bytes;
     const most = std.math.add(u64, head_len, body_most) catch return .no_memory;
     if (most > std.math.maxInt(usize)) return .no_memory;
     // An upload's exact length at once: its slot is its bound (170's cold
@@ -392,7 +396,7 @@ fn stepDrain(wire: *stream.Wire, table: *tcp.Table, i: usize, w: *BodyWait, now:
     w.late = !d.whole and w.verdict == .none and now >= d.deadline_at;
     // **A STALLED UPLOAD GIVES ITS SLOT BACK** (170.1): no byte for the
     // stall time is a dropped phone, which sends no FIN.
-    if (d.upload and !d.whole and w.verdict == .none and now - d.last_progress >= @as(i96, router.body_rule.upload_stall_ms) * std.time.ns_per_ms)
+    if (d.upload and !d.whole and w.verdict == .none and now - d.last_progress >= @as(i96, webbox.body.upload_stall_ms) * std.time.ns_per_ms)
         w.verdict = .stalled;
 }
 
@@ -436,13 +440,13 @@ fn uploaderOf(io: Io, head: []const u8) Asker {
     var out: std.Io.Writer = .fixed(&.{});
     var server = std.http.Server.init(&in, &out);
     var req = server.receiveHead() catch return .unknown;
-    const who = router.uploader(&req, io, fba.allocator()) catch |e| {
+    const who = app.site.uploader(&req, io, fba.allocator()) catch |e| {
         serial.put("  uploader: ");
         serial.put(@errorName(e));
         serial.put("\n");
         return .unknown;
     };
-    return if (who) |name| .{ .who = router.body_rule.keyOf(name) } else .stranger;
+    return if (who) |name| .{ .who = webbox.body.keyOf(name) } else .stranger;
 }
 /// The most bytes one connection may keep (a whole upload of a few MB fits;
 /// a larger response waits for room, as before spills).
@@ -479,7 +483,7 @@ var booted_unix: i64 = 0;
 var tsc_hz_seen: u64 = 0;
 /// The request head's buffer: angry-gopher's limits.zig sizes it, as it
 /// sizes Linux's, so the two hosts answer 431 at the same byte.
-var read_buf: [router.request_limits.head_bytes]u8 align(16) = undefined;
+var read_buf: [webbox.http.head_bytes]u8 align(16) = undefined;
 var write_buf: [64 * 1024]u8 align(16) = undefined;
 
 /// Each request's heap, reset after the response: the equivalent of the arena
@@ -506,7 +510,7 @@ var page_cache: metal.page_cache.PageCache = undefined;
 /// A file past the cap is read from the disk as before, so no single big upload
 /// pushes the transcripts out. `docs/designs/DESIGN-picture-cache.md` has the
 /// method and the budget cost.
-const page_cache_largest_kib_default = router.whole_read_max >> 10;
+const page_cache_largest_kib_default = app.hosting.whole_read_max >> 10;
 
 const config_path = "gopher-metal.conf";
 
@@ -601,7 +605,7 @@ pub fn kmain() noreturn {
     disks[0] = &boot_disk;
     Io.mount(mountFat(&boot_disk, &sector, "the boot disk"));
     const io = Io.io();
-    const base = router.mem_meter.init(gpa.allocator());
+    const base = webbox.mem_meter.init(gpa.allocator());
     const conf = readConfig(io, base);
     var volume_disk: virtio.Block = undefined;
     if (dataVolume()) |b| {
@@ -619,7 +623,7 @@ pub fn kmain() noreturn {
             serial.fail("the volume attached is not the one this machine serves");
         };
         Io.keepData(&data_dirs, vol);
-        serial.put("  chat's data: the volume\n");
+        serial.put("  " ++ app.hosting.data_name ++ ": the volume\n");
     } else {
         // **A VOLUME THAT WAS NAMED AND IS MISSING STOPS THE MACHINE.** Serving
         // on would answer with no accounts and no conversations, and keep what
@@ -631,7 +635,7 @@ pub fn kmain() noreturn {
             serial.fail("the volume this machine serves is not attached");
         }
         Io.keepData(&data_dirs, null);
-        serial.put("  chat's data: the boot disk\n");
+        serial.put("  " ++ app.hosting.data_name ++ ": the boot disk\n");
     }
     // **THE DATA'S FILES, KEPT AFTER THEIR FIRST READ** (QUEUE.md item 87):
     // a transcript two people are reading is read from memory, not walked to
@@ -792,7 +796,7 @@ pub fn kmain() noreturn {
     // session's last-message record (as Linux does, so the two hosts leave
     // the same files behind, which the judge compares), and search's index.
     // Each one-time pass reads on an arena `start` gives back.
-    var started = router.start(io, .{
+    var started = app.site.start(io, .{
         .roots = .{ .data_dir = data_dir, .auth_dir = auth_dir },
         .free_space = .{ .reader = dataSpace },
         .trusted_proxy = trusted_proxy,
@@ -802,30 +806,22 @@ pub fn kmain() noreturn {
         serial.put("  ");
         serial.put(@errorName(e));
         serial.put("\n");
-        serial.fail("the host contract's setup (router.start) failed");
+        serial.fail("the host contract's setup (app.site.start) failed");
     };
     const hub = &started.hub;
     body_gpa = hub.gpa;
-    if (started.app.backfilled > 0) {
-        serial.put("  wrote a last-message record for ");
-        serial.putDec(started.app.backfilled);
-        serial.put(" chat session(s)\n");
+    // What the application's setup did, in its own words, a line each.
+    {
+        var said: [1024]u8 = undefined;
+        var w: std.Io.Writer = .fixed(&said);
+        app.hosting.describeStart(started.app, &w) catch {};
+        var lines = std.mem.splitScalar(u8, std.mem.trimEnd(u8, w.buffered(), "\n"), '\n');
+        while (lines.next()) |line| {
+            serial.put("  ");
+            serial.put(line);
+            serial.put("\n");
+        }
     }
-    if (started.app.search) |st| {
-        serial.put("  search index: ");
-        serial.putDec(st.messages);
-        serial.put(" messages in ");
-        serial.putDec(st.transcripts);
-        serial.put(" transcripts (");
-        serial.putDec(st.bytes);
-        serial.put(" bytes, ");
-        serial.putDec(st.words);
-        serial.put(" words, ");
-        serial.putDec(st.unreadable);
-        serial.put(" unreadable) in ");
-        serial.putDec(@intCast(started.app.search_ms));
-        serial.put(" ms\n");
-    } else serial.put("  search index: not built (out of memory); the first search builds it\n");
     // **IDLE TIME** (src/idle.zig, essay idle-time-on-metal): each volume's
     // check, asked again while the machine serves, a slice per quiet moment.
     for ([_]?*disk_fat.Volume{ Io.siteVolume(), Io.dataVolume() }, 0..) |maybe, k| {
@@ -999,7 +995,7 @@ pub fn kmain() noreturn {
     serial.put(" frames lost on purpose, ");
     serial.putDec(table.window_updates);
     serial.put(" reopened windows said again\n");
-    const mem = router.mem_meter.snapshot();
+    const mem = webbox.mem_meter.snapshot();
     const page_stats = pages.stats();
     serial.put("  pages: ");
     serial.putDec(page_stats.bytes_taken);
@@ -1057,7 +1053,7 @@ fn readyNow(io: Io, wire: *stream.Wire, table: *tcp.Table, i: usize, w: *BodyWai
         stepDrain(wire, table, i, w, now);
         return w.drain.?.whole or w.verdict != .none or w.late;
     }
-    const got = ready.check(router.body_rule, c.pending(), c.peerDone(), c.rx.len, .{ .continued = w.continued, .limit = router.bodyLimit });
+    const got = ready.check(webbox.body, c.pending(), c.peerDone(), c.rx.len, .{ .continued = w.continued, .limit = app.site.bodyLimit });
     switch (got.readiness) {
         .waiting => return false,
         .must_continue => {
@@ -1088,7 +1084,7 @@ fn readyNow(io: Io, wire: *stream.Wire, table: *tcp.Table, i: usize, w: *BodyWai
             const elapsed_ms: u64 = @intCast(@divTrunc(now - since, std.time.ns_per_ms));
             const head = c.pending()[0..got.head_len];
             const parsed = std.http.Server.Request.Head.parse(head) catch return true;
-            switch (beginDrain(w, got.head_len, got.read.?, parsed.transfer_encoding == .chunked, router.bodyLimit(parsed.target), false, now, got.wait_ms -| elapsed_ms)) {
+            switch (beginDrain(w, got.head_len, got.read.?, parsed.transfer_encoding == .chunked, app.site.bodyLimit(parsed.target), false, now, got.wait_ms -| elapsed_ms)) {
                 .begun => {},
                 .wait => {
                     if (now - since >= @as(i96, got.wait_ms) * std.time.ns_per_ms) w.late = true;
@@ -1109,7 +1105,7 @@ fn readyNow(io: Io, wire: *stream.Wire, table: *tcp.Table, i: usize, w: *BodyWai
 /// An upload's head: its asker known (a stranger served from the head, the
 /// body never read), a slot taken (or waited for, then a 503), told to send
 /// if it asks, and its body drained into memory under five minutes.
-fn uploadNow(io: Io, wire: *stream.Wire, table: *tcp.Table, i: usize, w: *BodyWait, now: i96, head_len: usize, read: router.body_rule.Read) bool {
+fn uploadNow(io: Io, wire: *stream.Wire, table: *tcp.Table, i: usize, w: *BodyWait, now: i96, head_len: usize, read: webbox.body.Read) bool {
     const c = &table.conns[i];
     const head = c.pending()[0..head_len];
     const parsed = std.http.Server.Request.Head.parse(head) catch return true;
@@ -1143,7 +1139,7 @@ fn uploadNow(io: Io, wire: *stream.Wire, table: *tcp.Table, i: usize, w: *BodyWa
                     w.slot_wait_since = now;
                     break :blk now;
                 };
-                if (now - since < @as(i96, router.body_rule.slot_wait_ms) * std.time.ns_per_ms) return false;
+                if (now - since < @as(i96, webbox.body.slot_wait_ms) * std.time.ns_per_ms) return false;
                 return headOnly(w, head, .busy, now);
             },
         }
@@ -1154,7 +1150,7 @@ fn uploadNow(io: Io, wire: *stream.Wire, table: *tcp.Table, i: usize, w: *BodyWa
         if (table.queue(i, continue_line) == continue_line.len) w.continued = true;
         return false;
     };
-    switch (beginDrain(w, head_len, read, parsed.transfer_encoding == .chunked, router.bodyLimit(parsed.target), true, now, read.deadline_ms)) {
+    switch (beginDrain(w, head_len, read, parsed.transfer_encoding == .chunked, app.site.bodyLimit(parsed.target), true, now, read.deadline_ms)) {
         .begun => {},
         .wait => unreachable, // an upload has its slot, and no budget
         .no_memory => return headOnly(w, head, .busy, now),
@@ -1249,7 +1245,7 @@ fn serveOne(
     // whole of it, a byte every `idle_ns` less a little held the turn for
     // hours before the 431. So is any body read from the buffer (one that
     // fit it, whole already, or a client's that ended short).
-    s.body_deadline_at = bodyDeadline(router.body_rule.smallMs(router.request_limits.head_bytes));
+    s.body_deadline_at = bodyDeadline(webbox.body.smallMs(webbox.http.head_bytes));
     // **A HEAD THAT FILLED THE BUFFER UNENDED IS A 431 AT ONCE** (169's cold
     // review): the buffer is the head's most (`head_bytes`), so the rest of
     // it, read here, could only overflow, and reading it waited on the
@@ -1293,8 +1289,8 @@ fn serveOne(
     // 169): refused from its head, late from waiting (a 408), refused by the
     // loop's verdict, or in memory (or in the buffer) whole already: the turn
     // never waits on the network.
-    const body_rule = router.body_rule;
-    const cap = router.bodyLimit(req.head.target);
+    const body_rule = webbox.body;
+    const cap = app.site.bodyLimit(req.head.target);
     const refusal: ?struct { kind: edge.RejectKind, msg: []const u8 } = if (wait.late)
         .{ .kind = .body_too_slow, .msg = "request body too slow\n" }
     else switch (wait.verdict) {
@@ -1318,7 +1314,7 @@ fn serveOne(
         // Refused, never told to send (std answers an expectation first
         // while it is set).
         req.head.expect = null;
-        router.edge.reject(&req, r.kind, r.msg) catch {};
+        webbox.edge.reject(&req, r.kind, r.msg) catch {};
         s.writer().flush() catch {};
         logRequest(number, "(refused at its head)", r.msg[0 .. r.msg.len - 1]);
         // A drained body refused (late, past what is kept): what came of it.
@@ -1351,9 +1347,9 @@ fn serveOne(
     // still framed, and a short one (its client gone) must be refused: std
     // reads both from memory, decoding the one and refusing the other.
     if (wait.drain) |d| if (wait.verdict == .none and d.framing == .length and d.len - d.head_len == d.want)
-        router.holdBody(d.bytes[d.head_len..d.len]);
-    defer router.holdBody(null);
-    var kept_stream = router.route(&req, io, request_alloc, &bus) catch |e| blk: {
+        webbox.http.held_body = d.bytes[d.head_len..d.len];
+    defer webbox.http.held_body = null;
+    var kept_stream = app.site.route(&req, io, request_alloc, &bus) catch |e| blk: {
         outcome = @errorName(e);
         break :blk null;
     };
@@ -1991,7 +1987,7 @@ fn diskCheck(vol: *disk_fat.Volume, what: []const u8) void {
 }
 
 fn logRequest(number: u64, what: []const u8, outcome: []const u8) void {
-    const mem = router.mem_meter.snapshot();
+    const mem = webbox.mem_meter.snapshot();
     serial.put("  request ");
     serial.putDec(number);
     serial.put(": ");
@@ -2218,7 +2214,7 @@ fn awakeNow() i96 {
 
 /// A volume's idle check, as /admin/host says it.
 fn checkFact(alloc: std.mem.Allocator, c: *const metal.idle_check.VolumeCheck) ![]const u8 {
-    const hs = router.host_facts;
+    const hs = webbox.host_facts;
     const last = if (c.last) |l| blk: {
         const ago: i64 = @intCast(@divFloor(awakeNow() - l.at, std.time.ns_per_s));
         const damage = if (l.tally.first) |f|
@@ -2234,8 +2230,8 @@ fn checkFact(alloc: std.mem.Allocator, c: *const metal.idle_check.VolumeCheck) !
     });
 }
 
-fn metalFacts(io: Io, alloc: std.mem.Allocator) anyerror![]const router.host_facts.Fact {
-    const hs = router.host_facts;
+fn metalFacts(io: Io, alloc: std.mem.Allocator) anyerror![]const webbox.host_facts.Fact {
+    const hs = webbox.host_facts;
     var facts: std.ArrayList(hs.Fact) = .empty;
     const now: i64 = @intCast(@divFloor(Io.Clock.now(.real, io).nanoseconds, std.time.ns_per_s));
     const add = struct {
@@ -2261,8 +2257,8 @@ fn metalFacts(io: Io, alloc: std.mem.Allocator) anyerror![]const router.host_fac
     });
     if (Io.siteVolume()) |v| try addVolume(&facts, alloc, "the boot disk (the site)", "the boot disk's write cache", "the boot disk's folders in memory", v);
     if (Io.dataVolume()) |v| {
-        try addVolume(&facts, alloc, "the volume (chat's data)", "the volume's write cache", "the volume's folders in memory", v);
-    } else try add(&facts, alloc, "the volume (chat's data)", "none attached: the data is on the boot disk", .{});
+        try addVolume(&facts, alloc, "the volume (" ++ app.hosting.data_name ++ ")", "the volume's write cache", "the volume's folders in memory", v);
+    } else try add(&facts, alloc, "the volume (" ++ app.hosting.data_name ++ ")", "none attached: the data is on the boot disk", .{});
     const kept = Io.siteCache();
     try add(&facts, alloc, "site files in memory", "{d} kept, {d} KB of {d} KB; {d} reads answered from them", .{
         kept.count, kept.used >> 10, @as(usize, Io.SiteCache.capacity) >> 10, kept.hits,
@@ -2324,7 +2320,7 @@ fn kindName(v: *const disk_fat.Volume) []const u8 {
     return if (v.kind == .fat32) "FAT32" else "FAT16";
 }
 
-fn addVolume(facts: *std.ArrayList(router.host_facts.Fact), alloc: std.mem.Allocator, label: []const u8, cache_label: []const u8, dirs_label: []const u8, v: *disk_fat.Volume) !void {
+fn addVolume(facts: *std.ArrayList(webbox.host_facts.Fact), alloc: std.mem.Allocator, label: []const u8, cache_label: []const u8, dirs_label: []const u8, v: *disk_fat.Volume) !void {
     var serial_text: [9]u8 = undefined;
     const named = if (v.serial) |n| serialText(&serial_text, n) else "no serial";
     const value = if (v.space()) |sp|
@@ -2357,7 +2353,7 @@ fn addVolume(facts: *std.ArrayList(router.host_facts.Fact), alloc: std.mem.Alloc
 
 /// The data's volume, free and total, for the game store's floor: the volume
 /// when one is attached, else the boot disk, which then holds the data.
-fn dataSpace() ?router.Space {
+fn dataSpace() ?webbox.free_space.Space {
     const v = Io.dataVolume() orelse Io.siteVolume() orelse return null;
     const sp = v.space() catch return null;
     return .{ .free = sp.free, .total = sp.total };
