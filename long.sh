@@ -12,7 +12,8 @@
 #    every property on it must be reached, and none broken.
 #
 # 2. **The chat judge on FAT16** (QEMU's microvm, the whole story): moved
-#    here from gates.sh, whose FAT32 judges are what prod runs.
+#    here from gates.sh, whose FAT32 judges are what prod runs. It runs
+#    LAST, being QEMU, after 3 to 5.
 #
 # 3. **The real kernel, losing each of its frames in turn.** gopher.elf, built
 #    with -Dcoverage, on metal-vmm's PC-shaped machine (TRANSPORT=pci: it
@@ -61,7 +62,11 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$HERE"
 VMM="${METAL_VMM:-$HOME/showell_repos/metal-vmm}"
 SDK="${COVERAGE_SDK:-$HOME/showell_repos/zig-coverage-sdk}"
-SITE="${SITE:-$HOME/build/gopher-metal/probe/gopher/pristine.img}"
+# **THE SITE VOLUME IS THIS CHECKOUT'S** (tools/site_volume.py), built below
+# unless SITE names one: it was a default path whatever chat judge ran last
+# had left, which nothing kept fresh.
+SITE="${SITE:-}"
+GOPHER_ROOT="${GOPHER_ROOT:-$HOME/showell_repos/angry-gopher}"
 SEEDS="${SEEDS:-10000}"
 FAT_SEEDS="${FAT_SEEDS:-300}"
 LATENCY_US="${LATENCY_US:-5000}"
@@ -97,23 +102,14 @@ if [ "$want" != metal ]; then
 fi
 
 if [ "$want" != sim ]; then
-    # **THE FAT16 CHAT JUDGE** (moved here from gates.sh, the gates essay's
-    # item 6): the whole chat story on QEMU's microvm with the data on FAT16,
-    # every run. First, on gopher.elf as a release builds it: the coverage
-    # build below replaces it.
-    echo "── the chat judge on FAT16 (microvm)"
-    zig build gopher > "$OUT.fat16-build" 2>&1 || { echo "gopher.elf does not build: $OUT.fat16-build"; exit 2; }
-    env JUDGE_DROPLET=0 FAT=16 PROBE_WORK="$HOME/build/gopher-metal/probe-microvm-fat16" probe/run.sh gopher \
-        > "$OUT.fat16" 2>&1
-    code=$?
-    sed -n '/^\(PASS\|FAIL\|    \) *gopher/,$p' "$OUT.fat16"
-    { [ "$code" = 0 ] && grep -q "^PASS gopher" "$OUT.fat16"; } || failed+=(fat16-judge)
-    lap "chat judge, FAT16"
-
     echo "── the real kernel on metal-vmm's PC-shaped machine, losing each frame in turn"
     mkdir -p "$OUT"
     rm -f "$OUT/sdk.jsonl"
-    [ -f "$SITE" ] || { echo "no site volume at $SITE: run probe/run.sh gopher once"; exit 2; }
+    if [ -z "$SITE" ]; then
+        SITE="$HOME/build/gopher-metal/site/pristine.img"
+        python3 tools/site_volume.py "$SITE" "$GOPHER_ROOT" || { echo "the site volume does not build"; exit 2; }
+    fi
+    [ -f "$SITE" ] || { echo "no site volume at $SITE"; exit 2; }
     (cd "$VMM" && zig build) || { echo "metal-vmm does not build"; exit 2; }
     # **TWO KERNELS, TWO JOBS** (2026-10-07): the production build is what
     # each page is judged on, since it is what ships; the -Dcoverage build
@@ -254,6 +250,21 @@ EOF
     code=$?
     grep -E '^(FAIL|FLOOR|STALE)|^[0-9]+ runs|under the floor' "$OUT/report"
     [ $code = 0 ] || failed+=(metal-floor)
+
+    # **THE FAT16 CHAT JUDGE** (moved here from gates.sh, the gates essay's
+    # item 6): the whole chat story on QEMU's microvm with the data on FAT16,
+    # every run. **LAST, BEING QEMU** (Steve, 2026-10-11: find things
+    # quickly), on gopher.elf as a release builds it, which the coverage
+    # build above put back.
+    echo "── the chat judge on FAT16 (microvm)"
+    zig build gopher > "$OUT.fat16-build" 2>&1 || { echo "gopher.elf does not build: $OUT.fat16-build"; exit 2; }
+    env JUDGE_DROPLET=0 FAT=16 PROBE_WORK="$HOME/build/gopher-metal/probe-microvm-fat16" probe/run.sh gopher \
+        > "$OUT.fat16" 2>&1
+    code=$?
+    sed -n '/^\(PASS\|FAIL\|    \) *gopher/,$p' "$OUT.fat16"
+    { [ "$code" = 0 ] && grep -q "^PASS gopher" "$OUT.fat16"; } || failed+=(fat16-judge)
+    lap "chat judge, FAT16"
+
 fi
 
 if [ ${#failed[@]} = 0 ]; then

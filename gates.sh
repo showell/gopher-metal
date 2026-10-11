@@ -95,6 +95,34 @@ if [ "$mode" = quick ]; then
     exit 0
 fi
 
+# **THE QUICK CHECKS FIRST, QEMU LAST** (Steve, 2026-10-11: find things
+# quickly). Above: the limits, the unit tests, the kernels. Then this
+# checkout's site volume and metal-vmm's checks, which need no QEMU; then the
+# probes, the two chat judges and the droplet's boots, which do.
+
+# **THE SITE VOLUME, FROM THIS CHECKOUT** (tools/site_volume.py: the judge's
+# own stage and build_disk, no boot): what metal-vmm's timeouts.sh and
+# long.sh's sweeps judge, where they read whatever volume a chat judge had
+# last left at a default path.
+SITE_VOLUME="$HOME/build/gopher-metal/site/pristine.img"
+python3 tools/site_volume.py "$SITE_VOLUME" "$GOPHER_ROOT" || failed+=(site-volume)
+lap "the site volume"
+
+# ── metal-vmm's checks (no QEMU) ─────────────────────────────────────────────
+# **metal-vmm IS BUILT HERE**, for the reason gopher.elf is above: its scripts
+# run whatever binary is on disk. `pc_vs_microvm.sh all` is the PC-shaped machine
+# (TRANSPORT=pci): every route with the server halting between frames and
+# woken by MSI-X and the APIC timer, the path a droplet runs.
+VMM="${METAL_VMM:-$HOME/showell_repos/metal-vmm}"
+(cd "$VMM" && zig build 2>&1 | tail -5; exit "${PIPESTATUS[0]}") || failed+=(vmm-build)
+(cd "$VMM" && ./check.sh 2>&1 | tail -2; exit "${PIPESTATUS[0]}") || failed+=(vmm-check)
+(cd "$VMM" && ./same.sh 2>&1 | tail -2; exit "${PIPESTATUS[0]}") || failed+=(vmm-same)
+(cd "$VMM" && ./pc_vs_microvm.sh all 2>&1 | tail -2; exit "${PIPESTATUS[0]}") || failed+=(vmm-pc)
+# **TIMEOUTS, IN THE MACHINE'S TIME**: what a setting governs, proved by
+# moving it, read off metal-vmm's clock rather than waited out on the box's.
+(cd "$VMM" && SITE="$SITE_VOLUME" ./timeouts.sh 2>&1 | tail -3; exit "${PIPESTATUS[0]}") || failed+=(vmm-timeouts)
+lap "metal-vmm check, same, rest and timeouts"
+
 # ── the full run ─────────────────────────────────────────────────────────────
 r=$(probe/run.sh 2>&1) || failed+=(probes)
 echo "probes: $(echo "$r" | grep -c "^PASS") PASS"
@@ -147,7 +175,7 @@ fi
 # and tools/check_fat16_images.sh. long.sh runs the judge on every release.
 echo "FAT16 chat judge: in long.sh, before every release"
 
-# ── the droplet and metal-vmm checks ─────────────────────────────────────────
+# ── the droplet's boots (QEMU) ───────────────────────────────────────────────
 b=$(droplet/boot.sh 2>&1) || failed+=(droplet-boot)
 echo "droplet boot: $(echo "$b" | grep -c PASS) PASS"
 echo "$b" | grep "^FAIL"
@@ -159,19 +187,6 @@ lap "droplet hello"
 droplet/screen.sh 2>&1 | tail -1
 [ "${PIPESTATUS[0]}" = 0 ] || failed+=(screen)
 lap "screen"
-# **metal-vmm IS BUILT HERE**, for the reason gopher.elf is above: its scripts
-# run whatever binary is on disk. `pc_vs_microvm.sh all` is the PC-shaped machine
-# (TRANSPORT=pci): every route with the server halting between frames and
-# woken by MSI-X and the APIC timer, the path a droplet runs.
-VMM="${METAL_VMM:-$HOME/showell_repos/metal-vmm}"
-(cd "$VMM" && zig build 2>&1 | tail -5; exit "${PIPESTATUS[0]}") || failed+=(vmm-build)
-(cd "$VMM" && ./check.sh 2>&1 | tail -2; exit "${PIPESTATUS[0]}") || failed+=(vmm-check)
-(cd "$VMM" && ./same.sh 2>&1 | tail -2; exit "${PIPESTATUS[0]}") || failed+=(vmm-same)
-(cd "$VMM" && ./pc_vs_microvm.sh all 2>&1 | tail -2; exit "${PIPESTATUS[0]}") || failed+=(vmm-pc)
-# **TIMEOUTS, IN THE MACHINE'S TIME**: what a setting governs, proved by
-# moving it, read off metal-vmm's clock rather than waited out on the box's.
-(cd "$VMM" && ./timeouts.sh 2>&1 | tail -3; exit "${PIPESTATUS[0]}") || failed+=(vmm-timeouts)
-lap "metal-vmm check, same, rest and timeouts"
 
 # **A CHECK SKIPPED IS NO PASS** (the normalization hunt, 2026-10-10; Steve:
 # fail, never warn): a probe or chat judge that could not run a check (a loop
