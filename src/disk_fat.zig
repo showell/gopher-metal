@@ -3452,7 +3452,8 @@ pub const Volume = struct {
     /// is at most as long as the volume, and a directory pointing at its own
     /// ancestor is reported, not descended into for ever.
     ///
-    /// Walked `max_tree_depth` deep; each level holds a sector of stack.
+    /// Walked `max_tree_depth` deep; the checker holds a frame (a sector and
+    /// a long name) for each level, ~13 KB, on the caller's stack.
     /// Errors are the disk's (ReadFailed), or `seen` too short (TooBig); a
     /// damaged volume is not an error but the answer.
     pub fn check(
@@ -3516,7 +3517,7 @@ pub const Volume = struct {
     pub const CheckRun = struct {
         tally: Tally = .{},
         checker: Checker(*Tally, Tally.each) = undefined,
-        phase: enum { start, walk, fat, done } = .done,
+        phase: enum { start, walk, fat, done, failed } = .done,
         changes_at_start: u64 = 0,
 
         /// What a run found, in counts: what `/admin/host` says.
@@ -3549,7 +3550,19 @@ pub const Volume = struct {
         }
 
         /// One step: a slice of the tree's walk, or of the FAT on the disk.
+        ///
+        /// **A RUN THAT FAILED IS BEGUN AGAIN, NEVER RESUMED**: a step that
+        /// fails has moved the walk's place past what it failed on, so every
+        /// step after it is refused with that failure (`ReadFailed`) until
+        /// `begin`. A slice that reads nothing would never finish: a panic,
+        /// the caller's mistake.
         pub fn step(self: *CheckRun, slice: Slice) Error!Step {
+            if (slice.sectors == 0 or slice.runs == 0) @panic("a check's slice reads nothing: it would never finish");
+            if (self.phase == .failed) {
+                props.reachable(@src(), "fat: a step of a check that failed is refused until it begins again", null);
+                return Error.ReadFailed;
+            }
+            errdefer self.phase = .failed;
             const c = &self.checker;
             const v = c.vol;
             if (self.phase == .done) return .done;
@@ -3575,7 +3588,7 @@ pub const Volume = struct {
                     props.reachable(@src(), "fat: a check a slice at a time finishes", .{ .damage = self.tally.damage });
                     return .done;
                 },
-                .done => unreachable,
+                .done, .failed => unreachable,
             }
         }
 
@@ -3822,13 +3835,9 @@ pub const Volume = struct {
                         f.run_parts = 0;
                         f.run_started = false;
                     } else self.orphaned(&f.run_parts, &f.run_started);
-                    if (try self.entryIn(entry, f.cluster, f.parent, f.depth)) |child| {
-                        if (f.at == sector_size) {
-                            f.at = 0;
-                            f.k += 1;
-                        }
-                        return child;
-                    }
+                    // A child's walk first; `f`, past this entry, resumes after
+                    // it (at a sector's end, the loop's test moves it on).
+                    if (try self.entryIn(entry, f.cluster, f.parent, f.depth)) |child| return child;
                 }
                 f.at = 0;
                 f.k += 1;

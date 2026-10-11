@@ -833,6 +833,26 @@ test "a step of the check's walk reads at most its slice's directory sectors (id
     }
 }
 
+test "a check a slice at a time that fails is refused until it begins again (its place moved past the failure)" {
+    const d = try Disk.make("damaged-slice-walk-fails", test_disk.small32, true);
+    defer d.deinit();
+    try sliceTree(d);
+    try d.mount(true);
+    const seen = try testing.allocator.alloc(u8, d.vol.checkBytes());
+    defer testing.allocator.free(seen);
+    var run: disk_fat.Volume.CheckRun = .{};
+    const slice: disk_fat.Volume.CheckRun.Slice = .{ .sectors = 1, .runs = 1 };
+    try run.begin(&d.vol, seen);
+    try testing.expectEqual(disk_fat.Volume.CheckRun.Step.more, try run.step(slice));
+    d.blk.fail_after = d.blk.requests; // the disk stops answering
+    try testing.expectError(disk_fat.Error.ReadFailed, run.step(slice));
+    d.blk.fail_after = null; // and answers again: the run still refuses
+    try testing.expectError(disk_fat.Error.ReadFailed, run.step(slice));
+    try run.begin(&d.vol, seen);
+    while (try run.step(slice) == .more) {}
+    try testing.expectEqual((try d.check()).health, run.health());
+}
+
 test "the check finds FAT copies that differ" {
     for (configs) |cfg| {
         const shape, const cached = .{ cfg.shape, cfg.cached };
