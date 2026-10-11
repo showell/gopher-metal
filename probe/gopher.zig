@@ -530,9 +530,9 @@ pub fn kmain() noreturn {
     var request_heap = RequestHeap.init(pages.allocator, request_heap_bytes);
     if (!request_heap.preheat())
         serial.fail("the machine has not enough memory for a request heap");
-    // **THE HOST CONTRACT, ONE CALL** (angry-gopher router.zig,
-    // host_start.zig): what this machine supplies (where the data is on its
-    // volumes, the game store's floor read off the data's FAT, the trusted
+    // **THE HOST CONTRACT, ONE CALL** (angry-gopher router.zig, its webbox
+    // library's site.zig): what this machine supplies (where the data is on
+    // its volumes, how its free space is read off the data's FAT, the trusted
     // proxy, /admin/host's facts and the serial log), and the setup in its one
     // order before the first request: the session secret's move, every chat
     // session's last-message record (as Linux does, so the two hosts leave
@@ -540,7 +540,7 @@ pub fn kmain() noreturn {
     // Each one-time pass reads on an arena `start` gives back.
     var started = router.start(io, .{
         .roots = .{ .data_dir = data_dir, .auth_dir = auth_dir },
-        .floor = .{ .free_space = dataSpace },
+        .free_space = .{ .reader = dataSpace },
         .trusted_proxy = trusted_proxy,
         .facts = metalFacts,
         .log = metalLog,
@@ -551,12 +551,12 @@ pub fn kmain() noreturn {
         serial.fail("the host contract's setup (router.start) failed");
     };
     const hub = &started.hub;
-    if (started.backfilled > 0) {
+    if (started.app.backfilled > 0) {
         serial.put("  wrote a last-message record for ");
-        serial.putDec(started.backfilled);
+        serial.putDec(started.app.backfilled);
         serial.put(" chat session(s)\n");
     }
-    if (started.search) |st| {
+    if (started.app.search) |st| {
         serial.put("  search index: ");
         serial.putDec(st.messages);
         serial.put(" messages in ");
@@ -568,7 +568,7 @@ pub fn kmain() noreturn {
         serial.put(" words, ");
         serial.putDec(st.unreadable);
         serial.put(" unreadable) in ");
-        serial.putDec(@intCast(started.search_ms));
+        serial.putDec(@intCast(started.app.search_ms));
         serial.put(" ms\n");
     } else serial.put("  search index: not built (out of memory); the first search builds it\n");
     // **IDLE TIME** (src/idle.zig, essay idle-time-on-metal): each volume's
