@@ -1290,6 +1290,107 @@ test "an older segment with a newer acknowledgement moves the window's edge too"
     try testing.expectEqual(before - 50, f.table.conns[i].wnd);
 }
 
+// ---- sequence edges (RFC 9293 §3.4, §3.10.7.4): each test pins the last
+// number on one side and the first on the other, side by side.
+
+/// One connection with "ten bytes!" on the wire, and a bare ACK of all ten
+/// sent at `seq_from_next` past the next byte expected. Whether `una` moved
+/// says whether the segment's acknowledgement was taken.
+fn ackTakenAt(seq_from_next: u32) !bool {
+    var f: Fixture = .{};
+    f.init();
+    var p = Peer{ .ip = .{ 10, 0, 2, 2 }, .port = 40000 };
+    const i = try p.connect(&f.table, &f.wire, 0);
+    _ = f.table.queue(i, "ten bytes!");
+    transmit(&f.table, &f.wire, 1);
+    const una = f.table.conns[i].una;
+    p.ack = una +% 10;
+    var buf: [1600]u8 = undefined;
+    _ = handle(&f.table, &f.wire, p.frame(&buf, flag_ack, p.seq +% seq_from_next, ""), 2);
+    return f.table.conns[i].una != una;
+}
+
+test "the window's last number is ahead and its acknowledgement is taken; the right edge is beyond and its is not" {
+    // In the window: RCV.NXT =< SEG.SEQ < RCV.NXT + RCV.WND.
+    const w: u32 = 64; // the fixture's receive buffer, empty
+    try testing.expect(try ackTakenAt(w - 1));
+    try testing.expect(!try ackTakenAt(w));
+}
+
+test "half the circle less one behind is from behind and its acknowledgement counts; half the circle is not behind" {
+    const half: u32 = 1 << 31;
+    const next: u32 = 0;
+    try testing.expect(try ackTakenAt(next -% 1)); // one behind: a keepalive
+    try testing.expect(try ackTakenAt(next -% (half - 1)));
+    try testing.expect(!try ackTakenAt(next -% half));
+}
+
+test "a shut window takes a segment at the next byte expected, and none one past it" {
+    // RFC 9293 §3.10.7.4: with RCV.WND 0, only SEG.SEQ = RCV.NXT is acceptable.
+    for ([_]struct { past: u32, taken: bool }{ .{ .past = 0, .taken = true }, .{ .past = 1, .taken = false } }) |case| {
+        var f: Fixture = .{};
+        f.init();
+        var p = Peer{ .ip = .{ 10, 0, 2, 2 }, .port = 40000 };
+        const i = try p.connect(&f.table, &f.wire, 0);
+        var fill: [64]u8 = undefined;
+        _ = p.write(&f.table, &f.wire, pattern(&fill), 1);
+        try testing.expectEqual(@as(u16, 0), f.table.conns[i].window());
+        _ = f.table.queue(i, "ten bytes!");
+        transmit(&f.table, &f.wire, 2);
+        const una = f.table.conns[i].una;
+        p.ack = una +% 10;
+        var buf: [1600]u8 = undefined;
+        _ = handle(&f.table, &f.wire, p.frame(&buf, flag_ack, p.seq +% case.past, ""), 3);
+        try testing.expectEqual(case.taken, f.table.conns[i].una != una);
+    }
+}
+
+test "a window update from the segment that last set it counts; from the one before it, it does not" {
+    // SND.WL1 < SEG.SEQ, or SND.WL1 = SEG.SEQ and SND.WL2 =< SEG.ACK.
+    for ([_]struct { back: u32, updated: bool }{ .{ .back = 0, .updated = true }, .{ .back = 1, .updated = false } }) |case| {
+        var f: Fixture = .{};
+        f.init();
+        var p = Peer{ .ip = .{ 10, 0, 2, 2 }, .port = 40000 };
+        const i = try p.connect(&f.table, &f.wire, 0);
+        try testing.expectEqual(p.seq, f.table.conns[i].wl1);
+        try testing.expectEqual(p.ack, f.table.conns[i].wl2);
+        p.window = 1234;
+        var buf: [1600]u8 = undefined;
+        _ = handle(&f.table, &f.wire, p.frame(&buf, flag_ack, p.seq -% case.back, ""), 1);
+        try testing.expectEqual(case.updated, f.table.conns[i].wnd == 1234);
+    }
+}
+
+test "an acknowledgement of the timed segment's last byte takes the sample; one short of it does not" {
+    var f: Fixture = .{};
+    f.init();
+    var p = Peer{ .ip = .{ 10, 0, 2, 2 }, .port = 40000 };
+    const i = try p.connect(&f.table, &f.wire, 0);
+    _ = f.table.queue(i, "ten bytes!");
+    transmit(&f.table, &f.wire, 100 * ms);
+    const una = f.table.conns[i].una;
+    const samples = f.table.samples;
+    _ = p.ackUpTo(&f.table, &f.wire, una +% 9, 150 * ms);
+    try testing.expectEqual(samples, f.table.samples);
+    _ = p.ackUpTo(&f.table, &f.wire, una +% 10, 160 * ms);
+    try testing.expectEqual(samples + 1, f.table.samples);
+}
+
+test "a FIN behind data that exactly fills the room is taken; behind one byte more, it waits" {
+    for ([_]struct { len: usize, done: bool }{ .{ .len = 64, .done = true }, .{ .len = 65, .done = false } }) |case| {
+        var f: Fixture = .{};
+        f.init();
+        var p = Peer{ .ip = .{ 10, 0, 2, 2 }, .port = 40000 };
+        const i = try p.connect(&f.table, &f.wire, 0);
+        var body: [65]u8 = undefined;
+        var buf: [1600]u8 = undefined;
+        const r = handle(&f.table, &f.wire, p.frame(&buf, flag_fin | flag_ack, p.seq, pattern(body[0..case.len])), 1);
+        try testing.expectEqual(case.done, f.table.conns[i].peerDone());
+        try testing.expectEqual(@as(usize, 64), f.table.conns[i].pending().len);
+        try testing.expectEqual(if (case.done) Event.peer_done else Event.data, r.event);
+    }
+}
+
 test "giving up on a handshake tells the peer, instead of leaving it on a timer" {
     var f: Fixture = .{};
     f.init();
