@@ -9,28 +9,26 @@
 //! header saying a hundred bytes are coming and then pauses.
 //!
 //! **A BODY IS READ BY THE ONE RULE** (angry-gopher's webbox body.zig, which
-//! Linux's host reads too; metal-vmm QUEUE 166). The rule comes in as a
+//! Linux's host reads too; metal-vmm QUEUE 166, 169). The rule comes in as a
 //! parameter (`Rule`, the ported body.zig: `router.body_rule` in the kernel),
-//! so this file stays a question about bytes. With the route's cap from the
-//! head (`limit`):
+//! so this file stays a question about bytes. **THE TURN NEVER WAITS ON THE
+//! NETWORK**: every body is whole in memory before its request is served.
+//! With the route's cap from the head (`limit`):
 //!
 //!   - **A body refused from its head** (past the route's cap, or framed
 //!     twice) is served at once, for the host to refuse.
-//!   - **A body that fits the buffer is waited for**, holding nobody else up:
-//!     a Content-Length one until it is all here, a chunked one until its
-//!     last chunk is (or it is malformed), and a chunked one whose cap is past
-//!     the buffer for as long as it can still end in it. Its wait is bounded:
-//!     `wait_ms` from when the head was whole, the host's to time.
-//!   - **`Expect: 100-continue`** for such a body: the host answers the
-//!     expectation itself (`must_continue`), and asks again as `continued`,
-//!     when the body is waited for as any other. Before, `std.http.Server`
-//!     answered it from inside the handler, so the turn waited on the body.
-//!   - **A body too big for the buffer** is served at its head, its handler
-//!     reading the rest in the turn under one deadline for the whole of it
-//!     (the host's, from the rule). Nothing drains the buffer until the
-//!     handler runs, so a body that cannot fit in it would shut the window
-//!     and never arrive; and so is a chunked one that has filled the buffer
-//!     without ending (`tight`, as for a head).
+//!   - **An upload** (a route whose cap is past the rule's
+//!     `before_turn_most`) is the host's (`upload`): it asks who is uploading,
+//!     gives them a slot, and drains the body into memory.
+//!   - **A small body that fits the buffer is waited for in it**: a
+//!     Content-Length one until it is all here, a chunked one until its last
+//!     chunk (or it is malformed). Its wait is bounded: `wait_ms` from when
+//!     the head was whole, the host's to time.
+//!   - **A small body that does not fit** (or a chunked one that has filled
+//!     the buffer unended) is drained by the host into memory (`drain`),
+//!     which reopens the window, and served once whole.
+//!   - **`Expect: 100-continue`** for a small body: the host answers it
+//!     itself (`must_continue`), and asks again as `continued`.
 //!
 //! **NOR A HEAD THE WINDOW HAS SHUT ON.** A head that has not ended when the
 //! buffer is too full for the peer to send another segment into (tcp.zig's
@@ -56,27 +54,37 @@ const tcp = @import("tcp.zig");
 pub const Readiness = enum {
     /// Keep waiting.
     waiting,
-    /// Serve it: everything the handler will read is here, or the rest cannot
-    /// be waited for, or it is refused from its head.
+    /// Serve it: everything the handler will read is here, or it is refused
+    /// from its head.
     ready,
     /// The peer has closed without finishing: serve it anyway, so the host
     /// logs it and lets it go, as it always has.
     abandoned,
-    /// The head is whole and asks to be told to send a body that will be
-    /// waited for: the host sends `100 Continue` and asks again, `continued`.
+    /// The head is whole and asks to be told to send a small body: the host
+    /// sends `100 Continue` and asks again, `continued`.
     must_continue,
-    /// The head is whole and its body, which fits, is still coming: wait,
-    /// but no longer than `Answer.wait_ms` after the head was whole.
+    /// The head is whole and its small body, which fits, is still coming:
+    /// wait, but no longer than `Answer.wait_ms` after the head was whole.
     body_coming,
+    /// The head is whole and its small body cannot be waited for in the
+    /// buffer: the host drains it into memory (`Answer.head_len`, `read`).
+    drain,
+    /// The head is whole and asks to upload: the host's (who, a slot, a
+    /// drain into memory).
+    upload,
 };
 
-pub const Answer = struct {
-    readiness: Readiness,
-    /// For `body_coming`: the most the host waits for the body, from when its
-    /// head was whole (the rule's before-turn deadline). Past it the request
-    /// is served as late, a 408.
-    wait_ms: u64 = 0,
-};
+pub fn Answer(comptime Rule: type) type {
+    return struct {
+        readiness: Readiness,
+        /// For `body_coming` and `drain`: the most the host waits for the
+        /// body, from when its head was whole.
+        wait_ms: u64 = 0,
+        /// For `drain` and `upload`: where the body begins, and what is read.
+        head_len: usize = 0,
+        read: ?Rule.Read = null,
+    };
+}
 
 /// What the host knows of the connection besides its bytes.
 pub const Known = struct {
@@ -89,7 +97,7 @@ pub const Known = struct {
 
 /// `capacity` is the connection's receive buffer — the most that can ever be
 /// buffered for it at once. `Rule` is webbox's body.zig.
-pub fn check(comptime Rule: type, pending: []const u8, peer_done: bool, capacity: usize, known: Known) Answer {
+pub fn check(comptime Rule: type, pending: []const u8, peer_done: bool, capacity: usize, known: Known) Answer(Rule) {
     var parser: std.http.HeadParser = .{};
     const head_len = parser.feed(pending);
     const left = capacity - @min(pending.len, capacity);
@@ -106,42 +114,47 @@ pub fn check(comptime Rule: type, pending: []const u8, peer_done: bool, capacity
         props.reachable(@src(), "ready: a head std cannot parse is served, for the handler to refuse", null);
         return .{ .readiness = .ready };
     };
-    const body_room = capacity - @min(head_len, capacity);
-    const read = switch (Rule.plan(&head, known.limit(head.target), body_room)) {
+    const read = switch (Rule.plan(&head, known.limit(head.target))) {
         .none => return .{ .readiness = .ready },
         .refused => {
             props.reachable(@src(), "ready: a body refused from its head is served at once, for the host to refuse", null);
             return .{ .readiness = .ready };
         },
-        .in_turn => {
-            props.reachable(@src(), "ready: a body past the buffer is served at its head, and read in the turn", null);
-            return .{ .readiness = .ready };
+        .upload => |r| {
+            props.reachable(@src(), "ready: an upload's head is the host's: who, a slot, a drain", null);
+            return .{ .readiness = .upload, .head_len = head_len, .read = r };
         },
-        .before_turn => |r| r,
-        .chunked_as_far_as_room => |both| both.before,
+        .small => |r| r,
     };
     if (head.expect) |e| if (!known.continued) {
         // Only the expectation std knows is answered here; another is the
         // handler's to refuse.
         if (!std.ascii.eqlIgnoreCase(e, "100-continue")) return .{ .readiness = .ready };
-        props.reachable(@src(), "ready: a head asking 100-continue for a body that fits is told to send it", null);
+        props.reachable(@src(), "ready: a head asking 100-continue for a small body is told to send it", null);
         return .{ .readiness = .must_continue };
     };
+    const body_room = capacity - @min(head_len, capacity);
     const body = pending[head_len..];
-    const whole = if (head.transfer_encoding == .chunked) switch (Rule.chunkedEnd(body)) {
-        .whole => true,
-        .malformed => {
-            props.reachable(@src(), "ready: a malformed chunked body is served, for the handler to refuse", null);
-            return .{ .readiness = .ready };
-        },
-        .partial => false,
-    } else body.len >= read.bytes;
-    if (whole) return .{ .readiness = .ready };
-    // A Content-Length body that fits always can arrive; a chunked one may be
-    // longer than the room left.
-    if (tight and head.transfer_encoding == .chunked) {
-        props.reachable(@src(), "ready: a chunked body that fills the buffer unended is served, and read in the turn", null);
-        return .{ .readiness = .ready };
+    const drain: Answer(Rule) = .{ .readiness = .drain, .wait_ms = read.deadline_ms, .head_len = head_len, .read = read };
+    if (head.transfer_encoding == .chunked) {
+        switch (Rule.chunkedEnd(body)) {
+            .whole => return .{ .readiness = .ready },
+            .malformed => {
+                props.reachable(@src(), "ready: a malformed chunked body is served, for the handler to refuse", null);
+                return .{ .readiness = .ready };
+            },
+            .partial => {},
+        }
+        if (tight) {
+            props.reachable(@src(), "ready: a chunked body that fills the buffer unended is drained", null);
+            return drain;
+        }
+    } else {
+        if (body.len >= read.bytes) return .{ .readiness = .ready };
+        if (read.bytes > body_room) {
+            props.reachable(@src(), "ready: a body past the buffer is drained into memory", null);
+            return drain;
+        }
     }
     if (peer_done) return .{ .readiness = .abandoned };
     return .{ .readiness = .body_coming, .wait_ms = read.deadline_ms };
@@ -232,11 +245,15 @@ test "a client that closed part-way through its body is served and let go" {
     try testing.expectEqual(Readiness.abandoned, ask(post ++ "012", true, room));
 }
 
-test "a body too big for the buffer is served at its head, and read as it comes" {
-    // Nothing drains the buffer until the handler runs, so waiting for a body
-    // that cannot fit would be waiting for the window to open on its own.
+test "a body too big for the buffer is drained into memory by the host, never read in the turn (metal-vmm QUEUE 169)" {
+    // Waiting for a body that cannot fit would be waiting for the window to
+    // open on its own; the host drains it, which opens it.
     const big = "POST /upload HTTP/1.1\r\nHost: x\r\nContent-Length: 40000\r\n\r\n";
-    try testing.expectEqual(Readiness.ready, ask(big, false, room));
+    const a = check(body_rule, big, false, room, .{ .limit = roomy });
+    try testing.expectEqual(Readiness.drain, a.readiness);
+    try testing.expectEqual(big.len, a.head_len);
+    try testing.expectEqual(@as(u64, 40000), a.read.?.bytes);
+    try testing.expectEqual(body_rule.smallMs(40000), a.wait_ms);
     // One that just fits is still waited for.
     const fits = "POST /upload HTTP/1.1\r\nHost: x\r\nContent-Length: 16000\r\n\r\n";
     try testing.expectEqual(Readiness.body_coming, ask(fits, false, room));
@@ -256,12 +273,12 @@ test "an unended head in a small buffer waits with half the buffer left, and is 
     try testing.expectEqual(Readiness.ready, ask(buf[0 .. small - small / 2 + 1], false, small));
 }
 
-test "a body that exactly fills the buffer behind its head is waited for; one byte more is served at its head" {
+test "a body that exactly fills the buffer behind its head is waited for; one byte more is drained" {
     const head_fits = "POST /upload HTTP/1.1\r\nContent-Length: 64\r\n\r\n";
     const head_over = "POST /upload HTTP/1.1\r\nContent-Length: 65\r\n\r\n";
     const capacity = head_fits.len + 64;
     try testing.expectEqual(Readiness.body_coming, ask(head_fits, false, capacity));
-    try testing.expectEqual(Readiness.ready, ask(head_over, false, capacity));
+    try testing.expectEqual(Readiness.drain, ask(head_over, false, capacity));
     // And the one that fits, arrived whole, fills the buffer to the byte.
     try testing.expectEqual(Readiness.ready, ask(head_fits ++ "v" ** 64, false, capacity));
     try testing.expectEqual(Readiness.body_coming, ask(head_fits ++ "v" ** 63, false, capacity));
@@ -272,8 +289,8 @@ test "a head ending at the buffer's last byte is a request; one byte short of it
     try testing.expectEqual(Readiness.ready, ask(head, false, head.len));
     // The buffer full and the head not ended: nothing more can come.
     try testing.expectEqual(Readiness.ready, ask(head[0 .. head.len - 1], false, head.len - 1));
-    // A body of one byte behind it can never fit: served at its head too.
-    try testing.expectEqual(Readiness.ready, ask("POST /send HTTP/1.1\r\nContent-Length: 1\r\n\r\n", false, head.len));
+    // A body of one byte behind it can never fit: drained.
+    try testing.expectEqual(Readiness.drain, ask("POST /send HTTP/1.1\r\nContent-Length: 1\r\n\r\n", false, head.len));
 }
 
 test "a client waiting to be told to send a body that fits is told by the host, then waited for (metal-vmm QUEUE 166)" {
@@ -286,11 +303,12 @@ test "a client waiting to be told to send a body that fits is told by the host, 
     const told: Known = .{ .continued = true, .limit = roomy };
     const coming = check(body_rule, expects, false, room, told);
     try testing.expectEqual(Readiness.body_coming, coming.readiness);
-    try testing.expectEqual(body_rule.beforeTurnMs(5), coming.wait_ms);
+    try testing.expectEqual(body_rule.smallMs(5), coming.wait_ms);
     try testing.expectEqual(Readiness.ready, check(body_rule, expects ++ "hello", false, room, told).readiness);
-    // One too big for the buffer: served at its head, and std tells it in the
-    // handler, its read under the turn's deadline.
-    try testing.expectEqual(Readiness.ready, ask("POST /u HTTP/1.1\r\nExpect: 100-continue\r\nContent-Length: 40000\r\n\r\n", false, room));
+    // One too big for the buffer: told too, then drained.
+    const big = "POST /u HTTP/1.1\r\nExpect: 100-continue\r\nContent-Length: 40000\r\n\r\n";
+    try testing.expectEqual(Readiness.must_continue, ask(big, false, room));
+    try testing.expectEqual(Readiness.drain, check(body_rule, big, false, room, told).readiness);
     // An expectation std does not know: served, for the handler to refuse.
     try testing.expectEqual(Readiness.ready, ask("POST /u HTTP/1.1\r\nExpect: tea\r\nContent-Length: 5\r\n\r\n", false, room));
 }
@@ -305,12 +323,12 @@ test "a chunked body that fits is waited for to its last chunk (metal-vmm QUEUE 
     try testing.expectEqual(Readiness.abandoned, ask(chunked ++ "3\r\nhe", true, room));
     // Malformed: served, for the handler to refuse.
     try testing.expectEqual(Readiness.ready, ask(chunked ++ "3\rX", false, room));
-    // Its wait is the rule's, sized as far as the buffer (the cap is past it).
+    // Its wait is the rule's, sized from the route's cap.
     const a = check(body_rule, chunked, false, room, .{ .limit = roomy });
-    try testing.expectEqual(body_rule.beforeTurnMs(room - chunked.len), a.wait_ms);
+    try testing.expectEqual(body_rule.smallMs(1 << 20), a.wait_ms);
 }
 
-test "a chunked body that fills the buffer without ending is served, the rest read in the turn" {
+test "a chunked body that fills the buffer without ending is drained" {
     const chunked = "POST /send HTTP/1.1\r\nTransfer-Encoding: chunked\r\n\r\n";
     var buf: [room]u8 = undefined;
     @memcpy(buf[0..chunked.len], chunked);
@@ -318,7 +336,27 @@ test "a chunked body that fills the buffer without ending is served, the rest re
     @memcpy(buf[chunked.len..][0..size.len], size);
     @memset(buf[chunked.len + size.len ..], 'v');
     try testing.expectEqual(Readiness.body_coming, ask(buf[0 .. room - tcp.our_mss], false, room));
-    try testing.expectEqual(Readiness.ready, ask(buf[0 .. room - tcp.our_mss + 1], false, room));
+    try testing.expectEqual(Readiness.drain, ask(buf[0 .. room - tcp.our_mss + 1], false, room));
+}
+
+fn uploads(_: []const u8) u64 {
+    return 4 << 20;
+}
+
+test "an upload's head is the host's, however small its body, before any expectation (metal-vmm QUEUE 169)" {
+    const lim: Known = .{ .limit = uploads };
+    for ([_][]const u8{
+        "POST /up HTTP/1.1\r\nContent-Length: 5\r\n\r\n",
+        "POST /up HTTP/1.1\r\nContent-Length: 5\r\n\r\nhello",
+        "POST /up HTTP/1.1\r\nExpect: 100-continue\r\nContent-Length: 3000000\r\n\r\n",
+        "POST /up HTTP/1.1\r\nTransfer-Encoding: chunked\r\n\r\n",
+    }) |raw| {
+        const a = check(body_rule, raw, false, room, lim);
+        try testing.expectEqual(Readiness.upload, a.readiness);
+        try testing.expectEqual(body_rule.upload_ms, a.read.?.deadline_ms);
+    }
+    // Past its cap: refused, served at once.
+    try testing.expectEqual(Readiness.ready, check(body_rule, "POST /up HTTP/1.1\r\nContent-Length: 5000000\r\n\r\n", false, room, lim).readiness);
 }
 
 fn tiny(_: []const u8) u64 {

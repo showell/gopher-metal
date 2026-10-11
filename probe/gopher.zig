@@ -192,23 +192,92 @@ var draining: [max_connections]?Draining = @splat(null);
 var draining_now: usize = 0;
 
 /// **WHAT THE HOST KNOWS OF A CONNECTION'S BODY** (webbox's body.zig, the one
-/// rule both hosts read; metal-vmm QUEUE 166), indexed by connection, as
+/// rule both hosts read; metal-vmm QUEUE 166, 169), indexed by connection, as
 /// `held` is: whether it was told `100 Continue`, since when its head was
-/// whole while its body was still coming, and whether it waited past the
-/// rule's deadline for that (then it is served a 408). Kept with the
-/// connection's serial, so a slot's next connection starts afresh.
+/// whole while its body was still coming, whether it waited past the rule's
+/// deadline (a 408), its body drained into memory, its upload slot, and what
+/// the host decided to answer before its route. Kept with the connection's
+/// serial, so a slot's next connection starts afresh, its predecessor's
+/// memory and slot given back.
 const BodyWait = struct {
     serial: u64 = 0,
     continued: bool = false,
     head_at: ?i96 = null,
     late: bool = false,
+    drain: ?Drain = null,
+    slot: ?usize = null,
+    /// Since when an uploader has waited for a slot, and who they are (asked
+    /// once: the asking reads the store).
+    slot_wait_since: ?i96 = null,
+    uploader: ?u64 = null,
+    verdict: Verdict = .none,
 };
+
+/// What the host answers a request before its route runs, besides what the
+/// head itself refuses.
+const Verdict = enum {
+    none,
+    /// An upload by nobody the site knows: served from its head, its body
+    /// never read; its route refuses it.
+    stranger,
+    /// No upload slot came free in time, or the memory for a body did not.
+    busy,
+    /// A chunked body past what is kept of one (body.chunkedRawMost).
+    too_large,
+};
+
+/// **A BODY IN MEMORY BEFORE THE TURN** (metal-vmm QUEUE 169): the request's
+/// head and its body as they came, drained from the connection's buffer
+/// (which reopens its window), served from here once whole.
+const Drain = struct {
+    bytes: []u8,
+    len: usize = 0,
+    head_len: usize,
+    /// A Content-Length body is whole at `head_len + want` bytes; a chunked
+    /// one when its last chunk is in.
+    framing: enum { length, chunked },
+    want: usize,
+    began: i96,
+    deadline_at: i96,
+    whole: bool = false,
+    upload: bool,
+};
+
 var body_waits: [max_connections]BodyWait = @splat(.{});
+
+/// Where drained bodies live: the machine's heap.
+var body_gpa: std.mem.Allocator = undefined;
+
+/// The upload slots (body.zig): three, one a human.
+var upload_slots: router.body_rule.Slots = .{};
+
+/// **SMALL BODIES DRAINED, AT MOST THIS MUCH AT ONCE**: a small body is at
+/// most 1 MiB and needs no slot, so the many connections draining one are
+/// held to a budget; past it a drain waits, its window shut, under its
+/// deadline. Uploads have their slots: at most three of 101 MiB.
+const small_drain_budget = 64 * 1024 * 1024;
+var small_drained_now: usize = 0;
 
 fn bodyWait(table: *tcp.Table, i: usize) *BodyWait {
     const w = &body_waits[i];
-    if (w.serial != table.conns[i].serial) w.* = .{ .serial = table.conns[i].serial };
+    if (w.serial != table.conns[i].serial) {
+        releaseBody(w);
+        w.* = .{ .serial = table.conns[i].serial };
+    }
     return w;
+}
+
+/// The memory and the slot a connection's body held, given back.
+fn releaseBody(w: *BodyWait) void {
+    if (w.drain) |d| {
+        if (!d.upload) small_drained_now -= d.bytes.len;
+        body_gpa.free(d.bytes);
+        w.drain = null;
+    }
+    if (w.slot) |slot| {
+        upload_slots.giveBack(slot);
+        w.slot = null;
+    }
 }
 
 /// The machine's clock `ms` from now, for a stream's body deadline: within
@@ -223,10 +292,84 @@ fn bodyDeadline(ms: u64) i64 {
 /// The host's own answer to `Expect: 100-continue`, for a body it waits for.
 const continue_line = "HTTP/1.1 100 Continue\r\n\r\n";
 
-/// The rule's word that the turn's body is late: the handler's read fails,
-/// and `http.readLimitedBody` answers 408 (stream.zig's `on_late`).
-fn bodyLate() void {
-    router.body_rule.late_in_turn.store(true, .release);
+/// A drain begun for connection `i`: room for its head and at most `most`
+/// bytes of body. Null when the memory is not there (the request is then
+/// told the host is busy) or, for a small body, the budget is spent (it
+/// waits).
+const Begun = enum { begun, wait, no_memory };
+
+fn beginDrain(w: *BodyWait, head_len: usize, read: router.body_rule.Read, chunked: bool, cap: u64, upload: bool, now: i96, deadline_ms: u64) Begun {
+    const most: u64 = if (chunked) router.body_rule.chunkedRawMost(cap) else read.bytes;
+    const size = std.math.add(u64, head_len, most) catch return .no_memory;
+    if (size > std.math.maxInt(usize)) return .no_memory;
+    if (!upload and small_drained_now + size > small_drain_budget) return .wait;
+    const bytes = body_gpa.alloc(u8, @intCast(size)) catch return .no_memory;
+    if (!upload) small_drained_now += bytes.len;
+    w.drain = .{
+        .bytes = bytes,
+        .head_len = head_len,
+        .framing = if (chunked) .chunked else .length,
+        .want = @intCast(read.bytes),
+        .began = now,
+        .deadline_at = now + @as(i96, deadline_ms) * std.time.ns_per_ms,
+        .upload = upload,
+    };
+    return .begun;
+}
+
+/// What has arrived of a draining body moved into memory, the window
+/// reopened, and whether it is whole, late, or past what is kept.
+fn stepDrain(wire: *stream.Wire, table: *tcp.Table, i: usize, w: *BodyWait, now: i96) void {
+    const d = &w.drain.?;
+    const c = &table.conns[i];
+    const pending = c.pending();
+    const n = @min(pending.len, d.bytes.len - d.len);
+    @memcpy(d.bytes[d.len..][0..n], pending[0..n]);
+    d.len += n;
+    const was_tight = c.tight(c.window());
+    c.consume(n);
+    if (was_tight and !c.tight(c.window())) table.ack(wire, i);
+    switch (d.framing) {
+        .length => if (d.len - d.head_len >= d.want) {
+            d.whole = true;
+        },
+        .chunked => switch (router.body_rule.chunkedEnd(d.bytes[d.head_len..d.len])) {
+            .whole, .malformed => d.whole = true,
+            .partial => if (d.len == d.bytes.len) {
+                w.verdict = .too_large;
+            },
+        },
+    }
+    if (d.whole or w.verdict != .none) return;
+    // The client finished sending without finishing the body: served, its
+    // short body refused by its route's read.
+    if (c.peerDone() and c.pending().len == 0) {
+        d.whole = true;
+        return;
+    }
+    if (now >= d.deadline_at) w.late = true;
+}
+
+/// Who is uploading, by the site's `uploader` over the head alone (its
+/// sign-in, checked before a byte of the body is kept). A failure to tell is
+/// no stranger: it is said, and the upload told the host is busy.
+const Asker = union(enum) { who: u64, stranger, unknown };
+
+var asker_scratch: [64 * 1024]u8 = undefined;
+
+fn uploaderOf(io: Io, head: []const u8) Asker {
+    var fba = std.heap.FixedBufferAllocator.init(&asker_scratch);
+    var in: std.Io.Reader = .fixed(head);
+    var out: std.Io.Writer = .fixed(&.{});
+    var server = std.http.Server.init(&in, &out);
+    var req = server.receiveHead() catch return .unknown;
+    const who = router.uploader(&req, io, fba.allocator()) catch |e| {
+        serial.put("  uploader: ");
+        serial.put(@errorName(e));
+        serial.put("\n");
+        return .unknown;
+    };
+    return if (who) |name| .{ .who = router.body_rule.keyOf(name) } else .stranger;
 }
 /// The most bytes one connection may keep (a whole upload of a few MB fits;
 /// a larger response waits for room, as before spills).
@@ -589,6 +732,7 @@ pub fn kmain() noreturn {
         serial.fail("the host contract's setup (router.start) failed");
     };
     const hub = &started.hub;
+    body_gpa = hub.gpa;
     if (started.app.backfilled > 0) {
         serial.put("  wrote a last-message record for ");
         serial.putDec(started.app.backfilled);
@@ -668,7 +812,7 @@ pub fn kmain() noreturn {
         const arrived = stream.pump(&wire, &table, lease.address);
         const now = Io.awakeNs() orelse 0;
         if (arrived != null) idle_work.busy(now);
-        if (nextReady(&table, now)) |pick| {
+        if (nextReady(io, &wire, &table, now)) |pick| {
             served += 1;
             serveOne(io, &wire, &table, pick, lease.address, request_heap.allocator(), hub, served, conf.idle_ns, conf.streams);
             idle_work.busy(Io.awakeNs() orelse now);
@@ -808,37 +952,140 @@ pub fn kmain() noreturn {
     serial.pass();
 }
 
-/// The oldest connection with something to serve, or null. A head asking
-/// `100-continue` for a body the machine will wait for is answered here, and
-/// a body that has been coming past the rule's deadline is served as late.
-fn nextReady(table: *tcp.Table, now: i96) ?usize {
+/// The oldest connection with something to serve, or null. **THE TURN
+/// NEVER WAITS ON THE NETWORK** (metal-vmm QUEUE 169): a connection is ready
+/// only once everything its handler reads is in memory. A head asking
+/// `100-continue` is answered here; a small body too big for the buffer is
+/// drained into memory; an upload's asker is checked, given a slot, and its
+/// body drained; a body coming past the rule's deadline is served as late.
+fn nextReady(io: Io, wire: *stream.Wire, table: *tcp.Table, now: i96) ?usize {
     var best: ?usize = null;
     for (table.conns, 0..) |*c, i| {
-        if (c.claimed or c.state != .established) continue;
         const w = bodyWait(table, i);
-        const got = ready.check(router.body_rule, c.pending(), c.peerDone(), c.rx.len, .{ .continued = w.continued, .limit = router.bodyLimit });
-        switch (got.readiness) {
-            .waiting => continue,
-            .must_continue => {
-                // Sixteen bytes in a send queue of 64 KiB, nothing yet in it.
-                if (table.queue(i, continue_line) == continue_line.len) w.continued = true;
-                continue;
-            },
-            .body_coming => {
-                const since = w.head_at orelse blk: {
-                    w.head_at = now;
-                    break :blk now;
-                };
-                if (now - since < @as(i96, got.wait_ms) * std.time.ns_per_ms) continue;
-                w.late = true;
-            },
-            // Late is decided at each pass: a body that came whole while
-            // the turn was another's is served, not refused.
-            .ready, .abandoned => w.late = false,
+        if (c.claimed) continue;
+        if (c.state != .established) {
+            // Gone before its turn: what its body held, given back.
+            if (!c.open()) releaseBody(w);
+            continue;
         }
+        if (!readyNow(io, wire, table, i, w, now)) continue;
         if (best == null or c.serial < table.conns[best.?].serial) best = i;
     }
     return best;
+}
+
+fn readyNow(io: Io, wire: *stream.Wire, table: *tcp.Table, i: usize, w: *BodyWait, now: i96) bool {
+    const c = &table.conns[i];
+    if (w.verdict != .none or w.late) return true;
+    if (w.drain != null) {
+        stepDrain(wire, table, i, w, now);
+        return w.drain.?.whole or w.verdict != .none or w.late;
+    }
+    const got = ready.check(router.body_rule, c.pending(), c.peerDone(), c.rx.len, .{ .continued = w.continued, .limit = router.bodyLimit });
+    switch (got.readiness) {
+        .waiting => return false,
+        .must_continue => {
+            // Sixteen bytes in a send queue of 64 KiB, nothing yet in it.
+            if (table.queue(i, continue_line) == continue_line.len) w.continued = true;
+            return false;
+        },
+        .body_coming => {
+            const since = w.head_at orelse blk: {
+                w.head_at = now;
+                break :blk now;
+            };
+            if (now - since < @as(i96, got.wait_ms) * std.time.ns_per_ms) return false;
+            w.late = true;
+            return true;
+        },
+        // Late is decided at each pass: a body that came whole while the turn
+        // was another's is served, not refused.
+        .ready, .abandoned => {
+            w.late = false;
+            return true;
+        },
+        .drain => {
+            const since = w.head_at orelse blk: {
+                w.head_at = now;
+                break :blk now;
+            };
+            const elapsed_ms: u64 = @intCast(@divTrunc(now - since, std.time.ns_per_ms));
+            const head = c.pending()[0..got.head_len];
+            const parsed = std.http.Server.Request.Head.parse(head) catch return true;
+            switch (beginDrain(w, got.head_len, got.read.?, parsed.transfer_encoding == .chunked, router.bodyLimit(parsed.target), false, now, got.wait_ms -| elapsed_ms)) {
+                .begun => {},
+                .wait => {
+                    if (now - since >= @as(i96, got.wait_ms) * std.time.ns_per_ms) w.late = true;
+                    return w.late;
+                },
+                .no_memory => {
+                    w.verdict = .busy;
+                    return true;
+                },
+            }
+            stepDrain(wire, table, i, w, now);
+            return w.drain.?.whole or w.verdict != .none or w.late;
+        },
+        .upload => return uploadNow(io, wire, table, i, w, now, got.head_len, got.read.?),
+    }
+}
+
+/// An upload's head: its asker known (a stranger served from the head, the
+/// body never read), a slot taken (or waited for, then a 503), told to send
+/// if it asks, and its body drained into memory under five minutes.
+fn uploadNow(io: Io, wire: *stream.Wire, table: *tcp.Table, i: usize, w: *BodyWait, now: i96, head_len: usize, read: router.body_rule.Read) bool {
+    const c = &table.conns[i];
+    const head = c.pending()[0..head_len];
+    const parsed = std.http.Server.Request.Head.parse(head) catch return true;
+    if (w.slot == null) {
+        const who = w.uploader orelse switch (uploaderOf(io, head)) {
+            .who => |k| blk: {
+                w.uploader = k;
+                break :blk k;
+            },
+            .stranger => {
+                return headOnly(w, head, .stranger, now);
+            },
+            .unknown => return headOnly(w, head, .busy, now),
+        };
+        switch (upload_slots.take(who)) {
+            .slot => |slot| w.slot = slot,
+            .all_busy, .human_has_one => {
+                const since = w.slot_wait_since orelse blk: {
+                    w.slot_wait_since = now;
+                    break :blk now;
+                };
+                if (now - since < @as(i96, router.body_rule.slot_wait_ms) * std.time.ns_per_ms) return false;
+                return headOnly(w, head, .busy, now);
+            },
+        }
+    }
+    if (parsed.expect != null and !w.continued) {
+        if (table.queue(i, continue_line) == continue_line.len) w.continued = true;
+        return false;
+    }
+    switch (beginDrain(w, head_len, read, parsed.transfer_encoding == .chunked, router.bodyLimit(parsed.target), true, now, read.deadline_ms)) {
+        .begun => {},
+        .wait => unreachable, // an upload has its slot, and no budget
+        .no_memory => return headOnly(w, head, .busy, now),
+    }
+    stepDrain(wire, table, i, w, now);
+    return w.drain.?.whole or w.verdict != .none or w.late;
+}
+
+/// A request to be answered from its head alone (its body never read): the
+/// head kept in memory, the verdict said.
+fn headOnly(w: *BodyWait, head: []const u8, verdict: Verdict, now: i96) bool {
+    const bytes = body_gpa.dupe(u8, head) catch {
+        // No memory for even the head: told the host is busy, before any
+        // route could read a body from the network.
+        w.verdict = .busy;
+        return true;
+    };
+    w.verdict = verdict;
+    small_drained_now += bytes.len;
+    w.drain = .{ .bytes = bytes, .len = bytes.len, .head_len = bytes.len, .framing = .length, .want = 0, .began = now, .deadline_at = now, .whole = true, .upload = false };
+    return true;
 }
 
 /// The oldest connection that has gone quiet for `idle_ns` without sending a
@@ -849,7 +1096,12 @@ fn quiet(table: *tcp.Table, now: i96, idle_ns: u64) ?usize {
         if (c.claimed or !c.open()) continue;
         // A body coming after a whole head is the rule's to end, with a 408
         // at its deadline (nextReady), not let go unanswered.
-        if (c.state == .established and bodyWait(table, i).head_at != null) continue;
+        // A body coming, draining, or waiting for an upload slot is the
+        // rule's to end (nextReady), not let go unanswered.
+        if (c.state == .established) {
+            const w = bodyWait(table, i);
+            if (w.head_at != null or w.drain != null or w.slot_wait_since != null) continue;
+        }
         if (now - c.heard_at < idle_ns) continue;
         if (best == null or c.serial < table.conns[best.?].serial) best = i;
     }
@@ -894,13 +1146,21 @@ fn serveOne(
     // answer. Timing from outside measures curl, slirp and the emulator too.
     const opened_at = table.conns[i].opened_at;
 
+    // **A BODY IN MEMORY IS SERVED FROM MEMORY** (metal-vmm QUEUE 169): a
+    // drained request's head and body are read from where the loop kept
+    // them, never from the network; its memory and slot are given back when
+    // it is done.
+    const wait = bodyWait(table, i);
+    defer releaseBody(wait);
+    var from_memory: std.Io.Reader = .fixed(if (wait.drain) |d| d.bytes[0..d.len] else "");
     // **THE HEAD HAS ONE DEADLINE TOO** (metal-vmm QUEUE 166's cold review):
     // a head is served unended only when the buffer is too full for more
-    // (ready.zig), and the rest of it is read here, in the turn. Without a
-    // bound for the whole of it, a byte every `idle_ns` less a little held
-    // the turn for hours before the 431.
-    s.body_deadline_at = bodyDeadline(router.body_rule.inTurnMs(router.request_limits.head_bytes));
-    var server = std.http.Server.init(s.reader(), s.writer());
+    // (ready.zig), and the rest of it is read here. Without a bound for the
+    // whole of it, a byte every `idle_ns` less a little held the turn for
+    // hours before the 431. So is any body read from the buffer (one that
+    // fit it, whole already, or a client's that ended short).
+    s.body_deadline_at = bodyDeadline(router.body_rule.smallMs(router.request_limits.head_bytes));
+    var server = std.http.Server.init(if (wait.drain != null) &from_memory else s.reader(), s.writer());
     var req = server.receiveHead() catch |e| {
         // **A HEAD PAST THE READ BUFFER IS ANSWERED 431, AS LINUX ANSWERS IT**
         // (angry-gopher's server.zig, handleConn): counted for /version, and
@@ -922,36 +1182,27 @@ fn serveOne(
     };
     req.head.keep_alive = false;
 
-    // **THE BODY BY THE ONE RULE** (webbox's body.zig; metal-vmm QUEUE 166):
-    // refused from its head, late from waiting before the turn (a 408), or
-    // read in the turn under one deadline for the whole of it, from now. A
-    // body that fit the buffer is here already, and its reads never wait.
-    const wait = bodyWait(table, i);
+    // **THE BODY BY THE ONE RULE** (webbox's body.zig; metal-vmm QUEUE 166,
+    // 169): refused from its head, late from waiting (a 408), refused by the
+    // loop's verdict, or in memory (or in the buffer) whole already: the turn
+    // never waits on the network.
     const body_rule = router.body_rule;
     const cap = router.bodyLimit(req.head.target);
-    const room = rx_bytes - @min(req.head_buffer.len, rx_bytes);
-    s.body_deadline_at = null;
     const refusal: ?struct { kind: edge.RejectKind, msg: []const u8 } = if (wait.late)
         .{ .kind = .body_too_slow, .msg = "request body too slow\n" }
-    else switch (body_rule.plan(&req.head, cap, room)) {
-        .refused => |r| switch (r) {
-            .too_large => .{ .kind = .body_too_large, .msg = "request body too large\n" },
-            .framed_twice => .{ .kind = .body_framed_twice, .msg = "request body framed twice\n" },
-        },
-        .none => null,
-        .before_turn, .in_turn => |r| blk: {
-            s.body_deadline_at = bodyDeadline(body_rule.inTurnMs(r.bytes));
-            break :blk null;
-        },
-        .chunked_as_far_as_room => |both| blk: {
-            s.body_deadline_at = bodyDeadline(both.in_turn.deadline_ms);
-            break :blk null;
+    else switch (wait.verdict) {
+        .busy => .{ .kind = .uploads_busy, .msg = "Uploads are busy; try again in a minute.\n" },
+        .too_large => .{ .kind = .body_too_large, .msg = "request body too large\n" },
+        .stranger, .none => switch (body_rule.plan(&req.head, cap)) {
+            .refused => |r| switch (r) {
+                .too_large => .{ .kind = .body_too_large, .msg = "request body too large\n" },
+                .framed_twice => .{ .kind = .body_framed_twice, .msg = "request body framed twice\n" },
+            },
+            .none, .small, .upload => null,
         },
     };
-    // Told to send already, by the host: std must not tell it again.
-    if (wait.continued) req.head.expect = null;
-    body_rule.late_in_turn.store(false, .release);
-    s.on_late = bodyLate;
+    // Told to send already, by the host, or never to be: std must not tell it.
+    if (wait.continued or wait.verdict == .stranger) req.head.expect = null;
     if (refusal) |r| {
         // Refused, never told to send (std answers an expectation first
         // while it is set).
@@ -1036,6 +1287,15 @@ fn serveOne(
         } else close(wire, table, i);
     }
     logRequest(number, what, outcome);
+    // **THE LOG SAYS A BODY'S SIZE AND HOW LONG IT TOOK TO ARRIVE** (169), so
+    // a slow link is read, not inferred.
+    if (wait.drain) |d| if (wait.verdict == .none) {
+        serial.put(if (d.upload) "    upload: " else "    body: ");
+        serial.putDec(d.len - d.head_len);
+        serial.put(" bytes, arrived in ");
+        serial.putDec(@intCast(@divTrunc(head_at - d.began, std.time.ns_per_ms)));
+        serial.put(" ms\n");
+    };
     serial.put("    waited ");
     serial.putDec(@intCast(@divTrunc(head_at - opened_at, 1000)));
     serial.put(" us, answered in ");

@@ -21,11 +21,13 @@
 //!   closed is abandoned;
 //! - **a head ended** is ready when its method takes no body, its body is
 //!   refused from its head (past the route's cap, or framed twice), its body
-//!   is here (to the last chunk, for chunked), its body cannot fit the buffer
-//!   (or a chunked one has filled it unended), its chunks are malformed, or
-//!   std cannot parse it; one that asks 100-continue for a body that fits is
-//!   told to send it, once (the host's part, played here); else its body is
-//!   coming, or it is abandoned (webbox's body.zig, metal-vmm QUEUE 166);
+//!   is here (to the last chunk, for chunked), its chunks are malformed, or
+//!   std cannot parse it; an upload's (a route's cap past the rule's
+//!   `before_turn_most`) is the host's; a small body that asks 100-continue
+//!   is told to send it, once (the host's part, played here); one that cannot
+//!   fit the buffer (or a chunked one that has filled it unended) is drained;
+//!   else its body is coming, or it is abandoned (webbox's body.zig, metal-vmm
+//!   QUEUE 166, 169);
 //! - **once ready, ready**: more bytes never make a ready connection wait,
 //!   but for a head served by the shut window before it ends: when it ends,
 //!   its body may be waited for. Harmless in the table, which serves a
@@ -225,16 +227,17 @@ fn promised(t: Truth, n: usize, peer_done: bool, cap: usize, continued: bool) re
     const got = n - h;
     if (t.kind == .chunked) {
         if (t.framed_twice) return .ready;
-        // Its cap past the buffer: waited for as far as the buffer.
+        if (route_cap > body_rule.before_turn_most) return .upload;
         if (t.malformed_at) |m| if (got >= m) return .ready;
         if (t.chunks_end) |e| if (got >= e) return .ready;
-        if (tight) return .ready;
+        if (tight) return .drain;
         return if (peer_done) .abandoned else .body_coming;
     }
     if (t.content_length > route_cap) return .ready;
-    if (t.content_length > room) return .ready;
+    if (route_cap > body_rule.before_turn_most) return .upload;
     if (t.kind == .expect and !continued) return .must_continue;
     if (got >= t.content_length) return .ready;
+    if (t.content_length > room) return .drain;
     return if (peer_done) .abandoned else .body_coming;
 }
 
@@ -245,8 +248,10 @@ pub fn runSeed(seed: u64) !void {
     const cap = caps[r.uintLessThan(usize, caps.len)];
     // The route's cap: below the buffer now and then, so some bodies that
     // would fit are refused from their heads.
-    route_cap = switch (r.uintLessThan(u8, 4)) {
+    // Or past it, now and then: every body an upload, the host's.
+    route_cap = switch (r.uintLessThan(u8, 5)) {
         0 => r.uintLessThan(u64, 2000),
+        1 => 4 << 20,
         else => 1 << 20,
     };
     for (0..r.intRangeAtMost(usize, 1, 20)) |q_i| {
@@ -305,8 +310,10 @@ pub fn runSeed(seed: u64) !void {
             if (got == .ready and !ended) seen_unended_ready = true;
             if (got == .ready and q.truth.head_len != null and pending.len < q.truth.head_len.? and q.truth.head_len.? > cap)
                 props.reachable(@src(), "ready_sim: a head past the buffer is served unended (the 431 path)", null);
-            if (got == .ready and q.truth.kind == .body and q.truth.content_length > cap -| (q.truth.head_len orelse 0) and q.truth.head_len.? <= pending.len)
-                props.reachable(@src(), "ready_sim: a body too big for the buffer is served at its head", null);
+            if (got == .drain)
+                props.reachable(@src(), "ready_sim: a body too big for the buffer is drained", null);
+            if (got == .upload)
+                props.reachable(@src(), "ready_sim: an upload's head is the host's", null);
             if (got == .body_coming and q.truth.kind == .chunked)
                 props.reachable(@src(), "ready_sim: a chunked body that fits is waited for", null);
             if (got == .ready and q.truth.kind == .chunked and q.truth.chunks_end != null and q.truth.head_len.? + q.truth.chunks_end.? <= pending.len)

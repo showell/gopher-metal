@@ -116,15 +116,14 @@ pub const panic = metal.serial.panic;
 /// cap and no body rule (webbox's body.zig, which gopher.elf reads): a body
 /// is its handler's to read as it comes, as every body was before.
 const AtHead = struct {
-    const Read = struct { bytes: u64, deadline_ms: u64 };
-    pub fn plan(_: *const std.http.Server.Request.Head, _: u64, _: u64) union(enum) {
+    pub const Read = struct { bytes: u64, deadline_ms: u64 };
+    pub fn plan(_: *const std.http.Server.Request.Head, _: u64) union(enum) {
         none,
         refused: void,
-        in_turn: Read,
-        before_turn: Read,
-        chunked_as_far_as_room: struct { before: Read, in_turn: Read },
+        small: Read,
+        upload: Read,
     } {
-        return .{ .in_turn = .{ .bytes = 0, .deadline_ms = 0 } };
+        return .none;
     }
     pub fn chunkedEnd(_: []const u8) union(enum) { whole: usize, partial, malformed } {
         return .partial;
