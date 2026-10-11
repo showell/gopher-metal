@@ -227,7 +227,8 @@ fn promised(t: Truth, n: usize, peer_done: bool, cap: usize, continued: bool) re
     const got = n - h;
     if (t.kind == .chunked) {
         if (t.framed_twice) return .ready;
-        if (route_cap > body_rule.before_turn_most) return .upload;
+        // A chunked upload says no length: refused, 411.
+        if (route_cap > body_rule.before_turn_most) return .ready;
         if (t.malformed_at) |m| if (got >= m) return .ready;
         if (t.chunks_end) |e| if (got >= e) return .ready;
         if (tight) return .drain;

@@ -349,13 +349,13 @@ test "an upload's head is the host's, however small its body, before any expecta
         "POST /up HTTP/1.1\r\nContent-Length: 5\r\n\r\n",
         "POST /up HTTP/1.1\r\nContent-Length: 5\r\n\r\nhello",
         "POST /up HTTP/1.1\r\nExpect: 100-continue\r\nContent-Length: 3000000\r\n\r\n",
-        "POST /up HTTP/1.1\r\nTransfer-Encoding: chunked\r\n\r\n",
     }) |raw| {
         const a = check(body_rule, raw, false, room, lim);
         try testing.expectEqual(Readiness.upload, a.readiness);
         try testing.expectEqual(body_rule.upload_ms, a.read.?.deadline_ms);
     }
-    // Past its cap: refused, served at once.
+    // Chunked (no length, 411), or past its cap: refused, served at once.
+    try testing.expectEqual(Readiness.ready, check(body_rule, "POST /up HTTP/1.1\r\nTransfer-Encoding: chunked\r\n\r\n", false, room, lim).readiness);
     try testing.expectEqual(Readiness.ready, check(body_rule, "POST /up HTTP/1.1\r\nContent-Length: 5000000\r\n\r\n", false, room, lim).readiness);
 }
 

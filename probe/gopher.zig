@@ -240,7 +240,13 @@ const Drain = struct {
     began: i96,
     deadline_at: i96,
     whole: bool = false,
+    /// When it came whole: its arrival time, for the log.
+    whole_at: i96 = 0,
     upload: bool,
+    /// A chunked body's scan, kept between passes, so each chunk is parsed
+    /// once (169's cold review: re-parsing a body of tiny chunks each pass
+    /// stalled the loop).
+    scan: router.body_rule.ChunkedScan = .{},
 };
 
 var body_waits: [max_connections]BodyWait = @splat(.{});
@@ -333,21 +339,30 @@ fn stepDrain(wire: *stream.Wire, table: *tcp.Table, i: usize, w: *BodyWait, now:
         .length => if (d.len - d.head_len >= d.want) {
             d.whole = true;
         },
-        .chunked => switch (router.body_rule.chunkedEnd(d.bytes[d.head_len..d.len])) {
+        .chunked => switch (d.scan.end(d.bytes[d.head_len..d.len])) {
             .whole, .malformed => d.whole = true,
             .partial => if (d.len == d.bytes.len) {
                 w.verdict = .too_large;
             },
         },
     }
-    if (d.whole or w.verdict != .none) return;
     // The client finished sending without finishing the body: served, its
     // short body refused by its route's read.
-    if (c.peerDone() and c.pending().len == 0) {
-        d.whole = true;
-        return;
-    }
-    if (now >= d.deadline_at) w.late = true;
+    if (!d.whole and w.verdict == .none and c.peerDone() and c.pending().len == 0) d.whole = true;
+    if (d.whole) d.whole_at = now;
+    // Late is decided at each pass, as for a body waited for in the buffer:
+    // one that came whole while the turn was another's is served.
+    w.late = !d.whole and w.verdict == .none and now >= d.deadline_at;
+}
+
+/// **THE LOG SAYS A BODY'S SIZE AND HOW LONG IT TOOK TO ARRIVE** (169): from
+/// its drain's start (an upload's: its slot) to whole, or to `until`.
+fn logBody(d: Drain, until: i96) void {
+    serial.put(if (d.upload) "    upload: " else "    body: ");
+    serial.putDec(d.len - d.head_len);
+    serial.put(if (d.whole) " bytes, arrived in " else " bytes, not whole after ");
+    serial.putDec(@intCast(@divTrunc(@max(until - d.began, 0), std.time.ns_per_ms)));
+    serial.put(" ms\n");
 }
 
 /// Who is uploading, by the site's `uploader` over the head alone (its
@@ -976,8 +991,9 @@ fn nextReady(io: Io, wire: *stream.Wire, table: *tcp.Table, now: i96) ?usize {
 
 fn readyNow(io: Io, wire: *stream.Wire, table: *tcp.Table, i: usize, w: *BodyWait, now: i96) bool {
     const c = &table.conns[i];
-    if (w.verdict != .none or w.late) return true;
-    if (w.drain != null) {
+    if (w.verdict != .none) return true;
+    if (w.drain) |d| {
+        if (d.whole) return true;
         stepDrain(wire, table, i, w, now);
         return w.drain.?.whole or w.verdict != .none or w.late;
     }
@@ -1060,10 +1076,12 @@ fn uploadNow(io: Io, wire: *stream.Wire, table: *tcp.Table, i: usize, w: *BodyWa
             },
         }
     }
-    if (parsed.expect != null and !w.continued) {
+    // Only the expectation std knows is answered; another is drained as
+    // any upload, its client sending or not.
+    if (parsed.expect) |e| if (!w.continued and std.ascii.eqlIgnoreCase(e, "100-continue")) {
         if (table.queue(i, continue_line) == continue_line.len) w.continued = true;
         return false;
-    }
+    };
     switch (beginDrain(w, head_len, read, parsed.transfer_encoding == .chunked, router.bodyLimit(parsed.target), true, now, read.deadline_ms)) {
         .begun => {},
         .wait => unreachable, // an upload has its slot, and no budget
@@ -1160,6 +1178,23 @@ fn serveOne(
     // hours before the 431. So is any body read from the buffer (one that
     // fit it, whole already, or a client's that ended short).
     s.body_deadline_at = bodyDeadline(router.body_rule.smallMs(router.request_limits.head_bytes));
+    // **A HEAD THAT FILLED THE BUFFER UNENDED IS A 431 AT ONCE** (169's cold
+    // review): the buffer is the head's most (`head_bytes`), so the rest of
+    // it, read here, could only overflow, and reading it waited on the
+    // network in the turn. A client that closed is served as ever.
+    if (wait.drain == null and !table.conns[i].peerDone()) {
+        var hp: std.http.HeadParser = .{};
+        _ = hp.feed(table.conns[i].pending());
+        if (hp.state != .finished) {
+            edge.count(.header_too_large);
+            s.writer().writeAll("HTTP/1.1 431 Request Header Fields Too Large\r\n" ++
+                "connection: close\r\ncontent-length: 0\r\n\r\n") catch {};
+            s.writer().flush() catch {};
+            logRequest(number, "(no request)", "a head that filled the buffer unended: 431");
+            close(wire, table, i);
+            return;
+        }
+    }
     var server = std.http.Server.init(if (wait.drain != null) &from_memory else s.reader(), s.writer());
     var req = server.receiveHead() catch |e| {
         // **A HEAD PAST THE READ BUFFER IS ANSWERED 431, AS LINUX ANSWERS IT**
@@ -1197,6 +1232,7 @@ fn serveOne(
             .refused => |r| switch (r) {
                 .too_large => .{ .kind = .body_too_large, .msg = "request body too large\n" },
                 .framed_twice => .{ .kind = .body_framed_twice, .msg = "request body framed twice\n" },
+                .length_required => .{ .kind = .body_length_required, .msg = "an upload says its length\n" },
             },
             .none, .small, .upload => null,
         },
@@ -1210,6 +1246,8 @@ fn serveOne(
         router.edge.reject(&req, r.kind, r.msg) catch {};
         s.writer().flush() catch {};
         logRequest(number, "(refused at its head)", r.msg[0 .. r.msg.len - 1]);
+        // A drained body refused (late, past what is kept): what came of it.
+        if (wait.drain) |d| if (d.len > d.head_len) logBody(d, Io.awakeNs() orelse 0);
         close(wire, table, i);
         return;
     }
@@ -1289,13 +1327,7 @@ fn serveOne(
     logRequest(number, what, outcome);
     // **THE LOG SAYS A BODY'S SIZE AND HOW LONG IT TOOK TO ARRIVE** (169), so
     // a slow link is read, not inferred.
-    if (wait.drain) |d| if (wait.verdict == .none) {
-        serial.put(if (d.upload) "    upload: " else "    body: ");
-        serial.putDec(d.len - d.head_len);
-        serial.put(" bytes, arrived in ");
-        serial.putDec(@intCast(@divTrunc(head_at - d.began, std.time.ns_per_ms)));
-        serial.put(" ms\n");
-    };
+    if (wait.drain) |d| if (wait.verdict == .none) logBody(d, d.whole_at);
     serial.put("    waited ");
     serial.putDec(@intCast(@divTrunc(head_at - opened_at, 1000)));
     serial.put(" us, answered in ");
