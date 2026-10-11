@@ -56,7 +56,11 @@ TIERS = ("gates", "long")
 # touches none of them (a README) leaves it standing, and a rebuilt asset
 # that git cannot see does not.
 SERVED_DIRS = ("zig-server/src", "pages", "gallery")
-ASSET_ROW = re.compile(r'\.\{\s*\.name\s*=\s*"([^"]+)"\s*,\s*\.path\s*=\s*"([^"]+)"\s*\}')
+# One reading of the asset table, extract_assets.py's (a second copy of its
+# regex here missed rows of a shape it learned: angry-gopher's .built_by,
+# metal-vmm QUEUE 157(d)).
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from extract_assets import ROW as ASSET_ROW  # noqa: E402
 
 
 def git(repo: str, *args: str) -> str:
