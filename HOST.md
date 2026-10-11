@@ -11,8 +11,9 @@ fails on the laptop first.
 
 ## What a host does before the first request
 
-angry-gopher's `router.zig` declares the host contract, and both hosts follow
-it: Linux in `server.zig`, metal in `probe/gopher.zig`. Three calls:
+angry-gopher's webbox library declares the host contract (`site.zig`), and
+`router.zig` exports it by the names both hosts use: Linux in `server.zig`,
+metal in `probe/gopher.zig`. Three calls:
 
 1. `mem_meter.init(base)`: the process-lifetime allocator, before anything
    else.
