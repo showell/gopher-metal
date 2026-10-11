@@ -168,6 +168,38 @@ test "a body too big for the buffer is served at its head, and read as it comes"
     try testing.expectEqual(Readiness.waiting, check(big, false, 64 * 1024));
 }
 
+test "an unended head in a small buffer waits with half the buffer left, and is served with one byte less" {
+    // Below two segments, `tight`'s bar is half the buffer, not a segment.
+    const small = 2000;
+    try testing.expect(small / 2 < tcp.our_mss);
+    var buf: [small]u8 = undefined;
+    const start = "GET / HTTP/1.1\r\nX-Long: ";
+    @memcpy(buf[0..start.len], start);
+    @memset(buf[start.len..], 'v');
+    try testing.expectEqual(Readiness.waiting, check(buf[0 .. small - small / 2], false, small));
+    try testing.expectEqual(Readiness.ready, check(buf[0 .. small - small / 2 + 1], false, small));
+}
+
+test "a body that exactly fills the buffer behind its head is waited for; one byte more is served at its head" {
+    const head_fits = "POST /upload HTTP/1.1\r\nContent-Length: 64\r\n\r\n";
+    const head_over = "POST /upload HTTP/1.1\r\nContent-Length: 65\r\n\r\n";
+    const capacity = head_fits.len + 64;
+    try testing.expectEqual(Readiness.waiting, check(head_fits, false, capacity));
+    try testing.expectEqual(Readiness.ready, check(head_over, false, capacity));
+    // And the one that fits, arrived whole, fills the buffer to the byte.
+    try testing.expectEqual(Readiness.ready, check(head_fits ++ "v" ** 64, false, capacity));
+    try testing.expectEqual(Readiness.waiting, check(head_fits ++ "v" ** 63, false, capacity));
+}
+
+test "a head ending at the buffer's last byte is a request; one byte short of its end, it is served unended" {
+    const head = "POST /send HTTP/1.1\r\nContent-Length: 0\r\n\r\n";
+    try testing.expectEqual(Readiness.ready, check(head, false, head.len));
+    // The buffer full and the head not ended: nothing more can come.
+    try testing.expectEqual(Readiness.ready, check(head[0 .. head.len - 1], false, head.len - 1));
+    // A body of one byte behind it can never fit: served at its head too.
+    try testing.expectEqual(Readiness.ready, check("POST /send HTTP/1.1\r\nContent-Length: 1\r\n\r\n", false, head.len));
+}
+
 test "a client waiting to be told to send its body is served at once" {
     // **BOTH SIDES WOULD WAIT.** std.http.Server answers the expectation from
     // inside the handler, so the handler has to start before the body comes.
