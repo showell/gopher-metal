@@ -510,3 +510,122 @@ test "a last part whose thirteen characters run past max_name spoils the name, n
     long.take(&e);
     try testing.expectEqual(LongName.Stands.spoiled, long.stands);
 }
+
+test "LongName: a name of max_name characters reads back, one of max_name + 1 spoils" {
+    var buf: [max_name + 1]u8 = undefined;
+    for (&buf, 0..) |*c, i| c.* = 'a' + @as(u8, @intCast(i % 26));
+    // The writer never makes a max_name + 1 name; a rotten disk can. Its
+    // parts number the same as max_name's (both 8), so only the buffer
+    // check stops it.
+    try testing.expectEqual(longParts(buf[0..max_name]), longParts(buf[0 .. max_name + 1]));
+    var entries: [8][32]u8 = undefined;
+    for ([_]usize{ max_name, max_name + 1 }, [_]LongName.Stands{ .collecting, .spoiled }) |len, want| {
+        const n = longEntriesFor(buf[0..len], 0x5A, &entries);
+        var long: LongName = .{};
+        for (entries[0..n]) |*e| long.take(e);
+        try testing.expectEqual(want, long.stands);
+        if (want == .collecting) try testing.expectEqualStrings(buf[0..len], long.text());
+    }
+}
+
+test "longParts: 13·k characters fill k parts, 13·k + 1 need k + 1" {
+    const name = [_]u8{'x'} ** (13 * 3 + 1);
+    try testing.expectEqual(@as(u32, 0), longParts(name[0..0]));
+    try testing.expectEqual(@as(u32, 1), longParts(name[0..1]));
+    for (1..4) |k| {
+        try testing.expectEqual(@as(u32, @intCast(k)), longParts(name[0 .. 13 * k]));
+        try testing.expectEqual(@as(u32, @intCast(k + 1)), longParts(name[0 .. 13 * k + 1]));
+    }
+}
+
+test "LongName: 13·k and 13·k + 1 characters read back whole, the last part full or holding one" {
+    var buf: [40]u8 = undefined;
+    for (&buf, 0..) |*c, i| c.* = 'A' + @as(u8, @intCast(i % 26));
+    var entries: [4][32]u8 = undefined;
+    for (1..3) |k| {
+        for ([_]usize{ 13 * k, 13 * k + 1 }) |len| {
+            const n = longEntriesFor(buf[0..len], 0x5A, &entries);
+            try testing.expectEqual(longParts(buf[0..len]), @as(u32, @intCast(n)));
+            var long: LongName = .{};
+            for (entries[0..n]) |*e| long.take(e);
+            try testing.expectEqual(LongName.Stands.collecting, long.stands);
+            try testing.expectEqualStrings(buf[0..len], long.text());
+        }
+    }
+}
+
+test "LongName: a part numbered (max_name + 12) / 13 is taken, one more spoils" {
+    const top: u8 = (max_name + 12) / 13;
+    for ([_]u8{ top, top + 1 }, [_]LongName.Stands{ .collecting, .spoiled }) |seq, want| {
+        var e = [_]u8{0} ** 32; // a 0x0000 first character: the part holds nothing
+        e[0] = 0x40 | seq;
+        e[11] = attr_long_name;
+        e[13] = 0x5A;
+        var long: LongName = .{};
+        long.take(&e);
+        try testing.expectEqual(want, long.stands);
+    }
+    // Numbered 1 is the first part; 0 is none.
+    for ([_]u8{ 1, 0 }, [_]LongName.Stands{ .collecting, .spoiled }) |seq, want| {
+        var e = [_]u8{0} ** 32;
+        e[0] = 0x40 | seq;
+        e[11] = attr_long_name;
+        var long: LongName = .{};
+        long.take(&e);
+        try testing.expectEqual(want, long.stands);
+    }
+}
+
+test "encode: a base of 8 fits, 9 does not; an extension of 3 fits, 4 does not" {
+    try testing.expectEqualStrings("ABCDEFGHXYZ", &(try encode("abcdefgh.xyz")));
+    try testing.expectError(error.BadName, encode("abcdefghi.xyz"));
+    try testing.expectError(error.BadName, encode("abcdefgh.wxyz"));
+    try testing.expectEqualStrings("ABCDEFGH   ", &(try encode("abcdefgh")));
+    try testing.expectError(error.BadName, encode("abcdefghi"));
+    // A base of 1 fits, of 0 does not.
+    try testing.expectEqualStrings("A          ", &(try encode("a")));
+    try testing.expectError(error.BadName, encode(".xyz"));
+    // 8.3 at full width needs no long name; one more character does.
+    try testing.expect(!needsLongName("ABCDEFGH.XYZ"));
+    try testing.expect(needsLongName("ABCDEFGHI.XYZ"));
+    try testing.expect(needsLongName("ABCDEFGH.WXYZ"));
+}
+
+test "decode: a full 8.3 field reads all twelve bytes, a short one trims at the last space" {
+    var e = [_]u8{0} ** dirent_size;
+    @memcpy(e[0..11], "ABCDEFGHXYZ");
+    try testing.expectEqualStrings("ABCDEFGH.XYZ", decode(&e).alias());
+    @memcpy(e[0..11], "ABCDEFG XY ");
+    try testing.expectEqualStrings("ABCDEFG.XY", decode(&e).alias());
+    // An extension of one character is dotted; of none, no dot.
+    @memcpy(e[0..11], "A       X  ");
+    try testing.expectEqualStrings("A.X", decode(&e).alias());
+    @memcpy(e[0..11], "A          ");
+    try testing.expectEqualStrings("A", decode(&e).alias());
+    // All spaces: nothing, never a read before the field.
+    @memcpy(e[0..11], "           ");
+    try testing.expectEqualStrings("", decode(&e).alias());
+}
+
+test "toUnix: the last of each time field is a time, one more is garbage" {
+    const date: u16 = 46 << 9 | 9 << 5 | 17; // 2026-09-17
+    // Seconds in twos: 29 is 58 seconds, 30 would be 60.
+    try testing.expectEqual(@as(i64, 1789603200 + 23 * 3600 + 59 * 60 + 58), (Dos{ .date = date, .time = 23 << 11 | 59 << 5 | 29 }).toUnix());
+    try testing.expectEqual(@as(i64, 0), (Dos{ .date = date, .time = 23 << 11 | 59 << 5 | 30 }).toUnix());
+    try testing.expectEqual(@as(i64, 0), (Dos{ .date = date, .time = 23 << 11 | 60 << 5 }).toUnix());
+    try testing.expectEqual(@as(i64, 0), (Dos{ .date = date, .time = 24 << 11 }).toUnix());
+    // The day: September 30th is, 31st is not; month 12 is, 13 is not.
+    try testing.expect((Dos{ .date = 46 << 9 | 9 << 5 | 30, .time = 0 }).toUnix() != 0);
+    try testing.expectEqual(@as(i64, 0), (Dos{ .date = 46 << 9 | 9 << 5 | 31, .time = 0 }).toUnix());
+    try testing.expect((Dos{ .date = 46 << 9 | 12 << 5 | 31, .time = 0 }).toUnix() != 0);
+    try testing.expectEqual(@as(i64, 0), (Dos{ .date = 46 << 9 | 13 << 5 | 1, .time = 0 }).toUnix());
+}
+
+test "fromUnix: first_unix and last_unix are dates, a second outside either is none" {
+    try testing.expect(!std.meta.eql(Dos.none, Dos.fromUnix(Dos.first_unix)));
+    try testing.expectEqual(Dos.none, Dos.fromUnix(Dos.first_unix - 1));
+    const last = Dos.fromUnix(Dos.last_unix);
+    try testing.expectEqual(@as(u16, 127 << 9 | 12 << 5 | 31), last.date);
+    try testing.expectEqual(@as(u16, 23 << 11 | 59 << 5 | 29), last.time);
+    try testing.expectEqual(Dos.none, Dos.fromUnix(Dos.last_unix + 1));
+}
