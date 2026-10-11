@@ -52,7 +52,7 @@ POST_EVERY_S = 2.0
 def mint_session(secret: bytes, uid: str, issued: int) -> str:
     b64 = lambda b: base64.urlsafe_b64encode(b).rstrip(b"=").decode()
     mac = hmac.new(secret, f"{uid}\n{issued}".encode(), hashlib.sha256).digest()
-    return f"gopher_auth={b64(uid.encode())}.{issued}.{b64(mac)}"
+    return f"__Host-gopher_auth={b64(uid.encode())}.{issued}.{b64(mac)}"
 
 
 class Site:

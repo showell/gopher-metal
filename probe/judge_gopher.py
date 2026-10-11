@@ -131,22 +131,22 @@ def step(name, method, path, cookie=None, body=None, raw=None, headers=(), settl
 # being deleted with it.
 
 def mint_session(uid: str, issued: int) -> str:
-    """A gopher_auth cookie made HERE, from the staged secret and the format in
+    """A __Host-gopher_auth cookie made HERE, from the staged secret and the format in
     users.zig's signSession — not by either server. Both must honor a fresh one
     and refuse a stale one, which is session expiry, which is what the kernel's
     wall clock exists for."""
     b64 = lambda b: base64.urlsafe_b64encode(b).rstrip(b"=").decode()
     mac = hmac.new(SESSION_SECRET, f"{uid}\n{issued}".encode(), hashlib.sha256).digest()
-    return f"gopher_auth={b64(uid.encode())}.{issued}.{b64(mac)}"
+    return f"__Host-gopher_auth={b64(uid.encode())}.{issued}.{b64(mac)}"
 
 
 def forge_session(claimed: str, signed_for: str, issued: int) -> str:
     """A cookie that CLAIMS `claimed` but carries the valid MAC for
     `signed_for` — what someone holding their own session would try."""
-    real = mint_session(signed_for, issued)            # gopher_auth=<id>.<t>.<mac>
+    real = mint_session(signed_for, issued)            # __Host-gopher_auth=<id>.<t>.<mac>
     _, _, rest = real.partition(".")                   # <t>.<mac>
     b64 = base64.urlsafe_b64encode(claimed.encode()).rstrip(b"=").decode()
-    return f"gopher_auth={b64}.{rest}"
+    return f"__Host-gopher_auth={b64}.{rest}"
 
 
 FRESH = "$FRESH"      # minted when the story starts: must be honored
@@ -157,10 +157,13 @@ FORGED_UID = "$FORGED_UID"  # gopher_uid for p1, signed with another secret: mus
 
 
 def mint_uid(uid: str, issued: int, secret: bytes = SESSION_SECRET) -> str:
-    """A signed gopher_uid made HERE, in uid_cookie.zig's format: a label of
-    its own, so no session's MAC passes as one."""
+    """A signed __Host-gopher_uid made HERE, in uid_cookie.zig's format: a
+    label of its own, so no session's MAC passes as one. (An unsigned
+    `gopher_uid=` in a step is the legacy spelling on purpose: it is read
+    under its legacy name until angry-gopher's http.legacy_names_until_unix,
+    2026-11-15, and those steps must go by then.)"""
     mac = hmac.new(secret, f"gopher_uid\n{uid}\n{issued}".encode(), hashlib.sha256).digest()
-    return f"gopher_uid={uid}.{issued}.{base64.urlsafe_b64encode(mac).rstrip(b'=').decode()}"
+    return f"__Host-gopher_uid={uid}.{issued}.{base64.urlsafe_b64encode(mac).rstrip(b'=').decode()}"
 
 # 80 characters, the most chat_store.validSessionID allows.
 LONG_TOPIC = ("a-topic-whose-name-is-as-long-as-a-topic-name-may-be-" + "x" * 80)[:80]
@@ -1481,9 +1484,10 @@ def read_or_none(path: str):
 
 
 def cookie_from(answer: dict, jar):
-    """The gopher_uid a response set, or the jar unchanged."""
+    """The __Host-gopher_uid a response set, or the jar unchanged (a legacy
+    one it clears is no cookie to keep)."""
     sc = answer.get("headers", {}).get("set-cookie", "")
-    m = re.search(r"(gopher_uid=[A-Za-z0-9._-]+)", sc)
+    m = re.search(r"(__Host-gopher_uid=[A-Za-z0-9._-]+)", sc)
     return m.group(1) if m else jar
 
 
@@ -2118,7 +2122,7 @@ def logs_in(port: int, password: str) -> bool:
     resp = conn.getresponse()
     resp.read()
     conn.close()
-    return any(k.lower() == "set-cookie" and re.match(r"gopher_auth=[^;]", v)
+    return any(k.lower() == "set-cookie" and re.match(r"__Host-gopher_auth=[^;]", v)
                for k, v in resp.getheaders())
 
 
@@ -3162,7 +3166,7 @@ def main() -> int:
         # A session the KERNEL minted must be honored by Linux: same secret, same
         # HMAC, and the kernel's clock close enough to Linux's.
         login = by_name["the right one (a $2a$ hash)"]
-        metal_session = update_jar(login, {}).get("gopher_auth")
+        metal_session = update_jar(login, {}).get("__Host-gopher_auth")
         if not metal_session:
             failures += 1
             print("FAIL  members: the kernel's login set no session cookie")
@@ -3170,7 +3174,7 @@ def main() -> int:
             scratch = tempfile.mkdtemp(dir=work)
             linux = ask_linux(linux_bin, content,
                               step("a kernel-minted session, on Linux", "GET", "/chat/conversations",
-                                   f"gopher_auth={metal_session}"), scratch)
+                                   f"__Host-gopher_auth={metal_session}"), scratch)
             if linux.get("status") != 200:
                 failures += 1
                 print(f"FAIL  members: Linux refused the session the kernel minted ({linux.get('status')})")
@@ -3193,7 +3197,7 @@ def main() -> int:
         # honoured a forged cookie would agree.
         by_name = {s["name"]: a for s, a in zip(UID_STORY, answers)}
         playing = lambda a, who: f"Currently playing as <strong>{who}</strong>".encode() in (a.get("body") or b"")
-        set_uid = lambda a: re.search(r"gopher_uid=([^;]*)", a.get("headers", {}).get("set-cookie", ""))
+        set_uid = lambda a: re.search(r"__Host-gopher_uid=([^;]*)", a.get("headers", {}).get("set-cookie", ""))
         wrong = []
         upgrade = by_name["a guest upgrade with an unsigned cookie"]
         if upgrade.get("status") != 200 or UPGRADE_HEADING in (upgrade.get("body") or b""):

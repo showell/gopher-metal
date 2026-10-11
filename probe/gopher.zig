@@ -224,6 +224,10 @@ const Verdict = enum {
     busy,
     /// A chunked body past what is kept of one (body.chunkedRawMost).
     too_large,
+    /// An upload with no byte for `body.upload_stall_ms`: a dropped phone.
+    stalled,
+    /// An upload its human's newer one took the place of (170.1).
+    replaced,
 };
 
 /// **A BODY IN MEMORY BEFORE THE TURN** (metal-vmm QUEUE 169): the request's
@@ -237,8 +241,14 @@ const Drain = struct {
     /// one when its last chunk is in.
     framing: enum { length, chunked },
     want: usize,
+    /// The most it may hold, head and body: `bytes` grows toward it as bytes
+    /// arrive (170.3: a silent sender holds little).
+    most: usize,
     began: i96,
     deadline_at: i96,
+    /// When a byte last came: an upload with none for the stall time is a
+    /// dropped phone (170.1).
+    last_progress: i96,
     whole: bool = false,
     /// When it came whole: its arrival time, for the log.
     whole_at: i96 = 0,
@@ -254,8 +264,10 @@ var body_waits: [max_connections]BodyWait = @splat(.{});
 /// Where drained bodies live: the machine's heap.
 var body_gpa: std.mem.Allocator = undefined;
 
-/// The upload slots (body.zig): three, one a human.
+/// The upload slots (body.zig): three, one a human, and the connection
+/// reading in each (so a human's new upload can take over their old one).
 var upload_slots: router.body_rule.Slots = .{};
+var slot_conn: [router.body_rule.upload_slots]?usize = @splat(null);
 
 /// **SMALL BODIES DRAINED, AT MOST THIS MUCH AT ONCE**: a small body is at
 /// most 1 MiB and needs no slot, so the many connections draining one are
@@ -282,6 +294,7 @@ fn releaseBody(w: *BodyWait) void {
     }
     if (w.slot) |slot| {
         upload_slots.giveBack(slot);
+        slot_conn[slot] = null;
         w.slot = null;
     }
 }
@@ -304,23 +317,45 @@ const continue_line = "HTTP/1.1 100 Continue\r\n\r\n";
 /// waits).
 const Begun = enum { begun, wait, no_memory };
 
+/// The first room a drain is given past its head; it doubles as bytes come.
+const drain_first_bytes = 64 * 1024;
+
 fn beginDrain(w: *BodyWait, head_len: usize, read: router.body_rule.Read, chunked: bool, cap: u64, upload: bool, now: i96, deadline_ms: u64) Begun {
-    const most: u64 = if (chunked) router.body_rule.chunkedRawMost(cap) else read.bytes;
-    const size = std.math.add(u64, head_len, most) catch return .no_memory;
-    if (size > std.math.maxInt(usize)) return .no_memory;
+    const body_most: u64 = if (chunked) router.body_rule.chunkedRawMost(cap) else read.bytes;
+    const most = std.math.add(u64, head_len, body_most) catch return .no_memory;
+    if (most > std.math.maxInt(usize)) return .no_memory;
+    // An upload's exact length at once: its slot is its bound (170's cold
+    // review: doubling toward 101 MiB held two buffers at once). A small body
+    // grows as it comes, charged as it grows.
+    const size: usize = if (upload) @intCast(most) else @intCast(@min(most, head_len + drain_first_bytes));
     if (!upload and small_drained_now + size > small_drain_budget) return .wait;
-    const bytes = body_gpa.alloc(u8, @intCast(size)) catch return .no_memory;
+    const bytes = body_gpa.alloc(u8, size) catch return .no_memory;
     if (!upload) small_drained_now += bytes.len;
     w.drain = .{
         .bytes = bytes,
         .head_len = head_len,
         .framing = if (chunked) .chunked else .length,
         .want = @intCast(read.bytes),
+        .most = @intCast(most),
         .began = now,
         .deadline_at = now + @as(i96, deadline_ms) * std.time.ns_per_ms,
+        .last_progress = now,
         .upload = upload,
     };
     return .begun;
+}
+
+/// A drain's memory doubled toward its most, a small one's charged to the
+/// budget as it grows (170.3); false when the budget or the memory says
+/// not now (it waits, its window shut, under its deadline).
+fn growDrain(d: *Drain) bool {
+    if (d.bytes.len >= d.most) return false;
+    const next = @min(d.most, d.bytes.len * 2);
+    if (!d.upload and small_drained_now + (next - d.bytes.len) > small_drain_budget) return false;
+    const grown = body_gpa.realloc(d.bytes, next) catch return false;
+    if (!d.upload) small_drained_now += next - d.bytes.len;
+    d.bytes = grown;
+    return true;
 }
 
 /// What has arrived of a draining body moved into memory, the window
@@ -329,7 +364,9 @@ fn stepDrain(wire: *stream.Wire, table: *tcp.Table, i: usize, w: *BodyWait, now:
     const d = &w.drain.?;
     const c = &table.conns[i];
     const pending = c.pending();
+    if (pending.len > d.bytes.len - d.len) _ = growDrain(d);
     const n = @min(pending.len, d.bytes.len - d.len);
+    if (n > 0) d.last_progress = now;
     @memcpy(d.bytes[d.len..][0..n], pending[0..n]);
     d.len += n;
     const was_tight = c.tight(c.window());
@@ -341,7 +378,7 @@ fn stepDrain(wire: *stream.Wire, table: *tcp.Table, i: usize, w: *BodyWait, now:
         },
         .chunked => switch (d.scan.end(d.bytes[d.head_len..d.len])) {
             .whole, .malformed => d.whole = true,
-            .partial => if (d.len == d.bytes.len) {
+            .partial => if (d.len == d.most) {
                 w.verdict = .too_large;
             },
         },
@@ -353,6 +390,27 @@ fn stepDrain(wire: *stream.Wire, table: *tcp.Table, i: usize, w: *BodyWait, now:
     // Late is decided at each pass, as for a body waited for in the buffer:
     // one that came whole while the turn was another's is served.
     w.late = !d.whole and w.verdict == .none and now >= d.deadline_at;
+    // **A STALLED UPLOAD GIVES ITS SLOT BACK** (170.1): no byte for the
+    // stall time is a dropped phone, which sends no FIN.
+    if (d.upload and !d.whole and w.verdict == .none and now - d.last_progress >= @as(i96, router.body_rule.upload_stall_ms) * std.time.ns_per_ms)
+        w.verdict = .stalled;
+}
+
+/// **A TURN STOPS THE CLOCKS IT HOLDS UP** (170.2): drains and waits do not
+/// move while a turn holds the loop (a 100 MiB upload saved to disk, say),
+/// so every deadline running for a body, a head, or a slot is moved on by
+/// the turn's length: an honest body is never late for the loop's sake.
+fn pauseClocks(table: *tcp.Table, turn_ns: i96) void {
+    if (turn_ns <= 0) return;
+    for (&body_waits, 0..) |*w, i| {
+        if (w.serial != table.conns[i].serial) continue;
+        if (w.head_at) |*t| t.* += turn_ns;
+        if (w.slot_wait_since) |*t| t.* += turn_ns;
+        if (w.drain) |*d| {
+            d.deadline_at += turn_ns;
+            d.last_progress += turn_ns;
+        }
+    }
 }
 
 /// **THE LOG SAYS A BODY'S SIZE AND HOW LONG IT TOOK TO ARRIVE** (169): from
@@ -830,7 +888,9 @@ pub fn kmain() noreturn {
         if (nextReady(io, &wire, &table, now)) |pick| {
             served += 1;
             serveOne(io, &wire, &table, pick, lease.address, request_heap.allocator(), hub, served, conf.idle_ns, conf.streams);
-            idle_work.busy(Io.awakeNs() orelse now);
+            const after_turn = Io.awakeNs() orelse now;
+            pauseClocks(&table, after_turn - now);
+            idle_work.busy(after_turn);
         } else if (quiet(&table, now, conf.idle_ns)) |pick| {
             served += 1;
             letGo(&wire, &table, pick, served);
@@ -1064,9 +1124,21 @@ fn uploadNow(io: Io, wire: *stream.Wire, table: *tcp.Table, i: usize, w: *BodyWa
             },
             .unknown => return headOnly(w, head, .busy, now),
         };
-        switch (upload_slots.take(who)) {
-            .slot => |slot| w.slot = slot,
+        const taken = upload_slots.take(who);
+        switch (taken) {
+            .slot => |slot| {
+                w.slot = slot;
+                slot_conn[slot] = i;
+            },
             .all_busy, .human_has_one => {
+                // **A HUMAN'S NEW UPLOAD TAKES OVER THEIR OLD ONE** (170.1):
+                // the page uploads one at a time, so a second is a retry,
+                // the first most likely a dropped phone's. The first is told
+                // 409, its slot given back, and taken on a later pass.
+                if (taken == .human_has_one) if (upload_slots.heldBy(who)) |slot| if (slot_conn[slot]) |old| {
+                    const ow = &body_waits[old];
+                    if (old != i and ow.verdict == .none and !(if (ow.drain) |od| od.whole else false)) ow.verdict = .replaced;
+                };
                 const since = w.slot_wait_since orelse blk: {
                     w.slot_wait_since = now;
                     break :blk now;
@@ -1102,7 +1174,7 @@ fn headOnly(w: *BodyWait, head: []const u8, verdict: Verdict, now: i96) bool {
     };
     w.verdict = verdict;
     small_drained_now += bytes.len;
-    w.drain = .{ .bytes = bytes, .len = bytes.len, .head_len = bytes.len, .framing = .length, .want = 0, .began = now, .deadline_at = now, .whole = true, .upload = false };
+    w.drain = .{ .bytes = bytes, .len = bytes.len, .head_len = bytes.len, .framing = .length, .want = 0, .most = bytes.len, .began = now, .deadline_at = now, .last_progress = now, .whole = true, .upload = false };
     return true;
 }
 
@@ -1228,11 +1300,14 @@ fn serveOne(
     else switch (wait.verdict) {
         .busy => .{ .kind = .uploads_busy, .msg = "Uploads are busy; try again in a minute.\n" },
         .too_large => .{ .kind = .body_too_large, .msg = "request body too large\n" },
+        .stalled => .{ .kind = .body_too_slow, .msg = "the upload stalled\n" },
+        .replaced => .{ .kind = .upload_replaced, .msg = "a newer upload took this one's place\n" },
         .stranger, .none => switch (body_rule.plan(&req.head, cap)) {
             .refused => |r| switch (r) {
                 .too_large => .{ .kind = .body_too_large, .msg = "request body too large\n" },
                 .framed_twice => .{ .kind = .body_framed_twice, .msg = "request body framed twice\n" },
                 .length_required => .{ .kind = .body_length_required, .msg = "an upload says its length\n" },
+                .expectation_failed => .{ .kind = .body_expectation_failed, .msg = "only 100-continue is met\n" },
             },
             .none, .small, .upload => null,
         },
@@ -1271,6 +1346,13 @@ fn serveOne(
     bus.peer = ipText(&peer_text, table.conns[i].peer_ip);
     // The stream the handler kept is route's answer (angry-gopher 157(a)):
     // on an error, route has already dropped it.
+    // A drained body handed to the handler's read as it is (170.5): only a
+    // Content-Length one that came whole to its length. A chunked one is
+    // still framed, and a short one (its client gone) must be refused: std
+    // reads both from memory, decoding the one and refusing the other.
+    if (wait.drain) |d| if (wait.verdict == .none and d.framing == .length and d.len - d.head_len == d.want)
+        router.holdBody(d.bytes[d.head_len..d.len]);
+    defer router.holdBody(null);
     var kept_stream = router.route(&req, io, request_alloc, &bus) catch |e| blk: {
         outcome = @errorName(e);
         break :blk null;
