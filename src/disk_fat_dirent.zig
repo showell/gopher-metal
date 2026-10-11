@@ -629,3 +629,18 @@ test "fromUnix: first_unix and last_unix are dates, a second outside either is n
     try testing.expectEqual(@as(u16, 23 << 11 | 59 << 5 | 29), last.time);
     try testing.expectEqual(Dos.none, Dos.fromUnix(Dos.last_unix + 1));
 }
+
+test "LongName.close: a run counted down to part 1 puts its name, one stopped at part 2 does not" {
+    // "abcdefghijklmno" is two parts; without part 1 its first thirteen
+    // characters are whatever the buffer last held.
+    var entries: [2][32]u8 = undefined;
+    var entry = decode(&([_]u8{' '} ** dirent_size));
+    _ = longEntriesFor("abcdefghijklmno", shortChecksum(entry.short), &entries);
+    for ([_]usize{ 2, 1 }, [_]bool{ true, false }) |taken, put| {
+        var long: LongName = .{};
+        for (entries[0..taken]) |*e| long.take(e);
+        entry.long_len = 0;
+        try testing.expectEqual(put, long.close(&entry));
+        if (put) try testing.expectEqualStrings("abcdefghijklmno", entry.text());
+    }
+}
