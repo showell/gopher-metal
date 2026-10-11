@@ -488,3 +488,71 @@ test "a path too long to key is never kept" {
     c.forgetTree(long);
     try testing.expectEqual(@as(usize, 1), c.count);
 }
+
+test "a key of max_key bytes is kept, and one of max_key + 1 is not" {
+    const c = try make(1 << 20, 64 << 10);
+    defer done(c);
+    const fits = "data/" ++ "x" ** (PageCache.max_key - 5);
+    const over = "data/" ++ "x" ** (PageCache.max_key - 4);
+    try testing.expectEqual(PageCache.max_key, fits.len);
+    c.put(fits, "kept");
+    c.put(over, "not");
+    try testing.expectEqualStrings("kept", c.get(fits).?);
+    try testing.expect(c.get(over) == null);
+}
+
+test "a slash at the key's last byte, or just past it, leaves no room for the next part" {
+    const c = try make(1 << 20, 64 << 10);
+    defer done(c);
+    // The slash at max_key - 2: one byte left, and the part takes it.
+    const fits = "x" ** (PageCache.max_key - 2) ++ "/y";
+    // The slash at max_key - 1: the part would be the byte past the end.
+    const over = "x" ** (PageCache.max_key - 1) ++ "/y";
+    // A part filling the key: the slash itself does not fit.
+    const whole = "x" ** PageCache.max_key;
+    c.put(fits, "kept");
+    c.put(over, "not");
+    c.put(whole, "kept too");
+    c.put(whole ++ "/y", "not either");
+    try testing.expectEqualStrings("kept", c.get(fits).?);
+    try testing.expect(c.get(over) == null);
+    try testing.expectEqualStrings("kept too", c.get(whole).?);
+    try testing.expect(c.get(whole ++ "/y") == null);
+}
+
+test "a write at a kept file's end is an append; one byte past it is a hole, and drops the copy" {
+    const c = try make(1 << 20, 10_000);
+    defer done(c);
+    c.put("data/a", "abc");
+    c.put("data/b", "abc");
+    c.wrote("data/a", 3, "d");
+    c.wrote("data/b", 4, "d");
+    try testing.expectEqualStrings("abcd", c.get("data/a").?);
+    try testing.expect(c.get("data/b") == null);
+}
+
+test "a copy grown to exactly largest is kept; one byte more drops it" {
+    const largest = 10_000;
+    const c = try make(1 << 20, largest);
+    defer done(c);
+    var rest: [largest - 1]u8 = undefined;
+    @memset(&rest, 'r');
+    c.put("data/a", "a");
+    c.put("data/b", "b");
+    c.wrote("data/a", 1, &rest);
+    c.wrote("data/b", 1, &rest ++ "!");
+    try testing.expectEqual(@as(usize, largest), c.get("data/a").?.len);
+    try testing.expect(c.get("data/b") == null);
+}
+
+test "a file of exactly largest is kept; one byte more is not" {
+    const largest = 10_000;
+    const c = try make(1 << 20, largest);
+    defer done(c);
+    var bytes: [largest + 1]u8 = undefined;
+    @memset(&bytes, 'f');
+    c.put("data/a", bytes[0..largest]);
+    c.put("data/b", &bytes);
+    try testing.expectEqual(@as(usize, largest), c.get("data/a").?.len);
+    try testing.expect(c.get("data/b") == null);
+}
