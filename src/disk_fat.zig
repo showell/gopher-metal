@@ -2219,10 +2219,11 @@ pub const Volume = struct {
         const Pos = struct { lba: u32, at: u32 };
         var walk = try Walk.start(self, dir_cluster);
         // Where the open run's parts sit, to mark each deleted with its
-        // entry: `kept` says whether every one fit in `parts`.
+        // entry. A whole run counts down from at most `max_name`'s parts
+        // (LongName.take), well inside `parts`; one that overflows it is no
+        // whole run, so its name is never put.
         var parts: [max_long_parts]Pos = undefined;
         var part_count: usize = 0;
-        var kept: enum { every_part, too_many } = .every_part;
         var long: LongName = .{};
 
         while (true) {
@@ -2234,19 +2235,15 @@ pub const Volume = struct {
                 if (e[0] == 0xE5 or (e[11] != attr_long_name and e[11] & attr_volume_label != 0)) {
                     long.letGo();
                     part_count = 0;
-                    kept = .every_part;
                     continue;
                 }
                 if (e[11] == attr_long_name) {
                     // The part flagged 0x40 (LAST_LONG_ENTRY) opens a run.
-                    if (e[0] & 0x40 != 0) {
-                        part_count = 0;
-                        kept = .every_part;
-                    }
+                    if (e[0] & 0x40 != 0) part_count = 0;
                     if (part_count < parts.len) {
                         parts[part_count] = .{ .lba = walk.lba, .at = at };
                         part_count += 1;
-                    } else kept = .too_many;
+                    }
                     long.take(e);
                     continue;
                 }
@@ -2258,10 +2255,6 @@ pub const Volume = struct {
                     const chain = entry.first_cluster;
                     const short_lba = walk.lba;
                     const run = parts[0..part_count];
-                    if (has_long and kept == .too_many) { // cannot remove what cannot be found whole
-                        props.reachable(@src(), "fat: a long name of more parts than FAT allows cannot be removed", null);
-                        return Error.BadName;
-                    }
 
                     // 1. the short entry, while its sector is in scratch: the
                     // commit. What follows is cleanup, whose failure leaves
@@ -2297,7 +2290,6 @@ pub const Volume = struct {
                     return;
                 }
                 part_count = 0;
-                kept = .every_part;
             }
             if (!(try walk.next())) return;
         }
