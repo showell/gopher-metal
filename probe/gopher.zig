@@ -832,7 +832,9 @@ fn nextReady(table: *tcp.Table, now: i96) ?usize {
                 if (now - since < @as(i96, got.wait_ms) * std.time.ns_per_ms) continue;
                 w.late = true;
             },
-            .ready, .abandoned => {},
+            // Late is decided at each pass: a body that came whole while
+            // the turn was another's is served, not refused.
+            .ready, .abandoned => w.late = false,
         }
         if (best == null or c.serial < table.conns[best.?].serial) best = i;
     }
@@ -845,6 +847,9 @@ fn quiet(table: *tcp.Table, now: i96, idle_ns: u64) ?usize {
     var best: ?usize = null;
     for (table.conns, 0..) |*c, i| {
         if (c.claimed or !c.open()) continue;
+        // A body coming after a whole head is the rule's to end, with a 408
+        // at its deadline (nextReady), not let go unanswered.
+        if (c.state == .established and bodyWait(table, i).head_at != null) continue;
         if (now - c.heard_at < idle_ns) continue;
         if (best == null or c.serial < table.conns[best.?].serial) best = i;
     }
@@ -889,6 +894,12 @@ fn serveOne(
     // answer. Timing from outside measures curl, slirp and the emulator too.
     const opened_at = table.conns[i].opened_at;
 
+    // **THE HEAD HAS ONE DEADLINE TOO** (metal-vmm QUEUE 166's cold review):
+    // a head is served unended only when the buffer is too full for more
+    // (ready.zig), and the rest of it is read here, in the turn. Without a
+    // bound for the whole of it, a byte every `idle_ns` less a little held
+    // the turn for hours before the 431.
+    s.body_deadline_at = bodyDeadline(router.body_rule.inTurnMs(router.request_limits.head_bytes));
     var server = std.http.Server.init(s.reader(), s.writer());
     var req = server.receiveHead() catch |e| {
         // **A HEAD PAST THE READ BUFFER IS ANSWERED 431, AS LINUX ANSWERS IT**
@@ -919,6 +930,7 @@ fn serveOne(
     const body_rule = router.body_rule;
     const cap = router.bodyLimit(req.head.target);
     const room = rx_bytes - @min(req.head_buffer.len, rx_bytes);
+    s.body_deadline_at = null;
     const refusal: ?struct { kind: edge.RejectKind, msg: []const u8 } = if (wait.late)
         .{ .kind = .body_too_slow, .msg = "request body too slow\n" }
     else switch (body_rule.plan(&req.head, cap, room)) {
