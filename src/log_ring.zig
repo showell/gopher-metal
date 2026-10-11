@@ -379,6 +379,65 @@ test "a line longer than the ring keeps its tail, and is read whole as far as it
     try testing.expectEqualStrings("56789" ++ "0123456789" ++ "\n", r.read(&out));
 }
 
+test "a ring exactly full reads back whole, mid-line start and all; one byte over, from the first whole line" {
+    var out: [64]u8 = undefined;
+    const full = "ab\ncdefghijklmn\n";
+    var a_buf: [full.len]u8 = undefined;
+    var a = Ring.init(&a_buf);
+    a.write(full);
+    try testing.expectEqual(@as(u64, 0), a.lost());
+    try testing.expectEqualStrings(full, a.read(&out));
+    var b_buf: [full.len]u8 = undefined;
+    var b = Ring.init(&b_buf);
+    b.write(full ++ "o");
+    try testing.expectEqual(@as(u64, 1), b.lost());
+    try testing.expectEqualStrings("cdefghijklmn\no", b.read(&out));
+}
+
+test "once bytes are lost, a break as the last byte leaves the whole ring; a break one before it leaves one byte" {
+    var out: [64]u8 = undefined;
+    var a_buf: [16]u8 = undefined;
+    var a = Ring.init(&a_buf);
+    a.write("x" ** 30 ++ "\n");
+    try testing.expectEqualStrings("x" ** 15 ++ "\n", a.read(&out));
+    var b_buf: [16]u8 = undefined;
+    var b = Ring.init(&b_buf);
+    b.write("x" ** 30 ++ "\ny");
+    try testing.expectEqualStrings("y", b.read(&out));
+}
+
+test "the first whole line starts at the seam when the break is the first piece's last byte, and one in when it is the second's first" {
+    var out: [64]u8 = undefined;
+    var all: [64]u8 = undefined;
+    // 20 bytes into 16: positions 4..15 are the first piece, 16..19 the second.
+    var a_buf: [16]u8 = undefined;
+    var a = Ring.init(&a_buf);
+    a.write("a" ** 15 ++ "\nbcde");
+    try testing.expectEqual(@as(usize, 12), a.parts()[0].len);
+    try testing.expectEqualStrings("a" ** 11 ++ "\nbcde", joined(&a, &all));
+    try testing.expectEqualStrings("bcde", a.read(&out));
+    var b_buf: [16]u8 = undefined;
+    var b = Ring.init(&b_buf);
+    b.write("a" ** 16 ++ "\ncde");
+    try testing.expectEqual(@as(usize, 12), b.parts()[0].len);
+    try testing.expectEqualStrings("cde", b.read(&out));
+}
+
+test "a reader with room for the second piece exactly gets only it; with one byte more, the first piece's last byte too" {
+    var r_buf: [16]u8 = undefined;
+    var r = Ring.init(&r_buf);
+    r.write("0123456789\n"); // 11
+    r.write("abcdefgh\n"); // 20 in all: "456789\n" "abcdefgh\n", the seam after "\nabcde"
+    const p = r.parts();
+    try testing.expectEqual(@as(usize, 4), p[1].len);
+    var out: [64]u8 = undefined;
+    try testing.expectEqualStrings("fgh\n", r.read(out[0..4]));
+    try testing.expectEqualStrings("efgh\n", r.read(out[0..5]));
+    // And with room for all that is read, or one byte less.
+    try testing.expectEqualStrings("abcdefgh\n", r.read(out[0..9]));
+    try testing.expectEqualStrings("bcdefgh\n", r.read(out[0..8]));
+}
+
 test "after many wraps, what is read is the end of what was written, from a line start" {
     var r_buf: [64]u8 = undefined;
     var r = Ring.init(&r_buf);
