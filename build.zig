@@ -574,6 +574,9 @@ pub fn build(b: *std.Build) void {
             .optimize = b.option(std.builtin.OptimizeMode, "sweep-optimize", "how `properties` is built (Debug; long.sh: ReleaseSafe)") orelse .Debug,
             .imports = &.{
                 .{ .name = "tcp_properties_options", .module = props_opts.createModule() },
+                // ready_sim's rule (metal-vmm QUEUE 166), as the unit tests
+                // have it.
+                .{ .name = "body_rule", .module = body_rule },
                 .{ .name = "coverage", .module = coverage },
                 .{ .name = "plant_options", .module = plant_options },
                 .{ .name = "coverage_catalog", .module = coverage_catalog },
