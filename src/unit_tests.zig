@@ -44,6 +44,8 @@ test {
     _ = @import("restart.zig");
     _ = @import("kept_log.zig");
     _ = @import("ready.zig");
+    _ = @import("drain.zig");
+    _ = @import("drain_sim.zig");
     _ = @import("request_heap.zig");
     _ = @import("page_cache.zig");
     _ = @import("admin_reset.zig");

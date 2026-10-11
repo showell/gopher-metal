@@ -30,6 +30,7 @@ const fat_sim = @import("fat_sim.zig");
 const page_sim = @import("page_sim.zig");
 const pure_sim = @import("pure_sim.zig");
 const ready_sim = @import("ready_sim.zig");
+const drain_sim = @import("drain_sim.zig");
 const durable_sim = @import("durable_sim.zig");
 const floor_sim = @import("floor_sim.zig");
 const store_sim = @import("store_sim.zig");
@@ -87,6 +88,11 @@ test "the properties over a sweep of seeds" {
         const ok = if (ready_sim.runSeed(seed)) true else |_| false;
         if (!ok) failed_seeds += 1;
         at.always(@src(), ok, "ready_sim: every oracle holds for every seed", .{ .seed = seed });
+    }
+    for (1..options.drain_seeds + 1) |seed| {
+        const ok = if (drain_sim.runSeed(seed)) true else |_| false;
+        if (!ok) failed_seeds += 1;
+        at.always(@src(), ok, "drain_sim: every oracle holds for every seed", .{ .seed = seed });
     }
     for (1..options.full_seeds + 1) |seed| {
         const ok = if (sim.runFullSeed(seed)) true else |_| false;
