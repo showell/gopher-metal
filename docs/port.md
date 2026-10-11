@@ -43,10 +43,11 @@ machine) it spins.
 
 ## The real server
 
-`port.sh` copies angry-gopher's `zig-server/src/*.zig` and changes one line in
-each file that opens with `const Io = std.Io;`. Nothing else is touched. It
-prints how many files it copied and how many had the alias; at angry-gopher
-`7e3fbc5e` (2026-10-06) that is 77 files, 55 of them with the alias.
+`port.sh` copies angry-gopher's `zig-server/src/*.zig`, unchanged. Every file
+that does I/O opens with `const Io = @import("host_io").Io;`, and this build
+hands them `src/host_io_metal.zig` as `host_io`. It prints how many files it
+copied and how many take their `Io` from `host_io`, and refuses a file that
+aliases std's instead (Phase B step 2, 2026-10-11: 97 files, 63 of them).
 
 `probe/gopher.zig` is a HOST in the sense angry-gopher's `router.zig` defines —
 the contract any host meets before calling the route table:
@@ -116,12 +117,13 @@ at angry-gopher `7e3fbc5e`), and every file that uses them opens with the
 same line:
 
 ```zig
-const Io = std.Io;      //  ->  const Io = metal.io;
+const Io = @import("host_io").Io;   // std's on Linux; src/io.zig here
 ```
 
-Point that at `src/io.zig` and **not one call site changes**. That is the port:
-one single-line edit per file, zero touched call sites, and a `Dir` answering
-the operations the application actually asks for.
+The build points `host_io` at `src/host_io_metal.zig`, and **not one call
+site changes, and no line is edited**. That is the port: one file swapped by
+the build, and a `Dir` answering the operations the application actually
+asks for.
 
 ```
 gopher-metal std.Io probe

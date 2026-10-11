@@ -183,16 +183,24 @@ pub fn build(b: *std.Build) void {
     // never its files by path (angry-gopher's tools/lint_portable.py), so each
     // ported file belongs to one module. Its Linux half (`webbox_linux`) is
     // ported with the rest and never compiled here: nothing imports it.
+    // **`host_io`, THIS MACHINE'S** (src/host_io_metal.zig): the one file the
+    // application's sources take their `Io` from, std's on Linux, this
+    // machine's here. Nothing in them is rewritten.
+    const host_io = b.createModule(.{
+        .root_source_file = b.path("src/host_io_metal.zig"),
+        .red_zone = false,
+        .imports = &.{.{ .name = "metal", .module = metal }},
+    });
     const webbox = b.createModule(.{
         .root_source_file = .{ .cwd_relative = b.fmt("{s}/webbox.zig", .{gopher_port}) },
         .red_zone = false,
-        .imports = &.{.{ .name = "metal", .module = metal }},
+        .imports = &.{.{ .name = "host_io", .module = host_io }},
     });
     const app = b.createModule(.{
         .root_source_file = .{ .cwd_relative = b.fmt("{s}/router.zig", .{gopher_port}) },
         .red_zone = false,
         .imports = &.{
-            .{ .name = "metal", .module = metal },
+            .{ .name = "host_io", .module = host_io },
             .{ .name = "webbox", .module = webbox },
             .{ .name = "build_options", .module = build_opts.createModule() },
         },
@@ -454,6 +462,12 @@ pub fn build(b: *std.Build) void {
             .{ .name = "coverage_catalog", .module = coverage_catalog },
         },
     });
+    // The judges' `host_io`: this machine's file, its `metal` the simulated
+    // world.
+    const judge_host_io = b.createModule(.{
+        .root_source_file = b.path("src/host_io_metal.zig"),
+        .imports = &.{.{ .name = "metal", .module = judge_world }},
+    });
     const store_judge = b.addTest(.{
         .name = "store-judge",
         .root_module = b.createModule(.{
@@ -461,10 +475,13 @@ pub fn build(b: *std.Build) void {
             .target = b.graph.host,
             .imports = &.{
                 .{ .name = "judge_world", .module = judge_world },
-                .{ .name = "ag_store_linux", .module = b.createModule(.{ .root_source_file = .{ .cwd_relative = b.pathFromRoot(b.fmt("{s}/store.zig", .{ag_src})) } }) },
+                .{ .name = "ag_store_linux", .module = b.createModule(.{
+                    .root_source_file = .{ .cwd_relative = b.pathFromRoot(b.fmt("{s}/store.zig", .{ag_src})) },
+                    .imports = &.{.{ .name = "host_io", .module = b.createModule(.{ .root_source_file = .{ .cwd_relative = b.pathFromRoot(b.fmt("{s}/host_io_std.zig", .{ag_src})) } }) }},
+                }) },
                 .{ .name = "ag_store_metal", .module = b.createModule(.{
                     .root_source_file = .{ .cwd_relative = b.fmt("{s}/store.zig", .{gopher_port}) },
-                    .imports = &.{.{ .name = "metal", .module = judge_world }},
+                    .imports = &.{.{ .name = "host_io", .module = judge_host_io }},
                 }) },
             },
         }),
@@ -483,7 +500,7 @@ pub fn build(b: *std.Build) void {
                 .{ .name = "judge_world", .module = judge_world },
                 .{ .name = "ag_store_metal", .module = b.createModule(.{
                     .root_source_file = .{ .cwd_relative = b.fmt("{s}/store.zig", .{gopher_port}) },
-                    .imports = &.{.{ .name = "metal", .module = judge_world }},
+                    .imports = &.{.{ .name = "host_io", .module = judge_host_io }},
                 }) },
             },
         }),
