@@ -870,19 +870,22 @@ fn serveOne(
     var bus = Bus.of(hub);
     var peer_text: [15]u8 = undefined;
     bus.peer = ipText(&peer_text, table.conns[i].peer_ip);
-    router.route(&req, io, request_alloc, &bus) catch |e| {
+    // The stream the handler kept is route's answer (angry-gopher 157(a)):
+    // on an error, route has already dropped it.
+    var kept_stream = router.route(&req, io, request_alloc, &bus) catch |e| blk: {
         outcome = @errorName(e);
+        break :blk null;
     };
     // **THE HEAD AND BACKLOG GO FIRST.** Every turn of the network may service
     // the held streams, and this flush takes turns: a stream registered before
     // it would have its live frames queued ahead of its own head.
     const flushed = if (s.writer().flush()) |_| true else |_| false;
     if (!flushed) outcome = "the response would not flush";
-    if (bus.kept) |kept| if (!flushed) {
+    if (kept_stream) |kept| if (!flushed) {
         streams.drop(hub, kept);
-        bus.kept = null;
+        kept_stream = null;
     };
-    if (bus.kept) |kept| {
+    if (kept_stream) |kept| {
         // The handler wrote the stream's head and backlog; the live part is
         // this machine's now.
         // **THE BUDGET IS KEPT BY ENDING THE OLDEST.** A browser whose stream
