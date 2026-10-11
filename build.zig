@@ -154,9 +154,10 @@ pub fn build(b: *std.Build) void {
     // name. That table lives in angry-gopher/zig-server/build.zig; port.sh
     // copies it into gen/assets.zig, so the two cannot drift.
     //
-    // **THIS IS THE PART OF THE PORT THAT IS NOT ABOUT THE MACHINE.** The 61
-    // modules compile freestanding with one line changed each; what is left is
-    // build-graph plumbing, and it is the same plumbing on Linux.
+    // **THIS IS THE PART OF THE PORT THAT IS NOT ABOUT THE MACHINE.** The
+    // modules compile freestanding unchanged, handed this machine's `host_io`;
+    // what is left is build-graph plumbing, and it is the same plumbing on
+    // Linux.
     const gopher_root = b.option([]const u8, "gopher-root", "the angry-gopher checkout") orelse
         b.pathFromRoot("../angry-gopher");
 

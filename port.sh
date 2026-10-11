@@ -26,8 +26,10 @@ cp "$SRC"/*.zig "$OUT"/
 
 # **NO FILE IS EDITED**: each takes its `Io` from the `host_io` module, which
 # the build hands it (src/host_io_metal.zig: this machine's). A file with an
-# alias straight to std's would be std's here too, so one is refused.
-escaped="$(grep -l '^const Io = std\.Io;' "$OUT"/*.zig || true)"
+# alias straight to std's would be std's here too, so one is refused, but for
+# host_io_std.zig itself: the Linux build's choice of host_io, never compiled
+# here.
+escaped="$(grep -lE 'const Io = (std|@import\("std"\))\.Io;' "$OUT"/*.zig | grep -v '/host_io_std\.zig$' || true)"
 took="$(grep -l '^const Io = @import("host_io")\.Io;' "$OUT"/*.zig | wc -l)"
 
 # The asset table, read from the application's own build.zig rather than

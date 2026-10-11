@@ -40,8 +40,9 @@ const tsc = @import("tsc.zig");
 /// nothing — but it is still a value, so the call sites keep their shape.
 ///
 /// It has to be the module and not a struct inside it, and that cost a build.
-/// The ported application opens with `const Io = @import("metal").io;` and then
-/// spells its parameters `io: Io` — so the type it threads IS the module. A
+/// The ported application opens with `const Io = @import("host_io").Io;`
+/// (src/host_io_metal.zig: this module) and then spells its parameters
+/// `io: Io` — so the type it threads IS the module. A
 /// separate `pub const Io = struct {}` type-checked for this machine's own
 /// probes, which pass what they are given, and failed the moment the real
 /// application threaded its own `io` into `Io.Dir` — which is to say, the

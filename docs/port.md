@@ -1,4 +1,4 @@
-# The port: one alias, std's HTTP, one loop
+# The port: one file swapped, std's HTTP, one loop
 
 How angry-gopher's server runs on a machine with no operating system, and
 why the seam is where it is. The README is the orientation; this page is the
@@ -47,7 +47,7 @@ machine) it spins.
 that does I/O opens with `const Io = @import("host_io").Io;`, and this build
 hands them `src/host_io_metal.zig` as `host_io`. It prints how many files it
 copied and how many take their `Io` from `host_io`, and refuses a file that
-aliases std's instead (Phase B step 2, 2026-10-11: 97 files, 63 of them).
+aliases std's instead (Phase B step 2a, 2026-10-11: 97 files, 63 of them).
 
 `probe/gopher.zig` is a HOST in the sense angry-gopher's `router.zig` defines —
 the contract any host meets before calling the route table:

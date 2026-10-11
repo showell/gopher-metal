@@ -1,7 +1,7 @@
 //! **THE STORE JUDGE'S WORLD** (src/store_judge.zig): one module that owns
 //! metal's io, the test disk and the model, so the ported `store.zig`
-//! (imported as "metal", whose `io` this is) and the judge share one copy of
-//! each.
+//! (through its `host_io`, src/host_io_metal.zig, whose "metal" this is) and
+//! the judge share one copy of each.
 pub const io = @import("io.zig");
 pub const test_disk = @import("test_disk.zig");
 pub const disk_fat = @import("disk_fat.zig");

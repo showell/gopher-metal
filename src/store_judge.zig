@@ -9,8 +9,9 @@
 //!
 //! Two compilations of one file: `ag_store_linux` is angry-gopher's
 //! `zig-server/src/store.zig` as it is, and `ag_store_metal` is the port's
-//! copy (port.sh), whose `Io` is `@import("metal").io`: this judge's world,
-//! so the io it writes through is the one these tests mount disks on.
+//! copy (port.sh), whose `host_io` is src/host_io_metal.zig with this judge's
+//! world as its `metal`: so the io it writes through is the one these tests
+//! mount disks on.
 
 const std = @import("std");
 const world = @import("judge_world");
