@@ -190,6 +190,44 @@ const Draining = struct {
 };
 var draining: [max_connections]?Draining = @splat(null);
 var draining_now: usize = 0;
+
+/// **WHAT THE HOST KNOWS OF A CONNECTION'S BODY** (webbox's body.zig, the one
+/// rule both hosts read; metal-vmm QUEUE 166), indexed by connection, as
+/// `held` is: whether it was told `100 Continue`, since when its head was
+/// whole while its body was still coming, and whether it waited past the
+/// rule's deadline for that (then it is served a 408). Kept with the
+/// connection's serial, so a slot's next connection starts afresh.
+const BodyWait = struct {
+    serial: u64 = 0,
+    continued: bool = false,
+    head_at: ?i96 = null,
+    late: bool = false,
+};
+var body_waits: [max_connections]BodyWait = @splat(.{});
+
+fn bodyWait(table: *tcp.Table, i: usize) *BodyWait {
+    const w = &body_waits[i];
+    if (w.serial != table.conns[i].serial) w.* = .{ .serial = table.conns[i].serial };
+    return w;
+}
+
+/// The machine's clock `ms` from now, for a stream's body deadline: within
+/// i64's nanoseconds for any deadline the rule makes (it holds them below
+/// half of u64's milliseconds, and the clock counts from boot).
+fn bodyDeadline(ms: u64) i64 {
+    const now: i96 = Io.awakeNs() orelse 0;
+    const at = now + @as(i96, @min(ms, std.math.maxInt(i64) / std.time.ns_per_ms)) * std.time.ns_per_ms;
+    return @intCast(@min(at, std.math.maxInt(i64)));
+}
+
+/// The host's own answer to `Expect: 100-continue`, for a body it waits for.
+const continue_line = "HTTP/1.1 100 Continue\r\n\r\n";
+
+/// The rule's word that the turn's body is late: the handler's read fails,
+/// and `http.readLimitedBody` answers 408 (stream.zig's `on_late`).
+fn bodyLate() void {
+    router.body_rule.late_in_turn.store(true, .release);
+}
 /// The most bytes one connection may keep (a whole upload of a few MB fits;
 /// a larger response waits for room, as before spills).
 const spill_cap = 32 * 1024 * 1024;
@@ -630,7 +668,7 @@ pub fn kmain() noreturn {
         const arrived = stream.pump(&wire, &table, lease.address);
         const now = Io.awakeNs() orelse 0;
         if (arrived != null) idle_work.busy(now);
-        if (nextReady(&table)) |pick| {
+        if (nextReady(&table, now)) |pick| {
             served += 1;
             serveOne(io, &wire, &table, pick, lease.address, request_heap.allocator(), hub, served, conf.idle_ns, conf.streams);
             idle_work.busy(Io.awakeNs() orelse now);
@@ -770,12 +808,32 @@ pub fn kmain() noreturn {
     serial.pass();
 }
 
-/// The oldest connection with something to serve, or null.
-fn nextReady(table: *tcp.Table) ?usize {
+/// The oldest connection with something to serve, or null. A head asking
+/// `100-continue` for a body the machine will wait for is answered here, and
+/// a body that has been coming past the rule's deadline is served as late.
+fn nextReady(table: *tcp.Table, now: i96) ?usize {
     var best: ?usize = null;
     for (table.conns, 0..) |*c, i| {
         if (c.claimed or c.state != .established) continue;
-        if (ready.check(c.pending(), c.peerDone(), c.rx.len) == .waiting) continue;
+        const w = bodyWait(table, i);
+        const got = ready.check(router.body_rule, c.pending(), c.peerDone(), c.rx.len, .{ .continued = w.continued, .limit = router.bodyLimit });
+        switch (got.readiness) {
+            .waiting => continue,
+            .must_continue => {
+                // Sixteen bytes in a send queue of 64 KiB, nothing yet in it.
+                if (table.queue(i, continue_line) == continue_line.len) w.continued = true;
+                continue;
+            },
+            .body_coming => {
+                const since = w.head_at orelse blk: {
+                    w.head_at = now;
+                    break :blk now;
+                };
+                if (now - since < @as(i96, got.wait_ms) * std.time.ns_per_ms) continue;
+                w.late = true;
+            },
+            .ready, .abandoned => {},
+        }
         if (best == null or c.serial < table.conns[best.?].serial) best = i;
     }
     return best;
@@ -853,6 +911,46 @@ fn serveOne(
     };
     req.head.keep_alive = false;
 
+    // **THE BODY BY THE ONE RULE** (webbox's body.zig; metal-vmm QUEUE 166):
+    // refused from its head, late from waiting before the turn (a 408), or
+    // read in the turn under one deadline for the whole of it, from now. A
+    // body that fit the buffer is here already, and its reads never wait.
+    const wait = bodyWait(table, i);
+    const body_rule = router.body_rule;
+    const cap = router.bodyLimit(req.head.target);
+    const room = rx_bytes - @min(req.head_buffer.len, rx_bytes);
+    const refusal: ?struct { kind: edge.RejectKind, msg: []const u8 } = if (wait.late)
+        .{ .kind = .body_too_slow, .msg = "request body too slow\n" }
+    else switch (body_rule.plan(&req.head, cap, room)) {
+        .refused => |r| switch (r) {
+            .too_large => .{ .kind = .body_too_large, .msg = "request body too large\n" },
+            .framed_twice => .{ .kind = .body_framed_twice, .msg = "request body framed twice\n" },
+        },
+        .none => null,
+        .before_turn, .in_turn => |r| blk: {
+            s.body_deadline_at = bodyDeadline(body_rule.inTurnMs(r.bytes));
+            break :blk null;
+        },
+        .chunked_as_far_as_room => |both| blk: {
+            s.body_deadline_at = bodyDeadline(both.in_turn.deadline_ms);
+            break :blk null;
+        },
+    };
+    // Told to send already, by the host: std must not tell it again.
+    if (wait.continued) req.head.expect = null;
+    body_rule.late_in_turn.store(false, .release);
+    s.on_late = bodyLate;
+    if (refusal) |r| {
+        // Refused, never told to send (std answers an expectation first
+        // while it is set).
+        req.head.expect = null;
+        router.edge.reject(&req, r.kind, r.msg) catch {};
+        s.writer().flush() catch {};
+        logRequest(number, "(refused at its head)", r.msg[0 .. r.msg.len - 1]);
+        close(wire, table, i);
+        return;
+    }
+
     // The target is borrowed from the read buffer, which the handler may
     // consume; copy it for the log now — the PATH only, never the query, which
     // is not the log's to keep (serial.log_ring.withoutQuery; QUEUE.md item 95).
@@ -876,6 +974,8 @@ fn serveOne(
         outcome = @errorName(e);
         break :blk null;
     };
+    // The body's deadline is the body's: what follows only writes.
+    s.body_deadline_at = null;
     // **THE HEAD AND BACKLOG GO FIRST.** Every turn of the network may service
     // the held streams, and this flush takes turns: a stream registered before
     // it would have its live frames queued ahead of its own head.

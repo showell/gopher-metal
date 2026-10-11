@@ -252,6 +252,16 @@ pub const Stream = struct {
     /// gives it one (`Spill`). Null: a write waits for room.
     spill: ?*Spill = null,
 
+    /// **ONE DEADLINE FOR THE WHOLE BODY** (webbox's body.zig; metal-vmm
+    /// QUEUE 166), on this machine's clock: a read past it fails at once, as
+    /// one that timed out, however recently a byte came. Without it a client
+    /// sending a byte every `idle_ns` less a little held the turn for ever.
+    /// Null: only `idle_ns` bounds a read.
+    body_deadline_at: ?i64 = null,
+    /// Called once when a read fails for `body_deadline_at`, so the handler's
+    /// read can say why (the host's word to the rule: a 408, not a 400).
+    on_late: ?*const fn () void = null,
+
     reader_iface: Reader,
     writer_iface: Writer,
 
@@ -315,6 +325,12 @@ pub const Stream = struct {
                 self.timed_out = true;
                 return null;
             }
+            if (self.body_deadline_at) |at| if (self.clock() >= at) {
+                props.reachable(@src(), "stream: a read past the body's deadline gives up, however recently a byte came", null);
+                self.timed_out = true;
+                if (self.on_late) |late| late();
+                return null;
+            };
             self.pumpOrRest();
         }
     }

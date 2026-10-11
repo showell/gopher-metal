@@ -377,7 +377,12 @@ pub fn build(b: *std.Build) void {
     }
     // Outside src/, so not importable from unit_tests.zig: its own binary.
     const own_binary = [_][]const u8{"droplet/image.zig"};
+    // **THE ONE BODY RULE** (angry-gopher's webbox body.zig, metal-vmm QUEUE
+    // 166): ready.zig takes it as a parameter, which the kernel passes as
+    // `router.body_rule` and the unit tests as the ported file itself.
+    const body_rule = b.createModule(.{ .root_source_file = .{ .cwd_relative = b.fmt("{s}/body.zig", .{gopher_port}) } });
     const unit_imports = [_]std.Build.Module.Import{
+        .{ .name = "body_rule", .module = body_rule },
         .{ .name = "kernel_partition", .module = kernel_partition },
         .{ .name = "coverage", .module = coverage },
         .{ .name = "plant_options", .module = plant_options },
