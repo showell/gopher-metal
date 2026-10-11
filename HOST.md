@@ -19,7 +19,7 @@ hosts do them: Linux in `server.zig`, metal in `probe/gopher.zig`.
 3. one `Hub`, the registry live streams publish through.
 4. `store.backfillAll`: each chat topic's last-message record.
 5. after `route` returns: serve the stream the request kept, if any.
-6. optionally, `host_status.provide`: the host's own facts for /admin/host.
+6. optionally, `host_facts.provide`: the host's own facts for /admin/host.
 7. `game_limits.free_space`: how much of the data's disk is free.
 
 ## One handler at a time *(Steve, 2026-10-07)*

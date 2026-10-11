@@ -154,7 +154,7 @@ work).
     out as they were written (the retired gopher-metal queue, item 32).
     Linux's page says it keeps no log to show yet.
 
-  Each host hands its half over through angry-gopher's `host_status.provide`.
+  Each host hands its half over through angry-gopher's `host_facts.provide`.
 
 How fast, measured before the cutover (the same pages from both sites,
 alternating, 40 rounds; first byte, median / 90th percentile; 2026-10-01, v4:
