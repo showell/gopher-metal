@@ -2,15 +2,17 @@
 //! ROUTE TABLE, compiled from its own source, serving real requests on a machine
 //! with no operating system, with its data on a FAT16 or FAT32 volume.
 //!
-//! The only thing done to the application is `port.sh`: one line changed in
-//! each file that opens with `const Io = std.Io;`. Not one call site moves, and
-//! `std.http.Server` is the one the application already constructs.
+//! Nothing is done to the application: its files take their `Io` from
+//! `host_io`, which this build hands this machine's (src/host_io_metal.zig).
+//! Not one call site moves, and `std.http.Server` is the one the application
+//! already constructs.
 //!
-//! **THIS FILE IS A HOST** (router.zig's host contract): `mem_meter.init`
-//! over its own heap, one `router.start` with what this machine supplies
-//! (data/ and auth/ on the DigitalOcean volume if one is attached, the floor
-//! read off the data's FAT), and per request `router.route`, then what the
-//! request kept served from a table of held streams, drained every turn.
+//! **THIS FILE IS A HOST** (webbox's site.zig contract, the application as
+//! the `app` module): `mem_meter.init` over its own heap, one
+//! `app.site.start` with what this machine supplies (data/ and auth/ on the
+//! DigitalOcean volume if one is attached, the floor read off the data's FAT),
+//! and per request `app.site.route`, then what the request kept served from
+//! a table of held streams, drained every turn.
 //!
 //! Its clocks come from its own hardware (wallclock.zig).
 //!
@@ -66,6 +68,17 @@ pub const coverage_checks = gm_build.coverage;
 /// built on as `webbox`. Nothing else of either is reached from here.
 const app = @import("app");
 const webbox = @import("webbox");
+
+// **WHAT AN APPLICATION EXPORTS TO BE HOSTED HERE**, said where it is missed,
+// not as an error deep in this file.
+comptime {
+    for (.{ "site", "hosting" }) |name| {
+        if (!@hasDecl(app, name)) @compileError("the application's root exports `" ++ name ++ "` (Phase B: `site`, its webbox Site; `hosting`, what only it can say)");
+    }
+    for (.{ "data_name", "whole_read_max", "cache_largest_most", "describeStart" }) |name| {
+        if (!@hasDecl(app.hosting, name)) @compileError("the application's `hosting` declares `" ++ name ++ "` (probe/gopher.zig names each use)");
+    }
+}
 const edge = webbox.edge;
 const Bus = webbox.bus.Bus;
 const Hub = webbox.bus.Hub;
@@ -481,7 +494,7 @@ var busiest: usize = 0;
 /// When this boot's wall clock started, and the TSC's measured rate.
 var booted_unix: i64 = 0;
 var tsc_hz_seen: u64 = 0;
-/// The request head's buffer: angry-gopher's limits.zig sizes it, as it
+/// The request head's buffer: webbox's `http.head_bytes` sizes it, as it
 /// sizes Linux's, so the two hosts answer 431 at the same byte.
 var read_buf: [webbox.http.head_bytes]u8 align(16) = undefined;
 var write_buf: [64 * 1024]u8 align(16) = undefined;
@@ -514,7 +527,7 @@ const page_cache_largest_kib_default = app.hosting.whole_read_max >> 10;
 
 const config_path = "gopher-metal.conf";
 
-/// **THE APPLICATION'S DATA**: the two directories `router.start` points the
+/// **THE APPLICATION'S DATA**: the two directories `app.site.start` points the
 /// stores at (`Host.roots`), and the only ones this machine writes. On a droplet they are on the
 /// volume, which outlives every new image; everything else is the site's own,
 /// on the boot disk, and comes with the image.
@@ -721,7 +734,7 @@ pub fn kmain() noreturn {
     }
 
     // Whose X-Forwarded-For is believed: the config's trusted_proxy, handed
-    // to the host contract below (`router.start`).
+    // to the host contract below (`app.site.start`).
     const trusted_proxy: ?[]const u8 = if (conf.trusted_proxy) |p| ipText(&trusted_proxy_text, p) else null;
     if (trusted_proxy) |p| {
         serial.put("  X-Forwarded-For is believed from ");
@@ -788,8 +801,8 @@ pub fn kmain() noreturn {
     var request_heap = RequestHeap.init(pages.allocator, request_heap_bytes);
     if (!request_heap.preheat())
         serial.fail("the machine has not enough memory for a request heap");
-    // **THE HOST CONTRACT, ONE CALL** (angry-gopher router.zig, its webbox
-    // library's site.zig): what this machine supplies (where the data is on
+    // **THE HOST CONTRACT, ONE CALL** (webbox's site.zig, the application's
+    // `app.site`): what this machine supplies (where the data is on
     // its volumes, how its free space is read off the data's FAT, the trusted
     // proxy, /admin/host's facts and the serial log), and the setup in its one
     // order before the first request: the session secret's move, every chat
@@ -814,7 +827,8 @@ pub fn kmain() noreturn {
     {
         var said: [1024]u8 = undefined;
         var w: std.Io.Writer = .fixed(&said);
-        app.hosting.describeStart(started.app, &w) catch {};
+        app.hosting.describeStart(started.app, &w) catch
+            serial.fail("the application's start report is past its 1 KiB buffer (app.hosting.describeStart)");
         var lines = std.mem.splitScalar(u8, std.mem.trimEnd(u8, w.buffered(), "\n"), '\n');
         while (lines.next()) |line| {
             serial.put("  ");
@@ -2169,7 +2183,7 @@ fn readConfig(io: Io, alloc: std.mem.Allocator) Config {
             conf.page_cache_largest_kib = configNumber(u32, value) catch
                 serial.fail(config_path ++ ": `page_cache_largest_kib` is a number of KiB");
             if (conf.page_cache_largest_kib == 0) serial.fail(config_path ++ ": `page_cache_largest_kib` is 0 — set `page_cache_mib = 0` to keep no files, not a zero cap");
-            if (conf.page_cache_largest_kib > 10 << 10) serial.fail(config_path ++ ": `page_cache_largest_kib` past 10240 (10 MiB) is more than chat's image cap, so no picture reaches it");
+            if (conf.page_cache_largest_kib > app.hosting.cache_largest_most >> 10) serial.fail(config_path ++ ": `page_cache_largest_kib` past " ++ std.fmt.comptimePrint("{d}", .{app.hosting.cache_largest_most >> 10}) ++ " is more than the application's largest file worth keeping (app.hosting.cache_largest_most), so no file reaches it");
         } else if (std.mem.eql(u8, key, "trusted_proxy")) {
             const a = std.Io.net.Ip4Address.parse(value, 0) catch
                 serial.fail(config_path ++ ": `trusted_proxy` is an IPv4 address: 10.0.0.2");
