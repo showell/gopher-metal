@@ -144,6 +144,9 @@ pub const LongName = struct {
     buf: [max_name]u8 = undefined,
     len: usize = 0,
     sum: u8 = 0,
+    /// One less than the number of the part taken last: 0 once part 1, the
+    /// run's first characters, is in.
+    next: u8 = 0,
 
     pub const Stands = enum {
         /// No run open: none begun, or the last one closed or let go.
@@ -172,6 +175,7 @@ pub const LongName = struct {
             self.stands = .spoiled;
             return;
         }
+        self.next = seq - 1;
 
         const base = (@as(usize, seq) - 1) * 13;
         for (long_offsets, 0..) |off, i| {
@@ -196,11 +200,12 @@ pub const LongName = struct {
     }
 
     /// **THE SHORT ENTRY THAT CLOSES THE RUN**, which ends either way: the
-    /// long name onto `entry` if the run is whole and its checksum matches.
+    /// long name onto `entry` if the run is whole, its part 1 taken, and its
+    /// checksum matches.
     /// A run whose checksum does not match is an orphan, and using it would
     /// put the wrong name on the wrong bytes. Answers whether it was put.
     pub fn close(self: *LongName, entry: *Entry) bool {
-        const whole = self.stands == .collecting and self.len > 0 and self.sum == shortChecksum(entry.short);
+        const whole = self.stands == .collecting and self.next == 0 and self.len > 0 and self.sum == shortChecksum(entry.short);
         if (whole) {
             entry.long_len = @intCast(@min(self.len, entry.long.len));
             @memcpy(entry.long[0..entry.long_len], self.buf[0..entry.long_len]);
