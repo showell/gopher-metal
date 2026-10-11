@@ -97,6 +97,10 @@ if [ "$want" != metal ]; then
         -Dfloor=coverage/floor-sim.txt > "$OUT.sim" 2>&1
     code=$?
     grep -E 'runs failed|not satisfied|^ *(FAIL|FLOOR|STALE)|floor .*under' "$OUT.sim" | sed 's/^ *//'
+    # A failure the lines above don't name (a build error) says itself.
+    if [ $code != 0 ] && ! grep -qE 'runs failed|not satisfied|^ *(FAIL|FLOOR|STALE)|floor .*under' "$OUT.sim"; then
+        echo "the simulators did not run to a verdict ($OUT.sim):"; grep -E 'error' "$OUT.sim" | head -5
+    fi
     [ $code = 0 ] || failed+=(sim)
     lap "simulator"
 fi
