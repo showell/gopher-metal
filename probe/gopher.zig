@@ -324,7 +324,10 @@ fn beginDrain(w: *BodyWait, head_len: usize, read: router.body_rule.Read, chunke
     const body_most: u64 = if (chunked) router.body_rule.chunkedRawMost(cap) else read.bytes;
     const most = std.math.add(u64, head_len, body_most) catch return .no_memory;
     if (most > std.math.maxInt(usize)) return .no_memory;
-    const size: usize = @intCast(@min(most, head_len + drain_first_bytes));
+    // An upload's exact length at once: its slot is its bound (170's cold
+    // review: doubling toward 101 MiB held two buffers at once). A small body
+    // grows as it comes, charged as it grows.
+    const size: usize = if (upload) @intCast(most) else @intCast(@min(most, head_len + drain_first_bytes));
     if (!upload and small_drained_now + size > small_drain_budget) return .wait;
     const bytes = body_gpa.alloc(u8, size) catch return .no_memory;
     if (!upload) small_drained_now += bytes.len;
@@ -1343,8 +1346,12 @@ fn serveOne(
     bus.peer = ipText(&peer_text, table.conns[i].peer_ip);
     // The stream the handler kept is route's answer (angry-gopher 157(a)):
     // on an error, route has already dropped it.
-    // A drained body handed to the handler's read as it is (170.5).
-    if (wait.drain) |d| if (wait.verdict == .none) router.holdBody(d.bytes[d.head_len..d.len]);
+    // A drained body handed to the handler's read as it is (170.5): only a
+    // Content-Length one that came whole to its length. A chunked one is
+    // still framed, and a short one (its client gone) must be refused: std
+    // reads both from memory, decoding the one and refusing the other.
+    if (wait.drain) |d| if (wait.verdict == .none and d.framing == .length and d.len - d.head_len == d.want)
+        router.holdBody(d.bytes[d.head_len..d.len]);
     defer router.holdBody(null);
     var kept_stream = router.route(&req, io, request_alloc, &bus) catch |e| blk: {
         outcome = @errorName(e);
