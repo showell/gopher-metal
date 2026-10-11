@@ -11,16 +11,19 @@ fails on the laptop first.
 
 ## What a host does before the first request
 
-angry-gopher's `router.zig` declares these ("the host contract"), and both
-hosts do them: Linux in `server.zig`, metal in `probe/gopher.zig`.
+angry-gopher's `router.zig` declares the host contract, and both hosts follow
+it: Linux in `server.zig`, metal in `probe/gopher.zig`. Three calls:
 
-1. `mem_meter.init(base)`: the process-lifetime allocator.
-2. `roots.point(base, r)`: the data's two roots.
-3. one `Hub`, the registry live streams publish through.
-4. `store.backfillAll`: each chat topic's last-message record.
-5. after `route` returns: serve the stream the request kept, if any.
-6. optionally, `host_facts.provide`: the host's own facts for /admin/host.
-7. `game_limits.free_space`: how much of the data's disk is free.
+1. `mem_meter.init(base)`: the process-lifetime allocator, before anything
+   else.
+2. `start(io, Host)`: once, before the first request. Everything the host
+   supplies is in one `Host`: where the data is, how to read its free space,
+   the trusted proxy, and the host's own facts and log. The setup is done in
+   the one right order, and the answer is the `Hub` live streams publish
+   through.
+3. Per request, `route`, then serve the stream it answered, if any
+   (`streams.serveKept`, or `streams.nextFrame` for a host with one loop;
+   `streams.drop` ends it either way).
 
 ## One handler at a time *(Steve, 2026-10-07)*
 
