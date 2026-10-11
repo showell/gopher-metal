@@ -728,7 +728,7 @@ test "the check a slice at a time finds what the whole check finds, and starts a
         var steps: u32 = 0;
         while (true) {
             steps += 1;
-            switch (try run.step(1)) {
+            switch (try run.step(.{ .sectors = 1, .runs = 1 })) {
                 .more => continue,
                 .done => break,
                 .changed => return error.TestUnexpectedResult,
@@ -742,10 +742,94 @@ test "the check a slice at a time finds what the whole check finds, and starts a
 
         // A write between two steps: the run says so and stops.
         try run.begin(&d.vol, seen);
-        try testing.expectEqual(disk_fat.Volume.CheckRun.Step.more, try run.step(1));
+        try testing.expectEqual(disk_fat.Volume.CheckRun.Step.more, try run.step(.{ .sectors = 1, .runs = 1 }));
         try d.vol.writeFile("new", "y");
-        try testing.expectEqual(disk_fat.Volume.CheckRun.Step.changed, try run.step(1));
-        try testing.expectEqual(disk_fat.Volume.CheckRun.Step.done, try run.step(1));
+        try testing.expectEqual(disk_fat.Volume.CheckRun.Step.changed, try run.step(.{ .sectors = 1, .runs = 1 }));
+        try testing.expectEqual(disk_fat.Volume.CheckRun.Step.done, try run.step(.{ .sectors = 1, .runs = 1 }));
+    }
+}
+
+/// A tree for the walk's slices: folders that span sectors (long names), a
+/// folder found mid-sector after a long-name run, damage at depth, and a
+/// tree deeper than the check walks.
+fn sliceTree(d: *test_disk.Disk) !void {
+    const a = try d.vol.makePath("a");
+    var name: [40]u8 = undefined;
+    for (0..24) |i| {
+        const n = try std.fmt.bufPrint(&name, "a file with a long name, number {d}", .{i});
+        try d.vol.writeFileIn(a, n, "x");
+        if (i == 9) {
+            const b = try d.vol.makeDirIn(a, "b folder with a long name");
+            try d.vol.writeFileIn(b, "short", "x" ** 1000);
+            try d.vol.writeFileIn(b, "long", "y" ** 1000);
+            const c = try d.vol.makeDirIn(b, "c");
+            try d.vol.writeFileIn(c, "f", "z");
+        }
+    }
+    try d.vol.writeFile("top", "t");
+    const fifteen = try d.vol.makePath("d/" ** 14 ++ "d");
+    const sixteen = try d.vol.makeDirIn(fifteen, "d");
+    try d.vol.writeFileIn(sixteen, "f", "x");
+    setEntry(d, try d.vol.open("a/b folder with a long name/short"), .size, 5000); // short
+    setEntry(d, try d.vol.open("a/b folder with a long name/long"), .size, 1); // long
+}
+
+test "the walk a few sectors at a time finds exactly what the whole check finds, paths and all (idle time)" {
+    for (configs) |cfg| {
+        const shape, const cached = .{ cfg.shape, cfg.cached };
+        const d = try Disk.make("damaged-slice-walk", shape, cached);
+        defer d.deinit();
+        try sliceTree(d);
+        try d.mount(cached);
+        const whole = try d.check();
+        try testing.expect(whole.len >= 3); // short, long, too deep
+        const seen = try testing.allocator.alloc(u8, d.vol.checkBytes());
+        defer testing.allocator.free(seen);
+        for ([_]u32{ 1, 2, 3, 5, 64 }) |sectors| {
+            var r = test_disk.Report{};
+            r.health = try d.vol.checkInSlicesForTest(seen, &r, test_disk.Report.each, sectors);
+            try testing.expectEqual(whole.health, r.health);
+            try testing.expectEqual(whole.len, r.len);
+            for (whole.found[0..whole.len], r.found[0..r.len]) |w, g| {
+                try testing.expectEqual(w.problem, g.problem);
+                try testing.expectEqualStrings(w.text(), g.text());
+                try testing.expectEqual(w.cluster, g.cluster);
+                try testing.expectEqual(w.count, g.count);
+            }
+        }
+    }
+}
+
+test "a step of the check's walk reads at most its slice's directory sectors (idle time: production's walk was 548 ms in one step)" {
+    for (configs) |cfg| {
+        const shape, const cached = .{ cfg.shape, cfg.cached };
+        const d = try Disk.make("damaged-slice-walk-step", shape, cached);
+        defer d.deinit();
+        try sliceTree(d);
+        try d.mount(cached);
+        const seen = try testing.allocator.alloc(u8, d.vol.checkBytes());
+        defer testing.allocator.free(seen);
+        var run: disk_fat.Volume.CheckRun = .{};
+        try run.begin(&d.vol, seen);
+        const slice: disk_fat.Volume.CheckRun.Slice = .{ .sectors = 3, .runs = 1 };
+        var walk_steps: u64 = 0;
+        while (true) {
+            const before = run.checker.walk_sectors;
+            const got = try run.step(slice);
+            const read = run.checker.walk_sectors - before;
+            try testing.expect(read <= slice.sectors);
+            if (read > 0) walk_steps += 1;
+            switch (got) {
+                .more => continue,
+                .done => break,
+                .changed => return error.TestUnexpectedResult,
+            }
+        }
+        // The tree's folders hold more sectors than one slice: the walk
+        // took several steps, and read every sector the whole check reads.
+        try testing.expect(run.checker.walk_sectors > 3 * slice.sectors);
+        try testing.expectEqual((run.checker.walk_sectors + slice.sectors - 1) / slice.sectors, walk_steps);
+        try testing.expectEqual((try d.check()).health, run.health());
     }
 }
 

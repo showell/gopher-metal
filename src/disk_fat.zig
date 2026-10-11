@@ -3465,20 +3465,44 @@ pub const Volume = struct {
             props.reachable(@src(), "fat: a check given too little room to mark clusters is refused", null);
             return Error.TooBig;
         }
+        return self.checkIn(seen, context, each, std.math.maxInt(u32));
+    }
+
+    /// `check`, its walk `sectors` directory sectors at a time: what a
+    /// `CheckRun` does, findings and all, for a test to hold to `check`.
+    pub fn checkInSlicesForTest(
+        self: *Volume,
+        seen: []u8,
+        context: anytype,
+        comptime each: fn (@TypeOf(context), Finding) void,
+        sectors: u32,
+    ) Error!Health {
+        if (seen.len < self.checkBytes()) return Error.TooBig;
+        return self.checkIn(seen, context, each, sectors);
+    }
+
+    fn checkIn(
+        self: *Volume,
+        seen: []u8,
+        context: anytype,
+        comptime each: fn (@TypeOf(context), Finding) void,
+        sectors: u32,
+    ) Error!Health {
         const len = self.checkBytes();
         @memset(seen[0..len], 0);
         var c = Checker(@TypeOf(context), each){ .vol = self, .seen = seen[0..len], .context = context };
-        const root_clusters: u32 = if (self.kind == .fat32) try c.chain(self.root_cluster, null) else 0;
-        if (self.kind == .fat16 or root_clusters > 0) try c.directory(0, 0, root_clusters, 0);
+        try c.walkStart();
+        while (!try c.walkSome(sectors)) {}
         try c.fatOnDisk();
         return c.health;
     }
 
     /// **THE CHECK, A SLICE AT A TIME** (essay `idle-time-on-metal`): the
     /// same walk and the same FAT pass as `check`, cut into steps for the
-    /// kernel's idle time. The tree is walked in the first step, through the
-    /// held FAT and the held directory sectors where the volume has them;
-    /// the FAT on the disk is read `runs` runs a step. It writes nothing.
+    /// kernel's idle time: the tree `Slice.sectors` directory sectors a step,
+    /// then the FAT on the disk `Slice.runs` runs a step. It writes nothing.
+    /// **THE WALK IS SLICED TOO**: walked whole in one step, production's
+    /// volume (159 folders) took 548 ms of a 200 ms budget.
     ///
     /// **A VOLUME THAT CHANGES UNDER IT STARTS IT AGAIN**: a write between
     /// two steps would make the tree walked and the FAT read disagree, and
@@ -3492,7 +3516,7 @@ pub const Volume = struct {
     pub const CheckRun = struct {
         tally: Tally = .{},
         checker: Checker(*Tally, Tally.each) = undefined,
-        phase: enum { walk, fat, done } = .done,
+        phase: enum { start, walk, fat, done } = .done,
         changes_at_start: u64 = 0,
 
         /// What a run found, in counts: what `/admin/host` says.
@@ -3510,18 +3534,22 @@ pub const Volume = struct {
 
         pub const Step = enum { more, done, changed };
 
+        /// How much one step may read: directory sectors while it walks,
+        /// runs of the FAT (`run_sectors`, each copy) after.
+        pub const Slice = struct { sectors: u32, runs: u32 };
+
         /// A run over `vol`, its marks in `seen` (`checkBytes` long), from
         /// the start. Nothing is read until the first step.
         pub fn begin(self: *CheckRun, vol: *Volume, seen: []u8) Error!void {
             if (seen.len < vol.checkBytes()) return Error.TooBig;
             self.tally = .{};
             self.checker = .{ .vol = vol, .seen = seen[0..vol.checkBytes()], .context = &self.tally };
-            self.phase = .walk;
+            self.phase = .start;
             self.changes_at_start = vol.changes;
         }
 
-        /// One step: the tree's walk, or `runs` runs of the FAT on the disk.
-        pub fn step(self: *CheckRun, runs: u32) Error!Step {
+        /// One step: a slice of the tree's walk, or of the FAT on the disk.
+        pub fn step(self: *CheckRun, slice: Slice) Error!Step {
             const c = &self.checker;
             const v = c.vol;
             if (self.phase == .done) return .done;
@@ -3531,15 +3559,18 @@ pub const Volume = struct {
                 return .changed;
             }
             switch (self.phase) {
-                .walk => {
+                .start => {
                     @memset(c.seen, 0);
-                    const root_clusters: u32 = if (v.kind == .fat32) try c.chain(v.root_cluster, null) else 0;
-                    if (v.kind == .fat16 or root_clusters > 0) try c.directory(0, 0, root_clusters, 0);
-                    self.phase = .fat;
+                    try c.walkStart();
+                    self.phase = .walk;
+                    return self.step(slice);
+                },
+                .walk => {
+                    if (try c.walkSome(slice.sectors)) self.phase = .fat;
                     return .more;
                 },
                 .fat => {
-                    if (!try c.fatSome(runs)) return .more;
+                    if (!try c.fatSome(slice.runs)) return .more;
                     self.phase = .done;
                     props.reachable(@src(), "fat: a check a slice at a time finishes", .{ .damage = self.tally.damage });
                     return .done;
@@ -3566,6 +3597,11 @@ pub const Volume = struct {
             /// The path being walked, for the findings.
             path: [max_tree_depth * (max_name + 1)]u8 = undefined,
             path_len: usize = 0,
+            /// The directories being walked, the root first: a frame a level.
+            frames: [max_tree_depth]Frame = undefined,
+            frames_len: u32 = 0,
+            /// Directory sectors the walk has read, all its slices.
+            walk_sectors: u64 = 0,
             /// Where the FAT's pass stands (`fatSome`), between slices.
             fat: struct {
                 base: u32 = 0,
@@ -3577,6 +3613,31 @@ pub const Volume = struct {
             } = .{},
 
             const Self = @This();
+
+            /// **A DIRECTORY, PART WALKED**: where it stands (sector `k`,
+            /// entry offset `at` in `sector`, 0 before the sector is read),
+            /// and the long-name run it is in.
+            const Frame = struct {
+                cluster: Cluster,
+                parent: Cluster,
+                depth: u32,
+                sectors: u32,
+                k: u32 = 0,
+                at_cluster: Cluster,
+                at: usize = 0,
+                sector: [sector_size]u8 align(16) = undefined,
+                long: LongName = .{},
+                // The long-name parts since the last entry that was none,
+                // their run's checksum, whether every part agrees, the
+                // number the next part must have, and whether the run began
+                // with a part flagged last (0x40).
+                run_parts: u32 = 0,
+                run_sum: u8 = 0,
+                run_whole: bool = false,
+                run_next: u8 = 0,
+                run_started: bool = false,
+                path_was: usize,
+            };
 
             fn report(self: *Self, problem: Problem, cluster: Cluster, count: u32) void {
                 self.health.problems += 1;
@@ -3646,82 +3707,132 @@ pub const Volume = struct {
                 return was;
             }
 
-            /// Checks everything in the directory at `cluster` (0: the root),
-            /// over the first `clusters` clusters of its chain, which `chain`
-            /// has followed and found sound.
-            fn directory(self: *Self, cluster: Cluster, parent: Cluster, clusters: u32, depth: u32) Error!void {
+            /// **THE WALK, FROM THE ROOT**: its chain followed and its frame
+            /// the first on the stack. `walkSome` does the rest.
+            fn walkStart(self: *Self) Error!void {
                 const v = self.vol;
-                // **A SECTOR OF ITS OWN**: without a held FAT, each entry's
-                // chain is read through `scratch`.
-                var sector: [sector_size]u8 align(16) = undefined;
-                var long: LongName = .{};
-                // The long-name parts since the last entry that was none,
-                // their run's checksum, and whether every part agrees.
-                var run_parts: u32 = 0;
-                var run_sum: u8 = 0;
-                var run_whole = false;
-                var run_next: u8 = 0;
-                // Whether the run began with a part flagged last (0x40).
-                var run_started = false;
+                self.frames_len = 0;
+                const root_clusters: u32 = if (v.kind == .fat32) try self.chain(v.root_cluster, null) else 0;
+                if (v.kind == .fat16 or root_clusters > 0) self.enter(0, 0, root_clusters, 0, self.path_len);
+            }
 
+            /// A directory's frame on the stack: everything in the directory
+            /// at `cluster` (0: the root), over the first `clusters` clusters
+            /// of its chain, which `chain` has followed and found sound.
+            /// `path_was` is the path's length to go back to when it is done.
+            fn enter(self: *Self, cluster: Cluster, parent: Cluster, clusters: u32, depth: u32, path_was: usize) void {
+                const v = self.vol;
                 const fixed_root = cluster == 0 and v.kind == .fat16;
-                const sectors: u32 = if (fixed_root) v.root_sectors else clusters * v.sectors_per_cluster;
-                var at_cluster = v.dirStart(cluster);
-                var k: u32 = 0;
-                while (k < sectors) : (k += 1) {
-                    const lba = if (fixed_root) v.root_start + k else blk: {
-                        if (k > 0 and k % v.sectors_per_cluster == 0) at_cluster = try v.fatGet(at_cluster);
-                        break :blk v.clusterSector(at_cluster) + k % v.sectors_per_cluster;
-                    };
-                    try v.readSector(lba, &sector);
-                    var at: usize = 0;
-                    while (at + dirent_size <= sector_size) : (at += dirent_size) {
-                        const e = sector[at..][0..dirent_size];
-                        if (e[0] == 0x00) break; // nothing further in this directory
-                        if (e[0] == 0xE5) {
-                            self.orphaned(&run_parts, &run_started);
-                            long.letGo();
+                self.frames[self.frames_len] = .{
+                    .cluster = cluster,
+                    .parent = parent,
+                    .depth = depth,
+                    .sectors = if (fixed_root) v.root_sectors else clusters * v.sectors_per_cluster,
+                    .at_cluster = v.dirStart(cluster),
+                    .path_was = path_was,
+                };
+                self.frames_len += 1;
+            }
+
+            /// **THE WALK, AT MOST `sectors` DIRECTORY SECTORS READ** (a
+            /// slice of idle time; `check` gives it no limit): a directory is
+            /// a frame on `frames`, its place kept between calls, where a
+            /// call walked the whole tree at once, as deep as it went. Answers
+            /// whether the walk is done.
+            fn walkSome(self: *Self, sectors: u32) Error!bool {
+                const v = self.vol;
+                var read: u32 = 0;
+                while (self.frames_len > 0) {
+                    const f = &self.frames[self.frames_len - 1];
+                    if (f.at == 0) {
+                        if (f.k == f.sectors) {
+                            self.orphaned(&f.run_parts, &f.run_started);
+                            self.path_len = f.path_was;
+                            self.frames_len -= 1;
                             continue;
                         }
-                        if (e[11] == attr_long_name) {
-                            // A last part opens a run: the one before it
-                            // was closed by nothing. A part of another
-                            // checksum spoils the run.
-                            // Each part after the last-flagged one is
-                            // numbered one less, down to 1, as fsck.fat
-                            // checks.
-                            if (e[0] & 0x40 != 0) {
-                                self.orphaned(&run_parts, &run_started);
-                                run_started = true;
-                                run_sum = e[13];
-                                run_whole = true;
-                                run_next = e[0] & 0x1F;
-                            } else if (run_parts == 0 or e[13] != run_sum or e[0] & 0x1F != run_next) run_whole = false;
-                            run_next -%= 1;
-                            run_parts +|= 1;
-                            long.take(e);
-                            continue;
-                        }
-                        if (e[11] & attr_volume_label != 0) {
-                            self.orphaned(&run_parts, &run_started);
-                            long.letGo();
-                            continue;
-                        }
-                        var entry = v.entryFrom(e);
-                        _ = long.close(&entry);
-                        // **AN ORPHAN AS fsck.fat SEES ONE**, by the run and
-                        // the checksum, not by whether this driver reads the
-                        // name (one past `max_name` it does not, and the
-                        // parts are no orphans).
-                        if (run_parts > 0 and run_whole and run_next == 0 and run_sum == shortChecksum(e[0..11].*)) {
-                            run_parts = 0;
-                            run_started = false;
-                        } else self.orphaned(&run_parts, &run_started);
-                        try self.entryIn(entry, cluster, parent, depth);
-                    } else continue;
-                    break;
+                        if (read == sectors) return false;
+                        const fixed_root = f.cluster == 0 and v.kind == .fat16;
+                        const lba = if (fixed_root) v.root_start + f.k else blk: {
+                            if (f.k > 0 and f.k % v.sectors_per_cluster == 0) f.at_cluster = try v.fatGet(f.at_cluster);
+                            break :blk v.clusterSector(f.at_cluster) + f.k % v.sectors_per_cluster;
+                        };
+                        try v.readSector(lba, &f.sector);
+                        read += 1;
+                        self.walk_sectors +|= 1;
+                    }
+                    if (try self.sectorFrom(f)) |child| {
+                        self.enter(child.cluster, f.cluster, child.clusters, f.depth + 1, child.path_was);
+                    }
                 }
-                self.orphaned(&run_parts, &run_started);
+                return true;
+            }
+
+            /// A directory to walk next, found in its parent's sector.
+            const Child = struct { cluster: Cluster, clusters: u32, path_was: usize };
+
+            /// The entries of `f`'s sector from where it stands: to its end,
+            /// or to a directory to walk first, answered with `f` left just
+            /// past it. Where the directory ends, `f` is left at its last
+            /// sector's end.
+            fn sectorFrom(self: *Self, f: *Frame) Error!?Child {
+                while (f.at + dirent_size <= sector_size) {
+                    const e = f.sector[f.at..][0..dirent_size];
+                    f.at += dirent_size;
+                    if (e[0] == 0x00) { // nothing further in this directory
+                        f.k = f.sectors;
+                        f.at = 0;
+                        return null;
+                    }
+                    if (e[0] == 0xE5) {
+                        self.orphaned(&f.run_parts, &f.run_started);
+                        f.long.letGo();
+                        continue;
+                    }
+                    if (e[11] == attr_long_name) {
+                        // A last part opens a run: the one before it was
+                        // closed by nothing. A part of another checksum
+                        // spoils the run.
+                        // Each part after the last-flagged one is numbered
+                        // one less, down to 1, as fsck.fat checks.
+                        if (e[0] & 0x40 != 0) {
+                            self.orphaned(&f.run_parts, &f.run_started);
+                            f.run_started = true;
+                            f.run_sum = e[13];
+                            f.run_whole = true;
+                            f.run_next = e[0] & 0x1F;
+                        } else if (f.run_parts == 0 or e[13] != f.run_sum or e[0] & 0x1F != f.run_next) f.run_whole = false;
+                        f.run_next -%= 1;
+                        f.run_parts +|= 1;
+                        f.long.take(e);
+                        continue;
+                    }
+                    if (e[11] & attr_volume_label != 0) {
+                        self.orphaned(&f.run_parts, &f.run_started);
+                        f.long.letGo();
+                        continue;
+                    }
+                    var entry = self.vol.entryFrom(e);
+                    _ = f.long.close(&entry);
+                    // **AN ORPHAN AS fsck.fat SEES ONE**, by the run and the
+                    // checksum, not by whether this driver reads the name
+                    // (one past `max_name` it does not, and the parts are no
+                    // orphans).
+                    if (f.run_parts > 0 and f.run_whole and f.run_next == 0 and f.run_sum == shortChecksum(e[0..11].*)) {
+                        f.run_parts = 0;
+                        f.run_started = false;
+                    } else self.orphaned(&f.run_parts, &f.run_started);
+                    if (try self.entryIn(entry, f.cluster, f.parent, f.depth)) |child| {
+                        if (f.at == sector_size) {
+                            f.at = 0;
+                            f.k += 1;
+                        }
+                        return child;
+                    }
+                }
+                f.at = 0;
+                f.k += 1;
+                return null;
             }
 
             /// The parts of a run nothing closed, counted, and the run let go.
@@ -3736,7 +3847,9 @@ pub const Volume = struct {
                 run_parts.* = 0;
             }
 
-            fn entryIn(self: *Self, entry: Entry, dir: Cluster, parent: Cluster, depth: u32) Error!void {
+            /// One entry of the directory `dir`: checked, its chain marked;
+            /// a directory to walk is answered, its name left on the path.
+            fn entryIn(self: *Self, entry: Entry, dir: Cluster, parent: Cluster, depth: u32) Error!?Child {
                 const name = entry.text();
                 // "." is this directory and ".." its parent, 0 for the root.
                 if (eqlBytes(name, ".") or eqlBytes(name, "..")) {
@@ -3746,24 +3859,22 @@ pub const Volume = struct {
                         self.report(.bad_dot, entry.first_cluster, 0);
                         self.path_len = was;
                     }
-                    return;
+                    return null;
                 }
                 const was = self.push(name);
-                defer self.path_len = was;
                 if (entry.isDirectory()) {
                     self.health.directories += 1;
                     const n = try self.chain(entry.first_cluster, null);
-                    if (n == 0) return;
-                    if (depth + 1 >= max_tree_depth) {
+                    if (n > 0 and depth + 1 >= max_tree_depth) {
                         self.walked = .stopped_short;
                         self.report(.too_deep, entry.first_cluster, 0);
-                        return;
-                    }
-                    try self.directory(entry.first_cluster, dir, n, depth + 1);
+                    } else if (n > 0) return .{ .cluster = entry.first_cluster, .clusters = n, .path_was = was };
                 } else {
                     self.health.files += 1;
                     _ = try self.chain(entry.first_cluster, entry.size);
                 }
+                self.path_len = was;
+                return null;
             }
 
             /// Every copy on the disk against the first, every cluster in use

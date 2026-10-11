@@ -17,9 +17,11 @@ pub const VolumeCheck = struct {
     vol: *disk_fat.Volume,
     /// The marks (`checkBytes` long), owned by the caller, kept between steps.
     seen: []u8,
-    /// FAT runs read a step (`run_sectors` sectors, each copy): two disk
-    /// requests a run, ~12 ms on production's volume.
-    runs_per_step: u32 = 8,
+    /// What a step reads: directory sectors while it walks the tree (a
+    /// request each, ~1 ms on production's volume, where the whole walk was
+    /// 548 ms in one step), then FAT runs (`run_sectors` sectors, each copy:
+    /// two requests a run, ~12 ms).
+    slice: disk_fat.Volume.CheckRun.Slice = .{ .sectors = 64, .runs = 8 },
     period_ns: u64 = std.time.ns_per_hour,
     task: idle.Task = undefined,
     run: disk_fat.Volume.CheckRun = .{},
@@ -53,7 +55,7 @@ pub const VolumeCheck = struct {
             };
             self.state = .running;
         }
-        const outcome = self.run.step(self.runs_per_step) catch {
+        const outcome = self.run.step(self.slice) catch {
             // A read that failed: nothing found is said, and the next check
             // waits its period.
             props.reachable(@src(), "idle: a volume's check ends on a read that failed", null);
@@ -96,7 +98,7 @@ test "idle check: a volume is checked in quiet moments, a slice a step, then aga
     try d.vol.writeFile("data/a.md", "hello");
     const seen = try testing.allocator.alloc(u8, d.vol.checkBytes());
     defer testing.allocator.free(seen);
-    var check: VolumeCheck = .{ .vol = &d.vol, .seen = seen, .runs_per_step = 1, .period_ns = std.time.ns_per_s };
+    var check: VolumeCheck = .{ .vol = &d.vol, .seen = seen, .slice = .{ .sectors = 1, .runs = 1 }, .period_ns = std.time.ns_per_s };
     var q: idle.Idle = .{};
     try q.add(check.init("the volume's check"));
 
@@ -125,7 +127,7 @@ test "idle check: a write under a check starts it again, and the next one finish
     try d.vol.writeFile("data/a.md", "hello");
     const seen = try testing.allocator.alloc(u8, d.vol.checkBytes());
     defer testing.allocator.free(seen);
-    var check: VolumeCheck = .{ .vol = &d.vol, .seen = seen, .runs_per_step = 1 };
+    var check: VolumeCheck = .{ .vol = &d.vol, .seen = seen, .slice = .{ .sectors = 1, .runs = 1 } };
     var q: idle.Idle = .{};
     try q.add(check.init("the volume's check"));
     const now: i96 = std.time.ns_per_s;
