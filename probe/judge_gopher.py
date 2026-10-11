@@ -2007,11 +2007,12 @@ def named(answer: dict) -> dict:
     return dict(answer, body=STORED_NAME.sub(b"<NAME>", answer["body"]))
 
 
-# A picture, it read back, one sent after 100-continue, one not a picture, and
-# (not QUICK) a big picture posted + streamed back and one bigger than the heap
-# keeps. QUICK stops after the first four.
-UPLOAD_STORY_REQUESTS = 7
-UPLOAD_STORY_REQUESTS_QUICK = 4
+# The topic's first message, a picture, it read back, one sent after
+# 100-continue, one not a picture, and (not QUICK) a big picture posted +
+# streamed back and one bigger than the heap keeps. QUICK stops after the
+# first five.
+UPLOAD_STORY_REQUESTS = 8
+UPLOAD_STORY_REQUESTS_QUICK = 5
 
 
 def upload_story(port: int, session: str) -> dict:
@@ -2041,6 +2042,12 @@ def upload_story(port: int, session: str) -> dict:
 
     small = picture(64 << 10)
     out = {}
+    # **A TOPIC IS MADE BY ITS FIRST MESSAGE** (angry-gopher, metal-vmm QUEUE
+    # 156(j)): every tail but `send` is a 404 for a topic not there, an upload
+    # among them, so the pictures go to a topic a message made.
+    out["the topic's first message"] = send(
+        "POST", "/chat/c/1_2/general/send", b"markdown=pictures+follow&cid=u1",
+        "application/x-www-form-urlencoded")
     # **THE URL IS READ BEFORE THE NAME IS NORMALIZED.** Asking for
     # `<NAME>.png` is a 404 on both sides, and two 404s agree.
     stored = post("shot.png", small)
