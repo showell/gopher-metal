@@ -622,10 +622,17 @@ pub fn kmain() noreturn {
     };
     const hub = &started.hub;
     drains = .{ .gpa = hub.gpa, .limit = app.site.bodyLimit };
-    if (started.app.backfilled > 0) {
-        serial.put("  wrote a last-message record for ");
-        serial.putDec(started.app.backfilled);
-        serial.put(" chat session(s)\n");
+    {
+        var said: [1024]u8 = undefined;
+        var w: std.Io.Writer = .fixed(&said);
+        app.hosting.describeStart(started.app, &w) catch
+            serial.fail("the application's start report is past its 1 KiB buffer (app.hosting.describeStart)");
+        var lines = std.mem.splitScalar(u8, std.mem.trimEnd(u8, w.buffered(), "\n"), '\n');
+        while (lines.next()) |line| {
+            serial.put("  ");
+            serial.put(line);
+            serial.put("\n");
+        }
     }
     // **IDLE TIME** (src/idle.zig, essay idle-time-on-metal): each volume's
     // check, asked again while the machine serves, a slice per quiet moment.
