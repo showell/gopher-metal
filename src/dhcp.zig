@@ -20,8 +20,10 @@
 //! must be started first (`pit.calibrate` and `io.startClock`, or
 //! `wallclock.start`).
 //!
-//! What it does NOT do: renew, rebind, decline, or handle a NAK. A lease here
-//! is taken once and kept until the machine stops.
+//! What it does NOT do: renew, rebind, decline, or try again after a NAK: a
+//! NAK ends the exchange as `Refused` (metal-vmm QUEUE 172: it read as no
+//! reply at all, `NoOffer` or `NoAck`). A lease here is taken once and kept
+//! until the machine stops.
 
 const proto = @import("proto.zig");
 const net = @import("net.zig");
@@ -134,6 +136,17 @@ fn replyFor(payload: []const u8, xid: u32, mac: [6]u8) bool {
     return std_mem_eql(payload[28..34], &mac);
 }
 
+/// What one datagram is to an exchange waiting for a `want`: not ours (or
+/// not yet), the reply it waits for, or the server's refusal, a NAK.
+const Reply = enum { other, wanted, refused };
+
+fn replyKind(payload: []const u8, xid: u32, mac: [6]u8, want: u8) Reply {
+    if (!replyFor(payload, xid, mac)) return .other;
+    const t = messageType(payload) orelse return .other;
+    if (t == msg_nak) return .refused;
+    return if (t == want) .wanted else .other;
+}
+
 fn std_mem_eql(a: []const u8, b: []const u8) bool {
     if (a.len != b.len) return false;
     for (a, b) |x, y| if (x != y) return false;
@@ -160,7 +173,7 @@ fn jitter() i64 {
 /// Sends one message and waits for a reply of `want` type, sending it again
 /// each time a wait runs out, `attempts` times in all. Answers the payload,
 /// copied into `reply`, because the frame it arrived in goes back to the
-/// device.
+/// device; null when every wait ran out, `Refused` at a NAK.
 fn exchange(
     nic: *net.Net,
     frame: []u8,
@@ -169,7 +182,7 @@ fn exchange(
     want: u8,
     reply: []u8,
     from_mac: *[6]u8,
-) ?usize {
+) error{Refused}!?usize {
     const clock = struct {
         fn now() i96 {
             return io.awakeNs() orelse
@@ -189,10 +202,11 @@ fn exchange(
 
             const dg = proto.parseUdp(got.frame) orelse continue;
             if (dg.dst_port != port_client or dg.src_port != port_server) continue;
-            if (!replyFor(dg.payload, xid, nic.mac)) continue;
-            const t = messageType(dg.payload) orelse continue;
-            if (t == msg_nak) return null;
-            if (t != want) continue;
+            switch (replyKind(dg.payload, xid, nic.mac, want)) {
+                .other => continue,
+                .refused => return error.Refused,
+                .wanted => {},
+            }
 
             const n = @min(dg.payload.len, reply.len);
             @memcpy(reply[0..n], dg.payload[0..n]);
@@ -220,7 +234,7 @@ pub fn acquire(nic: *net.Net, frame: []u8, reply: []u8) Error!Lease {
 
     var len = proto.writeUdp(frame, nic.mac, proto.mac_broadcast, proto.ip_any, proto.ip_broadcast, port_client, port_server, at);
     var from_mac: [6]u8 = undefined;
-    const offer_len = exchange(nic, frame, len, xid, msg_offer, reply, &from_mac) orelse return Error.NoOffer;
+    const offer_len = (try exchange(nic, frame, len, xid, msg_offer, reply, &from_mac)) orelse return Error.NoOffer;
     const offer = reply[0..offer_len];
 
     var lease = Lease{
@@ -241,7 +255,7 @@ pub fn acquire(nic: *net.Net, frame: []u8, reply: []u8) Error!Lease {
     at += 1;
 
     len = proto.writeUdp(frame, nic.mac, proto.mac_broadcast, proto.ip_any, proto.ip_broadcast, port_client, port_server, at);
-    const ack_len = exchange(nic, frame, len, xid, msg_ack, reply, &from_mac) orelse return Error.NoAck;
+    const ack_len = (try exchange(nic, frame, len, xid, msg_ack, reply, &from_mac)) orelse return Error.NoAck;
     const ack = reply[0..ack_len];
 
     // The ACK is the authority, not the offer: a server may hand over
@@ -254,6 +268,26 @@ pub fn acquire(nic: *net.Net, frame: []u8, reply: []u8) Error!Lease {
     lease.server_mac = from_mac;
 
     return lease;
+}
+
+test "a NAK is the server's refusal, never a reply that did not come (metal-vmm QUEUE 172)" {
+    const mac = [6]u8{ 2, 0, 0, 0, 0, 7 };
+    var p: [300]u8 = undefined;
+    for ([_]struct { t: u8, want: u8, kind: Reply }{
+        .{ .t = msg_nak, .want = msg_offer, .kind = .refused },
+        .{ .t = msg_nak, .want = msg_ack, .kind = .refused },
+        .{ .t = msg_offer, .want = msg_offer, .kind = .wanted },
+        .{ .t = msg_ack, .want = msg_ack, .kind = .wanted },
+        .{ .t = msg_offer, .want = msg_ack, .kind = .other },
+    }) |c| {
+        var at = writeBootp(&p, 0x1234, mac, true);
+        p[0] = op_reply;
+        at = option(&p, at, opt_message_type, &.{c.t});
+        p[at] = opt_end;
+        if (replyKind(p[0 .. at + 1], 0x1234, mac, c.want) != c.kind) return error.TestUnexpectedResult;
+        // Another transaction's NAK, or another machine's, is not ours.
+        if (replyKind(p[0 .. at + 1], 0x1235, mac, c.want) != .other) return error.TestUnexpectedResult;
+    }
 }
 
 test "each wait doubles from four seconds and stops at sixty-four" {

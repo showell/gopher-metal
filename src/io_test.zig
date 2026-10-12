@@ -338,6 +338,19 @@ test "a file written over a directory is IsDir, as on Linux, and the directory s
     try t.volume.expectFile("data/chat/1_2/sessions/topic.md", "x");
 }
 
+test "an append onto a directory is IsDir, as on Linux, never NameTooLong (metal-vmm QUEUE 172)" {
+    const t = try Two.make(true);
+    defer t.deinit();
+    try cwd.writeFile(io, .{ .sub_path = "data/chat/1_2/sessions/topic.md", .data = "x" });
+    const opened = cwd.createFile(io, "data/chat/1_2/sessions", .{ .truncate = false });
+    if (opened) |f| {
+        var file = f;
+        defer file.close(io);
+        try testing.expectError(io_mod.Error.IsDir, file.writePositionalAll(io, "a line", 0));
+    } else |e| try testing.expectEqual(io_mod.Error.IsDir, e);
+    try t.volume.expectFile("data/chat/1_2/sessions/topic.md", "x");
+}
+
 // ── listings, at the sizes the application makes (QUEUE.md item 50) ──────────
 
 /// An upload's name as chat stores it: 32 hex digits and an extension.
