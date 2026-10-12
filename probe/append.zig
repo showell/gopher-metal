@@ -71,6 +71,11 @@ pub fn kmain() noreturn {
     const base = virtio.find(virtio.device_id_block) orelse
         serial.fail("no virtio-blk device on the PCI bus or in any mmio slot");
     var blk = blk_mem.bring(base) catch serial.fail("the block device would not come up");
+    // **THIS PROBE TESTS RUNS SPLIT ACROSS REQUESTS** (a FAT read in pieces,
+    // a file longer than one request): its disk's requests are held to 64 KiB,
+    // what they were before metal-vmm QUEUE 178 made them 1 MiB, so its small
+    // volume still splits them.
+    blk.most_sectors = 128;
     var vol = disk_fat.Volume.mount(&blk, &scratch, 0) catch
         serial.fail("this is not the FAT16 volume the probe expects");
     Io.mount(vol);
@@ -260,7 +265,7 @@ var fat_cache: [1024 * 1024]u8 align(4096) = undefined;
 /// the cached FAT, which must answer exactly as the one on disk did.
 fn readThroughCachedFat(vol: *disk_fat.Volume) void {
     const fat_sectors = vol.fatBytes() / disk_fat.sector_size;
-    if (fat_sectors <= metal.virtio.Block.max_sectors) {
+    if (fat_sectors <= vol.blk.most_sectors) {
         serial.put("  the FAT is only ");
         serial.putDec(fat_sectors);
         serial.put(" sectors\n");
@@ -317,7 +322,7 @@ fn readSweep(io: anytype, vol: *disk_fat.Volume) void {
     appendPattern(io, "big.txt", 0x33, 0, 100 * 1024);
 
     const Case = struct { path: []const u8, seed: u8, size: usize, min_runs: u32, min_longest: u32 };
-    const max_run = metal.virtio.Block.max_sectors / vol.sectors_per_cluster;
+    const max_run = vol.blk.most_sectors / vol.sectors_per_cluster;
     const cases = [_]Case{
         .{ .path = "frag.txt", .seed = 0x11, .size = 60000, .min_runs = 8, .min_longest = 1 },
         .{ .path = "big.txt", .seed = 0x33, .size = 100 * 1024, .min_runs = 1, .min_longest = max_run + 1 },

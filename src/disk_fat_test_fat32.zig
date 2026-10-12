@@ -435,3 +435,116 @@ test "a remove, and a tree's, that answers success left nothing behind: a read t
         }
     }
 }
+
+// ---- a run of clusters as one request, as large as the device takes (metal-vmm QUEUE 178) ----
+
+/// Two sectors a cluster, FAT16: the root is before the data, so every
+/// write into the data is a file's.
+const two_sector_clusters = Shape{ .sectors = 20_000, .sectors_per_cluster = 2 };
+
+/// What a disk is asked in the data region: requests, and the largest.
+const DataRequests = struct {
+    data_start: u64,
+    write: bool,
+    count: u32 = 0,
+    largest: u32 = 0,
+    fn each(context: *anyopaque, write: bool, lba: u64, sectors: u32) void {
+        const r: *DataRequests = @ptrCast(@alignCast(context));
+        if (write != r.write or lba < r.data_start) return;
+        r.count += 1;
+        r.largest = @max(r.largest, sectors);
+    }
+};
+
+fn watchData(d: *test_disk.Disk, r: *DataRequests) void {
+    d.blk.observe = .{ .context = r, .each = DataRequests.each };
+}
+
+test "a run of contiguous clusters is one request up to the device's most, and one cluster more is two (metal-vmm QUEUE 178)" {
+    const d = try Disk.make("runs-most", two_sector_clusters, true);
+    defer d.deinit();
+    defer d.blk.observe = null;
+    const cluster = 2 * disk_fat.sector_size;
+    var buf: [5 * cluster]u8 = undefined;
+    // A device that takes four clusters a request.
+    d.blk.most_sectors = 8;
+    for ([_]struct { clusters: usize, requests: u32 }{ .{ .clusters = 4, .requests = 1 }, .{ .clusters = 5, .requests = 2 } }) |c| {
+        var r: DataRequests = .{ .data_start = d.vol.data_start, .write = true };
+        watchData(d, &r);
+        try d.vol.writeFile("run.bin", pattern(buf[0 .. c.clusters * cluster], @intCast(c.clusters)));
+        try testing.expectEqual(c.requests, r.count);
+        try testing.expectEqual(@as(u32, 8), r.largest);
+        try d.expectFile("run.bin", buf[0 .. c.clusters * cluster]);
+        try d.vol.remove("run.bin");
+    }
+}
+
+test "the most a request carries is 1 MiB unless the device says less: a 1 MiB run is one write and one read, a cluster more is two (metal-vmm QUEUE 178)" {
+    const d = try Disk.make("runs-mib", two_sector_clusters, true);
+    defer d.deinit();
+    defer d.blk.observe = null;
+    try testing.expectEqual(@as(u32, 2048), d.blk.most_sectors);
+    const mib = 1 << 20;
+    const bytes = try testing.allocator.alloc(u8, mib + 2 * disk_fat.sector_size);
+    defer testing.allocator.free(bytes);
+    for ([_]struct { len: usize, requests: u32 }{ .{ .len = mib, .requests = 1 }, .{ .len = bytes.len, .requests = 2 } }) |c| {
+        var w: DataRequests = .{ .data_start = d.vol.data_start, .write = true };
+        watchData(d, &w);
+        try d.vol.writeFile("big.bin", pattern(bytes[0..c.len], 7));
+        try testing.expectEqual(c.requests, w.count);
+        var r: DataRequests = .{ .data_start = d.vol.data_start, .write = false };
+        watchData(d, &r);
+        const entry = try d.vol.open("big.bin");
+        const back = try testing.allocator.alloc(u8, c.len);
+        defer testing.allocator.free(back);
+        try testing.expectEqual(c.len, try d.vol.readFile(entry, back));
+        try testing.expectEqual(c.requests, r.count);
+        try testing.expectEqualSlices(u8, bytes[0..c.len], back);
+        try d.vol.remove("big.bin");
+    }
+}
+
+test "a run that ends at the volume's last cluster is written and read whole (metal-vmm QUEUE 178)" {
+    const d = try Disk.make("runs-end", two_sector_clusters, true);
+    defer d.deinit();
+    const cluster: u64 = 2 * disk_fat.sector_size;
+    // A bulk file up to the reserve (which a bulk write may not take), then
+    // small files through it: the last of them runs to the volume's end.
+    const bulk = (try d.vol.space()).free - @as(u64, d.vol.reserve_clusters) * cluster;
+    const bytes = try testing.allocator.alloc(u8, disk_fat.Volume.small_bytes);
+    defer testing.allocator.free(bytes);
+    const big = try testing.allocator.alloc(u8, @intCast(bulk));
+    defer testing.allocator.free(big);
+    try d.vol.writeFile("bulk.bin", pattern(big, 1));
+    var name_buf: [16]u8 = undefined;
+    var k: u8 = 0;
+    var last: []const u8 = "";
+    var last_len: usize = 0;
+    while ((try d.vol.space()).free > 0) : (k += 1) {
+        last_len = @intCast(@min((try d.vol.space()).free, bytes.len));
+        last = try std.fmt.bufPrint(&name_buf, "small{d}.bin", .{k});
+        try d.vol.writeFile(last, pattern(bytes[0..last_len], k));
+    }
+    try testing.expect(k > 1);
+    try d.expectFile(last, pattern(bytes[0..last_len], k - 1));
+    try d.expectFile("bulk.bin", big);
+}
+
+test "a device whose request is smaller than a cluster is refused at mount, never a cluster split (metal-vmm QUEUE 178)" {
+    const d = try Disk.make("runs-small-device", two_sector_clusters, false);
+    defer d.deinit();
+    d.blk.most_sectors = 1;
+    try testing.expectError(disk_fat.Error.RequestSmallerThanCluster, d.mount(false));
+    // One cluster a request is enough.
+    d.blk.most_sectors = 2;
+    try d.mount(false);
+}
+
+test "a request's most is ours, 1 MiB, or less where the device says less, never more (metal-vmm QUEUE 178)" {
+    try testing.expectEqual(@as(u32, 2048), virtio.Block.mostSectors(null));
+    try testing.expectEqual(@as(u32, 2048), virtio.Block.mostSectors(1 << 20));
+    try testing.expectEqual(@as(u32, 2048), virtio.Block.mostSectors((1 << 20) + 512));
+    try testing.expectEqual(@as(u32, 2047), virtio.Block.mostSectors((1 << 20) - 512));
+    try testing.expectEqual(@as(u32, 1), virtio.Block.mostSectors(1023));
+    try testing.expectEqual(@as(u32, 0), virtio.Block.mostSectors(511));
+}

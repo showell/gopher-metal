@@ -615,8 +615,9 @@ pub const Tail = enum { kept, zeros };
 
 /// **A FILE IS WRITTEN AS RUNS**, as it is read (`readAt`): whole sectors
 /// go straight from `bytes`, one request per run of consecutive clusters
-/// (at most `max_sectors`); only a sector the write starts or ends inside
-/// goes through `scratch`.
+/// (at most the disk's `most_sectors`: 1 MiB unless it says less, metal-vmm
+/// QUEUE 178); only a sector the write starts or ends inside goes through
+/// `scratch`.
 pub fn writeRuns(self: *Volume, first: Cluster, offset: u32, bytes: []const u8, tail: Tail) Error!void {
     if (bytes.len == 0) return;
     const cluster_bytes: u32 = self.sectors_per_cluster * sector_size;
@@ -642,7 +643,8 @@ pub fn writeRuns(self: *Volume, first: Cluster, offset: u32, bytes: []const u8, 
     var sector_in_cluster: u32 = (offset % cluster_bytes) / sector_size;
     var skip_in_sector: u32 = (offset % cluster_bytes) % sector_size;
     var at: usize = 0;
-    const max_run = @max(1, virtio.Block.max_sectors / self.sectors_per_cluster);
+    // At least one: the mount refused a disk that takes less than a cluster.
+    const max_run = self.blk.most_sectors / self.sectors_per_cluster;
     while (at < bytes.len) {
         var run: u32 = 1;
         var last = cluster;
@@ -881,7 +883,8 @@ pub fn readAt(self: *Volume, entry: Entry, offset: u32, out: []u8) Error!usize {
     var sector_in_cluster: u32 = (offset % cluster_bytes) / sector_size;
     var skip_in_sector: u32 = (offset % cluster_bytes) % sector_size;
     var got: usize = 0;
-    const max_run = @max(1, virtio.Block.max_sectors / self.sectors_per_cluster);
+    // At least one: the mount refused a disk that takes less than a cluster.
+    const max_run = self.blk.most_sectors / self.sectors_per_cluster;
     while (got < want) {
         var run: u32 = 1;
         var last = cluster;

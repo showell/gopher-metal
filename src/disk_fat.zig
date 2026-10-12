@@ -112,6 +112,10 @@ pub const Error = error{
     /// A new name that is another entry's 8.3 alias: a second entry would
     /// share it, which fsck calls a duplicate.
     NameTaken,
+    /// A disk whose most in one request is less than a cluster (metal-vmm
+    /// QUEUE 178): a cluster is never split across requests, so such a disk
+    /// is refused at mount.
+    RequestSmallerThanCluster,
 };
 
 /// **WHICH FAT A VOLUME IS**, decided as the specification decides it: by
@@ -521,6 +525,12 @@ pub const Volume = struct {
             props.reachable(@src(), "fat: a mount refuses a cluster size no volume has", null);
             return Error.BadBootSector;
         }
+        // **A CLUSTER IS ONE REQUEST AT LEAST** (178): the writes and reads
+        // go a run of clusters to a request, never part of one.
+        if (blk.most_sectors < sectors_per_cluster) {
+            props.reachable(@src(), "fat: a mount refuses a disk whose requests are smaller than a cluster", null);
+            return Error.RequestSmallerThanCluster;
+        }
         if (reserved == 0 or num_fats == 0 or num_fats > 2) {
             props.reachable(@src(), "fat: a mount refuses no reserved sectors, or a count of FATs it does not keep", null);
             return Error.BadBootSector;
@@ -742,7 +752,7 @@ pub const Volume = struct {
     pub fn readSectors(self: *Volume, lba: u32, count: u32, into: [*]u8) Error!void {
         var done: u32 = 0;
         while (done < count) {
-            const n = @min(count - done, virtio.Block.max_sectors);
+            const n = @min(count - done, self.blk.most_sectors);
             const status = self.blk.readMany(self.start_lba + lba + done, @intFromPtr(into + done * sector_size), n);
             if (status != virtio.blk_s_ok) {
                 props.reachable(@src(), "fat: a run of sectors fails to read", null);
@@ -820,7 +830,7 @@ pub const Volume = struct {
     /// `writeRuns`, the only bulk writer, caps a run at one request, so
     /// asking for more is an error, not a loop no test could reach.
     pub fn writeSectors(self: *Volume, lba: u32, count: u32, from: [*]const u8) Error!void {
-        if (count > virtio.Block.max_sectors) {
+        if (count > self.blk.most_sectors) {
             props.@"unreachable"(@src(), "fat: a write of more sectors than one request", null);
             return Error.TooBig;
         }

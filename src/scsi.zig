@@ -362,6 +362,13 @@ pub fn bring(device: virtio.Device, mem: *virtio.BlockMemory) Error!virtio.Block
         .status = &mem.status,
         .capacity = 0,
         .scsi = &mem.scsi,
+        // virtio 1.2 §5.6.4: max_sectors le32 at 8, the most a command may
+        // carry; obeyed where it is less than ours (metal-vmm QUEUE 178). A
+        // controller that says 0 has said nothing.
+        .most_sectors = virtio.Block.mostSectors(switch (virtio.configRead32(device, 8)) {
+            0 => null,
+            else => |n| @as(u64, n) * 512,
+        }),
     };
 
     // virtio 1.2 §5.6.4: max_channel le16 at 28, max_target le16 at 30, max_lun le32 at 32.

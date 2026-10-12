@@ -1416,7 +1416,9 @@ fn dataVolume() ?virtio.Block {
         serial.putDec(at.lun);
         serial.put(", ");
         serial.putDec(b.capacity / 2048);
-        serial.put(" MB\n");
+        serial.put(" MB, requests up to ");
+        serial.putDec(b.most_sectors / 2);
+        serial.put(" KiB\n");
         if (b.cache_on_at_bringup) switch (metal.scsi_mode.report(b.write_cache, true)) {
             .turned_off => serial.put("  the volume's write cache is turned off: every write is on the disk when answered\n"),
             .would_not_turn_off => serial.put("  the volume's write cache would not turn off: a power cut can leave its filesystem damaged\n"),
@@ -1503,7 +1505,7 @@ fn mountFat(blk: *virtio.Block, scratch: *[disk_fat.sector_size]u8, what: []cons
     };
     // Lookups read a directory up to a cluster per request (disk_fat's
     // `dir_burst`), within the most one request carries.
-    const burst_sectors = @min(vol.sectors_per_cluster, virtio.Block.max_sectors);
+    const burst_sectors = @min(vol.sectors_per_cluster, vol.blk.most_sectors);
     vol.dir_burst = pages.allocator.alloc(u8, burst_sectors * disk_fat.sector_size) catch
         serial.fail("no memory to read directories in bursts");
     // Directory sectors, once read, are held (disk_fat's `dirs`): 8 MiB, sixteen
@@ -1989,6 +1991,12 @@ fn metalFacts(io: Io, alloc: std.mem.Allocator) anyerror![]const webbox.host_fac
     }
     const work = diskWork();
     try add(&facts, alloc, "disk requests", "{d}, busy {d} ms in all", .{ work.requests, @divTrunc(Io.ticksToNs(work.ticks), std.time.ns_per_ms) });
+    // **THE MOST ONE REQUEST CARRIES**, each disk's (metal-vmm QUEUE 178): 1
+    // MiB unless the device said less, which it is obeyed in.
+    try add(&facts, alloc, "disk request most", "boot {d} KiB, volume {d} KiB", .{
+        if (disks[0]) |d| d.most_sectors / 2 else 0,
+        if (disks[1]) |d| d.most_sectors / 2 else 0,
+    });
     try add(&facts, alloc, "NMIs", "{d}", .{interrupts.nmis});
     if (turning) |t| try add(&facts, alloc, "frames refused (too long to send)", "{d}", .{t.wire.nic.oversized});
     return facts.items;

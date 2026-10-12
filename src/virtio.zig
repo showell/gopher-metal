@@ -128,6 +128,9 @@ const status_failed: u32 = 128;
 /// VIRTIO_F_VERSION_1: the driver speaks the modern interface. Without it a
 /// modern device refuses to start.
 const feature_version_1: u6 = 32;
+/// virtio-blk's VIRTIO_BLK_F_SIZE_MAX (§5.2.3): `size_max`, at config 8, is
+/// the most bytes in one segment.
+const blk_f_size_max: u32 = 1 << 1;
 
 pub const device_id_block: u32 = 2;
 pub const device_id_net: u32 = 1;
@@ -551,6 +554,12 @@ pub fn Queue(comptime size: u16) type {
 /// Answers the status word so far; the caller adds its queues, then calls
 /// `driverOk`.
 pub fn negotiate(d: Device, want_low: u32) Error!u32 {
+    return (try negotiateWith(d, want_low, 0)).st;
+}
+
+/// `negotiate`, also taking the features of `may_low` the device offers;
+/// answers the status word and the low features taken.
+pub fn negotiateWith(d: Device, want_low: u32, may_low: u32) Error!struct { st: u32, low: u32 } {
     setStatus(d, 0); // reset
     // **A RESET IS NOT DONE UNTIL THE DEVICE SAYS SO** on pci (§4.1.4.3.1):
     // the status reads back 0 once it is. mmio's reset is immediate.
@@ -575,8 +584,9 @@ pub fn negotiate(d: Device, want_low: u32) Error!u32 {
         return Error.DeviceRefused;
     }
 
+    const taken = want_low | (lo & may_low);
     driverFeatures(d, 1, @as(u32, 1) << (feature_version_1 - 32));
-    driverFeatures(d, 0, want_low);
+    driverFeatures(d, 0, taken);
 
     st |= status_features_ok;
     setStatus(d, st);
@@ -585,7 +595,7 @@ pub fn negotiate(d: Device, want_low: u32) Error!u32 {
         setStatus(d, status_failed);
         return Error.DeviceRefused;
     }
-    return st;
+    return .{ .st = st, .low = taken };
 }
 
 pub fn driverOk(d: Device, st: u32) Error!void {
@@ -692,6 +702,12 @@ pub const Block = struct {
     status: *volatile u8,
     /// The device's size in 512-byte sectors, from its config space.
     capacity: u64,
+    /// **THE MOST SECTORS ONE REQUEST ASKS FOR, ON THIS DISK** (metal-vmm
+    /// QUEUE 178): `most_sectors_ours`, or less where the device says less
+    /// (virtio-blk's `size_max`, virtio-scsi's `max_sectors`), obeyed. A
+    /// filesystem asks for no more, and refuses at mount a disk that takes
+    /// less than a cluster (`disk_fat`).
+    most_sectors: u32 = most_sectors_ours,
 
     /// **WHAT THE DEVICE COST.** Every request counted, and the timestamp-counter
     /// ticks spent between offering it and seeing it done — so a host can say
@@ -897,18 +913,31 @@ pub const Block = struct {
     /// up; it must be identity-mapped, since what goes in a descriptor is a
     /// PHYSICAL address.
     pub fn init(device: Device, mem: *BlockMemory) Error!Block {
-        const st = try negotiate(device, 0);
+        // VIRTIO_BLK_F_SIZE_MAX taken when offered: it changes nothing of the
+        // protocol, and says the most one segment may carry (178).
+        const got = try negotiateWith(device, 0, blk_f_size_max);
         const q = try Q.setup(device, 0, &mem.ring);
-        try driverOk(device, st);
+        try driverOk(device, got.st);
+        const size_max: ?u64 = if (got.low & blk_f_size_max != 0) configRead32(device, 8) else null;
         return .{
             .device = device,
             .q = q,
             .header = &mem.header,
             .status = &mem.status,
             .capacity = configRead64(device, 0),
-            // No features negotiated, so no VIRTIO_BLK_F_FLUSH: write-through.
+            .most_sectors = mostSectors(size_max),
+            // No VIRTIO_BLK_F_FLUSH negotiated: write-through.
             .write_cache = false,
         };
+    }
+
+    /// The most sectors a request asks for, given what a device said of the
+    /// most bytes one segment carries (null: it did not say): ours, or its
+    /// own if less. A device that takes less than a sector answers 0, which
+    /// every filesystem refuses at mount.
+    pub fn mostSectors(said_bytes: ?u64) u32 {
+        const said = said_bytes orelse return most_sectors_ours;
+        return @intCast(@min(most_sectors_ours, said / 512));
     }
 
     /// One request, start to finish, polled to completion. The chain is the
@@ -966,12 +995,13 @@ pub const Block = struct {
         return status;
     }
 
-    /// The most sectors one request asks for. virtio-blk lets a device state
-    /// its own limit only through features this driver does not negotiate, so
-    /// the number is ours: 64 KB, well inside what any device accepts in a
-    /// single segment, and enough that a file's run of clusters is one request
-    /// rather than one per sector.
-    pub const max_sectors: u32 = 128;
+    /// **THE MOST ONE REQUEST ASKS FOR, OURS: 1 MiB** (metal-vmm QUEUE 178).
+    /// It was 64 KiB, which made a 100 MB upload's write 2,017 requests in
+    /// its turn (~4-8 s on prod's network volume at ~2 ms a request). A run
+    /// of contiguous clusters goes as one request up to this, in one data
+    /// segment (so a device's `seg_max`, at least 1, is always met); a device
+    /// that says less is obeyed (`most_sectors`).
+    pub const most_sectors_ours: u32 = 2048;
 
     /// `count` sectors from `lba` into the `count` × 512 bytes at `addr`, as ONE
     /// request. **This is what makes reading a file cost a request per run of
@@ -979,7 +1009,7 @@ pub const Block = struct {
     /// transcript on every chat send, and at a sector per request that was four
     /// hundred round trips through the emulator.
     pub fn readMany(self: *Block, lba: u64, addr: u64, count: u32) u8 {
-        if (count == 0 or count > max_sectors) return blk_s_unsupp;
+        if (count == 0 or count > self.most_sectors) return blk_s_unsupp;
         return self.readTried(lba, addr, count * 512);
     }
 
@@ -992,7 +1022,7 @@ pub const Block = struct {
     /// ONE request — what makes a 10 MB upload about 160 requests instead of
     /// twenty thousand.
     pub fn writeMany(self: *Block, lba: u64, addr: u64, count: u32) u8 {
-        if (count == 0 or count > max_sectors) return blk_s_unsupp;
+        if (count == 0 or count > self.most_sectors) return blk_s_unsupp;
         return self.transfer(blk_t_out, lba, addr, count * 512);
     }
 
