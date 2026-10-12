@@ -281,7 +281,7 @@ pub const DirCache = struct {
     }
 
     /// A write to `n` sectors from `lba` failed: what they hold is unknown.
-    fn drop(c: *DirCache, lba: u32, n: u32) void {
+    pub fn drop(c: *DirCache, lba: u32, n: u32) void {
         var k: u32 = 0;
         while (k < n) : (k += 1) {
             const i = c.slot(lba + k);

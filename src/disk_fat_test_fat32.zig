@@ -900,3 +900,54 @@ test "a virtio-blk request that would need more segments than its chain holds is
     try testing.expectEqual(@as(u32, 2), n(4096, 4095));
     try testing.expect(n(512, 85) > virtio.Block.most_segments);
 }
+
+// ---- an overwrite reads its commit back (metal-vmm QUEUE 188.1) ----
+
+/// Request numbers of writes to one sector.
+const SectorWrites = struct {
+    blk: *virtio.Block,
+    lba: u64,
+    at: ?u64 = null,
+    fn each(context: *anyopaque, write: bool, lba: u64, _: u32) void {
+        const r: *SectorWrites = @ptrCast(@alignCast(context));
+        if (write and lba == r.lba and r.at == null) r.at = r.blk.requests - 1;
+    }
+};
+
+test "an overwrite whose commit lands nothing keeps the old file whole, never broken; read back past the directory cache (metal-vmm QUEUE 188.1)" {
+    for (configs) |cfg| {
+        const old = try testing.allocator.alloc(u8, 20 * 1024);
+        defer testing.allocator.free(old);
+        const new = try testing.allocator.alloc(u8, 30 * 1024);
+        defer testing.allocator.free(new);
+        _ = pattern(old, 1);
+        _ = pattern(new, 2);
+        // The commit's request, found on a disk made the same.
+        var commit_at: u64 = undefined;
+        {
+            const d = try Disk.make("commit-probe", cfg.shape, cfg.cached);
+            defer d.deinit();
+            defer d.blk.observe = null;
+            try d.vol.writeFile("f.bin", old);
+            var w: SectorWrites = .{ .blk = &d.blk, .lba = (try d.vol.open("f.bin")).lba };
+            d.blk.observe = .{ .context = &w, .each = SectorWrites.each };
+            try d.vol.writeFile("f.bin", new);
+            try d.expectFile("f.bin", new);
+            commit_at = w.at.?;
+        }
+        const d = try Disk.make("damaged-commit-lost", cfg.shape, cfg.cached);
+        defer d.deinit();
+        try d.vol.writeFile("f.bin", old);
+        _ = try d.vol.open("f.bin"); // the probe's one read, so the numbers agree
+        d.blk.fault = .{ .at = commit_at, .kind = .lands_nothing };
+        try testing.expectError(disk_fat.Error.WriteFailed, d.vol.writeFile("f.bin", new));
+        d.blk.fault = null;
+        // This boot reads the old file, and so does the next.
+        try d.expectFile("f.bin", old);
+        try d.mount(cfg.cached);
+        try d.expectFile("f.bin", old);
+        const r = try d.check();
+        try r.expect(&.{});
+        try d.expectKept();
+    }
+}
