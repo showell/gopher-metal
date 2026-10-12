@@ -109,6 +109,31 @@ pub fn cacheFat(self: *Volume, buf: []u8) Error!u32 {
 /// can leave hundreds of sectors apart after one lie or one cut, and taking
 /// the first copy then lost a file the second held whole.
 pub fn cacheFatChecked(self: *Volume, buf: []u8, seen: ?[]u8) Error!Mirrors {
+    // Allowed to write its own repair: the refusal is the weighing's answer.
+    self.writes_refused = false;
+    const m = try cacheFatCheckedInner(self, buf, seen);
+    self.writes_refused = m.found == .unweighed;
+    if (self.writes_refused) props.reachable(@src(), "fat: a mount whose weighing failed refuses writes", null);
+    return m;
+}
+
+/// **THE WEIGHING TRIED AGAIN** (metal-vmm QUEUE 188.2), on the held FAT's
+/// buffer, as the mount weighs: the first copy read afresh, the copies
+/// compared and weighed. Nothing has been written since the mount refused,
+/// so the disk is as it was. Writes are allowed again when it succeeds.
+pub fn reweigh(self: *Volume, seen: []u8) Error!Mirrors {
+    const fat = self.fat orelse return .{};
+    self.reweighs +%= 1;
+    const m = self.cacheFatChecked(fat, seen) catch |e| {
+        self.reweighs_failed +%= 1;
+        self.writes_refused = true;
+        return e;
+    };
+    if (m.found == .unweighed) self.reweighs_failed +%= 1;
+    return m;
+}
+
+fn cacheFatCheckedInner(self: *Volume, buf: []u8, seen: ?[]u8) Error!Mirrors {
     if (buf.len < self.fatBytes()) {
         props.reachable(@src(), "fat: a FAT cache buffer too small for the FAT is refused", null);
         return Error.TooBig;

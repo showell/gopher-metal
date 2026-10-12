@@ -951,3 +951,78 @@ test "an overwrite whose commit lands nothing keeps the old file whole, never br
         try d.expectKept();
     }
 }
+
+// ---- an unweighed mount refuses writes (metal-vmm QUEUE 188.2) ----
+
+/// The request number of the first read in [lo, hi), from `from` on.
+const CopyReads = struct {
+    blk: *virtio.Block,
+    lo: u64,
+    hi: u64,
+    from: u64,
+    at: ?u64 = null,
+    fn each(context: *anyopaque, write: bool, lba: u64, _: u32) void {
+        const r: *CopyReads = @ptrCast(@alignCast(context));
+        if (!write and lba >= r.lo and lba < r.hi and r.at == null and r.blk.requests - 1 >= r.from) r.at = r.blk.requests - 1;
+    }
+};
+
+test "a mount whose weighing of apart copies fails refuses every write, writes nothing, and is writable again once a weighing succeeds (metal-vmm QUEUE 188.2)" {
+    // Whole (an upload's run, 320 sectors apart) and one sector apart (178's form).
+    for ([_]u32{ upload_clusters, 300 }) |clusters| {
+        const bytes = try testing.allocator.alloc(u8, @as(usize, clusters) * disk_fat.sector_size);
+        defer testing.allocator.free(bytes);
+        _ = pattern(bytes, 0x21);
+        // The lie, and the mount's first read of the second copy, found on
+        // a disk made the same.
+        var lie_at: u64 = undefined;
+        var weigh_read_at: u64 = undefined;
+        {
+            const d = try Disk.make("refuse-probe", test_disk.small32, true);
+            defer d.deinit();
+            defer d.blk.observe = null;
+            var w = FatWrites.watch(d);
+            w.on(d);
+            try d.vol.writeFile("up.bin", bytes);
+            lie_at = w.first_at.?;
+        }
+        {
+            const d = try Disk.make("refuse-probe2", test_disk.small32, true);
+            defer d.deinit();
+            defer d.blk.observe = null;
+            d.blk.fault = .{ .at = lie_at, .kind = .lands_nothing };
+            try d.vol.writeFile("up.bin", bytes);
+            d.blk.fault = null;
+            // The weighing's check: its first read of a directory, in the data.
+            var r: CopyReads = .{ .blk = &d.blk, .lo = d.vol.data_start, .hi = std.math.maxInt(u64), .from = d.blk.requests };
+            d.blk.observe = .{ .context = &r, .each = CopyReads.each };
+            try d.mount(true);
+            weigh_read_at = r.at.?;
+        }
+        const d = try Disk.make("damaged-refuse", test_disk.small32, true);
+        defer d.deinit();
+        d.blk.fault = .{ .at = lie_at, .kind = .lands_nothing };
+        try d.vol.writeFile("up.bin", bytes);
+        // The mount's weighing fails part way: unweighed.
+        d.blk.fault = .{ .at = weigh_read_at, .kind = .fails };
+        try d.mount(true);
+        d.blk.fault = null;
+        try testing.expect(d.vol.writes_refused);
+        // Every write refused, and nothing written.
+        const writes = d.blk.writes;
+        try testing.expectError(disk_fat.Error.WritesRefused, d.vol.writeFile("next.bin", bytes[0..4096]));
+        try testing.expectError(disk_fat.Error.WritesRefused, d.vol.remove("up.bin"));
+        try testing.expectError(disk_fat.Error.WritesRefused, d.vol.rename("up.bin", "moved.bin"));
+        try testing.expectError(disk_fat.Error.WritesRefused, d.vol.makePath("dir"));
+        try testing.expectError(disk_fat.Error.WritesRefused, d.vol.writeInto("up.bin", 0, "x"));
+        try testing.expectEqual(writes, d.blk.writes);
+        // Weighed again: the second copy is the FAT, the file whole, and
+        // the volume writable.
+        const m = try d.vol.reweigh(d.check_room.?);
+        try testing.expectEqual(.weighed, m.found);
+        try testing.expect(!d.vol.writes_refused);
+        try d.expectFile("up.bin", bytes);
+        try d.vol.writeFile("next.bin", bytes[0..4096]);
+        try d.expectFile("next.bin", bytes[0..4096]);
+    }
+}
