@@ -2242,12 +2242,12 @@ def login_throttle_failures(elf, linux_bin, content, pristine, work, mnt, report
         return json.loads(body).get("login_throttle", {}).get("refused")
 
     def drive_create_and_signin(host, port):
-        # Account creation (its own table): five made, the sixth refused.
-        for i in range(5):  # login_throttle.create_max
+        # Account creation (its own table): two made, the third refused.
+        for i in range(2):  # login_throttle.create_max
             reg = f"name=throttlemaker{i}&password=correct+horse+battery+staple&action=register&next=%2F"
             expect(post(port, "/login/full", reg) != 429, f"{host}: account creation #{i + 1} was refused early")
-        reg6 = "name=throttlemaker5&password=correct+horse+battery+staple&action=register&next=%2F"
-        expect(post(port, "/login/full", reg6) == 429, f"{host}: the 6th account creation was not refused 429")
+        reg3 = "name=throttlemaker2&password=correct+horse+battery+staple&action=register&next=%2F"
+        expect(post(port, "/login/full", reg3) == 429, f"{host}: the 3rd account creation was not refused 429")
         # Sign-in (the per-address fail bound): untouched by the creations above.
         for i in range(10):  # login_throttle.addr_fails
             st = post(port, "/login/full", wrong)
