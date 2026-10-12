@@ -330,6 +330,30 @@ test "rename replaces a file on the volume, as std.Io spells it, and refuses wha
     try t.volume.expectFile("data/chat/1_2/sessions/topic.count", "5\n");
 }
 
+test "an exclusive write makes a file that is absent, and refuses one that is there, leaving it as it was" {
+    const t = try Two.make(true);
+    defer t.deinit();
+    try cwd.writeFile(io, .{ .sub_path = "auth/~0a1b2c3d.new", .data = "first", .flags = .{ .exclusive = true } });
+    try t.volume.expectFile("auth/~0a1b2c3d.new", "first");
+    try testing.expectError(io_mod.Error.PathAlreadyExists, cwd.writeFile(io, .{ .sub_path = "auth/~0a1b2c3d.new", .data = "second", .flags = .{ .exclusive = true } }));
+    try t.volume.expectFile("auth/~0a1b2c3d.new", "first");
+}
+
+test "renamePreserve moves a file to a name that is absent, and refuses one that is there, both left as they were" {
+    const t = try Two.make(true);
+    defer t.deinit();
+    try cwd.writeFile(io, .{ .sub_path = "auth/~0a1b2c3d.new", .data = "made" });
+    try cwd.renamePreserve("auth/~0a1b2c3d.new", cwd, "auth/_session_secret", io);
+    try t.volume.expectFile("auth/_session_secret", "made");
+    try expectAbsent(t.volume, "auth/~0a1b2c3d.new");
+
+    try cwd.writeFile(io, .{ .sub_path = "auth/~0e0f1011.new", .data = "a second site's" });
+    try testing.expectError(io_mod.Error.PathAlreadyExists, cwd.renamePreserve("auth/~0e0f1011.new", cwd, "auth/_session_secret", io));
+    try t.volume.expectFile("auth/_session_secret", "made");
+    try t.volume.expectFile("auth/~0e0f1011.new", "a second site's");
+    try testing.expectError(io_mod.Error.FileNotFound, cwd.renamePreserve("auth/nothing", cwd, "auth/x", io));
+}
+
 test "a file written over a directory is IsDir, as on Linux, and the directory stays" {
     const t = try Two.make(true);
     defer t.deinit();

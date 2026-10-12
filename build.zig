@@ -194,41 +194,48 @@ pub fn build(b: *std.Build) void {
         .red_zone = false,
         .imports = &.{.{ .name = "host_io", .module = host_io }},
     });
-    const app = b.createModule(.{
-        .root_source_file = .{ .cwd_relative = b.fmt("{s}/router.zig", .{gopher_src}) },
-        .red_zone = false,
-        .imports = &.{
-            .{ .name = "host_io", .module = host_io },
-            .{ .name = "webbox", .module = webbox },
-            .{ .name = "build_options", .module = build_opts.createModule() },
-        },
-    });
-    // Every asset the application embeds, from its own table
-    // (zig-server/assets.zon's `.embedded`, which its build.zig reads too).
-    // A page embeds these by name, and a name that no build graph declared is
-    // a compile error with a confusing message.
-    for (servedBy(b, gopher_root).embedded) |a| {
-        // Their paths are relative to zig-server/, which is one level in.
-        app.addAnonymousImport(a.name, .{
-            .root_source_file = .{ .cwd_relative = b.fmt("{s}/zig-server/{s}", .{ gopher_root, a.path }) },
-        });
-    }
+    // **THE APPLICATION, ANY APPLICATION** (Phase B step 4): an application
+    // is its root (exporting `site` and `hosting`) and its assets.zon; the
+    // kernel around it is probe/gopher.zig for every one. angry-gopher's chat
+    // is the first, Dog Park the second.
+    const gopher = addAppKernel(b, .{
+        .name = "gopher.elf",
+        .root = b.fmt("{s}/router.zig", .{gopher_src}),
+        .served = servedBy(b, b.fmt("{s}/zig-server/assets.zon", .{gopher_root})),
+        // assets.zon's embedded paths are relative to zig-server/.
+        .embed_base = b.fmt("{s}/zig-server", .{gopher_root}),
+        .imports = &.{.{ .name = "build_options", .module = build_opts.createModule() }},
+    }, .{ .metal = metal, .host_io = host_io, .webbox = webbox, .gm_build = gm_opts.createModule(), .optimize = optimize });
+    const app = gopher.root_module.import_table.get("app").?;
     const gopher_imports = [_]std.Build.Module.Import{
         .{ .name = "metal", .module = metal },
         .{ .name = "app", .module = app },
         .{ .name = "webbox", .module = webbox },
         .{ .name = "gm_build", .module = gm_opts.createModule() },
     };
-    const gopher = b.addExecutable(.{ .name = "gopher.elf", .root_module = kernelModule(b, b.path("probe/gopher.zig"), optimize, &gopher_imports) });
-    // Zig's own x86 backend, which Debug would otherwise pick, cannot yet
-    // assemble this kernel's AT&T or its soft-float.
-    gopher.use_llvm = true;
-    gopher.setLinkerScript(b.path("probe/link.ld"));
-    gopher.entry = .{ .symbol_name = "_start" };
     const gopher_copy = b.addUpdateSourceFiles();
     gopher_copy.addCopyFileToSource(gopher.getEmittedBin(), "probe/gopher.elf");
     const gopher_step = b.step("gopher", "the real server, compiled from angry-gopher's checkout as it is now");
     gopher_step.dependOn(&gopher_copy.step);
+
+    // **DOG PARK ON METAL** (Phase B step 4): the second application, its play
+    // server (src/play/hosted.zig) on the same kernel and the same webbox.
+    // -Ddogpark-root=<dir> names another checkout.
+    const dogpark_root = b.option([]const u8, "dogpark-root", "the dog-park checkout") orelse
+        b.pathFromRoot("../dog-park");
+    const dogpark_step = b.step("dogpark", "Dog Park's play server as a kernel, from its checkout as it is now");
+    if (dirExists(b, dogpark_root)) {
+        const dogpark = addAppKernel(b, .{
+            .name = "dogpark.elf",
+            .root = b.fmt("{s}/src/play/hosted.zig", .{dogpark_root}),
+            .served = servedBy(b, b.fmt("{s}/assets.zon", .{dogpark_root})),
+            .embed_base = dogpark_root,
+            .imports = &.{},
+        }, .{ .metal = metal, .host_io = host_io, .webbox = webbox, .gm_build = gm_opts.createModule(), .optimize = optimize });
+        const dogpark_copy = b.addUpdateSourceFiles();
+        dogpark_copy.addCopyFileToSource(dogpark.getEmittedBin(), "probe/dogpark.elf");
+        dogpark_step.dependOn(&dogpark_copy.step);
+    } else dogpark_step.dependOn(&b.addFail(b.fmt("dogpark: NOT built: no dog-park checkout at {s} (-Ddogpark-root=<dir>)", .{dogpark_root})).step);
 
     // **EVERY KERNEL TYPE-CHECKED, ON EVERY `zig build test`** (metal-vmm
     // B34): a field renamed in src/ broke gopher.elf (b4463a9) and native
@@ -724,6 +731,72 @@ fn wanted(test_file: ?[]const u8, path: []const u8) bool {
 
 /// `git rev-parse --short HEAD` in `dir`, with `+dirty` when its tree has
 /// uncommitted changes; `unknown` when git cannot say.
+/// One application, as `addAppKernel` takes it.
+const AppKernel = struct {
+    /// The kernel's file name in probe/.
+    name: []const u8,
+    /// The application's root: exports `site` and `hosting`.
+    root: []const u8,
+    /// Its assets.zon, read (`servedBy`).
+    served: Served,
+    /// The directory its `.embedded` paths are relative to.
+    embed_base: []const u8,
+    /// What else its root imports that only its own build supplies.
+    imports: []const std.Build.Module.Import,
+};
+
+/// What every application's kernel shares.
+const KernelParts = struct {
+    metal: *std.Build.Module,
+    host_io: *std.Build.Module,
+    webbox: *std.Build.Module,
+    gm_build: *std.Build.Module,
+    optimize: std.builtin.OptimizeMode,
+};
+
+/// **ANY APPLICATION, AS A KERNEL** (Phase B step 4): its root as the `app`
+/// module (with `host_io`, `webbox`, and what `imports` adds), each of its
+/// embedded assets by name, and probe/gopher.zig around it. The same
+/// webbox and host_io for every application: one library, one machine.
+fn addAppKernel(b: *std.Build, a: AppKernel, k: KernelParts) *std.Build.Step.Compile {
+    var imports: std.ArrayList(std.Build.Module.Import) = .empty;
+    imports.appendSlice(b.allocator, &.{
+        .{ .name = "host_io", .module = k.host_io },
+        .{ .name = "webbox", .module = k.webbox },
+    }) catch @panic("out of memory");
+    imports.appendSlice(b.allocator, a.imports) catch @panic("out of memory");
+    const app = b.createModule(.{
+        .root_source_file = .{ .cwd_relative = a.root },
+        .red_zone = false,
+        .imports = imports.items,
+    });
+    // A page embeds these by name, and a name that no build graph declared is
+    // a compile error with a confusing message.
+    for (a.served.embedded) |e| {
+        app.addAnonymousImport(e.name, .{
+            .root_source_file = .{ .cwd_relative = b.fmt("{s}/{s}", .{ a.embed_base, e.path }) },
+        });
+    }
+    const exe = b.addExecutable(.{ .name = a.name, .root_module = kernelModule(b, b.path("probe/gopher.zig"), k.optimize, &.{
+        .{ .name = "metal", .module = k.metal },
+        .{ .name = "app", .module = app },
+        .{ .name = "webbox", .module = k.webbox },
+        .{ .name = "gm_build", .module = k.gm_build },
+    }) });
+    // Zig's own x86 backend, which Debug would otherwise pick, cannot yet
+    // assemble this kernel's AT&T or its soft-float.
+    exe.use_llvm = true;
+    exe.setLinkerScript(b.path("probe/link.ld"));
+    exe.entry = .{ .symbol_name = "_start" };
+    return exe;
+}
+
+fn dirExists(b: *std.Build, path: []const u8) bool {
+    var dir = std.Io.Dir.cwd().openDir(b.graph.io, path, .{}) catch return false;
+    dir.close(b.graph.io);
+    return true;
+}
+
 /// **WHAT AN APPLICATION SERVES BESIDES ITS CODE** (Phase B step 3): its
 /// zig-server/assets.zon, read here as its own build.zig reads it, so the
 /// two cannot drift: `.embedded`, compiled in by name; `.site`, directories
@@ -735,9 +808,8 @@ const Served = struct {
     site: []const []const u8 = &.{},
 };
 
-fn servedBy(b: *std.Build, gopher_root: []const u8) Served {
+fn servedBy(b: *std.Build, path: []const u8) Served {
     const io = b.graph.io;
-    const path = b.fmt("{s}/zig-server/assets.zon", .{gopher_root});
     const text = std.Io.Dir.cwd().readFileAlloc(io, path, b.allocator, .limited(1 << 20)) catch return .{};
     const z = b.allocator.dupeZ(u8, text) catch @panic("out of memory");
     return std.zon.parse.fromSliceAlloc(Served, b.allocator, z, null, .{}) catch

@@ -432,6 +432,7 @@ pub const Error = error{
     WriteFailed,
     NameTooLong,
     NoSpaceLeft,
+    PathAlreadyExists,
 };
 
 /// max_path bounds the path a File remembers. The application's deepest is a
@@ -624,6 +625,10 @@ pub const Permissions = enum(u32) {
 pub const CreateFileOptions = struct {
     truncate: bool = true,
     permissions: Permissions = .default_file,
+    /// Refuse a file that is there (PathAlreadyExists), as std.Io's does:
+    /// webbox's `store.createNew`, a new site's first secret. One task runs
+    /// here, so asking and then making cannot be overtaken.
+    exclusive: bool = false,
 };
 
 pub const WriteFileOptions = struct {
@@ -634,6 +639,16 @@ pub const WriteFileOptions = struct {
 
 pub const StatFileOptions = struct {};
 pub const AccessOptions = struct {};
+
+/// Whether a path names something on its volume. Absent is an answer; a disk
+/// that would not say is an error, never taken for absent.
+fn present(v: *disk_fat.Volume, sub_path: []const u8) Error!bool {
+    _ = openEntry(v, sub_path) catch |e| switch (e) {
+        Error.FileNotFound => return false,
+        else => return e,
+    };
+    return true;
+}
 
 pub const Dir = struct {
     /// The cluster this directory starts at; zero is the root.
@@ -752,6 +767,7 @@ pub const Dir = struct {
         // quietly replacing the file anyway.
         if (!options.flags.truncate) @panic("writeFile with .flags.truncate = false is not implemented on this machine");
         const v = try writing(options.sub_path);
+        if (options.flags.exclusive and try present(v, options.sub_path)) return Error.PathAlreadyExists;
         const pc = pagesFor(options.sub_path);
         v.writeFile(options.sub_path, options.data) catch |e| {
             if (try throughFile(v, options.sub_path)) return Error.NotDir;
@@ -861,6 +877,17 @@ pub const Dir = struct {
             };
         };
         if (pc) |c| c.renamed(old_sub_path, new_sub_path);
+    }
+
+    /// renamePreserve is `rename` that refuses a name that is there
+    /// (PathAlreadyExists), leaving both files as they were: webbox's
+    /// `store.createNew`, which must not replace a secret another start
+    /// made. One task runs here, so asking and then renaming cannot be
+    /// overtaken.
+    pub fn renamePreserve(self: Dir, old_sub_path: []const u8, new_dir: Dir, new_sub_path: []const u8, ignored: Self) Error!void {
+        new_dir.fromRoot();
+        if (try present(try writing(new_sub_path), new_sub_path)) return Error.PathAlreadyExists;
+        return self.rename(old_sub_path, new_dir, new_sub_path, ignored);
     }
 
     /// deleteTree removes a directory and everything under it — a released
