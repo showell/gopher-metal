@@ -11,8 +11,11 @@ fails on the laptop first.
 
 ## What a host does before the first request
 
-angry-gopher's webbox library declares the host contract (`site.zig`), and
-`router.zig` exports it by the names both hosts use: Linux in `server.zig`,
+angry-gopher's webbox library declares the host contract (`site.zig`). A host
+takes two modules: the library, `webbox`, and the application's root, `app`,
+which exports `site` (its `Site(App)`: `start`, `route`, the body rule's two
+questions) and `hosting` (what only it can say: its data's name, its largest
+whole read, its setup's report in words). Linux in angry-gopher's `server.zig`,
 metal in `probe/gopher.zig`. Three calls:
 
 1. `mem_meter.init(base)`: the process-lifetime allocator, before anything
@@ -64,12 +67,13 @@ request wrote.
 ## Limits: one source of truth *(Steve, 2026-10-07)*
 
 **Each limit is defined once, in angry-gopher**, where the application that
-depends on it lives (`zig-server/src/limits.zig`, which the router exports),
+depends on it lives (`zig-server/src/limits.zig`; the head's size is the
+library's, `webbox.http.head_bytes`, which limits.zig names),
 and every other place either reads it or is checked against it:
 
 | limit | defined | read or checked by |
 |---|---|---|
-| a request's head (16 KiB) | `limits.zig` | both hosts size their head buffers from it (`router.request_limits.head_bytes`); metal asserts at compile time that a connection's receive buffer holds one |
+| a request's head (16 KiB) | webbox's `http.zig` (`head_bytes`), named by `limits.zig` | both hosts size their head buffers from it (`webbox.http.head_bytes`); metal asserts at compile time that a connection's receive buffer holds one |
 | an ordinary body, per route | `limits.zig` | every route's `http.readLimitedBody`; Caddy's `request_body`, held to it by `tools/check_caddy_limits.py` in `ops/check_zig` |
 | an upload (10 MiB images, 100 MiB video) | `chat_upload.zig`'s kinds | Caddy, by the same script |
 | a name, a path, a depth (96, 256, 16) | angry-gopher `store.zig` | metal's `disk_fat.zig` and `io.zig`, by `tools/check_limits.py` (the FAT driver needs them at compile time and can't import angry-gopher) |

@@ -2,15 +2,17 @@
 //! ROUTE TABLE, compiled from its own source, serving real requests on a machine
 //! with no operating system, with its data on a FAT16 or FAT32 volume.
 //!
-//! The only thing done to the application is `port.sh`: one line changed in
-//! each file that opens with `const Io = std.Io;`. Not one call site moves, and
-//! `std.http.Server` is the one the application already constructs.
+//! Nothing is done to the application: its files take their `Io` from
+//! `host_io`, which this build hands this machine's (src/host_io_metal.zig).
+//! Not one call site moves, and `std.http.Server` is the one the application
+//! already constructs.
 //!
-//! **THIS FILE IS A HOST** (router.zig's host contract): `mem_meter.init`
-//! over its own heap, one `router.start` with what this machine supplies
-//! (data/ and auth/ on the DigitalOcean volume if one is attached, the floor
-//! read off the data's FAT), and per request `router.route`, then what the
-//! request kept served from a table of held streams, drained every turn.
+//! **THIS FILE IS A HOST** (webbox's site.zig contract, the application as
+//! the `app` module): `mem_meter.init` over its own heap, one
+//! `app.site.start` with what this machine supplies (data/ and auth/ on the
+//! DigitalOcean volume if one is attached, the floor read off the data's FAT),
+//! and per request `app.site.route`, then what the request kept served from
+//! a table of held streams, drained every turn.
 //!
 //! Its clocks come from its own hardware (wallclock.zig).
 //!
@@ -60,12 +62,27 @@ comptime {
 /// every request (`checkVolumes`). A production build has neither.
 pub const coverage_checks = gm_build.coverage;
 
-/// The application, as it is.
-const router = @import("router.zig");
-const edge = router.edge;
-const Bus = router.Bus;
-const Hub = router.Hub;
-const streams = router.streams;
+/// **THE APPLICATION, AS A HOST TAKES IT** (Phase B step 1): its root as the
+/// `app` module, `site` (start, route, the body rule's questions) and
+/// `hosting` (what only it can say about itself), and the library it is
+/// built on as `webbox`. Nothing else of either is reached from here.
+const app = @import("app");
+const webbox = @import("webbox");
+
+// **WHAT AN APPLICATION EXPORTS TO BE HOSTED HERE**, said where it is missed,
+// not as an error deep in this file.
+comptime {
+    for (.{ "site", "hosting" }) |name| {
+        if (!@hasDecl(app, name)) @compileError("the application's root exports `" ++ name ++ "` (Phase B: `site`, its webbox Site; `hosting`, what only it can say)");
+    }
+    for (.{ "data_name", "whole_read_max", "cache_largest_most", "describeStart" }) |name| {
+        if (!@hasDecl(app.hosting, name)) @compileError("the application's `hosting` declares `" ++ name ++ "` (probe/gopher.zig names each use)");
+    }
+}
+const edge = webbox.edge;
+const Bus = webbox.bus.Bus;
+const Hub = webbox.bus.Hub;
+const streams = webbox.bus;
 
 comptime {
     _ = metal.boot;
@@ -142,7 +159,7 @@ const rx_bytes = 16 * 1024;
 comptime {
     // A head the application allows must fit a connection's receive buffer,
     // or ready.zig would wait for one that cannot arrive.
-    std.debug.assert(rx_bytes >= router.request_limits.head_bytes);
+    std.debug.assert(rx_bytes >= webbox.http.head_bytes);
 }
 /// A send queue holds what the peer has not yet acknowledged. A response
 /// larger than this waits for acknowledgements as it goes; a held stream whose
@@ -197,7 +214,7 @@ var draining_now: usize = 0;
 /// and driven by drain_sim. This loop keeps only the I/O: the table's bytes
 /// consumed, `100 Continue` queued, the uploader asked of the store, the
 /// clock read. Drained bodies live in the machine's heap.
-const Drains = metal.drain.Drains(router.body_rule, max_connections);
+const Drains = metal.drain.Drains(webbox.body, max_connections);
 var drains: Drains = undefined;
 
 /// The machine's clock `ms` from now, for a stream's body deadline: within
@@ -235,13 +252,13 @@ fn uploaderOf(io: Io, head: []const u8) Asker {
     var out: std.Io.Writer = .fixed(&.{});
     var server = std.http.Server.init(&in, &out);
     var req = server.receiveHead() catch return .unknown;
-    const who = router.uploader(&req, io, fba.allocator()) catch |e| {
+    const who = app.site.uploader(&req, io, fba.allocator()) catch |e| {
         serial.put("  uploader: ");
         serial.put(@errorName(e));
         serial.put("\n");
         return .unknown;
     };
-    return if (who) |name| .{ .who = router.body_rule.keyOf(name) } else .stranger;
+    return if (who) |name| .{ .who = webbox.body.keyOf(name) } else .stranger;
 }
 /// The most bytes one connection may keep (a whole upload of a few MB fits;
 /// a larger response waits for room, as before spills).
@@ -276,9 +293,9 @@ var busiest: usize = 0;
 /// When this boot's wall clock started, and the TSC's measured rate.
 var booted_unix: i64 = 0;
 var tsc_hz_seen: u64 = 0;
-/// The request head's buffer: angry-gopher's limits.zig sizes it, as it
+/// The request head's buffer: webbox's `http.head_bytes` sizes it, as it
 /// sizes Linux's, so the two hosts answer 431 at the same byte.
-var read_buf: [router.request_limits.head_bytes]u8 align(16) = undefined;
+var read_buf: [webbox.http.head_bytes]u8 align(16) = undefined;
 var write_buf: [64 * 1024]u8 align(16) = undefined;
 
 /// Each request's heap, reset after the response: the equivalent of the arena
@@ -305,11 +322,11 @@ var page_cache: metal.page_cache.PageCache = undefined;
 /// A file past the cap is read from the disk as before, so no single big upload
 /// pushes the transcripts out. `docs/designs/DESIGN-picture-cache.md` has the
 /// method and the budget cost.
-const page_cache_largest_kib_default = router.whole_read_max >> 10;
+const page_cache_largest_kib_default = app.hosting.whole_read_max >> 10;
 
 const config_path = "gopher-metal.conf";
 
-/// **THE APPLICATION'S DATA**: the two directories `router.start` points the
+/// **THE APPLICATION'S DATA**: the two directories `app.site.start` points the
 /// stores at (`Host.roots`), and the only ones this machine writes. On a droplet they are on the
 /// volume, which outlives every new image; everything else is the site's own,
 /// on the boot disk, and comes with the image.
@@ -400,7 +417,7 @@ pub fn kmain() noreturn {
     disks[0] = &boot_disk;
     Io.mount(mountFat(&boot_disk, &sector, "the boot disk"));
     const io = Io.io();
-    const base = router.mem_meter.init(gpa.allocator());
+    const base = webbox.mem_meter.init(gpa.allocator());
     const conf = readConfig(io, base);
     var volume_disk: virtio.Block = undefined;
     if (dataVolume()) |b| {
@@ -418,7 +435,7 @@ pub fn kmain() noreturn {
             serial.fail("the volume attached is not the one this machine serves");
         };
         Io.keepData(&data_dirs, vol);
-        serial.put("  chat's data: the volume\n");
+        serial.put("  " ++ app.hosting.data_name ++ ": the volume\n");
     } else {
         // **A VOLUME THAT WAS NAMED AND IS MISSING STOPS THE MACHINE.** Serving
         // on would answer with no accounts and no conversations, and keep what
@@ -430,7 +447,7 @@ pub fn kmain() noreturn {
             serial.fail("the volume this machine serves is not attached");
         }
         Io.keepData(&data_dirs, null);
-        serial.put("  chat's data: the boot disk\n");
+        serial.put("  " ++ app.hosting.data_name ++ ": the boot disk\n");
     }
     // **THE DATA'S FILES, KEPT AFTER THEIR FIRST READ** (QUEUE.md item 87):
     // a transcript two people are reading is read from memory, not walked to
@@ -516,7 +533,7 @@ pub fn kmain() noreturn {
     }
 
     // Whose X-Forwarded-For is believed: the config's trusted_proxy, handed
-    // to the host contract below (`router.start`).
+    // to the host contract below (`app.site.start`).
     const trusted_proxy: ?[]const u8 = if (conf.trusted_proxy) |p| ipText(&trusted_proxy_text, p) else null;
     if (trusted_proxy) |p| {
         serial.put("  X-Forwarded-For is believed from ");
@@ -583,15 +600,15 @@ pub fn kmain() noreturn {
     var request_heap = RequestHeap.init(pages.allocator, request_heap_bytes);
     if (!request_heap.preheat())
         serial.fail("the machine has not enough memory for a request heap");
-    // **THE HOST CONTRACT, ONE CALL** (angry-gopher router.zig, its webbox
-    // library's site.zig): what this machine supplies (where the data is on
+    // **THE HOST CONTRACT, ONE CALL** (webbox's site.zig, the application's
+    // `app.site`): what this machine supplies (where the data is on
     // its volumes, how its free space is read off the data's FAT, the trusted
     // proxy, /admin/host's facts and the serial log), and the setup in its one
     // order before the first request: the session secret's move, every chat
     // session's last-message record (as Linux does, so the two hosts leave
     // the same files behind, which the judge compares), and search's index.
     // Each one-time pass reads on an arena `start` gives back.
-    var started = router.start(io, .{
+    var started = app.site.start(io, .{
         .roots = .{ .data_dir = data_dir, .auth_dir = auth_dir },
         .free_space = .{ .reader = dataSpace },
         .trusted_proxy = trusted_proxy,
@@ -601,30 +618,22 @@ pub fn kmain() noreturn {
         serial.put("  ");
         serial.put(@errorName(e));
         serial.put("\n");
-        serial.fail("the host contract's setup (router.start) failed");
+        serial.fail("the host contract's setup (app.site.start) failed");
     };
     const hub = &started.hub;
-    drains = .{ .gpa = hub.gpa, .limit = router.bodyLimit };
-    if (started.app.backfilled > 0) {
-        serial.put("  wrote a last-message record for ");
-        serial.putDec(started.app.backfilled);
-        serial.put(" chat session(s)\n");
+    drains = .{ .gpa = hub.gpa, .limit = app.site.bodyLimit };
+    {
+        var said: [1024]u8 = undefined;
+        var w: std.Io.Writer = .fixed(&said);
+        app.hosting.describeStart(started.app, &w) catch
+            serial.fail("the application's start report is past its 1 KiB buffer (app.hosting.describeStart)");
+        var lines = std.mem.splitScalar(u8, std.mem.trimEnd(u8, w.buffered(), "\n"), '\n');
+        while (lines.next()) |line| {
+            serial.put("  ");
+            serial.put(line);
+            serial.put("\n");
+        }
     }
-    if (started.app.search) |st| {
-        serial.put("  search index: ");
-        serial.putDec(st.messages);
-        serial.put(" messages in ");
-        serial.putDec(st.transcripts);
-        serial.put(" transcripts (");
-        serial.putDec(st.bytes);
-        serial.put(" bytes, ");
-        serial.putDec(st.words);
-        serial.put(" words, ");
-        serial.putDec(st.unreadable);
-        serial.put(" unreadable) in ");
-        serial.putDec(@intCast(started.app.search_ms));
-        serial.put(" ms\n");
-    } else serial.put("  search index: not built (out of memory); the first search builds it\n");
     // **IDLE TIME** (src/idle.zig, essay idle-time-on-metal): each volume's
     // check, asked again while the machine serves, a slice per quiet moment.
     for ([_]?*disk_fat.Volume{ Io.siteVolume(), Io.dataVolume() }, 0..) |maybe, k| {
@@ -798,7 +807,7 @@ pub fn kmain() noreturn {
     serial.put(" frames lost on purpose, ");
     serial.putDec(table.window_updates);
     serial.put(" reopened windows said again\n");
-    const mem = router.mem_meter.snapshot();
+    const mem = webbox.mem_meter.snapshot();
     const page_stats = pages.stats();
     serial.put("  pages: ");
     serial.putDec(page_stats.bytes_taken);
@@ -941,7 +950,7 @@ fn serveOne(
     // whole of it, a byte every `idle_ns` less a little held the turn for
     // hours before the 431. So is any body read from the buffer (one that
     // fit it, whole already, or a client's that ended short).
-    s.body_deadline_at = bodyDeadline(router.body_rule.smallMs(router.request_limits.head_bytes));
+    s.body_deadline_at = bodyDeadline(webbox.body.smallMs(webbox.http.head_bytes));
     // **A HEAD THAT FILLED THE BUFFER UNENDED IS A 431 AT ONCE** (169's cold
     // review): the buffer is the head's most (`head_bytes`), so the rest of
     // it, read here, could only overflow, and reading it waited on the
@@ -993,8 +1002,8 @@ fn serveOne(
     // 169): refused from its head, late from waiting (a 408), refused by the
     // loop's verdict, or in memory (or in the buffer) whole already: the turn
     // never waits on the network.
-    const body_rule = router.body_rule;
-    const cap = router.bodyLimit(req.head.target);
+    const body_rule = webbox.body;
+    const cap = app.site.bodyLimit(req.head.target);
     const refusal: ?struct { kind: edge.RejectKind, msg: []const u8 } = if (wait.refusal()) |r| switch (r) {
         .too_slow => .{ .kind = .body_too_slow, .msg = "request body too slow\n" },
         .busy => .{ .kind = .uploads_busy, .msg = "Uploads are busy; try again in a minute.\n" },
@@ -1016,7 +1025,7 @@ fn serveOne(
         // Refused, never told to send (std answers an expectation first
         // while it is set).
         req.head.expect = null;
-        router.edge.reject(&req, r.kind, r.msg) catch {};
+        webbox.edge.reject(&req, r.kind, r.msg) catch {};
         s.writer().flush() catch {};
         logRequest(number, "(refused at its head)", r.msg[0 .. r.msg.len - 1]);
         // A drained body refused (late, past what is kept): what came of it.
@@ -1049,11 +1058,11 @@ fn serveOne(
     // still framed, and a short one (its client gone) must be refused: std
     // reads both from memory, decoding the one and refusing the other.
     switch (wait.handover()) {
-        .whole => |body| router.holdBody(body),
+        .whole => |body| webbox.http.held_body = body,
         .network, .memory => {},
     }
-    defer router.holdBody(null);
-    var kept_stream = router.route(&req, io, request_alloc, &bus) catch |e| blk: {
+    defer webbox.http.held_body = null;
+    var kept_stream = app.site.route(&req, io, request_alloc, &bus) catch |e| blk: {
         outcome = @errorName(e);
         break :blk null;
     };
@@ -1691,7 +1700,7 @@ fn diskCheck(vol: *disk_fat.Volume, what: []const u8) void {
 }
 
 fn logRequest(number: u64, what: []const u8, outcome: []const u8) void {
-    const mem = router.mem_meter.snapshot();
+    const mem = webbox.mem_meter.snapshot();
     serial.put("  request ");
     serial.putDec(number);
     serial.put(": ");
@@ -1873,7 +1882,7 @@ fn readConfig(io: Io, alloc: std.mem.Allocator) Config {
             conf.page_cache_largest_kib = configNumber(u32, value) catch
                 serial.fail(config_path ++ ": `page_cache_largest_kib` is a number of KiB");
             if (conf.page_cache_largest_kib == 0) serial.fail(config_path ++ ": `page_cache_largest_kib` is 0 — set `page_cache_mib = 0` to keep no files, not a zero cap");
-            if (conf.page_cache_largest_kib > 10 << 10) serial.fail(config_path ++ ": `page_cache_largest_kib` past 10240 (10 MiB) is more than chat's image cap, so no picture reaches it");
+            if (conf.page_cache_largest_kib > app.hosting.cache_largest_most >> 10) serial.fail(config_path ++ ": `page_cache_largest_kib` past " ++ std.fmt.comptimePrint("{d}", .{app.hosting.cache_largest_most >> 10}) ++ " is more than the application's largest file worth keeping (app.hosting.cache_largest_most), so no file reaches it");
         } else if (std.mem.eql(u8, key, "trusted_proxy")) {
             const a = std.Io.net.Ip4Address.parse(value, 0) catch
                 serial.fail(config_path ++ ": `trusted_proxy` is an IPv4 address: 10.0.0.2");
@@ -1918,7 +1927,7 @@ fn awakeNow() i96 {
 
 /// A volume's idle check, as /admin/host says it.
 fn checkFact(alloc: std.mem.Allocator, c: *const metal.idle_check.VolumeCheck) ![]const u8 {
-    const hs = router.host_facts;
+    const hs = webbox.host_facts;
     const last = if (c.last) |l| blk: {
         const ago: i64 = @intCast(@divFloor(awakeNow() - l.at, std.time.ns_per_s));
         const damage = if (l.tally.first) |f|
@@ -1934,8 +1943,8 @@ fn checkFact(alloc: std.mem.Allocator, c: *const metal.idle_check.VolumeCheck) !
     });
 }
 
-fn metalFacts(io: Io, alloc: std.mem.Allocator) anyerror![]const router.host_facts.Fact {
-    const hs = router.host_facts;
+fn metalFacts(io: Io, alloc: std.mem.Allocator) anyerror![]const webbox.host_facts.Fact {
+    const hs = webbox.host_facts;
     var facts: std.ArrayList(hs.Fact) = .empty;
     const now: i64 = @intCast(@divFloor(Io.Clock.now(.real, io).nanoseconds, std.time.ns_per_s));
     const add = struct {
@@ -1961,8 +1970,8 @@ fn metalFacts(io: Io, alloc: std.mem.Allocator) anyerror![]const router.host_fac
     });
     if (Io.siteVolume()) |v| try addVolume(&facts, alloc, "the boot disk (the site)", "the boot disk's write cache", "the boot disk's folders in memory", v);
     if (Io.dataVolume()) |v| {
-        try addVolume(&facts, alloc, "the volume (chat's data)", "the volume's write cache", "the volume's folders in memory", v);
-    } else try add(&facts, alloc, "the volume (chat's data)", "none attached: the data is on the boot disk", .{});
+        try addVolume(&facts, alloc, "the volume (" ++ app.hosting.data_name ++ ")", "the volume's write cache", "the volume's folders in memory", v);
+    } else try add(&facts, alloc, "the volume (" ++ app.hosting.data_name ++ ")", "none attached: the data is on the boot disk", .{});
     const kept = Io.siteCache();
     try add(&facts, alloc, "site files in memory", "{d} kept, {d} KB of {d} KB; {d} reads answered from them", .{
         kept.count, kept.used >> 10, @as(usize, Io.SiteCache.capacity) >> 10, kept.hits,
@@ -2024,7 +2033,7 @@ fn kindName(v: *const disk_fat.Volume) []const u8 {
     return if (v.kind == .fat32) "FAT32" else "FAT16";
 }
 
-fn addVolume(facts: *std.ArrayList(router.host_facts.Fact), alloc: std.mem.Allocator, label: []const u8, cache_label: []const u8, dirs_label: []const u8, v: *disk_fat.Volume) !void {
+fn addVolume(facts: *std.ArrayList(webbox.host_facts.Fact), alloc: std.mem.Allocator, label: []const u8, cache_label: []const u8, dirs_label: []const u8, v: *disk_fat.Volume) !void {
     var serial_text: [9]u8 = undefined;
     const named = if (v.serial) |n| serialText(&serial_text, n) else "no serial";
     const value = if (v.space()) |sp|
@@ -2057,7 +2066,7 @@ fn addVolume(facts: *std.ArrayList(router.host_facts.Fact), alloc: std.mem.Alloc
 
 /// The data's volume, free and total, for the game store's floor: the volume
 /// when one is attached, else the boot disk, which then holds the data.
-fn dataSpace() ?router.Space {
+fn dataSpace() ?webbox.free_space.Space {
     const v = Io.dataVolume() orelse Io.siteVolume() orelse return null;
     const sp = v.space() catch return null;
     return .{ .free = sp.free, .total = sp.total };

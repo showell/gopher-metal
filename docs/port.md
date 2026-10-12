@@ -1,4 +1,4 @@
-# The port: one alias, std's HTTP, one loop
+# The port: one file swapped, std's HTTP, one loop
 
 How angry-gopher's server runs on a machine with no operating system, and
 why the seam is where it is. The README is the orientation; this page is the
@@ -43,13 +43,16 @@ machine) it spins.
 
 ## The real server
 
-`port.sh` copies angry-gopher's `zig-server/src/*.zig` and changes one line in
-each file that opens with `const Io = std.Io;`. Nothing else is touched. It
-prints how many files it copied and how many had the alias; at angry-gopher
-`7e3fbc5e` (2026-10-06) that is 77 files, 55 of them with the alias.
+`port.sh` copies angry-gopher's `zig-server/src/*.zig`, unchanged. Every file
+that does I/O opens with `const Io = @import("host_io").Io;`, and this build
+hands them `src/host_io_metal.zig` as `host_io`. It prints how many files it
+copied and how many take their `Io` from `host_io`, and refuses a file that
+aliases std's instead (Phase B step 2a, 2026-10-11: 97 files, 63 of them).
 
-`probe/gopher.zig` is a HOST in the sense angry-gopher's `router.zig` defines —
-the contract any host meets before calling the route table:
+`probe/gopher.zig` is a HOST in the sense webbox's `site.zig` defines, taking
+the application as the `app` module (`app.site`, `app.hosting`) and the
+library as `webbox` — the contract any host meets before calling the route
+table:
 
     mem_meter.init(base)        base: std's general-purpose allocator, on this
                                 machine's pages
@@ -59,7 +62,7 @@ the contract any host meets before calling the route table:
     an arena per request
 
 — with the site on a GPT disk whose first partition is FAT16 or FAT32, and
-clocks from its own hardware. Then it calls `router.route`: the application's
+clocks from its own hardware. Then it calls `app.site.route`: the application's
 real dispatch, every page — a table of up to 256 connections, one request
 served at a time, each request with its own heap that is reset afterwards.
 `gopher-metal.conf` on the boot disk says how many requests to serve
@@ -116,12 +119,13 @@ at angry-gopher `7e3fbc5e`), and every file that uses them opens with the
 same line:
 
 ```zig
-const Io = std.Io;      //  ->  const Io = metal.io;
+const Io = @import("host_io").Io;   // std's on Linux; src/io.zig here
 ```
 
-Point that at `src/io.zig` and **not one call site changes**. That is the port:
-one single-line edit per file, zero touched call sites, and a `Dir` answering
-the operations the application actually asks for.
+The build points `host_io` at `src/host_io_metal.zig`, and **not one call
+site changes, and no line is edited**. That is the port: one file swapped by
+the build, and a `Dir` answering the operations the application actually
+asks for.
 
 ```
 gopher-metal std.Io probe

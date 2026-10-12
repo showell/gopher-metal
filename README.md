@@ -347,11 +347,12 @@ PID) before a morning's gates.
 
 - **`std.http.Server` runs unmodified.** It is built from a reader and a
   writer, and `src/stream.zig` presents a TCP connection as both.
-- **The port is one alias.** angry-gopher's filesystem calls are spelled
-  `Io.Dir.cwd().something(io, ...)`; `port.sh` changes `const Io = std.Io;`
-  to this repo's `io.zig` in each file that has it, and no call site moves.
-  `std.Io` itself is not the seam: it does not compile on a freestanding
-  target.
+- **The port is one file.** angry-gopher's filesystem calls are spelled
+  `Io.Dir.cwd().something(io, ...)`, and every file takes that `Io` from the
+  `host_io` module (`const Io = @import("host_io").Io;`). Its own build hands
+  them std's; this build hands them `src/host_io_metal.zig`, whose `Io` is this
+  repo's `io.zig`. No line is rewritten and no call site moves. `std.Io`
+  itself is not the seam: it does not compile on a freestanding target.
 - **One loop, no threads.** One core, no preemption: the loop talks to the
   devices, moves every connection along, and serves whatever request has
   wholly arrived. Chat's live streams are held by the loop.

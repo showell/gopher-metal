@@ -3,14 +3,15 @@
 #
 #   port.sh
 #
-# **THIS IS THE WHOLE PORT.** It copies the server's sources and changes one
-# line in each of the files that has it:
+# **THIS IS THE WHOLE PORT.** It copies the server's sources, unchanged. Each
+# file takes its `Io` from the `host_io` module,
 #
-#     const Io = std.Io;   ->   const Io = @import("metal").io;
+#     const Io = @import("host_io").Io;
 #
-# Not one call site moves. All 121 of the server's filesystem calls are spelled
-# `Io.Dir.cwd().something(io, ...)`, so pointing that alias at src/io.zig is the
-# entire change. See the README for why std.Io itself is not the seam.
+# and this build hands them src/host_io_metal.zig as that module, whose `Io`
+# is src/io.zig; angry-gopher's build hands the same files std's. Not one
+# call site moves, and no line is rewritten. See the README for why std.Io
+# itself is not the seam.
 #
 # The copy is NOT committed here: this repo holds the change, not the code it
 # is applied to.
@@ -23,16 +24,20 @@ OUT="${GOPHER_PORT:-$HOME/build/gopher-metal/port}"
 rm -rf "$OUT"; mkdir -p "$OUT"
 cp "$SRC"/*.zig "$OUT"/
 
-before="$(grep -l '^const Io = std\.Io;' "$OUT"/*.zig | wc -l)"
-sed -i 's|^const Io = std\.Io;|const Io = @import("metal").io;|' "$OUT"/*.zig
-after="$(grep -l 'const Io = @import("metal")\.io;' "$OUT"/*.zig | wc -l)"
+# **NO FILE IS EDITED**: each takes its `Io` from the `host_io` module, which
+# the build hands it (src/host_io_metal.zig: this machine's). A file with an
+# alias straight to std's would be std's here too, so one is refused, but for
+# host_io_std.zig itself: the Linux build's choice of host_io, never compiled
+# here.
+escaped="$(grep -lE 'const Io = (std|@import\("std"\))\.Io;' "$OUT"/*.zig | grep -v '/host_io_std\.zig$' || true)"
+took="$(grep -l '^const Io = @import("host_io")\.Io;' "$OUT"/*.zig | wc -l)"
 
 # The asset table, read from the application's own build.zig rather than
 # copied, so that the two cannot drift. See tools/extract_assets.py.
 python3 "$HERE/tools/extract_assets.py" "$SRC/../build.zig" "$HERE/gen/assets.zig"
 
-echo "$(ls "$OUT"/*.zig | wc -l) files copied, $before had the alias, $after now point at this machine"
-[ "$before" = "$after" ] || { echo "the edit did not take on every file"; exit 1; }
+echo "$(ls "$OUT"/*.zig | wc -l) files copied, $took take their Io from host_io"
+[ -z "$escaped" ] || { echo "these alias std's Io, not host_io's, and would be std's here: $escaped"; exit 1; }
 
 # **WHICH angry-gopher THIS IS** (tools/verdicts.py): gates.sh and long.sh
 # refuse a port that is not angry-gopher's HEAD, and an image is built only
