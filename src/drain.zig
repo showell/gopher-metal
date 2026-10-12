@@ -25,8 +25,17 @@
 //!   - **A dropped phone** (170.1): an upload with no byte for 30 s gives its
 //!     slot back (408), and a human's new upload takes over their old one
 //!     (the old one 409), since the page uploads one file at a time.
-//!   - **A turn stops the clocks it holds up** (170.2): every deadline moves
-//!     on by the turn's length (`pause`).
+//!   - **A turn stops the clocks it holds up** (170.2), each by at most its
+//!     own length in all (175.1); a stall clock never (`pause`).
+//!   - **A full budget is a 503 at once** (175.2), at a drain's beginning or
+//!     its growth, as Linux answers it.
+//!
+//! **THE MEMORY BOUND** (175.3): three uploads at their exact length; the
+//! small budget (body.zig's `small_budget`, the one constant), which holds
+//! every small drain's room and every head kept to answer from; and, for the
+//! moment a drain grows, its old room beside its new (a realloc that cannot
+//! grow in place holds both until it copies), at most one drain at a time,
+//! so at most 1 MiB past the budget.
 //!
 //! Every decision here is a function of what it is handed: no clock but the
 //! `now` given, no I/O. So each edge is a unit test (both sides of every
@@ -191,6 +200,10 @@ pub fn Drains(comptime Rule: type, comptime conns: usize) type {
             slot: ?usize = null,
             /// Since when an uploader has waited for a slot.
             slot_wait_since: ?i96 = null,
+            /// What turns may still move its clocks on (`pause`): its running
+            /// clock's own length, at most, so a loop busy for hours does not
+            /// hold a silent request for hours (metal-vmm QUEUE 175.1).
+            credit_left: i96 = 0,
             uploader: ?Who = null,
             /// When it asked who it is, in order (`Drains.asks`): of a
             /// human's uploads, the one that asked last is the retry.
@@ -281,18 +294,23 @@ pub fn Drains(comptime Rule: type, comptime conns: usize) type {
             self.waits[i].asked = self.asks;
         }
 
-        /// **A TURN STOPS THE CLOCKS IT HOLDS UP** (170.2): every deadline
-        /// running for a body, a head or a slot moves on by the turn's
-        /// length, so an honest body is never late for the loop's sake.
+        /// **A TURN STOPS THE CLOCKS IT HOLDS UP** (170.2), **AND NO MORE**
+        /// (175.1): every deadline running for a body, a head or a slot moves
+        /// on by the turn's length, so an honest body is never late for the
+        /// loop's sake, but by at most its own length in all, so turns back
+        /// to back (one busy client) cannot hold a silent request for hours.
+        /// A stall clock never moves on: a drain always takes what is
+        /// buffered (an upload's room is its length; a small one's growth
+        /// refused is a 503), so bytes that came in the turn reset it at the
+        /// next step, and a dropped phone sends none.
         pub fn pause(self: *Self, turn_ns: i96) void {
             if (turn_ns <= 0) return;
             for (&self.waits) |*w| {
-                if (w.head_at) |*t| t.* += turn_ns;
-                if (w.slot_wait_since) |*t| t.* += turn_ns;
-                if (w.drain) |*d| {
-                    d.deadline_at += turn_ns;
-                    d.last_progress += turn_ns;
-                }
+                const credit = @min(turn_ns, w.credit_left);
+                w.credit_left -= credit;
+                if (w.head_at) |*t| t.* += credit;
+                if (w.slot_wait_since) |*t| t.* += credit;
+                if (w.drain) |*d| d.deadline_at += credit;
             }
         }
 
@@ -311,7 +329,7 @@ pub fn Drains(comptime Rule: type, comptime conns: usize) type {
                 .waiting => return .{ .then = .wait },
                 .must_continue => return .{ .then = .send_continue },
                 .body_coming => {
-                    const since = startClock(&w.head_at, now);
+                    const since = startWait(w, &w.head_at, now, got.wait_ms);
                     if (now - since < msNs(got.wait_ms)) return .{ .then = .wait };
                     props.reachable(@src(), "drain: a body waited for in the buffer is late", null);
                     w.late = true;
@@ -324,14 +342,18 @@ pub fn Drains(comptime Rule: type, comptime conns: usize) type {
                     return .{ .then = .serve };
                 },
                 .drain => {
-                    const since = startClock(&w.head_at, now);
+                    const since = startWait(w, &w.head_at, now, got.wait_ms);
                     const parsed = std.http.Server.Request.Head.parse(c.pending[0..got.head_len]) catch return .{ .then = .serve };
                     switch (self.begin(i, got.head_len, got.read.?, parsed.transfer_encoding == .chunked, self.limit(parsed.target), false, now, since + msNs(got.wait_ms))) {
                         .begun => {},
-                        .wait => {
-                            props.reachable(@src(), "drain: a small body waits for the budget to begin", null);
-                            if (now - since >= msNs(got.wait_ms)) w.late = true;
-                            return .{ .then = if (w.late) .serve else .wait };
+                        // **A FULL BUDGET IS A 503, AT ONCE** (175.2), as Linux
+                        // answers it (body.zig's small_budget): a wait ran to
+                        // a 408 at the deadline, and drains begun starved each
+                        // other.
+                        .over_budget => {
+                            props.reachable(@src(), "drain: a small body finds the budget full, 503", null);
+                            w.verdict = .busy;
+                            return .{ .then = .serve };
                         },
                         .no_memory => {
                             props.reachable(@src(), "drain: no memory for a small body's drain", null);
@@ -381,7 +403,7 @@ pub fn Drains(comptime Rule: type, comptime conns: usize) type {
                                 }
                             }
                         };
-                        const since = startClock(&w.slot_wait_since, now);
+                        const since = startWait(w, &w.slot_wait_since, now, Rule.slot_wait_ms);
                         if (now - since < msNs(Rule.slot_wait_ms)) return .{ .then = .wait };
                         props.reachable(@src(), "drain: an upload waits out the slot wait", null);
                         return self.headOnly(i, head, .busy, now);
@@ -391,15 +413,17 @@ pub fn Drains(comptime Rule: type, comptime conns: usize) type {
             // Only the expectation std knows is answered; another is refused
             // from the head (body.zig, 417) before it gets here.
             if (parsed.expect) |e| if (!w.continued and std.ascii.eqlIgnoreCase(e, "100-continue")) return .{ .then = .send_continue };
+            // Its five minutes from its slot, and what turns may add to them.
+            if (w.drain == null) w.credit_left = msNs(read.deadline_ms);
             switch (self.begin(i, head_len, read, parsed.transfer_encoding == .chunked, self.limit(parsed.target), true, now, now + msNs(read.deadline_ms))) {
                 .begun => {},
-                .wait => unreachable, // an upload has its slot, and no budget
+                .over_budget => unreachable, // an upload has its slot, and no budget
                 .no_memory => return self.headOnly(i, head, .busy, now),
             }
             return self.stepDrain(i, c, now);
         }
 
-        const Begun = enum { begun, wait, no_memory };
+        const Begun = enum { begun, over_budget, no_memory };
 
         fn begin(self: *Self, i: usize, head_len: usize, read: Rule.Read, chunked: bool, cap: u64, is_upload: bool, now: i96, deadline_at: i96) Begun {
             const w = &self.waits[i];
@@ -409,7 +433,7 @@ pub fn Drains(comptime Rule: type, comptime conns: usize) type {
             // An upload's exact length at once: its slot is its bound. A small
             // body grows as it comes, charged as it grows.
             const size: usize = if (is_upload) @intCast(most) else @intCast(@min(most, head_len + first_bytes));
-            if (!is_upload and self.charged + size > self.budget) return .wait;
+            if (!is_upload and self.charged + size > self.budget) return .over_budget;
             const bytes = self.gpa.alloc(u8, size) catch return .no_memory;
             if (!is_upload) self.charged += bytes.len;
             w.drain = .{
@@ -428,19 +452,19 @@ pub fn Drains(comptime Rule: type, comptime conns: usize) type {
         }
 
         /// A drain's room doubled toward its most, a small one's charged to
-        /// the budget as it grows; false when the budget or the memory says
-        /// not now (it waits, its window shut, under its deadline).
-        fn grow(self: *Self, d: *Drain) bool {
-            if (d.bytes.len >= d.most) return false;
+        /// the budget as it grows. `refused` when the budget or the memory
+        /// says no: a 503 (175.2).
+        fn grow(self: *Self, d: *Drain) enum { grown, at_most, refused } {
+            if (d.bytes.len >= d.most) return .at_most;
             const next = @min(d.most, d.bytes.len * 2);
             if (d.charged and self.charged + (next - d.bytes.len) > self.budget) {
-                props.reachable(@src(), "drain: a small drain's growth waits for the budget", null);
-                return false;
+                props.reachable(@src(), "drain: a small drain's growth finds the budget full, 503", null);
+                return .refused;
             }
-            const grown = self.gpa.realloc(d.bytes, next) catch return false;
+            const grown = self.gpa.realloc(d.bytes, next) catch return .refused;
             if (d.charged) self.charged += next - d.bytes.len;
             d.bytes = grown;
-            return true;
+            return .grown;
         }
 
         /// What has arrived of a draining body moved into memory, and whether
@@ -448,7 +472,10 @@ pub fn Drains(comptime Rule: type, comptime conns: usize) type {
         fn stepDrain(self: *Self, i: usize, c: Conn, now: i96) Step {
             const w = &self.waits[i];
             const d = &w.drain.?;
-            if (c.pending.len > d.bytes.len - d.len) _ = self.grow(d);
+            if (c.pending.len > d.bytes.len - d.len) if (self.grow(d) == .refused) {
+                w.verdict = .busy;
+                return .{ .then = .serve };
+            };
             const n = @min(c.pending.len, d.bytes.len - d.len);
             if (n > 0) d.last_progress = now;
             @memcpy(d.bytes[d.len..][0..n], c.pending[0..n]);
@@ -485,6 +512,13 @@ pub fn Drains(comptime Rule: type, comptime conns: usize) type {
         /// read): the head kept in memory, the verdict said.
         fn headOnly(self: *Self, i: usize, head: []const u8, verdict: Verdict, now: i96) Step {
             const w = &self.waits[i];
+            // Held to the budget too (175.3): past it, a 503 with nothing
+            // kept, answered before any route could read the network.
+            if (self.charged + head.len > self.budget) {
+                props.reachable(@src(), "drain: a head to answer from finds the budget full, 503", null);
+                w.verdict = .busy;
+                return .{ .then = .serve };
+            }
             const bytes = self.gpa.dupe(u8, head) catch {
                 // No memory for even the head: told the host is busy, before
                 // any route could read a body from the network.
@@ -492,7 +526,6 @@ pub fn Drains(comptime Rule: type, comptime conns: usize) type {
                 return .{ .then = .serve };
             };
             w.verdict = verdict;
-            // A head is at most the buffer: charged, never refused for it.
             self.charged += bytes.len;
             w.drain = .{ .bytes = bytes, .len = bytes.len, .head_len = bytes.len, .framing = .length, .want = 0, .most = bytes.len, .began = now, .deadline_at = now, .last_progress = now, .whole = true, .whole_at = now, .upload = false, .charged = true };
             return .{ .then = .serve };
@@ -504,9 +537,12 @@ fn msNs(n: u64) i96 {
     return @as(i96, n) * ns_per_ms;
 }
 
-fn startClock(at: *?i96, now: i96) i96 {
+/// A wait's clock started at `now` if it has none, with turns allowed to
+/// move it on by at most `credit_ms` (175.1); when it started.
+fn startWait(w: anytype, at: *?i96, now: i96, credit_ms: u64) i96 {
     if (at.*) |t| return t;
     at.* = now;
+    w.credit_left = msNs(credit_ms);
     return now;
 }
 
@@ -616,25 +652,6 @@ test "a drain's deadline: its last nanosecond waits, the deadline itself is late
     try testing.expectEqual(Then.serve, c.step(&d, deadline));
     try testing.expectEqual(Refusal.too_slow, d.waits[0].refusal().?);
     try testing.expectEqual(@as(u16, 408), d.waits[0].refusal().?.status());
-}
-
-test "a drain begun late (the budget full) keeps the deadline of its head, to the nanosecond" {
-    const body = try pattern(100_000);
-    defer testing.allocator.free(body);
-    const req = try request("/doc", body.len, "", body);
-    defer testing.allocator.free(req);
-    var d: TestDrains = .{ .gpa = testing.allocator, .limit = caps, .budget = 0 };
-    defer d.release(0);
-    var c: Client = .{ .i = 0, .serial = 1, .bytes = req, .sent = headLen(req) + 20_000 };
-    const t0 = ms(1000);
-    try testing.expectEqual(Then.wait, c.step(&d, t0));
-    try testing.expect(d.waits[0].drain == null);
-    // The budget opens 1.5 ms later: the drain's deadline is still the head's.
-    d.budget = body_rule.small_budget;
-    try testing.expectEqual(Then.wait, c.settle(&d, t0 + ms(1) + @divExact(ms(1), 2)));
-    try testing.expect(d.waits[0].drain != null);
-    const deadline = t0 + ms(body_rule.smallMs(body.len));
-    try testing.expectEqual(deadline, d.waits[0].drain.?.deadline_at);
 }
 
 test "a body waited for in the buffer: its last nanosecond waits, the deadline is late, and a body whole by then is served" {
@@ -856,7 +873,7 @@ fn fillDrains(d: *TestDrains, first: usize, n: usize, most: usize, body: []const
     }
 }
 
-test "the small budget charged to exactly 64 MiB is met; one byte more waits, until a drain is given back" {
+test "the small budget charged to exactly 64 MiB is met; one byte more is 503 (metal-vmm QUEUE 175.2)" {
     const mib = 1 << 20;
     const body = try pattern(mib + 1);
     defer testing.allocator.free(body);
@@ -869,7 +886,8 @@ test "the small budget charged to exactly 64 MiB is met; one byte more waits, un
         const req = try request("/doc", 100_000, "", body[0..100_000]);
         defer testing.allocator.free(req);
         var c: Client = .{ .i = 64, .serial = 65, .bytes = req, .sent = req.len };
-        try testing.expectEqual(Then.wait, c.step(&d, 0));
+        try testing.expectEqual(Then.serve, c.step(&d, 0));
+        try testing.expectEqual(Refusal.busy, d.waits[64].refusal().?);
         try testing.expect(d.waits[64].drain == null);
         try testing.expectEqual(@as(usize, body_rule.small_budget), d.charged);
     }
@@ -884,20 +902,15 @@ test "the small budget charged to exactly 64 MiB is met; one byte more waits, un
         const req = try request("/doc", length, "", body[0..length]);
         defer testing.allocator.free(req);
         var c: Client = .{ .i = 63, .serial = 64, .bytes = req, .sent = req.len, .capacity = 64 * 1024 };
-        try testing.expectEqual(Then.wait, c.settle(&d, 0));
+        try testing.expectEqual(Then.serve, c.settle(&d, 0));
         const w = &d.waits[63];
-        try testing.expect(!w.drain.?.whole);
+        try testing.expectEqual(Refusal.busy, w.refusal().?);
         try testing.expect(d.charged <= body_rule.small_budget);
         try testing.expect(w.drain.?.bytes.len < mib + 1);
-        // One given back: it grows, and is whole.
-        d.release(0);
-        try testing.expectEqual(Then.serve, c.settle(&d, 0));
-        try testing.expect(w.drain.?.whole);
-        try testing.expectEqualSlices(u8, body[0..length], w.handover().whole);
     }
 }
 
-test "a turn's length moves every clock on: a drain's deadline, an upload's stall, a slot's wait" {
+test "a turn's length moves a drain's deadline and a slot's wait on, and a stall only when bytes waited (metal-vmm QUEUE 170.2, 175.1)" {
     const body = try pattern(100_000);
     defer testing.allocator.free(body);
     const doc = try request("/doc", body.len, "", body);
@@ -922,8 +935,9 @@ test "a turn's length moves every clock on: a drain's deadline, an upload's stal
     const deadline = ms(body_rule.smallMs(body.len)) + turn;
     try testing.expectEqual(Then.wait, s.step(&d, deadline - 1));
     try testing.expectEqual(Then.serve, s.step(&d, deadline));
-    try testing.expectEqual(Then.wait, u.step(&d, ms(body_rule.upload_stall_ms) + turn - 1));
-    try testing.expectEqual(Then.serve, u.step(&d, ms(body_rule.upload_stall_ms) + turn));
+    // Nothing waited to be taken: its stall clock is the wall's (175.1).
+    try testing.expectEqual(Then.wait, u.step(&d, ms(body_rule.upload_stall_ms) - 1));
+    try testing.expectEqual(Then.serve, u.step(&d, ms(body_rule.upload_stall_ms)));
     try testing.expectEqual(Refusal.stalled, d.waits[1].refusal().?);
     try testing.expectEqual(Then.wait, v.step(&d, ms(body_rule.slot_wait_ms) + turn - 1));
     try testing.expectEqual(Then.serve, v.step(&d, ms(body_rule.slot_wait_ms) + turn));
@@ -1035,4 +1049,68 @@ test "a human's older retry, still waiting, never takes over their newest upload
     try testing.expectEqual(Then.serve, y.step(&d, ms(1)));
     try testing.expectEqual(Verdict.none, d.waits[1].verdict);
     try testing.expectEqual(Refusal.replaced, d.waits[2].refusal().?);
+}
+
+test "a busy loop, turns back to back, still lets a silent upload go at its stall, and a silent small body at its deadline plus at most that again (metal-vmm QUEUE 175.1)" {
+    const up = try request("/up", 10_000, "", "");
+    defer testing.allocator.free(up);
+    const doc = try request("/doc", 100_000, "", "");
+    defer testing.allocator.free(doc);
+    var d: TestDrains = .{ .gpa = testing.allocator, .limit = caps };
+    defer for (0..2) |k| d.release(k);
+    var u: Client = .{ .i = 0, .serial = 1, .bytes = up, .sent = up.len };
+    var s: Client = .{ .i = 1, .serial = 2, .bytes = doc, .sent = doc.len };
+    var now: i96 = 0;
+    try testing.expectEqual(Then.wait, u.upload(&d, .{ .who = 1 }, now));
+    try testing.expectEqual(Then.wait, s.settle(&d, now));
+    // One busy client: a turn of 10 s, then a pass of 1 ms, over and over.
+    var upload_at: ?i96 = null;
+    var small_at: ?i96 = null;
+    while (now < ms(10 * 60_000) and (upload_at == null or small_at == null)) {
+        d.pause(ms(10_000));
+        now += ms(10_000) + ms(1);
+        if (upload_at == null and u.step(&d, now) == .serve) upload_at = now;
+        if (small_at == null and s.step(&d, now) == .serve) small_at = now;
+    }
+    // Not a byte came: the stall is not credited (nothing waited to be taken).
+    try testing.expect(upload_at.? <= ms(body_rule.upload_stall_ms) + ms(20_000));
+    try testing.expectEqual(Refusal.stalled, d.waits[0].refusal().?);
+    const deadline = ms(body_rule.smallMs(100_000));
+    try testing.expect(small_at.? <= 2 * deadline + ms(20_000));
+    try testing.expectEqual(Refusal.too_slow, d.waits[1].refusal().?);
+}
+
+test "a full small-body budget is 503 at once, at a drain's beginning and at its growth, as Linux answers (metal-vmm QUEUE 175.2)" {
+    const body = try pattern(100_000);
+    defer testing.allocator.free(body);
+    const req = try request("/doc", body.len, "", body);
+    defer testing.allocator.free(req);
+    {
+        var d: TestDrains = .{ .gpa = testing.allocator, .limit = caps, .budget = 0 };
+        defer d.release(0);
+        var c: Client = .{ .i = 0, .serial = 1, .bytes = req, .sent = req.len };
+        try testing.expectEqual(Then.serve, c.step(&d, 0));
+        try testing.expectEqual(Refusal.busy, d.waits[0].refusal().?);
+    }
+    {
+        // Room for its first 64 KiB and its head, not for its growth.
+        var d: TestDrains = .{ .gpa = testing.allocator, .limit = caps, .budget = headLen(req) + first_bytes };
+        defer d.release(0);
+        var c: Client = .{ .i = 0, .serial = 1, .bytes = req, .sent = req.len };
+        try testing.expectEqual(Then.serve, c.settle(&d, 0));
+        try testing.expectEqual(Refusal.busy, d.waits[0].refusal().?);
+        try testing.expect(d.charged <= d.budget);
+    }
+}
+
+test "a head kept to answer from is held to the budget too: past it, 503 with nothing kept (metal-vmm QUEUE 175.3)" {
+    const req = try request("/up", 10_000, "", "");
+    defer testing.allocator.free(req);
+    var d: TestDrains = .{ .gpa = testing.allocator, .limit = caps, .budget = 10 };
+    defer d.release(0);
+    var c: Client = .{ .i = 0, .serial = 1, .bytes = req, .sent = req.len };
+    try testing.expectEqual(Then.serve, c.upload(&d, .stranger, 0));
+    try testing.expectEqual(Refusal.busy, d.waits[0].refusal().?);
+    try testing.expect(d.waits[0].drain == null);
+    try testing.expectEqual(@as(usize, 0), d.charged);
 }

@@ -82,10 +82,10 @@ const Client = struct {
     continued: bool = false,
     /// The free clock (ms) when its head was first seen by the module, its
     /// drain began, its slot wait began, its last byte arrived.
-    head_seen: ?u64 = null,
-    drain_began: ?u64 = null,
-    slot_wait_began: ?u64 = null,
-    last_arrival: u64,
+    head_seen: ?Mark = null,
+    drain_began: ?Mark = null,
+    slot_wait_began: ?Mark = null,
+    last_arrival: Mark,
     opened: u64,
     /// An allocation failed while it waited, or its asker could not be told.
     excused_busy: bool = false,
@@ -139,6 +139,9 @@ const Flaky = struct {
     }
 };
 
+/// When something happened, on both clocks.
+const Mark = struct { free: u64, now: i96 };
+
 const Sim = struct {
     gpa: std.mem.Allocator,
     rng: std.Random,
@@ -157,6 +160,20 @@ const Sim = struct {
     /// retry is the one that asks later, whatever its connection's age.
     asks: u64 = 0,
     latest_ask: [3]u64 = @splat(0),
+
+    fn mark(s: *const Sim) Mark {
+        return .{ .free = s.free_ms, .now = s.now };
+    }
+
+    /// How long a wait begun at `from` has waited as the module counts it
+    /// (175.1): the wall's time less the turns it was credited, at most its
+    /// own length, `cap_ms`.
+    fn waited(s: *const Sim, from: Mark, cap_ms: u64) u64 {
+        const wall = s.now - from.now;
+        const free: i96 = @as(i96, s.free_ms - from.free) * ns_per_ms;
+        const credited = @min(wall - free, @as(i96, cap_ms) * ns_per_ms);
+        return @intCast(@divTrunc(wall - credited, ns_per_ms));
+    }
 
     fn fail(s: *Sim, comptime fmt: []const u8, args: anytype) error{Oracle} {
         std.debug.print("drain_sim seed {d} at {d} ms free: " ++ fmt ++ "\n", .{ s.seed, s.free_ms } ++ args);
@@ -246,7 +263,7 @@ const Sim = struct {
             .rate = rate,
             .stop_at = stop_at,
             .closes = closes,
-            .last_arrival = s.free_ms,
+            .last_arrival = s.mark(),
             .opened = s.free_ms,
         };
         s.next_serial += 1;
@@ -269,7 +286,7 @@ const Sim = struct {
             const want = @min(c.stop_at - c.sent, room, @max(1, c.rate * ms / 1000));
             if (want > 0) {
                 c.sent += want;
-                c.last_arrival = s.free_ms;
+                c.last_arrival = s.mark();
             }
             if (c.sent == c.bytes.len and c.all_by == null) c.all_by = s.free_ms;
         };
@@ -310,10 +327,10 @@ const Sim = struct {
             const w = &s.d.waits[i];
             if (w.head_at != null and c.head_seen == null) {
                 if (c.sent < c.head_len) return s.fail("a head timed before it was whole", .{});
-                c.head_seen = s.free_ms;
+                c.head_seen = s.mark();
             }
-            if (w.drain != null and c.drain_began == null) c.drain_began = s.free_ms;
-            if (w.slot_wait_since != null and c.slot_wait_began == null) c.slot_wait_began = s.free_ms;
+            if (w.drain != null and c.drain_began == null) c.drain_began = s.mark();
+            if (w.slot_wait_since != null and c.slot_wait_began == null) c.slot_wait_began = s.mark();
             switch (next.then) {
                 .wait => return false,
                 .serve => return true,
@@ -387,18 +404,24 @@ const Sim = struct {
                     break :blk body_rule.plan(&head, caps(head.target)).read().?.deadline_ms;
                 };
                 const t = from orelse return s.fail("408 with no clock begun", .{});
-                if (s.free_ms - t < deadline) return s.fail("408 after {d} ms of free time, its deadline {d}", .{ s.free_ms - t, deadline });
+                const ms_waited = s.waited(t, deadline);
+                if (ms_waited < deadline) return s.fail("408 after {d} ms waited, its deadline {d}", .{ ms_waited, deadline });
             },
             .stalled => {
                 props.reachable(@src(), "drain_sim: a dropped phone's upload stalls, 408", null);
                 if (c.kind != .upload) return s.fail("a small body stalled", .{});
-                if (s.free_ms - c.last_arrival < body_rule.upload_stall_ms) return s.fail("stalled {d} ms after a byte", .{s.free_ms - c.last_arrival});
+                // The wall's time: turns never hold a stall (175.1).
+                const since: u64 = @intCast(@divTrunc(s.now - c.last_arrival.now, ns_per_ms));
+                if (since < body_rule.upload_stall_ms) return s.fail("stalled {d} ms after a byte", .{since});
             },
             .busy => {
                 props.reachable(@src(), "drain_sim: an upload told the host is busy, 503", null);
-                if (!c.excused_busy) {
+                // A tight budget is a 503 at once (175.2), for a small body or
+                // a head kept to answer from.
+                if (!c.excused_busy and !s.tight_budget) {
                     const t = c.slot_wait_began orelse return s.fail("503 with no slot wait, no failure", .{});
-                    if (s.free_ms - t < body_rule.slot_wait_ms) return s.fail("503 after {d} ms waiting for a slot", .{s.free_ms - t});
+                    const ms_waited = s.waited(t, body_rule.slot_wait_ms);
+                    if (ms_waited < body_rule.slot_wait_ms) return s.fail("503 after {d} ms waiting for a slot", .{ms_waited});
                 }
             },
             .replaced => {
@@ -441,7 +464,7 @@ const Sim = struct {
         // **NO HONEST BODY REFUSED**: the budget out of play and no heap
         // failure, a body all here well within its deadline is not 408.
         if (!s.tight_budget and !c.excused_busy and w.late) if (c.all_by) |t| if (c.head_seen) |h| {
-            if (c.kind != .upload and t - h + 1000 < body_rule.small_base_ms) return s.fail("408 for a body all here {d} ms after its head", .{t - h});
+            if (c.kind != .upload and t - h.free + 1000 < body_rule.small_base_ms) return s.fail("408 for a body all here {d} ms after its head", .{t - h.free});
         };
         if (age > body_rule.slot_wait_ms + body_rule.upload_ms + 60_000) return s.fail("served {d} ms after it opened", .{age});
     }
