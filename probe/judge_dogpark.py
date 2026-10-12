@@ -101,6 +101,8 @@ FIRST = [
     ("Alice leashes 1", "POST", "/leash", ALICE, b'{"dog":1}'),
     ("Bob wants 1", "POST", "/leash", BOB, b'{"dog":1}'),
     ("no such dog", "POST", "/leash", BOB, b'{"dog":100000}'),
+    # Dog 0 at (155, 350) heads for cow 0 at (250, 250): the cow steps aside.
+    ("Alice's dog scares a cow", "POST", "/move", ALICE, b'{"dog":0,"park_x":165,"park_y":340}'),
     ("Alice moves 1", "POST", "/move", ALICE, b'{"dog":1,"park_x":2345,"park_y":1234}'),
     ("a move outside", "POST", "/move", ALICE, b'{"dog":1,"park_x":-5,"park_y":10}'),
     ("Bob releases 1", "POST", "/release", BOB, b'{"dog":1}'),
@@ -259,6 +261,12 @@ def main() -> int:
 
     # What the story is for, said on the Linux side (the comparison carries it
     # to metal): the restart kept the viewport and the move, not the leash.
+    # Dog 0 heads (10, -10); cow 0, 85 px east and 90 north of it, is left
+    # of its path, so it steps half the dog's 14 px to the left: (-5, -5).
+    first = dict(zip([st[0] for st in FIRST], seen["first boot:"][0]))
+    scare = first["Alice's dog scares a cow"].get("body")
+    if scare != b'{"moved":0,"park_x":165,"park_y":340,"cows":[{"id":0,"park_x":245,"park_y":245}]}':
+        problems.append(f"first boot: dog 0's move did not step cow 0 to (245, 245): {scare!r}")
     after = seen["after a restart:"][0]
     if after and after[0].get("body") != b'{"viewport":{"at":{"park_x":1200,"park_y":700}},"leash":{"none":{}}}':
         problems.append(f"after a restart: Alice's /me is {after[0].get('body')!r}, not her kept viewport and no leash")
