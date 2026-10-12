@@ -5,12 +5,14 @@ checkout (Phase B step 2b: no copy). A gate that passed on other code than the i
 nothing about the image, and nothing used to say which code a gate judged.
 So:
 
-- angry-gopher is named by its **content id**: a hash of the content of
-  every file an image reads from the checkout (`served_files`: the server's
-  source, the assets its build.zig embeds, pages/ and gallery/). A verdict
-  is keyed by that and by this repo's and the SDK's commits (B16), so a
-  README commit in angry-gopher leaves a verdict standing and an SDK change
-  does not.
+- The applications are named by one **content id**: a hash of the content
+  of every file a kernel reads from their checkouts (`served_files`):
+  angry-gopher's server source, the assets its build.zig embeds, pages/ and
+  gallery/; and Dog Park's (its source, build files and `.site`
+  directories), which the gates judge on metal as on Linux
+  (probe/judge_dogpark.py). A verdict is keyed by that and by this repo's
+  and the SDK's commits (B16), so a README commit in either leaves a verdict
+  standing and an SDK change does not.
 - `gates.sh` and `long.sh` call `pair`, which prints the two they are about
   to judge, or refuses a checkout the build cannot take (`freshness`).
   At the end they call `record`, which keeps their verdict for that pair.
@@ -46,6 +48,12 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 GOPHER_ROOT = os.environ.get("GOPHER_ROOT", os.path.expanduser("~/showell_repos/angry-gopher"))
 SRC = os.path.join(GOPHER_ROOT, "zig-server", "src")
 VERDICT_DIR = os.environ.get("GATES_VERDICT_DIR", os.path.expanduser("~/build/gopher-metal/verdicts"))
+# Dog Park's checkout, as probe/judge_dogpark.py finds it.
+DOGPARK_ROOT = os.path.realpath(os.environ.get("DOGPARK_ROOT", os.path.join(ROOT, "..", "dog-park")))
+# What Dog Park's two builds read besides its assets.zon's `.site`: its
+# source and its build files (webbox comes from angry-gopher's, counted there).
+DOGPARK_ASSETS = "assets.zon"
+DOGPARK_BUILT = ("src", "build.zig", "build.zig.zon")
 SDK = os.environ.get("COVERAGE_SDK", os.path.join(os.path.dirname(ROOT), "zig-coverage-sdk"))
 TIERS = ("gates", "long")
 
@@ -63,11 +71,12 @@ ASSET_NAME = re.compile(r'\.name\s*=\s*"')
 SITE = re.compile(r'\.site\s*=\s*\.\{([^}]*)\}')
 
 
-def served_by(root: str = None) -> tuple:
-    """(the embedded paths from zig-server/, the site directories), from the
-    checkout's assets.zon (GOPHER_ROOT's, or `root`'s); raises ValueError
-    naming what it cannot read."""
-    path = os.path.join(root or GOPHER_ROOT, ASSETS)
+def served_by(root: str = None, assets: str = ASSETS) -> tuple:
+    """(the embedded paths, relative to the assets file's directory, and the
+    site directories), from the checkout's assets.zon (GOPHER_ROOT's
+    zig-server/assets.zon, or `root`'s `assets`); raises ValueError naming
+    what it cannot read."""
+    path = os.path.join(root or GOPHER_ROOT, assets)
     with open(path) as f:
         text = f.read()
     rows = ASSET_ROW.findall(text)
@@ -95,31 +104,52 @@ def commit_of(repo: str, paths: tuple = ()) -> str:
     return head + ("-dirty" if changed else "")
 
 
+def walk(root: str, entries) -> list:
+    """Every file under each of `entries` (a directory or a file), as paths
+    from `root`."""
+    files = []
+    for e in entries:
+        if os.path.isfile(os.path.join(root, e)):
+            files.append(e)
+        for dirpath, _, names in os.walk(os.path.join(root, e)):
+            for n in names:
+                files.append(os.path.relpath(os.path.join(dirpath, n), root))
+    return files
+
+
 def served_files() -> list:
     """Every angry-gopher file an image reads, as paths from its root."""
-    files = []
     embedded, _ = served_by()
-    for d in served_dirs():
-        for dirpath, _, names in os.walk(os.path.join(GOPHER_ROOT, d)):
-            for n in names:
-                files.append(os.path.relpath(os.path.join(dirpath, n), GOPHER_ROOT))
-    files.append(ASSETS)
+    files = walk(GOPHER_ROOT, served_dirs()) + [ASSETS]
     for path in embedded:
         files.append(os.path.normpath(os.path.join("zig-server", path)))
     return sorted(set(files))
 
 
+def dogpark_dirs() -> tuple:
+    return (*DOGPARK_BUILT, *served_by(DOGPARK_ROOT, DOGPARK_ASSETS)[1])
+
+
+def dogpark_files() -> list:
+    """Every Dog Park file its kernel or its Linux build reads, as paths from
+    its root."""
+    embedded, _ = served_by(DOGPARK_ROOT, DOGPARK_ASSETS)
+    return sorted(set(walk(DOGPARK_ROOT, dogpark_dirs()) + [DOGPARK_ASSETS] + [os.path.normpath(p) for p in embedded]))
+
+
 def content_id() -> str:
-    """`content-` and a hash of every served file's path and bytes (a file
-    named but not there counts as missing)."""
+    """`content-` and a hash of every served file's repo, path and bytes, both
+    applications' (a file named but not there counts as missing)."""
     h = hashlib.sha256()
-    for rel in served_files():
-        h.update(rel.encode() + b"\0")
-        try:
-            with open(os.path.join(GOPHER_ROOT, rel), "rb") as f:
-                h.update(hashlib.sha256(f.read()).digest())
-        except FileNotFoundError:
-            h.update(b"missing")
+    for repo, root, rels in (("angry-gopher", GOPHER_ROOT, served_files()),
+                             ("dog-park", DOGPARK_ROOT, dogpark_files())):
+        for rel in rels:
+            h.update(f"{repo}/{rel}".encode() + b"\0")
+            try:
+                with open(os.path.join(root, rel), "rb") as f:
+                    h.update(hashlib.sha256(f.read()).digest())
+            except FileNotFoundError:
+                h.update(b"missing")
     return "content-" + h.hexdigest()[:16]
 
 
@@ -136,6 +166,14 @@ def current_pair() -> tuple:
     why = freshness()
     if why != "fresh":
         return ours, None, why
+    # Dog Park is judged by the gates, so a verdict names its code too: no
+    # checkout, or one whose assets do not read, is no pair.
+    if not os.path.isdir(os.path.join(DOGPARK_ROOT, "src")):
+        return ours, None, f"no dog-park checkout at {DOGPARK_ROOT} (DOGPARK_ROOT)"
+    try:
+        served_by(DOGPARK_ROOT, DOGPARK_ASSETS)
+    except (OSError, ValueError) as e:
+        return ours, None, f"Dog Park's assets do not read: {e}"
     return ours, content_id(), None
 
 
@@ -153,7 +191,7 @@ def pair() -> int:
     if problem:
         print(f"REFUSING: {problem}")
         return 2
-    print(f"judging gopher-metal {short(ours)} with angry-gopher {short(theirs)}")
+    print(f"judging gopher-metal {short(ours)} with angry-gopher and dog-park {short(theirs)}")
     return 0
 
 
@@ -185,7 +223,7 @@ def record(tier: str, outcome: str) -> int:
     os.makedirs(VERDICT_DIR, exist_ok=True)
     with open(verdict_path(tier, ours, theirs), "w") as f:
         f.write(f"{outcome} {time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())}\n")
-    print(f"verdict kept: {tier} {outcome} for gopher-metal {short(ours)} with angry-gopher {short(theirs)}")
+    print(f"verdict kept: {tier} {outcome} for gopher-metal {short(ours)} with angry-gopher and dog-park {short(theirs)}")
     return 0
 
 
@@ -205,6 +243,8 @@ def require() -> list:
     # Generated assets are not in git, and are not asked to be.
     if git(GOPHER_ROOT, "status", "--porcelain", "--untracked-files=no", "--", *served_dirs(), ASSETS):
         why.append("angry-gopher's served files have uncommitted changes")
+    if git(DOGPARK_ROOT, "status", "--porcelain", "--untracked-files=no", "--", *dogpark_dirs(), DOGPARK_ASSETS):
+        why.append("dog-park's judged files have uncommitted changes")
     for tier in TIERS:
         try:
             with open(verdict_path(tier, ours, theirs)) as f:
