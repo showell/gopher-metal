@@ -179,7 +179,11 @@ const Sim = struct {
         };
         switch (kind) {
             .small, .upload => {
-                const most: usize = if (kind == .upload) 2 << 20 else if (target[1] == 'd') 300_000 else 70_000;
+                // Sizes that reach every edge (past the buffer, past the
+                // budget in a tight seed, slower than the deadline) and keep a
+                // seed under a second: an upload is past the line by its
+                // route's cap, not its size.
+                const most: usize = if (kind == .upload) 256 << 10 else if (target[1] == 'd') 100_000 else 70_000;
                 // Now and then past the cap: refused from its head.
                 const n = if (r.uintLessThan(u8, 3) == 0) r.uintLessThan(usize, 2000) else r.uintLessThan(usize, most);
                 try body.ensureTotalCapacity(s.gpa, n);
@@ -188,7 +192,7 @@ const Sim = struct {
             },
             .chunked => {
                 // Tiny chunks now and then, to pass what is kept of one.
-                const tiny = r.uintLessThan(u8, 4) == 0;
+                const tiny = r.uintLessThan(u8, 10) == 0;
                 const chunks = r.uintLessThan(usize, if (tiny) 20_000 else 40);
                 for (0..chunks) |_| {
                     const n = if (tiny) 1 else 1 + r.uintLessThan(usize, 4000);
@@ -357,7 +361,8 @@ const Sim = struct {
                 // held to the budget.
                 if (d.charged and d.want > 0) small += d.bytes.len;
                 if (d.upload and d.bytes.len != d.most) return s.fail("an upload's room {d} is not its length {d}", .{ d.bytes.len, d.most });
-                if (!std.mem.eql(u8, d.bytes[0..d.len], c.bytes[0..d.len])) return s.fail("a drain holds other bytes than came", .{});
+                // Its bytes are judged when it is served (`serve`): every pass
+                // over megabytes was most of the sweep's time.
                 // A head kept to answer from is copied, never consumed.
                 const head_only = d.want == 0 and d.most == d.head_len;
                 if (!head_only and d.len > c.taken) return s.fail("a drain holds more than was taken", .{});

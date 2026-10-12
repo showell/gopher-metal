@@ -709,11 +709,17 @@ pub const Dir = struct {
         if (e.isDirectory()) return Error.IsDir;
         if (e.size > @intFromEnum(limit)) return Error.StreamTooLong;
 
-        const out = gpa.alloc(u8, e.size) catch return Error.OutOfMemory;
+        var out = gpa.alloc(u8, e.size) catch return Error.OutOfMemory;
+        // A read that fails gives back what it took (metal-vmm QUEUE 172: the
+        // caller, told ReadFailed, had nothing to free), and one short of the
+        // entry's size is its own allocation, so the caller frees what it was
+        // given.
+        errdefer gpa.free(out);
         const n = v.readFile(e, out) catch return Error.ReadFailed;
-        if (keepable) site_cache.keep(sub_path, out[0..n]);
-        if (pc) |c| if (n == e.size) c.put(sub_path, out[0..n]);
-        return out[0..n];
+        if (n != out.len) out = gpa.realloc(out, n) catch return Error.OutOfMemory;
+        if (keepable) site_cache.keep(sub_path, out);
+        if (pc) |c| if (n == e.size) c.put(sub_path, out);
+        return out;
     }
 
     /// The other half: a whole file, written at once. FAT16 has no journal, so

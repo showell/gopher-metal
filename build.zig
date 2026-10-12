@@ -554,7 +554,7 @@ pub fn build(b: *std.Build) void {
     props_opts.addOption(u64, "store_seeds", b.option(u64, "store-seeds", "how many store_sim seeds `properties` sweeps") orelse 1000);
     props_opts.addOption(u64, "durable_seeds", b.option(u64, "durable-seeds", "how many durable_sim seeds `properties` sweeps") orelse 1000);
     props_opts.addOption(u64, "ready_seeds", b.option(u64, "ready-seeds", "how many ready_sim seeds `properties` sweeps") orelse 300);
-    props_opts.addOption(u64, "drain_seeds", b.option(u64, "drain-seeds", "how many drain_sim seeds `properties` sweeps") orelse 300);
+    props_opts.addOption(u64, "drain_seeds", b.option(u64, "drain-seeds", "how many drain_sim seeds `properties` sweeps (each about a second in Debug)") orelse 100);
     props_opts.addOption([]const u8, "sdk_jsonl", b.option([]const u8, "sdk-jsonl", "where `properties` writes its JSONL") orelse "");
     // The floor (coverage/floor-sim.txt, COVERAGE.md): what the long tier
     // must reach. Unset, a MISS is reported and never fails the step.

@@ -686,6 +686,8 @@ test "a path with an empty part is refused by every operation that takes a path,
         for ([_][]const u8{ "data//keep", "/data/keep", "data/keep/", "data/" }) |bad| {
             try testing.expectError(disk_fat.Error.NotFound, d.vol.open(bad));
             try testing.expectError(disk_fat.Error.BadName, d.vol.remove(bad));
+            // Never "already gone", so done (metal-vmm QUEUE 172).
+            try testing.expectError(disk_fat.Error.BadName, d.vol.removeTree(bad));
             try testing.expectError(disk_fat.Error.BadName, d.vol.writeFile(bad, "x"));
             try testing.expectError(disk_fat.Error.BadName, d.vol.rename(bad, "data/other"));
             try testing.expectError(disk_fat.Error.BadName, d.vol.rename("data/keep", bad));
@@ -2090,6 +2092,37 @@ test "remove refuses a directory, and leaves the volume clean" {
     defer d.deinit();
     try d.vol.writeFile("data/dir/inside.txt", "under the directory");
     try testing.expectError(disk_fat.Error.IsDirectory, d.vol.remove("data/dir"));
+}
+
+test "a remove, and a tree's, that answers success left nothing behind: a read that lies on the second walk is an error (metal-vmm QUEUE 172)" {
+    // Each request a remove makes after its lookup, read back as other bytes
+    // (the first a zero: "nothing further in this directory").
+    var n: u64 = 0;
+    while (n < 40) : (n += 1) {
+        inline for (.{ "data/X.DAT", "data/sub" }) |path| {
+            // Lied to on purpose: a leak is allowed ("limit-"), a false "done" is not.
+            const d = try test_disk.Disk.make("limit-remove-lies", test_disk.small, false);
+            defer d.deinit();
+            try d.vol.writeFile("data/X.DAT", "a file to remove");
+            try d.vol.writeFile("data/sub/inner.txt", "a tree to remove");
+            // Past the lookup that finds it (a lie there is absence, which
+            // removeTree calls done, and remove refuses): the walk after.
+            const before_lookup = d.blk.requests;
+            _ = try d.vol.open(path);
+            const lookup = d.blk.requests - before_lookup;
+            d.blk.fault = .{ .at = d.blk.requests + lookup + n, .kind = .garbage, .seed = 0 };
+            const removed = if (comptime std.mem.eql(u8, path, "data/X.DAT")) d.vol.remove(path) else d.vol.removeTree(path);
+            d.blk.fault = null;
+            if (removed) |_| {
+                // Said done: the next boot finds it gone.
+                try d.mount(false);
+                if (d.vol.open(path)) |_| {
+                    std.debug.print("{s}: request {d} read as other bytes, and the remove said done\n", .{ path, n });
+                    return error.TestUnexpectedResult;
+                } else |e| try testing.expectEqual(disk_fat.Error.NotFound, e);
+            } else |_| {}
+        }
+    }
 }
 
 // ---- the paths the tests above leave untried (coverage, 2026-10-09) ----------

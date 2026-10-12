@@ -972,6 +972,14 @@ fn serveOne(
                 "connection: close\r\ncontent-length: 0\r\n\r\n") catch {};
             s.writer().flush() catch {};
         }
+        // **A HEAD THAT IS NOT HTTP IS A 400, COUNTED, AS LINUX ANSWERS IT**
+        // (metal-vmm QUEUE 172): it was closed with no answer.
+        if (e == error.HttpHeadersInvalid) {
+            edge.count(.head_malformed);
+            s.writer().writeAll("HTTP/1.1 400 Bad Request\r\n" ++
+                "connection: close\r\ncontent-length: 0\r\n\r\n") catch {};
+            s.writer().flush() catch {};
+        }
         logRequest(number, "(no request)", if (s.timed_out)
             "the client stopped sending, and was let go"
         else
