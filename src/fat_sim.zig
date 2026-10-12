@@ -74,6 +74,10 @@ const Scenario = struct {
     /// The model and the volume are checked whole every this many
     /// operations, and after each of the first twenty that found no room.
     check_every: usize,
+    /// **THE DISK'S MOST IN ONE REQUEST** (metal-vmm QUEUE 180.4): a
+    /// cluster, 8, 128 or ours (2,048), so a run cut by the limit part-way
+    /// through a chain is in the sweeps.
+    most_sectors: u32,
 
     fn choose(rng: std.Random) Scenario {
         // Named choices (zig-coverage-sdk's explore.pick), drawn exactly as
@@ -92,6 +96,12 @@ const Scenario = struct {
             .crowded = crowded,
             .crowd_dir = if (crowded and rng.boolean()) dirs.len else rng.uintLessThan(usize, dirs.len + 1),
             .check_every = if (crowded) 50 else 1,
+            .most_sectors = switch (explore.pick(rng, "fat_sim: the disk's most in one request", .{ .cluster = 1, .eight = 1, .s128 = 1, .ours = 1 })) {
+                .cluster => shape.sectors_per_cluster,
+                .eight => 8,
+                .s128 => 128,
+                .ours => @import("virtio.zig").Block.most_sectors_ours,
+            },
         };
     }
 };
@@ -224,7 +234,7 @@ const Sim = struct {
     }
 
     fn initFrom(gpa: std.mem.Allocator, io: std.Io, seed: u64, prng: std.Random.DefaultPrng, sc: Scenario, cached: bool) !Sim {
-        return .{
+        var s: Sim = .{
             .gpa = gpa,
             .seed = seed,
             .prng = prng,
@@ -235,6 +245,8 @@ const Sim = struct {
             .model = .init(gpa),
             .bytes = try gpa.alloc(u8, sc.max_bytes),
         };
+        s.disk.blk.most_sectors = sc.most_sectors;
+        return s;
     }
 
     fn deinit(s: *Sim) void {

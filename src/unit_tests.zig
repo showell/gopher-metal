@@ -13,6 +13,7 @@
 test {
     _ = @import("rtc.zig");
     _ = @import("pit.zig");
+    _ = @import("gpt.zig");
     _ = @import("stack.zig");
     _ = @import("civil.zig");
     _ = @import("disk_fat.zig");

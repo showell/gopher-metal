@@ -283,7 +283,9 @@ pub fn Checker(comptime Context: type, comptime each: fn (Context, Finding) void
         fn chain(self: *Self, first: Cluster, size: ?u32) Error!u32 {
             const v = self.vol;
             const cluster_bytes = v.sectors_per_cluster * sector_size;
-            const need: u32 = if (size) |n| (n + cluster_bytes - 1) / cluster_bytes else 0;
+            // Rounded in 64 bits (metal-vmm QUEUE 182.3): a FAT32 file within
+            // a cluster of 4 GiB overflowed u32, and every check panicked.
+            const need: u32 = if (size) |n| @intCast((@as(u64, n) + cluster_bytes - 1) / cluster_bytes) else 0;
             if (first == 0) {
                 if (size == null or need > 0) self.report(if (size == null) .broken else .short, 0, 0);
                 return 0;

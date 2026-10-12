@@ -27,7 +27,10 @@ fn here() std.builtin.SourceLocation {
 const kernel_partition = @import("kernel_partition.zig");
 
 pub const sector_size: u32 = 512;
-pub const Error = error{ ReadFailed, NotGpt, NoPartition };
+/// `TooLarge`: a partition that reaches past sector 2^32, which this
+/// machine's 32-bit sector numbers cannot address (metal-vmm QUEUE 182.2,
+/// as `disk_fat.Volume.mount` refuses a volume past it).
+pub const Error = error{ ReadFailed, NotGpt, NoPartition, TooLarge };
 
 const header_lba: u32 = 1;
 const signature = "EFI PART";
@@ -50,9 +53,8 @@ fn eql16(a: *const [16]u8, b: *const [16]u8) bool {
     return true;
 }
 
-/// A 64-bit little-endian field, truncated: every address here is a sector
-/// number on a disk small enough that the high word is zero, and a disk where
-/// it is not is a disk this machine cannot address anyway.
+/// A 64-bit little-endian field, whole: an address past 32 bits is refused
+/// where it is read (metal-vmm QUEUE 182), never cast and never truncated.
 fn le64(b: []const u8) u64 {
     return @as(u64, le32(b[0..4])) | (@as(u64, le32(b[4..8])) << 32);
 }
@@ -80,6 +82,12 @@ pub fn dataPartition(blk: *virtio.Block, scratch: *[sector_size]u8) Error!Partit
     }
 
     const per_sector = sector_size / entry_size;
+    // **THE ENTRIES' LAST SECTOR, ADDRESSABLE** (metal-vmm QUEUE 182.1): a
+    // header naming entries past sector 2^32 is no table this machine reads.
+    if (entries_lba + (entry_count - 1) / per_sector > std.math.maxInt(u32)) {
+        props.reachable(@src(), "gpt: a table whose entries are past sector 2^32 is not one this machine reads", null);
+        return Error.NotGpt;
+    }
     var index: u32 = 0;
     while (index < entry_count) : (index += 1) {
         const lba: u32 = @intCast(entries_lba + index / per_sector);
@@ -109,9 +117,56 @@ pub fn dataPartition(blk: *virtio.Block, scratch: *[sector_size]u8) Error!Partit
             props.reachable(@src(), "gpt: a partition with no first sector, or ending before it starts, is passed over", null);
             continue;
         }
+        if (last > std.math.maxInt(u32)) {
+            props.reachable(@src(), "gpt: a partition reaching past sector 2^32 is refused", null);
+            return Error.TooLarge;
+        }
         props.alwaysLessThanOrEqualTo(@src(), first, last, "gpt: a partition answered starts no later than it ends", null);
         return .{ .first_lba = @intCast(first), .last_lba = @intCast(last) };
     }
     props.reachable(@src(), "gpt: no partition but the kernel's, so no data partition", .{ .entries = entry_count });
     return Error.NoPartition;
+}
+
+// ---- addresses past 32 bits, refused rather than a panic (metal-vmm QUEUE 182) ----
+
+/// A disk of eight sectors: a GPT header at 1 naming `entries_lba`, and one
+/// partition entry at sector 2 from `first` to `last`.
+fn testDisk(bytes: *[8 * sector_size]u8, entries_lba: u64, first: u64, last: u64) virtio.Block {
+    @memset(bytes, 0);
+    const h = bytes[sector_size..][0..sector_size];
+    @memcpy(h[0..8], signature);
+    std.mem.writeInt(u64, h[72..80], entries_lba, .little);
+    std.mem.writeInt(u32, h[80..84], 4, .little);
+    std.mem.writeInt(u32, h[84..88], 128, .little);
+    const e = bytes[2 * sector_size ..][0..128];
+    e[0] = 0xAF; // any type but the kernel's
+    std.mem.writeInt(u64, e[32..40], first, .little);
+    std.mem.writeInt(u64, e[40..48], last, .little);
+    return virtio.Block.inMemory(bytes);
+}
+
+test "a GPT whose entries are past sector 2^32 is not one this machine reads (metal-vmm QUEUE 182.1)" {
+    var bytes: [8 * sector_size]u8 align(16) = undefined;
+    var scratch: [sector_size]u8 align(16) = undefined;
+    // The last address that fits reads on (to sector 2 here, the edge's
+    // other side checked by its value); one past it is NotGpt, never a panic.
+    var blk = testDisk(&bytes, 2, 3, 7);
+    try std.testing.expectEqual(Partition{ .first_lba = 3, .last_lba = 7 }, try dataPartition(&blk, &scratch));
+    blk = testDisk(&bytes, 1 << 32, 3, 7);
+    try std.testing.expectError(Error.NotGpt, dataPartition(&blk, &scratch));
+    blk = testDisk(&bytes, (1 << 32) - 1 + 0, 3, 7);
+    try std.testing.expectError(Error.ReadFailed, dataPartition(&blk, &scratch)); // fits, and is past this disk
+}
+
+test "a partition reaching past sector 2^32 is refused, as a FAT volume past it is: a whole volume over 2 TiB (metal-vmm QUEUE 182.2)" {
+    var bytes: [8 * sector_size]u8 align(16) = undefined;
+    var scratch: [sector_size]u8 align(16) = undefined;
+    const most: u64 = std.math.maxInt(u32);
+    var blk = testDisk(&bytes, 2, 3, most);
+    try std.testing.expectEqual(Partition{ .first_lba = 3, .last_lba = @intCast(most) }, try dataPartition(&blk, &scratch));
+    blk = testDisk(&bytes, 2, 3, most + 1);
+    try std.testing.expectError(Error.TooLarge, dataPartition(&blk, &scratch));
+    blk = testDisk(&bytes, 2, most + 1, most + 2);
+    try std.testing.expectError(Error.TooLarge, dataPartition(&blk, &scratch));
 }

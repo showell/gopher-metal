@@ -1019,6 +1019,10 @@ fn serveOne(
         },
         .none, .small, .upload => null,
     };
+    // The one expectation met, in any case, made std's exact one (metal-vmm
+    // QUEUE 180.7: std refuses `100-Continue` with no answer, and a bodiless
+    // one reached it).
+    if (refusal == null) body_rule.meetExpectation(&req.head);
     // Told to send already, by the host, or never to be: std must not tell it.
     if (wait.continued or wait.verdict == .stranger) req.head.expect = null;
     if (refusal) |r| {
@@ -1418,7 +1422,13 @@ fn dataVolume() ?virtio.Block {
         serial.putDec(b.capacity / 2048);
         serial.put(" MB, requests up to ");
         serial.putDec(b.most_sectors / 2);
-        serial.put(" KiB\n");
+        serial.put(" KiB");
+        if (b.disk_most_sectors) |most| {
+            serial.put(" (the disk says ");
+            serial.putDec(most / 2);
+            serial.put(" KiB)");
+        }
+        serial.put("\n");
         if (b.cache_on_at_bringup) switch (metal.scsi_mode.report(b.write_cache, true)) {
             .turned_off => serial.put("  the volume's write cache is turned off: every write is on the disk when answered\n"),
             .would_not_turn_off => serial.put("  the volume's write cache would not turn off: a power cut can leave its filesystem damaged\n"),
@@ -1846,12 +1856,12 @@ fn readConfig(io: Io, alloc: std.mem.Allocator) Config {
             const ms = configNumber(u64, value) catch
                 serial.fail(config_path ++ ": `idle_timeout_ms` is not a number");
             if (ms == 0) serial.fail(config_path ++ ": an idle timeout of zero would answer nobody");
-            conf.idle_ns = ms * std.time.ns_per_ms;
+            conf.idle_ns = metal.idle.nsOfMs(ms) orelse serial.fail(config_path ++ ": `idle_timeout_ms` is too large");
         } else if (std.mem.eql(u8, key, "keepalive_ms")) {
             const ms = configNumber(u64, value) catch
                 serial.fail(config_path ++ ": `keepalive_ms` is not a number");
             if (ms == 0) serial.fail(config_path ++ ": a keepalive of zero would ping on every turn");
-            conf.keepalive_ns = ms * std.time.ns_per_ms;
+            conf.keepalive_ns = metal.idle.nsOfMs(ms) orelse serial.fail(config_path ++ ": `keepalive_ms` is too large");
         } else if (std.mem.eql(u8, key, "lose_one_sent_in")) {
             conf.lose_one_sent_in = configNumber(u32, value) catch
                 serial.fail(config_path ++ ": `lose_one_sent_in` is not a number");
@@ -1993,9 +2003,10 @@ fn metalFacts(io: Io, alloc: std.mem.Allocator) anyerror![]const webbox.host_fac
     try add(&facts, alloc, "disk requests", "{d}, busy {d} ms in all", .{ work.requests, @divTrunc(Io.ticksToNs(work.ticks), std.time.ns_per_ms) });
     // **THE MOST ONE REQUEST CARRIES**, each disk's (metal-vmm QUEUE 178): 1
     // MiB unless the device said less, which it is obeyed in.
-    try add(&facts, alloc, "disk request most", "boot {d} KiB, volume {d} KiB", .{
+    try add(&facts, alloc, "disk request most", "boot {d} KiB, volume {d} KiB (the volume's own: {s})", .{
         if (disks[0]) |d| d.most_sectors / 2 else 0,
         if (disks[1]) |d| d.most_sectors / 2 else 0,
+        if (disks[1]) |d| if (d.disk_most_sectors) |m| try std.fmt.allocPrint(alloc, "{d} KiB", .{m / 2}) else "not said" else "no volume",
     });
     try add(&facts, alloc, "NMIs", "{d}", .{interrupts.nmis});
     if (turning) |t| try add(&facts, alloc, "frames refused (too long to send)", "{d}", .{t.wire.nic.oversized});

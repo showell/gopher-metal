@@ -611,6 +611,13 @@ pub const Volume = struct {
             props.reachable(@src(), "fat: a mount refuses a FAT too short for its clusters", null);
             return Error.BadBootSector;
         }
+        // **A FAT ITS ENTRY NUMBERS REACH** (metal-vmm QUEUE 182): the check
+        // and the weighing number entries `sector * per + i` in u32, safe
+        // before only through the kernel's 32 MiB FAT budget. Bounded here.
+        if (@as(u64, sectors_per_fat) * (sector_size / entry_bytes) > 1 << 32) {
+            props.reachable(@src(), "fat: a mount refuses a FAT longer than 32-bit entry numbers reach", null);
+            return Error.BadBootSector;
+        }
 
         var vol: Volume = .{
             .blk = blk,

@@ -61,14 +61,14 @@ const ns_per_ms = std.time.ns_per_ms;
 /// The first room a drain is given past its head; it doubles as bytes come.
 pub const first_bytes = 64 * 1024;
 
-/// What the host answers a request before its route runs, besides what the
-/// head itself refuses.
 /// Why a wait was told the host is busy (metal-vmm QUEUE 177.5): the
 /// budget full, memory that did not come, an asker that could not be told,
 /// or the slot wait run out. One 503 to the client; the simulator excuses
 /// each by its own cause, and a log may say it.
 pub const Busy = enum { none, budget, memory, asking, slot_wait };
 
+/// What the host answers a request before its route runs, besides what the
+/// head itself refuses.
 pub const Verdict = enum {
     none,
     /// An upload by nobody the site knows: served from its head, its body

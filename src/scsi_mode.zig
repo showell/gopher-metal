@@ -125,3 +125,33 @@ test "the cache report is derived from what the disk says now and one bit of bri
     try testing.expectEqual(Report.unknown, report(null, true));
     try testing.expectEqual(Report.unknown, report(null, false));
 }
+
+/// **THE DISK'S OWN MOST IN ONE COMMAND** (metal-vmm QUEUE 180.1): MAXIMUM
+/// TRANSFER LENGTH, in sectors, from INQUIRY's Block Limits page (B0h,
+/// SBC-3 6.6.3), of which the disk sent `got` bytes. Null where it says
+/// nothing: a page too short to hold the field, another page, or 0 (no
+/// limit). Virtio-scsi's `max_sectors` is the controller's hint; this is
+/// the disk's, which Linux's sd obeys.
+pub fn blockLimitsMost(page: []const u8, got: usize) ?u32 {
+    const n = @min(got, page.len);
+    if (n < 12 or page[1] != 0xB0) return null;
+    const most = std.mem.readInt(u32, page[8..12], .big);
+    return if (most == 0) null else most;
+}
+
+test "Block Limits: the disk's most is read from its page, and nothing is read from a page that does not say it (metal-vmm QUEUE 180.1)" {
+    var page: [64]u8 = @splat(0);
+    page[1] = 0xB0;
+    page[3] = 0x3C;
+    std.mem.writeInt(u32, page[8..12], 256, .big);
+    try std.testing.expectEqual(@as(?u32, 256), blockLimitsMost(&page, 64));
+    // Exactly the field, and one byte short of it.
+    try std.testing.expectEqual(@as(?u32, 256), blockLimitsMost(&page, 12));
+    try std.testing.expectEqual(@as(?u32, null), blockLimitsMost(&page, 11));
+    // Another page, and a limit of 0: nothing said.
+    page[1] = 0x83;
+    try std.testing.expectEqual(@as(?u32, null), blockLimitsMost(&page, 64));
+    page[1] = 0xB0;
+    std.mem.writeInt(u32, page[8..12], 0, .big);
+    try std.testing.expectEqual(@as(?u32, null), blockLimitsMost(&page, 64));
+}

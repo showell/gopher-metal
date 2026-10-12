@@ -131,6 +131,9 @@ const feature_version_1: u6 = 32;
 /// virtio-blk's VIRTIO_BLK_F_SIZE_MAX (§5.2.3): `size_max`, at config 8, is
 /// the most bytes in one segment.
 const blk_f_size_max: u32 = 1 << 1;
+/// VIRTIO_BLK_F_SEG_MAX: `seg_max`, at config 12, is the most segments in
+/// one request.
+const blk_f_seg_max: u32 = 1 << 2;
 
 pub const device_id_block: u32 = 2;
 pub const device_id_net: u32 = 1;
@@ -694,7 +697,8 @@ const BlkReqHeader = extern struct {
 };
 
 pub const Block = struct {
-    pub const Q = Queue(8);
+    const queue_size = 8;
+    pub const Q = Queue(queue_size);
 
     device: Device,
     q: Q,
@@ -708,6 +712,14 @@ pub const Block = struct {
     /// filesystem asks for no more, and refuses at mount a disk that takes
     /// less than a cluster (`disk_fat`).
     most_sectors: u32 = most_sectors_ours,
+    /// What a SCSI disk itself said of its most (INQUIRY's Block Limits
+    /// page, metal-vmm QUEUE 180.1), for the host facts; null where it said
+    /// nothing, or on virtio-blk.
+    disk_most_sectors: ?u32 = null,
+    /// **THE MOST BYTES IN ONE SEGMENT** (virtio-blk's `size_max`, metal-vmm
+    /// QUEUE 180.2): a request's data is chained in segments of at most
+    /// this; null, one segment.
+    segment_bytes: ?u32 = null,
 
     /// **WHAT THE DEVICE COST.** Every request counted, and the timestamp-counter
     /// ticks spent between offering it and seeing it done — so a host can say
@@ -913,22 +925,40 @@ pub const Block = struct {
     /// up; it must be identity-mapped, since what goes in a descriptor is a
     /// PHYSICAL address.
     pub fn init(device: Device, mem: *BlockMemory) Error!Block {
-        // VIRTIO_BLK_F_SIZE_MAX taken when offered: it changes nothing of the
-        // protocol, and says the most one segment may carry (178).
-        const got = try negotiateWith(device, 0, blk_f_size_max);
+        // VIRTIO_BLK_F_SIZE_MAX and _SEG_MAX taken when offered: they change
+        // nothing of the protocol, and say the most one segment may carry
+        // and how many segments a request may have (178, 180.2).
+        const got = try negotiateWith(device, 0, blk_f_size_max | blk_f_seg_max);
         const q = try Q.setup(device, 0, &mem.ring);
         try driverOk(device, got.st);
-        const size_max: ?u64 = if (got.low & blk_f_size_max != 0) configRead32(device, 8) else null;
+        const size_max: ?u32 = if (got.low & blk_f_size_max != 0) configRead32(device, 8) else null;
+        const seg_max: ?u32 = if (got.low & blk_f_seg_max != 0) configRead32(device, 12) else null;
         return .{
             .device = device,
             .q = q,
             .header = &mem.header,
             .status = &mem.status,
             .capacity = configRead64(device, 0),
-            .most_sectors = mostSectors(size_max),
+            .most_sectors = mostSectorsBlk(size_max, seg_max),
+            .segment_bytes = if (size_max) |n| if (n != 0) n else null else null,
             // No VIRTIO_BLK_F_FLUSH negotiated: write-through.
             .write_cache = false,
         };
+    }
+
+    /// The data segments a request's chain holds besides its header and
+    /// status (`Q`'s eight descriptors).
+    pub const most_segments: u32 = queue_size - 2;
+
+    /// **VIRTIO-BLK'S MOST** (metal-vmm QUEUE 180.2): `size_max` limits each
+    /// SEGMENT, and a request may have `seg_max` of them (one where the
+    /// device does not say, as Linux takes it), at most `most_segments`.
+    /// `size_max` 0 is unset, as virtio-scsi's 0 is. Never more than ours.
+    pub fn mostSectorsBlk(size_max: ?u32, seg_max: ?u32) u32 {
+        const per = size_max orelse return most_sectors_ours;
+        if (per == 0) return most_sectors_ours;
+        const segments = @min(@max(seg_max orelse 1, 1), most_segments);
+        return mostSectors(@as(u64, per) * segments);
     }
 
     /// The most sectors a request asks for, given what a device said of the
@@ -960,13 +990,22 @@ pub const Block = struct {
 
         const d = &self.q.ring.desc;
         d[0] = .{ .addr = @intFromPtr(self.header), .len = @sizeOf(BlkReqHeader), .flags = desc_flag_next, .next = 1 };
-        d[1] = .{
-            .addr = addr,
-            .len = len,
-            .flags = desc_flag_next | (if (kind == blk_t_in) desc_flag_write else 0),
-            .next = 2,
-        };
-        d[2] = .{ .addr = @intFromPtr(self.status), .len = 1, .flags = desc_flag_write, .next = 0 };
+        // The data, in segments of at most `segment_bytes` (180.2): the
+        // request's most (`most_sectors`) keeps them within `most_segments`.
+        const per = self.segment_bytes orelse len;
+        var at: u32 = 0;
+        var k: u16 = 1;
+        while (at < len) : (k += 1) {
+            const n = @min(per, len - at);
+            d[k] = .{
+                .addr = addr + at,
+                .len = n,
+                .flags = desc_flag_next | (if (kind == blk_t_in) desc_flag_write else 0),
+                .next = k + 1,
+            };
+            at += n;
+        }
+        d[k] = .{ .addr = @intFromPtr(self.status), .len = 1, .flags = desc_flag_write, .next = 0 };
 
         const began = tsc.read();
         self.q.offer(0);

@@ -838,3 +838,55 @@ test "a FAT run that landed and answered failure is given back as runs, not a cl
     try testing.expect(d.fatsAgree());
     try d.expectKept();
 }
+
+test "virtio-blk's size_max is per segment: a request carries it times the segments, and 0 is unset (metal-vmm QUEUE 180.2)" {
+    const most = virtio.Block.mostSectorsBlk;
+    // Unset, or 0: ours.
+    try testing.expectEqual(@as(u32, 2048), most(null, null));
+    try testing.expectEqual(@as(u32, 2048), most(0, 8));
+    // One segment where seg_max is not said, as Linux takes it.
+    try testing.expectEqual(@as(u32, 8), most(4096, null));
+    // Up to seg_max segments, at most the six a request's chain holds.
+    try testing.expectEqual(@as(u32, 24), most(4096, 3));
+    try testing.expectEqual(@as(u32, 48), most(4096, 6));
+    try testing.expectEqual(@as(u32, 48), most(4096, 126));
+    // Never more than ours.
+    try testing.expectEqual(@as(u32, 2048), most(1 << 20, 126));
+    // A size_max under a cluster served by segments (before 180.2, refused at mount).
+    try testing.expect(most(512, 126) >= 2);
+}
+
+test "a file whose size is near 4 GiB is checked, not a panic: its clusters are counted in 64 bits (metal-vmm QUEUE 182.3)" {
+    for ([_]u32{ std.math.maxInt(u32) - 512 * 4 + 1, std.math.maxInt(u32) }) |size| {
+        const d = try Disk.make("damaged-near-4gib", test_disk.small32, true);
+        defer d.deinit();
+        try d.vol.writeFile("BIG.BIN", "x");
+        // The entry's size, raised by hand: a FAT32 file may be that big.
+        const at = std.mem.indexOf(u8, d.bytes, "BIG     BIN").?;
+        std.mem.writeInt(u32, d.bytes[at + 28 ..][0..4], size, .little);
+        try d.mount(true);
+        const r = try d.check();
+        try r.expect(&.{.{ .problem = .short, .path = "/BIG.BIN", .cluster = (try d.vol.open("BIG.BIN")).first_cluster, .count = 1 }});
+    }
+}
+
+test "a FAT longer than 32-bit entry numbers reach is refused at mount, in the driver itself (metal-vmm QUEUE 182)" {
+    const d = try Disk.make("limit-fat-length", test_disk.small32, false);
+    defer d.deinit();
+    const b = d.bytes[0..disk_fat.sector_size];
+    const saved = b.*;
+    defer b.* = saved;
+    // A boot sector that says a volume of nearly 2^32 sectors, 128 to a
+    // cluster, and a FAT of `spf` sectors: 2^25 of them is 2^32 entries,
+    // the last numbered 2^32 - 1; one more and its numbers overflow u32.
+    b[13] = 128;
+    std.mem.writeInt(u32, b[32..36], 0xFFFF_0000, .little);
+    for ([_]struct { spf: u32, ok: bool }{ .{ .spf = 1 << 25, .ok = true }, .{ .spf = (1 << 25) + 1, .ok = false } }) |c| {
+        std.mem.writeInt(u32, b[36..40], c.spf, .little);
+        var scratch: [disk_fat.sector_size]u8 align(16) = undefined;
+        const got = disk_fat.Volume.mount(&d.blk, &scratch, 0);
+        // At the edge the bound lets it by, and the mount reads on, past
+        // this small disk; one more is refused as a boot sector.
+        if (c.ok) try testing.expectError(disk_fat.Error.ReadFailed, got) else try testing.expectError(disk_fat.Error.BadBootSector, got);
+    }
+}

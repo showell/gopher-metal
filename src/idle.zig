@@ -169,3 +169,18 @@ test "idle: a ninth task is refused" {
     fakes[max_tasks] = .{ .left = 0 };
     try testing.expectError(error.TooMany, idle.add(fakes[max_tasks].init("one too many")));
 }
+
+/// **MILLISECONDS FROM THE CONFIG, IN NANOSECONDS, OR NONE** (metal-vmm QUEUE
+/// 182.4): `idle_timeout_ms` and `keepalive_ms` were multiplied in u64, which
+/// past ~1.8e13 ms panicked the boot. Null past what u64 holds; the boot
+/// fails naming the key.
+pub fn nsOfMs(ms: u64) ?u64 {
+    return std.math.mul(u64, ms, std.time.ns_per_ms) catch null;
+}
+
+test "a config's milliseconds past what nanoseconds hold in u64 are refused, not a panic (metal-vmm QUEUE 182.4)" {
+    const most = std.math.maxInt(u64) / std.time.ns_per_ms;
+    try std.testing.expectEqual(@as(?u64, most * std.time.ns_per_ms), nsOfMs(most));
+    try std.testing.expectEqual(@as(?u64, null), nsOfMs(most + 1));
+    try std.testing.expectEqual(@as(?u64, 5_000_000), nsOfMs(5));
+}
