@@ -1187,3 +1187,14 @@ class Gates(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main(verbosity=1)
+
+
+class LegacyNamesEnd(unittest.TestCase):
+    def test_the_legacy_names_have_not_ended(self):
+        # metal-vmm QUEUE 176.2: on 2026-11-15 the hosts stop reading the
+        # legacy cookie names, and P1 = "gopher_uid=1", UID_STORY's unsigned
+        # steps and the "is no one" checks quietly test nothing.
+        import datetime
+        if datetime.datetime.now(datetime.timezone.utc) >= datetime.datetime(2026, 11, 15, tzinfo=datetime.timezone.utc):
+            self.fail("the legacy cookie names ended on 2026-11-15: delete judge_gopher.py's legacy steps "
+                      "(P1, UID_STORY's unsigned cookies and their checks) with the hosts' migration")

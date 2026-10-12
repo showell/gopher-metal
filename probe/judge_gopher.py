@@ -1485,7 +1485,9 @@ def read_or_none(path: str):
 
 def cookie_from(answer: dict, jar):
     """The __Host-gopher_uid a response set, or the jar unchanged (a legacy
-    one it clears is no cookie to keep)."""
+    one it clears is no cookie to keep). A legacy-named identity SET is no
+    cookie either (metal-vmm QUEUE 176.2): the next step then shows that host
+    as no one, where the other names its player."""
     sc = answer.get("headers", {}).get("set-cookie", "")
     m = re.search(r"(__Host-gopher_uid=[A-Za-z0-9._-]+)", sc)
     return m.group(1) if m else jar
@@ -3197,7 +3199,10 @@ def main() -> int:
         # honoured a forged cookie would agree.
         by_name = {s["name"]: a for s, a in zip(UID_STORY, answers)}
         playing = lambda a, who: f"Currently playing as <strong>{who}</strong>".encode() in (a.get("body") or b"")
-        set_uid = lambda a: re.search(r"__Host-gopher_uid=([^;]*)", a.get("headers", {}).get("set-cookie", ""))
+        # Either name, a value set (a clear is Max-Age=0 and empty): a host
+        # that set a legacy-named identity fails the "set a cookie" checks
+        # below, and the positive ones want __Host- (metal-vmm QUEUE 176.2).
+        set_uid = lambda a: re.search(r"(?:^|\n|; |\b)((?:__Host-)?gopher_uid)=([^;\s]+)", a.get("headers", {}).get("set-cookie", ""))
         wrong = []
         upgrade = by_name["a guest upgrade with an unsigned cookie"]
         if upgrade.get("status") != 200 or UPGRADE_HEADING in (upgrade.get("body") or b""):
@@ -3207,20 +3212,20 @@ def main() -> int:
             if playing(by_name[name], who) or set_uid(by_name[name]):
                 wrong.append(f"{name}: answered as {who}, or set a cookie")
         named = set_uid(by_name["a player names themselves"])
-        if not named or named.group(1).count(".") != 2:
+        if not named or named.group(1) != "__Host-gopher_uid" or named.group(2).count(".") != 2:
             wrong.append(f"naming oneself set {named.group(0) if named else 'no cookie'}, not a signed one")
         if not playing(by_name["and is that player, signed"], "Debbie"):
             wrong.append("the signed cookie /play set did not name its player")
         first = by_name["a legacy cookie's first visit is re-signed"]
         resigned = set_uid(first)
-        if first.get("status") != 303 or not resigned or not resigned.group(1).startswith("p1."):
+        if first.get("status") != 303 or not resigned or resigned.group(1) != "__Host-gopher_uid" or not resigned.group(2).startswith("p1."):
             wrong.append(f"the legacy cookie's first visit answered {first.get('status')}, "
                          f"setting {resigned.group(0) if resigned else 'nothing'}: not re-signed "
                          "(and so p1 did not survive the forged release)")
         if not playing(by_name["and the re-signed cookie is that player"], "Nikhil"):
             wrong.append("the re-signed cookie did not name p1")
         again = by_name["the same unsigned cookie again, inside the grace, is re-signed again"]
-        if again.get("status") != 303 or not set_uid(again) or not set_uid(again).group(1).startswith("p1."):
+        if again.get("status") != 303 or not set_uid(again) or set_uid(again).group(1) != "__Host-gopher_uid" or not set_uid(again).group(2).startswith("p1."):
             wrong.append(f"the legacy cookie inside its grace answered {again.get('status')}, not re-signed again")
         for w in wrong:
             failures += 1
