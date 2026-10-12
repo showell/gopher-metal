@@ -355,11 +355,15 @@ pub fn build(b: *std.Build) void {
     // merged unit binary (which also runs the simulators and store tests that
     // reach the FAT, so a line only a simulator runs counts as run) and
     // disk_fat_test and the faults and lies binaries.
-    const fat_coverage = b.addSystemCommand(&.{ "python3", "tools/linecov.py", "src/disk_fat.zig" });
-    const dirent_coverage = b.addSystemCommand(&.{ "python3", "tools/linecov.py", "src/disk_fat_dirent.zig" });
-    const fat_coverage_step = b.step("fat-coverage", "the lines of disk_fat.zig and disk_fat_dirent.zig no host test runs (the unit binary, simulators included, and the FAT test binaries)");
-    fat_coverage_step.dependOn(&fat_coverage.step);
-    fat_coverage_step.dependOn(&dirent_coverage.step);
+    // disk_fat.zig is split by the 1,000-line rule (metal-vmm QUEUE 173):
+    // each of its files is listed, over the same binaries.
+    const fat_files = [_][]const u8{ "src/disk_fat.zig", "src/disk_fat_fat.zig", "src/disk_fat_chain.zig", "src/disk_fat_dir.zig", "src/disk_fat_file.zig", "src/disk_fat_remove.zig", "src/disk_fat_check.zig", "src/disk_fat_dirent.zig" };
+    var fat_coverage: [fat_files.len]*std.Build.Step.Run = undefined;
+    const fat_coverage_step = b.step("fat-coverage", "the lines of disk_fat.zig, its split files and disk_fat_dirent.zig no host test runs (the unit binary, simulators included, and the FAT test binaries)");
+    for (fat_files, &fat_coverage) |path, *run| {
+        run.* = b.addSystemCommand(&.{ "python3", "tools/linecov.py", path });
+        fat_coverage_step.dependOn(&run.*.step);
+    }
     // **ONE BINARY FOR THE FILES' OWN TESTS** (src/unit_tests.zig, metal-vmm
     // QUEUE 142): one compile of the runner, std and the shared imports,
     // and each file's tests run once, not in every binary that imports it.
@@ -403,8 +407,7 @@ pub fn build(b: *std.Build) void {
         test_step.dependOn(&b.addRunArtifact(unit).step);
         // disk_fat's lines run in the merged binary, or in its own.
         if (std.mem.eql(u8, path, "src/unit_tests.zig") or std.mem.eql(u8, path, "src/disk_fat.zig") or std.mem.eql(u8, path, "src/disk_fat_dirent.zig")) {
-            fat_coverage.addArtifactArg(unit);
-            dirent_coverage.addArtifactArg(unit);
+            for (fat_coverage) |run| run.addArtifactArg(unit);
         }
     }
     // **WHICH LINES OF THE STORE'S ORACLE ITS OWN TESTS RUN** (`zig build
@@ -621,8 +624,7 @@ pub fn build(b: *std.Build) void {
         }),
     });
     if (wanted(test_file, "src/disk_fat_test.zig")) test_step.dependOn(&b.addRunArtifact(disk_fat_unit).step);
-    fat_coverage.addArtifactArg(disk_fat_unit);
-    dirent_coverage.addArtifactArg(disk_fat_unit);
+    for (fat_coverage) |run| run.addArtifactArg(disk_fat_unit);
     // The stops and the lying disk (QUEUE.md items 79-80): hundreds of runs
     // each, so binaries of their own, run beside disk_fat_test's: one for the
     // stops and the failed requests, one for the lies. Every test in the file
@@ -653,8 +655,7 @@ pub fn build(b: *std.Build) void {
             }),
         });
         if (wanted(test_file, "src/disk_fat_faults_test.zig")) test_step.dependOn(&b.addRunArtifact(unit).step);
-        fat_coverage.addArtifactArg(unit);
-        dirent_coverage.addArtifactArg(unit);
+        for (fat_coverage) |run| run.addArtifactArg(unit);
     }
 
     const starts = [_]struct { isn: u32, peer: u32 }{
