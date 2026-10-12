@@ -1360,8 +1360,9 @@ fn serveOne(
     // Content-Length one that came whole to its length. A chunked one is
     // still framed, and a short one (its client gone) must be refused: std
     // reads both from memory, decoding the one and refusing the other.
-    if (wait.drain) |d| if (wait.verdict == .none and d.framing == .length and d.len - d.head_len == d.want)
+    if (wait.drain) |d| if (wait.verdict == .none and d.framing == .length and d.len - d.head_len == d.want) {
         webbox.http.held_body = d.bytes[d.head_len..d.len];
+    };
     defer webbox.http.held_body = null;
     var kept_stream = app.site.route(&req, io, request_alloc, &bus) catch |e| blk: {
         outcome = @errorName(e);
