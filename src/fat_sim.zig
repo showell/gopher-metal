@@ -549,6 +549,19 @@ const Sim = struct {
                 // The disk stops answering a few requests into an operation.
                 s.disk.blk.fail_after = s.disk.blk.requests + r.uintLessThan(u64, if (explore.flag(r, "fat_sim: the disk fails within 12 requests, not 80")) 12 else 80);
                 s.failed_disk = true;
+                // **A STOP THAT TEARS ITS LAST REQUEST** (metal-vmm QUEUE
+                // 181): some of its sectors land, as a power cut leaves a
+                // multi-sector write, where a stop failed whole requests.
+                if (explore.flag(r, "fat_sim: the stop tears its last request")) s.disk.blk.fault = .{ .at = s.disk.blk.fail_after.? -| 1, .kind = .torn };
+                // On FAT32, now and then an upload's size: a FAT run past
+                // what the mount weighs sector by sector (181).
+                const upload = s.sc.shape.kind == .fat32 and explore.flag(r, "fat_sim: the failing write is upload-sized");
+                // An upload's FAT runs come within its first few requests:
+                // its stop is drawn there, so a torn one lands in them.
+                if (upload) {
+                    s.disk.blk.fail_after = s.disk.blk.requests + 1 + r.uintLessThan(u64, 8);
+                    if (s.disk.blk.fault != null) s.disk.blk.fault.?.at = s.disk.blk.fail_after.? - 1;
+                }
                 const k = r.uintLessThan(usize, dirs.len + 1);
                 const path = join(if (k == dirs.len) "" else dirs[k], names[r.uintLessThan(usize, names.len)], &buf);
                 var failed: ?anyerror = null;
@@ -561,8 +574,13 @@ const Sim = struct {
                     vol.writeInto(f.path, @intCast(f.bytes.len), s.content(@max(1, @min(s.sc.max_bytes, r.uintLessThan(usize, 200_000))))) catch |e| {
                         failed = e;
                     };
-                } else if (explore.flag(r, "fat_sim: the failing operation is a write, not a read")) {
-                    vol.writeFile(path, s.content(@min(s.sc.max_bytes, r.uintLessThan(usize, 200_000)))) catch |e| {
+                } else if (upload or explore.flag(r, "fat_sim: the failing operation is a write, not a read")) {
+                    const big: ?[]u8 = if (upload) try s.gpa.alloc(u8, 6 << 20) else null;
+                    defer if (big) |b| s.gpa.free(b);
+                    if (big) |b| for (b, 0..) |*x, i| {
+                        x.* = @truncate(i *% 31 +% 1);
+                    };
+                    vol.writeFile(path, big orelse s.content(@min(s.sc.max_bytes, r.uintLessThan(usize, 200_000)))) catch |e| {
                         failed = e;
                     };
                 } else if (s.disk.read(path)) |got| {
@@ -571,6 +589,10 @@ const Sim = struct {
                 if (failed) |e| if (e != E.ReadFailed and e != E.WriteFailed and e != E.NotFound and !roomless(e))
                     return s.fault(@errorName(e));
                 props.reachable(@src(), "fat_sim: the disk stops answering part-way through an operation", null);
+                s.disk.blk.fail_after = null;
+                s.disk.blk.fail_after_writes = null;
+                s.disk.blk.fault = null;
+                try s.judgeStop(if (appended) |f| f.path else path);
             },
         }
     }
@@ -807,6 +829,29 @@ const Sim = struct {
                 try s.model.addDir(d);
             } else |_| {}
         }
+    }
+
+    /// **WHAT A STOP LEAVES, JUDGED** (metal-vmm QUEUE 181: a stop was
+    /// only checked for its error): the next boot mounts, the check finds
+    /// no damage (lost clusters, copies apart and a stale count are what a
+    /// stop may leave), and every file the model holds but `stopped` reads
+    /// as the model says.
+    fn judgeStop(s: *Sim, stopped: []const u8) !void {
+        const d = s.disk;
+        d.mount(s.cached) catch |e| return s.fault(@errorName(e));
+        const r = try d.check();
+        for (r.found[0..r.len]) |f| if (f.problem.damage()) {
+            std.debug.print("  after the stop: {s} at {s}\n", .{ @tagName(f.problem), f.text() });
+            return s.fault("a stop left the volume damaged");
+        };
+        var it = s.model.files.iterator();
+        while (it.next()) |e| {
+            if (std.mem.eql(u8, e.key_ptr.*, stopped)) continue;
+            const got = d.read(e.key_ptr.*) catch return s.fault("after a stop, a file the model holds does not open");
+            defer s.gpa.free(got);
+            if (!std.mem.eql(u8, got, e.value_ptr.*)) return s.fault("after a stop, a file the model holds reads otherwise");
+        }
+        props.reachable(@src(), "fat_sim: what a stop leaves is judged", .{ .held = s.cached });
     }
 
     fn verify(s: *Sim) !void {

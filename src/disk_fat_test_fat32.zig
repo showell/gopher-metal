@@ -750,3 +750,91 @@ test "a FAT run whose first copy's write fails, and whose second's does not (met
         try testing.expectError(disk_fat.Error.NotFound, d.vol.open("f.bin"));
     }
 }
+
+// ---- a lie or a cut inside an upload-sized FAT run (metal-vmm QUEUE 181) ----
+
+/// Twenty MB on `small32`: a chain of 40,960 clusters, 320 FAT sectors, one
+/// run a copy: more than the mount weighs sector by sector.
+const upload_clusters = 40_960;
+
+fn uploadBytes() ![]u8 {
+    const bytes = try testing.allocator.alloc(u8, upload_clusters * disk_fat.sector_size);
+    return pattern(bytes, 0x5A);
+}
+
+/// The request number of the upload's first-copy FAT run, on a fresh `small32`.
+fn uploadRunAt() !u64 {
+    const d = try Disk.make("upload-probe", test_disk.small32, true);
+    defer d.deinit();
+    defer d.blk.observe = null;
+    const bytes = try uploadBytes();
+    defer testing.allocator.free(bytes);
+    var w = FatWrites.watch(d);
+    w.on(d);
+    try d.vol.writeFile("up.bin", bytes);
+    try testing.expect(w.sectors[0] > disk_fat.Volume.max_weighed_sectors);
+    return w.first_at.?;
+}
+
+test "one lie to the first copy's upload-sized FAT run costs nothing: the mount keeps the copy that checks clean, and the file reads whole (metal-vmm QUEUE 181)" {
+    const at = try uploadRunAt();
+    const bytes = try uploadBytes();
+    defer testing.allocator.free(bytes);
+    for ([_]@FieldType(virtio.Block.Fault, "kind"){ .lands_nothing, .torn }) |lie| {
+        const d = try Disk.make("upload-lie", test_disk.small32, true);
+        defer d.deinit();
+        d.blk.fault = .{ .at = at, .kind = lie };
+        try d.vol.writeFile("up.bin", bytes);
+        d.blk.fault = null;
+        try d.mount(true);
+        try testing.expectEqual(@as(u32, 1), d.trusted);
+        try d.expectFile("up.bin", bytes);
+        try testing.expect(d.fatsAgree());
+        const r = try d.check();
+        try r.expect(&.{});
+        // And the next write is a write like any other.
+        try d.vol.writeFile("next.bin", bytes[0 .. 4 << 20]);
+        try d.expectFile("next.bin", bytes[0 .. 4 << 20]);
+    }
+}
+
+test "a cut inside the first copy's upload-sized FAT run leaves nothing: the mount keeps the untouched copy (metal-vmm QUEUE 181)" {
+    const at = try uploadRunAt();
+    const bytes = try uploadBytes();
+    defer testing.allocator.free(bytes);
+    const d = try Disk.make("upload-cut", test_disk.small32, true);
+    defer d.deinit();
+    const free = d.vol.free_clusters;
+    d.blk.fault = .{ .at = at, .kind = .torn };
+    d.blk.fail_after = at + 1;
+    try testing.expect(std.meta.isError(d.vol.writeFile("up.bin", bytes)));
+    d.blk.fault = null;
+    d.blk.fail_after = null;
+    try d.mount(true);
+    try testing.expectEqual(@as(u32, 1), d.trusted);
+    try testing.expectEqual(free, d.vol.free_clusters);
+    try d.expectKept();
+    const r = try d.check();
+    try r.expect(&.{});
+}
+
+test "a FAT run that landed and answered failure is given back as runs, not a cluster at a time (metal-vmm QUEUE 181)" {
+    const clusters = 300; // two FAT sectors, one run
+    const at = try firstCopyRunAt(clusters);
+    const d = try Disk.make("fat-runs-landed", two_sector_clusters, true);
+    defer d.deinit();
+    defer d.blk.observe = null;
+    const free = d.vol.free_clusters;
+    d.blk.fault = .{ .at = at, .kind = .lands_and_fails };
+    var w = FatWrites.watch(d);
+    w.on(d);
+    const bytes = try testing.allocator.alloc(u8, clusters * 2 * disk_fat.sector_size);
+    defer testing.allocator.free(bytes);
+    try testing.expectError(disk_fat.Error.WriteFailed, d.vol.writeFile("f.bin", pattern(bytes, 9)));
+    d.blk.fault = null;
+    // Taken (the run that landed, then copy 1), then given back (copy 0, copy 1).
+    try testing.expectEqual([2]u32{ 2, 2 }, w.copies);
+    try testing.expectEqual(free, d.vol.free_clusters);
+    try testing.expect(d.fatsAgree());
+    try d.expectKept();
+}

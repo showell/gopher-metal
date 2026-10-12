@@ -188,8 +188,12 @@ pub fn allocChainHeld(self: *Volume, fat: []u8, count: u32) Error!Cluster {
             }
             if (looked == clusters) {
                 props.reachable(@src(), "fat: an allocation finds the volume full", .{ .count = count, .taken = taken + n });
-                if (first != 0 or n > 0) {
-                    props.reachable(@src(), "fat: a volume full part-way through an allocation gives back what it took", .{ .taken = taken + n });
+                // What was written is given back (the errdefer); what was
+                // only planned is undone in the held FAT, never written.
+                if (first != 0) {
+                    props.reachable(@src(), "fat: a volume full part-way through an allocation gives back what it took", .{ .taken = taken });
+                } else if (n > 0) {
+                    props.reachable(@src(), "fat: a volume full while an allocation is planned writes nothing of it", .{ .planned = n });
                 }
                 unplan(self, fat, seg_first, n);
                 return Error.Full; // the errdefer gives back what was written
@@ -224,7 +228,7 @@ pub fn allocChainHeld(self: *Volume, fat: []u8, count: u32) Error!Cluster {
                     self.keepTaken(n);
                     writeSegmentCopies(self, fat, seg_first, n);
                     self.took(n);
-                    self.giveBack(seg_first, n);
+                    giveBackSegment(self, fat, seg_first, n);
                 },
                 // Taken as written, and the first copy written again
                 // once, as `fatSet` does: the segment is then taken on
@@ -327,6 +331,40 @@ const SegmentRuns = struct {
         return run;
     }
 };
+
+/// **A SEGMENT GIVEN BACK AS IT WAS TAKEN: AS RUNS** (metal-vmm QUEUE
+/// 181), where `giveBack` freed it a cluster at a time, two requests each
+/// (~51,000 for 100 MB of 4 KiB clusters, the kernel stalled). Each run's
+/// entries are freed in the held FAT and the run written to every copy.
+///
+/// **A RUN THE DISK REFUSES ENDS IT.** Its entries stay free in the held
+/// FAT, which is safe either way (nothing points at them, and the next
+/// write of those sectors frees them on the disk too), so they are counted
+/// free and unsure (`unsure_clusters`: the disk may hold them taken). The
+/// runs after it are left taken, a counted leak (`notGivenBack`).
+fn giveBackSegment(self: *Volume, fat: []u8, seg_first: Cluster, n: u32) void {
+    defer self.ended(n);
+    // **THE HINT IS LOWERED FIRST**, as in giveBack.
+    if (seg_first < self.alloc_hint) self.alloc_hint = seg_first;
+    var runs = SegmentRuns.of(self, fat, seg_first, n);
+    var freed: u32 = 0;
+    while (true) {
+        const run_first = runs.cluster;
+        const left = runs.left;
+        const run = runs.next() orelse break;
+        const in_run = left - runs.left;
+        unplan(self, fat, run_first, in_run);
+        writeFatRun(self, fat, 0, run) catch {
+            self.keepFreed(in_run);
+            self.unsure_clusters +|= in_run;
+            return self.notGivenBack(freed + in_run, n);
+        };
+        var c: u32 = 1;
+        while (c < self.num_fats) : (c += 1) writeFatRun(self, fat, c, run) catch self.copyApart();
+        self.keepFreed(in_run);
+        freed += in_run;
+    }
+}
 
 /// One run of held FAT sectors to copy `copy`: as a sector was written
 /// where it is one (`writeSector`), as one request where more.
