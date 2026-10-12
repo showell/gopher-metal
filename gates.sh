@@ -77,6 +77,12 @@ zig build gopher "${ZIG_GOPHER[@]}" 2>&1 | grep error
 [ "${PIPESTATUS[0]}" = 0 ] || failed+=(gopher-build)
 lap "kernels and gopher.elf"
 
+# **DOG PARK, ON METAL AS ON LINUX** (probe/judge_dogpark.py): the same
+# requests to its play server on Linux and to dogpark.elf, over two boots,
+# and the data each left. Seconds, so both tiers run it, before the long ones.
+python3 probe/judge_dogpark.py || failed+=(dogpark)
+lap "the dogpark judge"
+
 # ── one chat-judge story, for the quick tier ─────────────────────────────────
 # A single story (the member story: login, chat, topics, admin, logout) on one
 # machine, FAT32, so a single commit is answered in two minutes instead of the
