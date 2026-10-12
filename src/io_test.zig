@@ -802,3 +802,20 @@ test "readFileAlloc whose read fails gives back what it took: the caller is told
         t.volume.blk.fault = null;
     }
 }
+
+test "a read that fails while a missing path is probed is ReadFailed, never 'not there' (metal-vmm QUEUE 172)" {
+    const t = try Two.make(true);
+    defer t.deinit();
+    try cwd.writeFile(io, .{ .sub_path = "data/chat/a.md", .data = "here" });
+    var n: u64 = 0;
+    while (n < 16) : (n += 1) {
+        const at = t.volume.blk.requests + n;
+        t.volume.blk.fault = .{ .at = at, .kind = .fails };
+        const got = cwd.statFile(io, "data/chat/nothere/x.md", .{});
+        const fired = t.volume.blk.requests > at;
+        t.volume.blk.fault = null;
+        if (got) |_| return error.TestUnexpectedResult else |e| {
+            try testing.expectEqual(if (fired) error.ReadFailed else error.FileNotFound, e);
+        }
+    }
+}
