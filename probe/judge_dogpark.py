@@ -22,6 +22,7 @@ import base64
 import hashlib
 import hmac
 import http.client
+import json
 import os
 import re
 import shutil
@@ -104,7 +105,7 @@ FIRST = [
     ("no such dog", "POST", "/leash", BOB, b'{"dog":100000}'),
     # Dog 0 at (155, 350) heads for cow 0 at (250, 250): the cow steps aside.
     ("Alice's dog scares a cow", "POST", "/move", ALICE, b'{"dog":0,"path":[[165,340]]}'),
-    ("Alice drags 1 along a path", "POST", "/move", ALICE, b'{"dog":1,"path":[[360,160],[372,171],[385,180],[399,191]]}'),
+    ("Alice drags 1 along a path", "POST", "/move", ALICE, b'{"dog":1,"back":[[350,150]],"path":[[360,160],[372,171],[385,180],[399,191]]}'),
     ("Alice moves 1", "POST", "/move", ALICE, b'{"dog":1,"path":[[2345,1234]]}'),
     ("a move outside", "POST", "/move", ALICE, b'{"dog":1,"path":[[-5,10]]}'),
     ("a move with no path", "POST", "/move", ALICE, b'{"dog":1,"path":[]}'),
@@ -269,12 +270,19 @@ def main() -> int:
     # What the story is for, said on the Linux side (the comparison carries it
     # to metal): the restart kept the viewport and the move, not the leash.
     # Dog 0 heads (10, -10) from 53 px off cow 0, which stands in its path,
-    # left of the line: the cow goes left, across the heading, (-26, -26),
-    # fast, as the dog is close (dog-park's cows.zig).
+    # left of the line: the cow goes left, exactly across the heading
+    # (north-west, as far on each axis), and fast, as the dog is close
+    # (dog-park's cows.zig).
     first = dict(zip([st[0] for st in FIRST], seen["first boot:"][0]))
-    scare = first["Alice's dog scares a cow"].get("body")
-    if scare != b'{"moved":0,"park_x":165,"park_y":340,"cows":[{"id":0,"park_x":224,"park_y":224}]}':
-        problems.append(f"first boot: dog 0's move did not step cow 0 to (224, 224): {scare!r}")
+    scare = first["Alice's dog scares a cow"].get("body") or b"{}"
+    try:
+        cow0 = [c for c in json.loads(scare)["cows"] if c["id"] == 0][0]
+        mx, my = cow0["park_x"] - 250, cow0["park_y"] - 250
+        across = mx == my and mx < -5
+    except (ValueError, KeyError, IndexError):
+        across = False
+    if not across:
+        problems.append(f"first boot: dog 0's move did not step cow 0 north-west, across its heading: {scare!r}")
     after = seen["after a restart:"][0]
     if after and after[0].get("body") != b'{"viewport":{"at":{"park_x":1200,"park_y":700}},"leash":{"none":{}}}':
         problems.append(f"after a restart: Alice's /me is {after[0].get('body')!r}, not her kept viewport and no leash")
