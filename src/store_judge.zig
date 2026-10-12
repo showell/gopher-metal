@@ -8,8 +8,8 @@
 //! the same answer from all three at every step and the same tree after it.
 //!
 //! Two compilations of one file: `ag_store_linux` is angry-gopher's
-//! `zig-server/src/store.zig` as it is, and `ag_store_metal` is the port's
-//! copy (port.sh), whose `host_io` is src/host_io_metal.zig with this judge's
+//! `zig-server/src/store.zig` as it is, and `ag_store_metal` is the same
+//! file compiled with `host_io` as src/host_io_metal.zig with this judge's
 //! world as its `metal`: so the io it writes through is the one these tests
 //! mount disks on.
 

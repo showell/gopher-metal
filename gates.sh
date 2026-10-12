@@ -13,8 +13,9 @@
 #
 # **gopher.elf IS REBUILT HERE.** `probe/run.sh gopher` judges whatever
 # gopher.elf is on disk, and `zig build kernels` does not build it, so a gate
-# that skipped this judged yesterday's kernel and passed. It assumes port.sh
-# has already prepared angry-gopher's sources; it does not re-port them.
+# that skipped this judged yesterday's kernel and passed. It compiles
+# angry-gopher's checkout as it is (no copy); port.sh must have written this
+# tree's asset list from it, which the build checks.
 #
 # **THE CHAT JUDGE RUNS FAT32 HERE, FAT16 IN long.sh** (QUEUE.md item 88; the
 # gates essay, item 6): prod's data is a FAT32 volume. The FAT16 judge was
@@ -42,14 +43,15 @@ t=$SECONDS
 lap() { echo "time: $1 $((SECONDS - t)) s"; t=$SECONDS; }
 
 GOPHER_ROOT="${GOPHER_ROOT:-$HOME/showell_repos/angry-gopher}"
-GOPHER_PORT="${GOPHER_PORT:-$HOME/build/gopher-metal/port}"
-export GOPHER_ROOT GOPHER_PORT
-# **ONE CHECKOUT, ONE PORT, FOR EVERY JUDGE** (metal-vmm 147(d)): verdicts.py
-# reads them from the environment, build.zig from its options, whose defaults
-# are the same places only while neither is set elsewhere.
-ZIG_GOPHER=(-Dgopher="$GOPHER_PORT" -Dgopher-root="$GOPHER_ROOT")
-# **WHICH CODE THIS RUN JUDGES** (tools/verdicts.py): both commits, printed,
-# and a port that is not angry-gopher's HEAD refused. A full run keeps its
+export GOPHER_ROOT
+# **ONE CHECKOUT FOR EVERY JUDGE** (metal-vmm 147(d)): verdicts.py reads it
+# from the environment, build.zig from its option, whose defaults are the same
+# place only while neither is set elsewhere.
+ZIG_GOPHER=(-Dgopher-root="$GOPHER_ROOT")
+# **WHICH CODE THIS RUN JUDGES** (tools/verdicts.py): both, printed, and a
+# checkout the build cannot take refused. The build reads the checkout live:
+# an edit to it during the run changes its content id, and `record` keeps no
+# verdict. A full run keeps its
 # verdict for exactly this pair, which droplet/chat.py requires.
 VERDICT_PAIR="$(python3 tools/verdicts.py ids)" || exit 2
 export VERDICT_PAIR
@@ -65,7 +67,7 @@ python3 tools/check_limits.py "$GOPHER_ROOT/zig-server/src" || failed+=(limits)
 # is the gates' longest.
 zig build test "${ZIG_GOPHER[@]}" --summary all > "$VERDICTS/test-summary.txt" 2>&1
 [ $? = 0 ] || failed+=(test)
-# The check's "NOT type-checked" line too: a stale port fails `check` (and so
+# The check's "NOT type-checked" line too: a checkout the build cannot take fails `check` (and so
 # `test`), and its reason is said here, not only in the summary file.
 grep -E "tests passed|error|NOT type-checked" "$VERDICTS/test-summary.txt"
 lap "zig build test"

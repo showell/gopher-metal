@@ -6,7 +6,7 @@ front-end artifacts by name -- `@embedFile("chat_js_emoji")` -- and those names
 resolve only because a build graph declared them. Our build graph has to declare
 the same ones, and hand-copying sixty entries is duplicated state that drifts
 the first time somebody adds an asset. So it is read from the source of truth
-every time port.sh runs.
+every time port.sh runs (the build refuses a list that is not the checkout's).
 
     extract_assets.py <their build.zig> <gen/assets.zig>
 """
