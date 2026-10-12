@@ -2107,10 +2107,12 @@ pub const Volume = struct {
     ///
     /// Freeing last is the crash-safe order: a stop between the steps leaks
     /// clusters, where the other order leaves an entry pointing at clusters
-    /// already given away. A name not in the directory is no error.
+    /// already given away. A name the walk does not find is NotFound: its
+    /// callers looked it up first (`walkFound`).
     fn removeEntry(self: *Volume, dir_cluster: Cluster, name: []const u8) Error!void {
         var gone: Landing = .before;
-        return self.unlinkEntry(dir_cluster, name, .free_chain, &gone, null);
+        try self.unlinkEntry(dir_cluster, name, .free_chain, &gone, null);
+        return walkFound(gone);
     }
 
     /// An entry `unlinkEntry` tombstoned and kept the means to undo:
@@ -3324,6 +3326,16 @@ pub const Volume = struct {
         try self.removeEntry(p.cluster, p.name);
     }
 
+    /// **A NAME FOUND, THEN NOT, IS NO REMOVE** (metal-vmm QUEUE 172): the
+    /// lookup and the unlink are two walks of the directory, and a disk that
+    /// answers the second with other bytes leaves the name standing; "done"
+    /// would be a lie, so it is NotFound, as `rename` says (3255).
+    fn walkFound(gone: Landing) Error!void {
+        if (gone != .before) return;
+        props.reachable(@src(), "fat: a remove's second walk misses the name its lookup found", null);
+        return Error.NotFound;
+    }
+
     /// Bounds the recursion of `removeTree` and `check`, which run on a
     /// kernel stack with no guard page. The application's deepest tree is
     /// five levels.
@@ -3345,6 +3357,10 @@ pub const Volume = struct {
     /// error is the caller's.
     pub fn removeTree(self: *Volume, path: []const u8) Error!void {
         defer self.balanced();
+        // A path with an empty part names nothing to `open`, which is
+        // absence, which is done: refused first, as every path operation
+        // refuses it (metal-vmm QUEUE 172).
+        if (hasEmptyPart(path)) return Error.BadName;
         const entry = self.open(path) catch |e| switch (e) {
             Error.NotFound => return,
             else => return e,
@@ -3386,7 +3402,8 @@ pub const Volume = struct {
                 self.unsure_runs +|= runs_inside;
             },
         };
-        return self.unlinkEntry(parent, name, .free_chain, &gone, null);
+        try self.unlinkEntry(parent, name, .free_chain, &gone, null);
+        return walkFound(gone);
     }
 
     fn removeTreeAt(self: *Volume, dir_cluster: Cluster, depth: u32) Error!void {

@@ -21,6 +21,7 @@ pub const tcp = @import("tcp.zig");
 pub const coverage = @import("coverage");
 pub const stream = @import("stream.zig");
 pub const ready = @import("ready.zig");
+pub const drain = @import("drain.zig");
 pub const request_heap = @import("request_heap.zig");
 pub const gpt = @import("gpt.zig");
 pub const disk_fat = @import("disk_fat.zig");

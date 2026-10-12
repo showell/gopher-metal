@@ -320,7 +320,7 @@ fn cacheable(path: []const u8) bool {
 /// absent (QUEUE.md item 89).
 fn openEntry(v: *disk_fat.Volume, path: []const u8) Error!disk_fat.Entry {
     return v.open(path) catch |e| switch (e) {
-        error.NotFound => if (throughFile(v, path)) Error.NotDir else Error.FileNotFound,
+        error.NotFound => if (try throughFile(v, path)) Error.NotDir else Error.FileNotFound,
         else => Error.ReadFailed,
     };
 }
@@ -331,11 +331,16 @@ fn openEntry(v: *disk_fat.Volume, path: []const u8) Error!disk_fat.Entry {
 /// read as an absent file on metal and as an error on Linux (the store judge,
 /// 2026-10-07: `readOrEmpty` gave "" on one host and failed on the other).
 /// Asked only after a miss, so a found path costs nothing more.
-fn throughFile(v: *disk_fat.Volume, path: []const u8) bool {
+/// A read that fails while it looks is ReadFailed, never "not through a
+/// file", which the caller would answer as absent (metal-vmm QUEUE 172).
+fn throughFile(v: *disk_fat.Volume, path: []const u8) Error!bool {
     var end: usize = 0;
     while (std.mem.indexOfScalarPos(u8, path, end, '/')) |slash| : (end = slash + 1) {
         if (slash == 0) continue;
-        const e = v.open(path[0..slash]) catch return false;
+        const e = v.open(path[0..slash]) catch |err| switch (err) {
+            error.NotFound, error.NotFat16 => return false,
+            else => return Error.ReadFailed,
+        };
         if (!e.isDirectory()) return true;
     }
     return false;
@@ -517,7 +522,7 @@ pub const File = struct {
         const v = try writing(path);
         const pc = pagesFor(path);
         v.writeInto(path, @intCast(offset), bytes) catch |e| {
-            if (throughFile(v, path)) return Error.NotDir;
+            if (try throughFile(v, path)) return Error.NotDir;
             if (pc) |c| c.forget(path);
             return switch (e) {
                 error.NotFound => Error.FileNotFound,
@@ -710,11 +715,17 @@ pub const Dir = struct {
         if (e.isDirectory()) return Error.IsDir;
         if (e.size > @intFromEnum(limit)) return Error.StreamTooLong;
 
-        const out = gpa.alloc(u8, e.size) catch return Error.OutOfMemory;
+        var out = gpa.alloc(u8, e.size) catch return Error.OutOfMemory;
+        // A read that fails gives back what it took (metal-vmm QUEUE 172: the
+        // caller, told ReadFailed, had nothing to free), and one short of the
+        // entry's size is its own allocation, so the caller frees what it was
+        // given.
+        errdefer gpa.free(out);
         const n = v.readFile(e, out) catch return Error.ReadFailed;
-        if (keepable) site_cache.keep(sub_path, out[0..n]);
-        if (pc) |c| if (n == e.size) c.put(sub_path, out[0..n]);
-        return out[0..n];
+        if (n != out.len) out = gpa.realloc(out, n) catch return Error.OutOfMemory;
+        if (keepable) site_cache.keep(sub_path, out);
+        if (pc) |c| if (n == e.size) c.put(sub_path, out);
+        return out;
     }
 
     /// The other half: a whole file, written at once. FAT16 has no journal, so
@@ -743,7 +754,7 @@ pub const Dir = struct {
         const v = try writing(options.sub_path);
         const pc = pagesFor(options.sub_path);
         v.writeFile(options.sub_path, options.data) catch |e| {
-            if (throughFile(v, options.sub_path)) return Error.NotDir;
+            if (try throughFile(v, options.sub_path)) return Error.NotDir;
             if (pc) |c| c.forget(options.sub_path);
             return switch (e) {
                 error.BadName => Error.NameTooLong,
@@ -766,7 +777,7 @@ pub const Dir = struct {
             // A folder path that runs through a file, or is one, is NotDir,
             // as std.Io's createDirPath answers it on Linux.
             const is_file = if (v.open(sub_path)) |found| !found.isDirectory() else |_| false;
-            if (is_file or throughFile(v, sub_path)) return Error.NotDir;
+            if (is_file or try throughFile(v, sub_path)) return Error.NotDir;
             switch (e) {
                 error.BadName => return Error.NameTooLong,
                 error.Full, error.DirectoryFull => return Error.NoSpaceLeft,
@@ -815,7 +826,7 @@ pub const Dir = struct {
         const v = try writing(sub_path);
         if (pagesFor(sub_path)) |c| c.forget(sub_path);
         v.remove(sub_path) catch |e| {
-            if (throughFile(v, sub_path)) return Error.NotDir;
+            if (try throughFile(v, sub_path)) return Error.NotDir;
             switch (e) {
                 error.NotFound => return Error.FileNotFound,
                 // As std.Io answers a directory given to deleteFile.
@@ -861,7 +872,7 @@ pub const Dir = struct {
         if (pagesFor(sub_path)) |c| c.forgetTree(sub_path);
         // A tree that is not there is gone already; one through a file is
         // NotDir, as std.Io's deleteTree answers on Linux.
-        if (throughFile(v, sub_path)) return Error.NotDir;
+        if (try throughFile(v, sub_path)) return Error.NotDir;
         v.removeTree(sub_path) catch return Error.WriteFailed;
     }
 

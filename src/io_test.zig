@@ -785,3 +785,37 @@ test "a read tried again (boot's read_tries) answers past one refusal, and is co
     try testing.expectError(error.ReadFailed, cwd.statFile(io, "data/chat/log.md", .{}));
     t.volume.blk.fault = null;
 }
+
+test "readFileAlloc whose read fails gives back what it took: the caller is told ReadFailed and holds nothing to free (metal-vmm QUEUE 172)" {
+    const t = try Two.make(true);
+    defer t.deinit();
+    const big = "a file of more than one sector, " ** 40;
+    try cwd.writeFile(io, .{ .sub_path = "data/chat/big.md", .data = big });
+    var n: u64 = 0;
+    while (n < 12) : (n += 1) {
+        t.volume.blk.fault = .{ .at = t.volume.blk.requests + n, .kind = .fails };
+        // testing.allocator: a buffer kept past the failure is a leak it names.
+        if (cwd.readFileAlloc(io, "data/chat/big.md", testing.allocator, .limited(4096))) |got| {
+            defer testing.allocator.free(got);
+            try testing.expectEqualStrings(big, got);
+        } else |e| try testing.expectEqual(error.ReadFailed, e);
+        t.volume.blk.fault = null;
+    }
+}
+
+test "a read that fails while a missing path is probed is ReadFailed, never 'not there' (metal-vmm QUEUE 172)" {
+    const t = try Two.make(true);
+    defer t.deinit();
+    try cwd.writeFile(io, .{ .sub_path = "data/chat/a.md", .data = "here" });
+    var n: u64 = 0;
+    while (n < 16) : (n += 1) {
+        const at = t.volume.blk.requests + n;
+        t.volume.blk.fault = .{ .at = at, .kind = .fails };
+        const got = cwd.statFile(io, "data/chat/nothere/x.md", .{});
+        const fired = t.volume.blk.requests > at;
+        t.volume.blk.fault = null;
+        if (got) |_| return error.TestUnexpectedResult else |e| {
+            try testing.expectEqual(if (fired) error.ReadFailed else error.FileNotFound, e);
+        }
+    }
+}
