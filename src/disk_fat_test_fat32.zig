@@ -780,7 +780,7 @@ test "one lie to the first copy's upload-sized FAT run costs nothing: the mount 
     const at = try uploadRunAt();
     const bytes = try uploadBytes();
     defer testing.allocator.free(bytes);
-    for ([_]@FieldType(virtio.Block.Fault, "kind"){ .lands_nothing, .torn }) |lie| {
+    for ([_]@FieldType(virtio.Block.Fault, "kind"){ .lands_nothing, .torn, .torn_tail }) |lie| {
         const d = try Disk.make("upload-lie", test_disk.small32, true);
         defer d.deinit();
         d.blk.fault = .{ .at = at, .kind = lie };
@@ -889,4 +889,14 @@ test "a FAT longer than 32-bit entry numbers reach is refused at mount, in the d
         // this small disk; one more is refused as a boot sector.
         if (c.ok) try testing.expectError(disk_fat.Error.ReadFailed, got) else try testing.expectError(disk_fat.Error.BadBootSector, got);
     }
+}
+
+test "a virtio-blk request that would need more segments than its chain holds is refused, never built past the ring (metal-vmm QUEUE 187.2)" {
+    const n = virtio.Block.segmentsFor;
+    try testing.expectEqual(@as(u32, 1), n(512, null));
+    try testing.expectEqual(@as(u32, 1), n(512, 512));
+    try testing.expectEqual(@as(u32, 6), n(512, 86));
+    try testing.expectEqual(@as(u32, 7), n(512, 85));
+    try testing.expectEqual(@as(u32, 2), n(4096, 4095));
+    try testing.expect(n(512, 85) > virtio.Block.most_segments);
 }

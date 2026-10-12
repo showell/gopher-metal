@@ -84,7 +84,8 @@ pub fn dataPartition(blk: *virtio.Block, scratch: *[sector_size]u8) Error!Partit
     const per_sector = sector_size / entry_size;
     // **THE ENTRIES' LAST SECTOR, ADDRESSABLE** (metal-vmm QUEUE 182.1): a
     // header naming entries past sector 2^32 is no table this machine reads.
-    if (entries_lba + (entry_count - 1) / per_sector > std.math.maxInt(u32)) {
+    // The start alone first, so the sum fits u64 (187.2: one near 2^64 overflowed the guard).
+    if (entries_lba > std.math.maxInt(u32) or entries_lba + (entry_count - 1) / per_sector > std.math.maxInt(u32)) {
         props.reachable(@src(), "gpt: a table whose entries are past sector 2^32 is not one this machine reads", null);
         return Error.NotGpt;
     }
@@ -169,4 +170,13 @@ test "a partition reaching past sector 2^32 is refused, as a FAT volume past it 
     try std.testing.expectError(Error.TooLarge, dataPartition(&blk, &scratch));
     blk = testDisk(&bytes, 2, most + 1, most + 2);
     try std.testing.expectError(Error.TooLarge, dataPartition(&blk, &scratch));
+}
+
+test "a GPT whose entries are near sector 2^64 is NotGpt, its guard never an overflow (metal-vmm QUEUE 187.2)" {
+    var bytes: [8 * sector_size]u8 align(16) = undefined;
+    var scratch: [sector_size]u8 align(16) = undefined;
+    var blk = testDisk(&bytes, std.math.maxInt(u64), 3, 7);
+    // Five entries, past one sector: the guard's own sum passed u64.
+    std.mem.writeInt(u32, bytes[sector_size + 80 ..][0..4], 5, .little);
+    try std.testing.expectError(Error.NotGpt, dataPartition(&blk, &scratch));
 }

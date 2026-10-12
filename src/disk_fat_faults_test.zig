@@ -1470,7 +1470,7 @@ test "a disk that lies to any one request of an upload-sized write on FAT32 neve
         total = d.blk.requests - before;
     }
     var runs: u32 = 0;
-    for ([_]@FieldType(virtio.Block.Fault, "kind"){ .lands_nothing, .torn }) |lie| {
+    for ([_]@FieldType(virtio.Block.Fault, "kind"){ .lands_nothing, .torn, .torn_tail }) |lie| {
         var n: u64 = 0;
         while (n < total) : (n += 1) {
             const d = try Disk.makeUnkept("limit-upload-lies", test_disk.small32, true);

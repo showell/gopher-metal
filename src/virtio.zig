@@ -827,6 +827,9 @@ pub const Block = struct {
             /// A write of more than one sector answers OK and only its first
             /// half lands: a torn write.
             torn,
+            /// The same, its SECOND half landing (metal-vmm QUEUE 187.1): a
+            /// cut lands any of a request's sectors, not only a prefix.
+            torn_tail,
             /// A read answers OK with other bytes than the disk's: what a
             /// short read leaves in the buffer, or a device that lies.
             garbage,
@@ -908,6 +911,12 @@ pub const Block = struct {
                     if (self.cache) |c| c.wrote(c.context, lba, there[0..half]);
                     return blk_s_ok;
                 },
+                .torn_tail => if (kind != blk_t_in and len > 512) {
+                    const half = len / 512 / 2 * 512;
+                    @memcpy(there[half..len], here[half..len]);
+                    if (self.cache) |c| c.wrote(c.context, lba + half / 512, there[half..len]);
+                    return blk_s_ok;
+                },
                 .garbage => if (kind == blk_t_in) {
                     for (here[0..len], 0..) |*b, i| b.* = @truncate(i *% 167 +% f.seed);
                     return blk_s_ok;
@@ -949,6 +958,12 @@ pub const Block = struct {
     /// The data segments a request's chain holds besides its header and
     /// status (`Q`'s eight descriptors).
     pub const most_segments: u32 = queue_size - 2;
+
+    /// The segments `len` bytes take at most `per` a segment (null: one).
+    pub fn segmentsFor(len: u32, per: ?u32) u32 {
+        const p = per orelse return 1;
+        return (len + p - 1) / p;
+    }
 
     /// **VIRTIO-BLK'S MOST** (metal-vmm QUEUE 180.2): `size_max` limits each
     /// SEGMENT, and a request may have `seg_max` of them (one where the
@@ -993,6 +1008,11 @@ pub const Block = struct {
         // The data, in segments of at most `segment_bytes` (180.2): the
         // request's most (`most_sectors`) keeps them within `most_segments`.
         const per = self.segment_bytes orelse len;
+        // **NEVER A CHAIN PAST THE RING** (187.2): a device whose size_max
+        // splits even one sector into more segments than the chain holds is
+        // refused the request (a 512-byte read before the mount could
+        // refuse the disk built d[8]).
+        if (segmentsFor(len, self.segment_bytes) > most_segments) return blk_s_unsupp;
         var at: u32 = 0;
         var k: u16 = 1;
         while (at < len) : (k += 1) {

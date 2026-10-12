@@ -1472,6 +1472,12 @@ fn mountFat(blk: *virtio.Block, scratch: *[disk_fat.sector_size]u8, what: []cons
             serial.put(": its partition table cannot be read\n");
             serial.fail("a disk's partition table cannot be read");
         }
+        // Said as what it is (metal-vmm QUEUE 187.2): a volume grown and
+        // partitioned past 2 TiB is not one with no partition.
+        if (e == error.TooLarge) {
+            serial.put(": its partition reaches past sector 2^32 (2 TiB), which this machine cannot address\n");
+            serial.fail("a disk's partition is past what this machine addresses");
+        }
         serial.put(": no GPT partition\n");
         serial.fail("a disk has no partition to serve from");
     };

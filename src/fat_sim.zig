@@ -76,8 +76,11 @@ const Scenario = struct {
     check_every: usize,
     /// **THE DISK'S MOST IN ONE REQUEST** (metal-vmm QUEUE 180.4): a
     /// cluster, 8, 128 or ours (2,048), so a run cut by the limit part-way
-    /// through a chain is in the sweeps.
-    most_sectors: u32,
+    /// through a chain is in the sweeps. Drawn from its own generator,
+    /// seeded from the run's seed (`mostOf`), never from the run's draws:
+    /// so every seed's other draws are what they were, and the pinned
+    /// regression seeds still replay the runs that found them (187.2).
+    most_sectors: u32 = 0,
 
     fn choose(rng: std.Random) Scenario {
         // Named choices (zig-coverage-sdk's explore.pick), drawn exactly as
@@ -96,12 +99,6 @@ const Scenario = struct {
             .crowded = crowded,
             .crowd_dir = if (crowded and rng.boolean()) dirs.len else rng.uintLessThan(usize, dirs.len + 1),
             .check_every = if (crowded) 50 else 1,
-            .most_sectors = switch (explore.pick(rng, "fat_sim: the disk's most in one request", .{ .cluster = 1, .eight = 1, .s128 = 1, .ours = 1 })) {
-                .cluster => shape.sectors_per_cluster,
-                .eight => 8,
-                .s128 => 128,
-                .ours => @import("virtio.zig").Block.most_sectors_ours,
-            },
         };
     }
 };
@@ -233,7 +230,9 @@ const Sim = struct {
         return s;
     }
 
-    fn initFrom(gpa: std.mem.Allocator, io: std.Io, seed: u64, prng: std.Random.DefaultPrng, sc: Scenario, cached: bool) !Sim {
+    fn initFrom(gpa: std.mem.Allocator, io: std.Io, seed: u64, prng: std.Random.DefaultPrng, drawn_sc: Scenario, cached: bool) !Sim {
+        var sc = drawn_sc;
+        sc.most_sectors = mostOf(seed, sc.shape);
         var s: Sim = .{
             .gpa = gpa,
             .seed = seed,
@@ -247,6 +246,13 @@ const Sim = struct {
         };
         s.disk.blk.most_sectors = sc.most_sectors;
         return s;
+    }
+
+    /// The disk's most for the run of `seed` (`Scenario.most_sectors`).
+    fn mostOf(seed: u64, shape: test_disk.Shape) u32 {
+        var side = std.Random.DefaultPrng.init(seed ^ 0x6d6f_7374_7365_6374); // "mostsect"
+        const choices = [_]u32{ shape.sectors_per_cluster, 8, 128, @import("virtio.zig").Block.most_sectors_ours };
+        return choices[side.random().uintLessThan(usize, choices.len)];
     }
 
     fn deinit(s: *Sim) void {
@@ -564,7 +570,7 @@ const Sim = struct {
                 // **A STOP THAT TEARS ITS LAST REQUEST** (metal-vmm QUEUE
                 // 181): some of its sectors land, as a power cut leaves a
                 // multi-sector write, where a stop failed whole requests.
-                if (explore.flag(r, "fat_sim: the stop tears its last request")) s.disk.blk.fault = .{ .at = s.disk.blk.fail_after.? -| 1, .kind = .torn };
+                if (explore.flag(r, "fat_sim: the stop tears its last request")) s.disk.blk.fault = .{ .at = s.disk.blk.fail_after.? -| 1, .kind = if (explore.flag(r, "fat_sim: the tear lands its request's second half, not its first")) .torn_tail else .torn };
                 // On FAT32, now and then an upload's size: a FAT run past
                 // what the mount weighs sector by sector (181).
                 const upload = s.sc.shape.kind == .fat32 and explore.flag(r, "fat_sim: the failing write is upload-sized");
