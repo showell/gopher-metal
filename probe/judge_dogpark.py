@@ -82,6 +82,7 @@ J = "application/json"
 FIRST = [
     ("the page", "GET", "/", None, None),
     ("its script", "GET", "/park.js", None, None),
+    ("the cows' rule", "GET", "/cows.wasm", None, None),
     ("nowhere", "GET", "/nowhere", None, None),
     ("the page by POST", "POST", "/", None, b""),
     ("/me by POST", "POST", "/me", ALICE, b""),
@@ -231,8 +232,10 @@ def main() -> int:
               "(dog-park's build.zig.zon): not one library")
         return 1
     t0 = time.time()
-    for cmd, cwd in ((["zig", "build", "dogpark", f"-Ddogpark-root={DOGPARK}", f"-Dgopher-root={GOPHER_ROOT}"], GM),
-                     (["zig", "build"], DOGPARK)):
+    # Dog Park's first: it makes zig-out/web/cows.wasm, which the kernel
+    # compiles in (its assets.zon's `.embedded`).
+    for cmd, cwd in ((["zig", "build"], DOGPARK),
+                     (["zig", "build", "dogpark", f"-Ddogpark-root={DOGPARK}", f"-Dgopher-root={GOPHER_ROOT}"], GM)):
         r = subprocess.run(cmd, cwd=cwd, capture_output=True, text=True)
         if r.returncode != 0:
             print(f"{' '.join(cmd)} in {cwd} failed:\n{r.stderr[-3000:]}")
