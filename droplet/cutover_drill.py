@@ -595,7 +595,7 @@ def main(argv):
         print(__doc__.strip(), file=sys.stderr)
         return 2
     if not os.path.isfile(R.ELF):
-        print(f"cutover_drill: no {R.ELF}: ./port.sh && zig build gopher")
+        print(f"cutover_drill: no {R.ELF}: zig build gopher")
         return 2
     if os.geteuid() != 0 and subprocess.run(["sudo", "-n", "true"], capture_output=True).returncode != 0:
         print("cutover_drill: the namespace and veth need root: run as root, or where `sudo -n` works")

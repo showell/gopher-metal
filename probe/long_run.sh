@@ -43,7 +43,7 @@ say "log: $LOG"
 # ── build once, up front ─────────────────────────────────────────────────────
 say "building (kernels, the TCP table on Linux, and the Linux build of the app)"
 {
-    ( cd "$HERE/.." && ./port.sh && zig build kernels && zig build gopher && zig build native )
+    ( cd "$HERE/.." && zig build kernels && zig build gopher && zig build native )
     ( cd "$HOME/showell_repos/angry-gopher/zig-server" && zig build )
 } >> "$LOG" 2>&1
 if [ $? -ne 0 ]; then

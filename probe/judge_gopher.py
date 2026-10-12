@@ -60,6 +60,9 @@ import urllib.parse
 import datetime
 import zoneinfo
 
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "tools"))
+import verdicts  # noqa: E402  the application's assets.zon, read once
+
 SECTOR = 512
 PART_FIRST = 2048
 STAGED_TIME = 1758000000
@@ -389,10 +392,12 @@ def write(root, rel, text):
 
 
 def stage(root: str, gopher_root: str) -> None:
-    pages = os.path.join(gopher_root, "pages")
-    os.makedirs(os.path.join(root, "pages"))
-    for name in ("home.txt", "steve-resume.md", "steve-resume.pdf", "safari-download.md"):
-        shutil.copy(os.path.join(pages, name), os.path.join(root, "pages", name))
+    # **WHAT THE APPLICATION READS AT REQUEST TIME, WHOLE** (Phase B step 3):
+    # its zig-server/assets.zon names those directories (`.site`: pages/,
+    # gallery/), where this named four pages by hand and a fifth would have
+    # been missing here and on every image, served on Linux and not on metal.
+    for d in verdicts.served_by(gopher_root)[1]:
+        shutil.copytree(os.path.join(gopher_root, d), os.path.join(root, d))
     for d in ("data/lynrummy", "data/chat", "data/users", "auth"):
         os.makedirs(os.path.join(root, d), exist_ok=True)
     write(root, "data/players/1/name", "Steve")

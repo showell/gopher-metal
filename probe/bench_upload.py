@@ -4,7 +4,7 @@ every 50 ms. Prints, per upload: the client's wall time, the kernel's own log
 lines for it (how long it took to arrive, the turn, its DISK REQUESTS), and the
 longest any GET / waited.
 
-    python3 probe/bench_upload.py <work dir>     # needs KVM; ./port.sh, zig build gopher first
+    python3 probe/bench_upload.py <work dir>     # needs KVM; zig build gopher first
 
 **THE NUMBER THAT CARRIES TO PROD IS THE DISK REQUEST COUNT**, not the times:
 QEMU's disk here answers a request in ~0.1 ms, prod's network volume (write

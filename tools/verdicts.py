@@ -49,18 +49,38 @@ VERDICT_DIR = os.environ.get("GATES_VERDICT_DIR", os.path.expanduser("~/build/go
 SDK = os.environ.get("COVERAGE_SDK", os.path.join(os.path.dirname(ROOT), "zig-coverage-sdk"))
 TIERS = ("gates", "long")
 
-# **WHAT AN IMAGE READS FROM ANGRY-GOPHER** (metal-vmm QUEUE B16): port.sh
-# copies zig-server/src; the kernel embeds the assets zig-server/build.zig's
-# table names (many generated, so not in git); droplet/chat.py stages pages/
-# and gallery/. A verdict is keyed by those files' content, so a commit that
-# touches none of them (a README) leaves it standing, and a rebuilt asset
-# that git cannot see does not.
-SERVED_DIRS = ("zig-server/src", "pages", "gallery")
-# One reading of the asset table, extract_assets.py's (a second copy of its
-# regex here missed rows of a shape it learned: angry-gopher's .built_by,
-# metal-vmm QUEUE 157(d)).
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from extract_assets import ROW as ASSET_ROW  # noqa: E402
+# **WHAT AN IMAGE READS FROM ANGRY-GOPHER** (metal-vmm QUEUE B16, Phase B
+# step 3): the build compiles zig-server/src and embeds what
+# zig-server/assets.zon's `.embedded` names (many generated, so not in git);
+# droplet/chat.py lays its `.site` directories onto the site disk. A verdict
+# is keyed by those files' content, so a commit that touches none of them (a
+# README) leaves it standing, and a rebuilt asset that git cannot see does not.
+ASSETS = "zig-server/assets.zon"
+# An embedded row, as angry-gopher's tools/embedded_assets.py reads it, and
+# every row must read (a row of another shape is refused, never skipped).
+ASSET_ROW = re.compile(r'\.\{\s*\.name\s*=\s*"([^"]+)"\s*,\s*\.path\s*=\s*"([^"]+)"\s*(?:,\s*\.built_by\s*=\s*"[^"]+"\s*)?\}')
+ASSET_NAME = re.compile(r'\.name\s*=\s*"')
+SITE = re.compile(r'\.site\s*=\s*\.\{([^}]*)\}')
+
+
+def served_by(root: str = None) -> tuple:
+    """(the embedded paths from zig-server/, the site directories), from the
+    checkout's assets.zon (GOPHER_ROOT's, or `root`'s); raises ValueError
+    naming what it cannot read."""
+    path = os.path.join(root or GOPHER_ROOT, ASSETS)
+    with open(path) as f:
+        text = f.read()
+    rows = ASSET_ROW.findall(text)
+    if len(rows) != len(ASSET_NAME.findall(text)):
+        raise ValueError(f"{path}: {len(ASSET_NAME.findall(text))} embedded names, {len(rows)} rows read: has a row changed shape?")
+    site = SITE.search(text)
+    if not site:
+        raise ValueError(f"{path} names no .site")
+    return [p for _, p in rows], re.findall(r'"([^"]+)"', site.group(1))
+
+
+def served_dirs() -> tuple:
+    return ("zig-server/src", *served_by()[1])
 
 
 def git(repo: str, *args: str) -> str:
@@ -78,13 +98,13 @@ def commit_of(repo: str, paths: tuple = ()) -> str:
 def served_files() -> list:
     """Every angry-gopher file an image reads, as paths from its root."""
     files = []
-    for d in SERVED_DIRS:
+    embedded, _ = served_by()
+    for d in served_dirs():
         for dirpath, _, names in os.walk(os.path.join(GOPHER_ROOT, d)):
             for n in names:
                 files.append(os.path.relpath(os.path.join(dirpath, n), GOPHER_ROOT))
-    build = os.path.join(GOPHER_ROOT, "zig-server", "build.zig")
-    files.append("zig-server/build.zig")
-    for _, path in ASSET_ROW.findall(open(build).read()):
+    files.append(ASSETS)
+    for path in embedded:
         files.append(os.path.normpath(os.path.join("zig-server", path)))
     return sorted(set(files))
 
@@ -183,7 +203,7 @@ def require() -> list:
     # An image is built from committed code: what it serves from angry-gopher
     # (the content id says which bytes; this says they are committed ones).
     # Generated assets are not in git, and are not asked to be.
-    if git(GOPHER_ROOT, "status", "--porcelain", "--untracked-files=no", "--", *SERVED_DIRS, "zig-server/build.zig"):
+    if git(GOPHER_ROOT, "status", "--porcelain", "--untracked-files=no", "--", *served_dirs(), ASSETS):
         why.append("angry-gopher's served files have uncommitted changes")
     for tier in TIERS:
         try:
@@ -229,18 +249,12 @@ def freshness() -> str:
                     escaped.append(name)
     if escaped:
         return "these alias std's Io, not host_io's, and would be std's here: " + " ".join(escaped)
-    # **AND THIS TREE'S ASSET LIST IS THAT CHECKOUT'S** (146(a)'s review):
-    # port.sh writes gen/assets.zig from the checkout's build.zig table, and a
-    # tree whose list predates an asset's rename names files that are gone.
+    # **AND ITS ASSETS READ** (Phase B step 3): the build reads the same
+    # table, and a row of another shape would be a name no build declared.
     try:
-        with open(os.path.join(GOPHER_ROOT, "zig-server", "build.zig")) as f:
-            table = ASSET_ROW.findall(f.read())
-        with open(os.path.join(ROOT, "gen", "assets.zig")) as f:
-            listed = ASSET_ROW.findall(f.read())
-    except FileNotFoundError as e:
-        return f"cannot compare the asset lists: {e.filename} is missing"
-    if table != listed:
-        return "this tree's gen/assets.zig is not the checkout's asset table: run ./port.sh here"
+        served_by()
+    except (OSError, ValueError) as e:
+        return f"angry-gopher's assets do not read: {e}"
     return "fresh"
 
 

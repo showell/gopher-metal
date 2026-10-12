@@ -344,7 +344,7 @@ def main(argv) -> int:
         print(__doc__.strip(), file=sys.stderr)
         return 2
     if not os.path.isfile(ELF):
-        print(f"rehearse: no {ELF}: ./port.sh && zig build gopher")
+        print(f"rehearse: no {ELF}: zig build gopher")
         return 2
     if os.geteuid() != 0 and subprocess.run(["sudo", "-n", "true"], capture_output=True).returncode != 0:
         print("rehearse: the Linux server runs in a network namespace, which needs root: run as root, or "

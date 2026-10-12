@@ -14,8 +14,8 @@
 # **gopher.elf IS REBUILT HERE.** `probe/run.sh gopher` judges whatever
 # gopher.elf is on disk, and `zig build kernels` does not build it, so a gate
 # that skipped this judged yesterday's kernel and passed. It compiles
-# angry-gopher's checkout as it is (no copy); port.sh must have written this
-# tree's asset list from it, which the build checks.
+# angry-gopher's checkout as it is (no copy), its sources and the assets its
+# zig-server/assets.zon names.
 #
 # **THE CHAT JUDGE RUNS FAT32 HERE, FAT16 IN long.sh** (QUEUE.md item 88; the
 # gates essay, item 6): prod's data is a FAT32 volume. The FAT16 judge was
