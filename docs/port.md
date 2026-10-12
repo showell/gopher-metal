@@ -43,11 +43,15 @@ machine) it spins.
 
 ## The real server
 
-`port.sh` copies angry-gopher's `zig-server/src/*.zig`, unchanged. Every file
-that does I/O opens with `const Io = @import("host_io").Io;`, and this build
-hands them `src/host_io_metal.zig` as `host_io`. It prints how many files it
-copied and how many take their `Io` from `host_io`, and refuses a file that
-aliases std's instead (Phase B step 2a, 2026-10-11: 97 files, 63 of them).
+`build.zig` compiles angry-gopher's `zig-server/src/*.zig` from its checkout
+(`-Dgopher-root`, `../angry-gopher` by default), unchanged and uncopied
+(Phase B step 2b, 2026-10-13). Every file that does I/O opens with
+`const Io = @import("host_io").Io;`, and this build hands them
+`src/host_io_metal.zig` as `host_io`. A file that aliases std's `Io` instead
+is refused, by the build's check and by `port.sh`, which is left with only
+the asset list (`gen/assets.zig`) until step 3 makes the assets a build input.
+A gate names angry-gopher by the content id of what it serves, and keeps no
+verdict if that changed during the run (`tools/verdicts.py`).
 
 `probe/gopher.zig` is a HOST in the sense webbox's `site.zig` defines, taking
 the application as the `app` module (`app.site`, `app.hosting`) and the

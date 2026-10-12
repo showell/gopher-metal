@@ -124,9 +124,9 @@ if [ "$want" != sim ]; then
     # guest gives its connections after its last request: v19's first
     # long.sh failed every route that way while its production kernel served
     # each page whole.
-    zig build gopher -Dcoverage > "$OUT/build.log" 2>&1 || { echo "gopher.elf -Dcoverage does not build: $OUT/build.log"; exit 2; }
+    zig build gopher -Dcoverage -Dgopher-root="$GOPHER_ROOT" > "$OUT/build.log" 2>&1 || { echo "gopher.elf -Dcoverage does not build: $OUT/build.log"; exit 2; }
     cp probe/gopher.elf "$OUT/gopher-coverage.elf"
-    zig build gopher > "$OUT/rebuild.log" 2>&1 || { echo "gopher.elf does not build: $OUT/rebuild.log"; exit 2; }
+    zig build gopher -Dgopher-root="$GOPHER_ROOT" > "$OUT/rebuild.log" 2>&1 || { echo "gopher.elf does not build: $OUT/rebuild.log"; exit 2; }
     JUDGED=probe/gopher.elf
     COUNTED="$OUT/gopher-coverage.elf"
 
@@ -261,7 +261,7 @@ EOF
     # quickly), on gopher.elf as a release builds it, which the coverage
     # build above put back.
     echo "── the chat judge on FAT16 (microvm)"
-    zig build gopher > "$OUT.fat16-build" 2>&1 || { echo "gopher.elf does not build: $OUT.fat16-build"; exit 2; }
+    zig build gopher -Dgopher-root="$GOPHER_ROOT" > "$OUT.fat16-build" 2>&1 || { echo "gopher.elf does not build: $OUT.fat16-build"; exit 2; }
     env JUDGE_DROPLET=0 FAT=16 PROBE_WORK="$HOME/build/gopher-metal/probe-microvm-fat16" probe/run.sh gopher \
         > "$OUT.fat16" 2>&1
     code=$?

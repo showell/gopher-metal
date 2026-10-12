@@ -1,23 +1,22 @@
 #!/usr/bin/env python3
 """**WHICH CODE WAS JUDGED, AND WHAT THE JUDGES SAID.** A release is an image
-of two repos' code: this one's, and angry-gopher's server as `port.sh` copied
-it. A gate that passed on other code than the image carries has proved
+of two repos' code: this one's, and angry-gopher's server, compiled from its
+checkout (Phase B step 2b: no copy). A gate that passed on other code than the image carries has proved
 nothing about the image, and nothing used to say which code a gate judged.
 So:
 
-- `port.sh` writes a **stamp** into the ported tree: a hash of the content
-  of every angry-gopher file an image reads (`served_files`: the server's
-  source, the assets its build.zig embeds, pages/ and gallery/), and its
-  commit for the reader. A verdict is keyed by that content and by this
-  repo's and the SDK's commits (B16), so a README commit in angry-gopher
-  leaves a verdict standing and an SDK change does not.
-- `gates.sh` and `long.sh` call `pair`, which prints the two commits they
-  are about to judge and refuses a port that is not angry-gopher's HEAD.
+- angry-gopher is named by its **content id**: a hash of the content of
+  every file an image reads from the checkout (`served_files`: the server's
+  source, the assets its build.zig embeds, pages/ and gallery/). A verdict
+  is keyed by that and by this repo's and the SDK's commits (B16), so a
+  README commit in angry-gopher leaves a verdict standing and an SDK change
+  does not.
+- `gates.sh` and `long.sh` call `pair`, which prints the two they are about
+  to judge, or refuses a checkout the build cannot take (`freshness`).
   At the end they call `record`, which keeps their verdict for that pair.
 - `droplet/chat.py` calls `require`, which refuses to build an image unless
   both trees are clean and both verdicts are PASS for exactly that pair.
 
-    tools/verdicts.py stamp                  (port.sh)
     tools/verdicts.py pair                   (gates.sh, long.sh: print, or refuse)
     tools/verdicts.py ids                    (the pair, as the run starts)
     tools/verdicts.py fresh                  (build.zig's check: "fresh", or why not)
@@ -25,7 +24,9 @@ So:
 
 **A VERDICT IS FOR THE CODE THE RUN STARTED ON.** A run takes `ids` first;
 `record` keeps nothing if either tree has moved since, because the run then
-judged a mixture.
+judged a mixture. With no copy this is what keeps a gate honest when
+angry-gopher's checkout is edited under it: the build reads the checkout
+live, so an edit mid-run changes the content id and the verdict is refused.
 
 `RELEASE_UNGATED=1` lets `require` pass anyway, for an emergency fix, and
 says so loudly; nothing else bypasses it.
@@ -43,8 +44,7 @@ import time
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 GOPHER_ROOT = os.environ.get("GOPHER_ROOT", os.path.expanduser("~/showell_repos/angry-gopher"))
-PORT = os.environ.get("GOPHER_PORT", os.path.expanduser("~/build/gopher-metal/port"))
-STAMP = os.path.join(PORT, "PORTED_FROM")
+SRC = os.path.join(GOPHER_ROOT, "zig-server", "src")
 VERDICT_DIR = os.environ.get("GATES_VERDICT_DIR", os.path.expanduser("~/build/gopher-metal/verdicts"))
 SDK = os.environ.get("COVERAGE_SDK", os.path.join(os.path.dirname(ROOT), "zig-coverage-sdk"))
 TIERS = ("gates", "long")
@@ -108,34 +108,15 @@ def ours_id() -> str:
     return commit_of(ROOT) + ".sdk-" + commit_of(SDK)
 
 
-def stamp() -> int:
-    theirs = content_id()
-    commit = commit_of(GOPHER_ROOT)
-    with open(STAMP, "w") as f:
-        f.write(theirs + "\n" + commit + "\n")
-    print(f"ported angry-gopher {short(commit)} ({theirs})")
-    return 0
-
-
-def ported() -> str:
-    """The stamp's content id; empty if there is no stamp, or an old one."""
-    try:
-        with open(STAMP) as f:
-            first = f.readline().strip()
-    except FileNotFoundError:
-        return ""
-    return first if first.startswith("content-") else ""
-
-
 def current_pair() -> tuple:
-    """(this repo's and the SDK's commits, the ported angry-gopher content),
+    """(this repo's and the SDK's commits, angry-gopher's content id now),
     or an error: `freshness`'s, so `pair`, `ids` and build.zig's check refuse
     the same ports (147(d))."""
     ours = ours_id()
     why = freshness()
     if why != "fresh":
-        return ours, ported() or None, why
-    return ours, ported(), None
+        return ours, None, why
+    return ours, content_id(), None
 
 
 def short(c: str) -> str:
@@ -218,12 +199,9 @@ def require() -> list:
 
 
 def fresh() -> int:
-    """**IS THE PORT ANGRY-GOPHER AS IT IS NOW?** (metal-vmm 146(a)): build.zig
-    type-checks gopher.elf against the port only then. The port's asset list
-    is port.sh's gen/assets.zig, but the files are read from the live
-    checkout, so a port older than the checkout fails gopher-metal's tests
-    for no fault of gopher-metal's. Prints `fresh`, or why not; exits 0
-    either way, so build.zig reads the answer from the output."""
+    """**CAN THE BUILD TAKE THE CHECKOUT AS IT IS?** build.zig type-checks and
+    builds gopher.elf only then. Prints `fresh`, or why not; exits 0 either
+    way, so build.zig reads the answer from the output."""
     try:
         print(freshness())
     except OSError as e:  # one line on every path: build.zig reads it
@@ -231,23 +209,29 @@ def fresh() -> int:
     return 0
 
 
+# A file that names std's Io where host_io's belongs would compile here as
+# std's, which has no machine under it: the sed the port once was is a
+# refusal now (Phase B 2a; host_io_std.zig is the Linux host's own).
+STD_IO_ALIAS = re.compile(r'const Io = (std|@import\("std"\))\.Io;')
+
+
 def freshness() -> str:
-    """`fresh`, or why not: the port, the checkout and this tree's asset
-    list. Not this repo's or the SDK's commits, which `pair` adds and a
-    check of the port has no use for."""
-    if not os.path.isdir(os.path.join(GOPHER_ROOT, "zig-server")):
-        return f"no angry-gopher checkout at {GOPHER_ROOT}"
-    theirs = ported()
-    if not theirs:
-        return f"no stamp (or one from before B16) at {STAMP}: run ./port.sh"
-    now = content_id()
-    if theirs != now:
-        return f"the port is angry-gopher {theirs}, but what it serves is now {now}: run ./port.sh"
+    """`fresh`, or why not: the checkout, its sources' Io, and this tree's
+    asset list. Not this repo's or the SDK's commits, which `pair` adds and a
+    check of the build has no use for."""
+    if not os.path.isdir(SRC):
+        return f"no angry-gopher sources at {SRC}"
+    escaped = []
+    for name in sorted(os.listdir(SRC)):
+        if name.endswith(".zig") and name != "host_io_std.zig":
+            with open(os.path.join(SRC, name)) as f:
+                if STD_IO_ALIAS.search(f.read()):
+                    escaped.append(name)
+    if escaped:
+        return "these alias std's Io, not host_io's, and would be std's here: " + " ".join(escaped)
     # **AND THIS TREE'S ASSET LIST IS THAT CHECKOUT'S** (146(a)'s review):
-    # port.sh writes gen/assets.zig in whichever tree it ran from, and the
-    # stamp sits in the shared port, so another worktree, or a branch whose
-    # committed list predates an asset's rename, can hold a list the
-    # checkout no longer matches.
+    # port.sh writes gen/assets.zig from the checkout's build.zig table, and a
+    # tree whose list predates an asset's rename names files that are gone.
     try:
         with open(os.path.join(GOPHER_ROOT, "zig-server", "build.zig")) as f:
             table = ASSET_ROW.findall(f.read())
@@ -262,8 +246,6 @@ def freshness() -> str:
 
 def main() -> int:
     args = sys.argv[1:]
-    if args == ["stamp"]:
-        return stamp()
     if args == ["pair"]:
         return pair()
     if args == ["ids"]:

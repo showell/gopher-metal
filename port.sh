@@ -1,9 +1,10 @@
 #!/bin/bash
-# Prepares angry-gopher's chat server to build against this machine.
+# Prepares this tree to build angry-gopher's chat server for this machine.
 #
 #   port.sh
 #
-# **THIS IS THE WHOLE PORT.** It copies the server's sources, unchanged. Each
+# **NOTHING IS COPIED** (Phase B step 2b): build.zig compiles the server from
+# angry-gopher's checkout (`-Dgopher-root`, ../angry-gopher by default). Each
 # file takes its `Io` from the `host_io` module,
 #
 #     const Io = @import("host_io").Io;
@@ -13,33 +14,20 @@
 # call site moves, and no line is rewritten. See the README for why std.Io
 # itself is not the seam.
 #
-# The copy is NOT committed here: this repo holds the change, not the code it
-# is applied to.
+# **WHAT IS LEFT FOR THIS SCRIPT: THE ASSET LIST** (step 3 makes it a build
+# input, and this script goes): gen/assets.zig, the front-end artifacts each
+# page embeds by name, from the table in angry-gopher's zig-server/build.zig.
+# Then the same freshness the build asks (tools/verdicts.py): a source that
+# aliases std's Io is refused here too, so it is said before a build.
 set -eu
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-SRC="${GOPHER_SRC:-$HOME/showell_repos/angry-gopher/zig-server/src}"
-OUT="${GOPHER_PORT:-$HOME/build/gopher-metal/port}"
+GOPHER_ROOT="${GOPHER_ROOT:-$HOME/showell_repos/angry-gopher}"
+export GOPHER_ROOT
+SRC="$GOPHER_ROOT/zig-server/src"
 
 [ -d "$SRC" ] || { echo "no server sources at $SRC"; exit 2; }
-rm -rf "$OUT"; mkdir -p "$OUT"
-cp "$SRC"/*.zig "$OUT"/
-
-# **NO FILE IS EDITED**: each takes its `Io` from the `host_io` module, which
-# the build hands it (src/host_io_metal.zig: this machine's). A file with an
-# alias straight to std's would be std's here too, so one is refused, but for
-# host_io_std.zig itself: the Linux build's choice of host_io, never compiled
-# here.
-escaped="$(grep -lE 'const Io = (std|@import\("std"\))\.Io;' "$OUT"/*.zig | grep -v '/host_io_std\.zig$' || true)"
-took="$(grep -l '^const Io = @import("host_io")\.Io;' "$OUT"/*.zig | wc -l)"
-
-# The asset table, read from the application's own build.zig rather than
-# copied, so that the two cannot drift. See tools/extract_assets.py.
 python3 "$HERE/tools/extract_assets.py" "$SRC/../build.zig" "$HERE/gen/assets.zig"
-
-echo "$(ls "$OUT"/*.zig | wc -l) files copied, $took take their Io from host_io"
-[ -z "$escaped" ] || { echo "these alias std's Io, not host_io's, and would be std's here: $escaped"; exit 1; }
-
-# **WHICH angry-gopher THIS IS** (tools/verdicts.py): gates.sh and long.sh
-# refuse a port that is not angry-gopher's HEAD, and an image is built only
-# from a pair whose verdicts say PASS.
-python3 "$HERE/tools/verdicts.py" stamp
+took="$(grep -l '^const Io = @import("host_io")\.Io;' "$SRC"/*.zig | wc -l)"
+echo "angry-gopher $(git -C "$GOPHER_ROOT" rev-parse --short HEAD): $(ls "$SRC"/*.zig | wc -l) files, $took take their Io from host_io"
+state="$(python3 "$HERE/tools/verdicts.py" fresh)"
+[ "$state" = fresh ] || { echo "$state"; exit 1; }

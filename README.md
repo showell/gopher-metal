@@ -58,8 +58,8 @@ live item says "metal-vmm"; a bare "QUEUE.md item N" is the retired queue's.
   TCP, the boot loader, the droplet tools, and the gates that judge metal
   against angry-gopher's Linux build.
 - **angry-gopher** — the program: every route and app, written and tested
-  on Linux. `port.sh` reads its `zig-server/src` from a sibling checkout
-  (`GOPHER_SRC`) and swaps `std.Io` for this repo's `metal.io`.
+  on Linux. The build compiles its `zig-server/src` from a sibling checkout
+  (`-Dgopher-root`, no copy), handing each file this repo's `host_io`.
 
 A release is a new boot image from this repo carrying both repos' commits
 ("A deploy", below). prod's old Linux droplet runs only Caddy, which
@@ -279,7 +279,8 @@ SECRET-LEAK.md and ADMIN-PASSWORD-LOST.md and when each is needed):
   for a batch: host tests, every probe, the chat judge on FAT32 on microvm
   and on the droplet-shaped machine side by side, the droplet boot checks,
   and metal-vmm's `check.sh`, `same.sh` and `pc_vs_microvm.sh all`. It rebuilds
-  `gopher.elf` and metal-vmm, but does not re-port: run `./port.sh` first.
+  `gopher.elf` and metal-vmm from angry-gopher's checkout as it is; run
+  `./port.sh` first if angry-gopher's asset table changed.
 - `./long.sh` is the long tier: the simulators at 10,000 seeds against
   `coverage/floor-sim.txt`, the chat judge on FAT16, and the real kernel on
   metal-vmm losing each of its frames in turn, and facing a peer that

@@ -676,12 +676,12 @@ if [ "$want" = all ] || [ "$want" = stdhttp ]; then
 fi
 
 # **THE REAL SERVER.** angry-gopher's own driving.zig, from its own source,
-# with one line changed per file by port.sh. Needs `zig build gopher`.
+# compiled unchanged, handed this machine's host_io. Needs `zig build gopher`.
 #
 # Judged by probe/judge_gopher.py against the SAME application built for Linux,
 # over the same files: every request below must be answered identically. The
-# Linux build is made here from the checkout port.sh copied, so the two cannot
-# be different versions of the code.
+# Linux build is made here from the checkout the kernel was compiled from, so
+# the two cannot be different versions of the code.
 if [ "$want" = gopher ] || [ $quick = 1 ]; then
     GOPHER_ROOT="${GOPHER_ROOT:-$HOME/showell_repos/angry-gopher}"
     if [ ! -f "$HERE/gopher.elf" ]; then

@@ -118,11 +118,12 @@ pub fn build(b: *std.Build) void {
         .{ .name = "hello.elf", .root = "droplet/hello.zig", .step = "hello", .help = "for a real droplet: both cards, every request, forever" },
     };
 
-    // **THE REAL SERVER**, built only when port.sh has prepared it: this repo
-    // holds the change, not the code it is applied to.
-    // port.sh writes here by default; -Dgopher=<dir> points elsewhere.
-    const gopher_port = b.option([]const u8, "gopher", "angry-gopher's ported sources") orelse
-        b.pathFromRoot("../../build/gopher-metal/port");
+    // **THE REAL SERVER**, compiled from angry-gopher's checkout as it is
+    // (Phase B step 2b: no copy): this repo holds the machine, not the code
+    // it serves. -Dgopher-root=<dir> names another checkout.
+    const gopher_root = b.option([]const u8, "gopher-root", "the angry-gopher checkout") orelse
+        b.pathFromRoot("../angry-gopher");
+    const gopher_src = b.fmt("{s}/zig-server/src", .{gopher_root});
 
     const all = b.step("kernels", "every kernel");
     for (kernels) |k| {
@@ -146,21 +147,20 @@ pub fn build(b: *std.Build) void {
     // The application's own modules, each importing `metal` for its Io.
     //
     // **NOT part of `kernels`**, and not depended on by the install step: this
-    // needs `port.sh` to have prepared the sources, and a checkout without
-    // angry-gopher beside it should still build everything else. `zig build
+    // needs angry-gopher's checkout (and port.sh's asset list from it), and a
+    // checkout without angry-gopher beside it should still build everything
+    // else. `zig build
     // gopher` says plainly what is missing when it is missing.
     // What the application's own build.zig supplies and this one must too: a
     // `build_options` module, and the front-end artifacts each page embeds by
     // name. That table lives in angry-gopher/zig-server/build.zig; port.sh
-    // copies it into gen/assets.zig, so the two cannot drift.
+    // extracts it into gen/assets.zig, and the build refuses a list that is
+    // not the checkout's, so the two cannot drift.
     //
     // **THIS IS THE PART OF THE PORT THAT IS NOT ABOUT THE MACHINE.** The
     // modules compile freestanding unchanged, handed this machine's `host_io`;
     // what is left is build-graph plumbing, and it is the same plumbing on
     // Linux.
-    const gopher_root = b.option([]const u8, "gopher-root", "the angry-gopher checkout") orelse
-        b.pathFromRoot("../angry-gopher");
-
     // **THE COMMITS, BAKED IN**, for /version and /admin/host: angry-gopher's
     // (the application's own option, as its ops/deploy sets it on Linux) and
     // this repository's, each marked `+dirty` when its tree had uncommitted
@@ -182,8 +182,8 @@ pub fn build(b: *std.Build) void {
     // **THE `webbox` LIBRARY, ITS OWN MODULE**, as the application's build
     // makes it: the application's files import it by name (`@import("webbox")`),
     // never its files by path (angry-gopher's tools/lint_portable.py), so each
-    // ported file belongs to one module. Its Linux half (`webbox_linux`) is
-    // ported with the rest and never compiled here: nothing imports it.
+    // of its files belongs to one module. Its Linux half (`webbox_linux`) sits
+    // beside the rest and is never compiled here: nothing imports it.
     // **`host_io`, THIS MACHINE'S** (src/host_io_metal.zig): the one file the
     // application's sources take their `Io` from, std's on Linux, this
     // machine's here. Nothing in them is rewritten.
@@ -193,12 +193,12 @@ pub fn build(b: *std.Build) void {
         .imports = &.{.{ .name = "metal", .module = metal }},
     });
     const webbox = b.createModule(.{
-        .root_source_file = .{ .cwd_relative = b.fmt("{s}/webbox.zig", .{gopher_port}) },
+        .root_source_file = .{ .cwd_relative = b.fmt("{s}/webbox.zig", .{gopher_src}) },
         .red_zone = false,
         .imports = &.{.{ .name = "host_io", .module = host_io }},
     });
     const app = b.createModule(.{
-        .root_source_file = .{ .cwd_relative = b.fmt("{s}/router.zig", .{gopher_port}) },
+        .root_source_file = .{ .cwd_relative = b.fmt("{s}/router.zig", .{gopher_src}) },
         .red_zone = false,
         .imports = &.{
             .{ .name = "host_io", .module = host_io },
@@ -229,7 +229,7 @@ pub fn build(b: *std.Build) void {
     gopher.entry = .{ .symbol_name = "_start" };
     const gopher_copy = b.addUpdateSourceFiles();
     gopher_copy.addCopyFileToSource(gopher.getEmittedBin(), "probe/gopher.elf");
-    const gopher_step = b.step("gopher", "the real server, once port.sh has prepared it, of the checkout as it is now");
+    const gopher_step = b.step("gopher", "the real server, compiled from angry-gopher's checkout as it is now (port.sh's asset list first)");
     gopher_step.dependOn(&gopher_copy.step);
 
     // **EVERY KERNEL TYPE-CHECKED, ON EVERY `zig build test`** (metal-vmm
@@ -245,9 +245,9 @@ pub fn build(b: *std.Build) void {
     // behind `builtin.mode != .Debug` is not analyzed either. native and
     // droplet are host programs, and are built and linked whole.
     //
-    // gopher.elf needs angry-gopher's port (port.sh) and its checkout, for
-    // the assets; without either it is not checked, and the step says so
-    // rather than pass in silence.
+    // gopher.elf needs angry-gopher's checkout and port.sh's asset list from
+    // it; without either it is not checked, and the step says so rather than
+    // pass in silence.
     const check_step = b.step("check", "type-check every kernel (analysis only, not codegen or link), and build native and droplet (part of `test`)");
     // **EVERY PLANT TYPE-CHECKED** (src/plant.zig): a plant's code is
     // analysed only when it is on, so each is checked by a `check` of its
@@ -258,7 +258,7 @@ pub fn build(b: *std.Build) void {
         if (p == .none) continue;
         // The same port and checkout as this build's, or gopher.elf is
         // checked against the defaults' (or not at all) for every plant.
-        const one = b.addSystemCommand(&.{ b.graph.zig_exe, "build", "check", "-Dcoverage", b.fmt("-Dplant={s}", .{@tagName(p)}), b.fmt("-Dgopher={s}", .{gopher_port}), b.fmt("-Dgopher-root={s}", .{gopher_root}) });
+        const one = b.addSystemCommand(&.{ b.graph.zig_exe, "build", "check", "-Dcoverage", b.fmt("-Dplant={s}", .{@tagName(p)}), b.fmt("-Dgopher-root={s}", .{gopher_root}) });
         one.setCwd(b.path("."));
         check_plants.dependOn(&one.step);
     }
@@ -272,13 +272,12 @@ pub fn build(b: *std.Build) void {
         check_step.dependOn(&exe.step);
     }
     var port_code: u8 = 0;
-    // **ONLY A PORT OF THE CHECKOUT AS IT IS NOW** (metal-vmm 146(a)): the
-    // asset list is the port's, the files the checkout's, so a stale port
-    // would fail the build for no fault of this repo's. tools/verdicts.py
-    // says whether it is fresh, as gates.sh asks it, and a port not fresh
-    // fails the check.
+    // **ONLY A CHECKOUT THIS BUILD CAN TAKE** (metal-vmm 146(a), Phase B 2b):
+    // its sources take their Io from host_io, never std's, and this tree's
+    // asset list is its table. tools/verdicts.py says whether it is fresh, as
+    // gates.sh asks it, and one not fresh fails the check.
     const port_state: []const u8 = blk: {
-        const out = b.runAllowFail(&.{ "env", b.fmt("GOPHER_PORT={s}", .{gopher_port}), b.fmt("GOPHER_ROOT={s}", .{gopher_root}), "python3", b.pathFromRoot("tools/verdicts.py"), "fresh" }, &port_code, .ignore) catch break :blk "tools/verdicts.py could not be run";
+        const out = b.runAllowFail(&.{ "env", b.fmt("GOPHER_ROOT={s}", .{gopher_root}), "python3", b.pathFromRoot("tools/verdicts.py"), "fresh" }, &port_code, .ignore) catch break :blk "tools/verdicts.py could not be run";
         break :blk std.mem.trim(u8, out, " \t\r\n");
     };
     if (std.mem.eql(u8, port_state, "fresh")) {
@@ -288,12 +287,12 @@ pub fn build(b: *std.Build) void {
         // **A KERNEL NOT CHECKED FAILS THE CHECK** (Steve, 2026-10-10: fail,
         // never warn). It printed and passed; a stale port then hid a kernel
         // that did not build (48a167f).
-        const fail = b.addFail(b.fmt("check: gopher.elf NOT type-checked: {s} (port {s}, checkout {s}): run ./port.sh, or -Dgopher=<dir> and -Dgopher-root=<dir> for others", .{ port_state, gopher_port, gopher_root }));
+        const fail = b.addFail(b.fmt("check: gopher.elf NOT type-checked: {s} (checkout {s}): see ./port.sh, or -Dgopher-root=<dir> for another checkout", .{ port_state, gopher_root }));
         check_step.dependOn(&fail.step);
         // **NOR BUILT** (the protocols-in-prose hunt, K10), with
         // probe/gopher.elf left as it was: a kernel of a port that is not
         // the checkout's would be judged as if it were.
-        const no_build = b.addFail(b.fmt("gopher: NOT built: {s} (port {s}, checkout {s}): run ./port.sh, or -Dgopher=<dir> and -Dgopher-root=<dir> for others", .{ port_state, gopher_port, gopher_root }));
+        const no_build = b.addFail(b.fmt("gopher: NOT built: {s} (checkout {s}): see ./port.sh, or -Dgopher-root=<dir> for another checkout", .{ port_state, gopher_root }));
         gopher_copy.step.dependOn(&no_build.step);
     }
 
@@ -404,8 +403,8 @@ pub fn build(b: *std.Build) void {
     const own_binary = [_][]const u8{"droplet/image.zig"};
     // **THE ONE BODY RULE** (angry-gopher's webbox body.zig, metal-vmm QUEUE
     // 166): ready.zig takes it as a parameter, which the kernel passes as
-    // `router.body_rule` and the unit tests as the ported file itself.
-    const body_rule = b.createModule(.{ .root_source_file = .{ .cwd_relative = b.fmt("{s}/body.zig", .{gopher_port}) } });
+    // `webbox.body` and the unit tests as angry-gopher's file itself.
+    const body_rule = b.createModule(.{ .root_source_file = .{ .cwd_relative = b.fmt("{s}/body.zig", .{gopher_src}) } });
     const unit_imports = [_]std.Build.Module.Import{
         .{ .name = "body_rule", .module = body_rule },
         .{ .name = "kernel_partition", .module = kernel_partition },
@@ -452,9 +451,9 @@ pub fn build(b: *std.Build) void {
     if (!test_file_found) @panic("-Dtest-file names no file the unit tests run");
 
     // **THE STORE PRODUCTION RUNS, JUDGED** (src/store_judge.zig):
-    // angry-gopher's store.zig over Linux and, as port.sh made it
-    // (`-Dgopher`), over this repo's io.zig, against the model. Needs the
-    // sibling angry-gopher checkout and a port, so it is a step of its own,
+    // angry-gopher's store.zig over Linux and, handed this machine's
+    // host_io, over this repo's io.zig, against the model. Needs the
+    // sibling angry-gopher checkout, so it is a step of its own,
     // not part of `test`, and not yet in gates.sh: its model is still
     // gopher-metal's Store, not the seam's (STORE.md).
     const ag_src = b.option([]const u8, "angry-gopher-src", "angry-gopher's zig-server/src, the Linux side of store-judge") orelse "../angry-gopher/zig-server/src";
@@ -485,7 +484,7 @@ pub fn build(b: *std.Build) void {
                     .imports = &.{.{ .name = "host_io", .module = b.createModule(.{ .root_source_file = .{ .cwd_relative = b.pathFromRoot(b.fmt("{s}/host_io_std.zig", .{ag_src})) } }) }},
                 }) },
                 .{ .name = "ag_store_metal", .module = b.createModule(.{
-                    .root_source_file = .{ .cwd_relative = b.fmt("{s}/store.zig", .{gopher_port}) },
+                    .root_source_file = .{ .cwd_relative = b.fmt("{s}/store.zig", .{gopher_src}) },
                     .imports = &.{.{ .name = "host_io", .module = judge_host_io }},
                 }) },
             },
@@ -504,7 +503,7 @@ pub fn build(b: *std.Build) void {
             .imports = &.{
                 .{ .name = "judge_world", .module = judge_world },
                 .{ .name = "ag_store_metal", .module = b.createModule(.{
-                    .root_source_file = .{ .cwd_relative = b.fmt("{s}/store.zig", .{gopher_port}) },
+                    .root_source_file = .{ .cwd_relative = b.fmt("{s}/store.zig", .{gopher_src}) },
                     .imports = &.{.{ .name = "host_io", .module = judge_host_io }},
                 }) },
             },
