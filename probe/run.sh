@@ -88,7 +88,7 @@ quick=0
 if [ "$want" = quick ]; then
     quick=1
     if ! ( cd "$HERE/.." && zig build test && zig build kernels -Ddev \
-           && ./port.sh && zig build gopher -Ddev ) > "$WORK/quick.build" 2>&1; then
+           && zig build gopher -Ddev ) > "$WORK/quick.build" 2>&1; then
         echo "FAIL quick | the host tests or the Debug build failed; see $WORK/quick.build"
         tail -5 "$WORK/quick.build"
         exit 1
@@ -685,7 +685,7 @@ fi
 if [ "$want" = gopher ] || [ $quick = 1 ]; then
     GOPHER_ROOT="${GOPHER_ROOT:-$HOME/showell_repos/angry-gopher}"
     if [ ! -f "$HERE/gopher.elf" ]; then
-        echo "FAIL gopher | no gopher.elf; run: ./port.sh && zig build gopher"
+        echo "FAIL gopher | no gopher.elf; run: zig build gopher"
         failed=1
     elif ! ( cd "$GOPHER_ROOT/zig-server" && zig build ) > "$WORK/gopher.linux-build" 2>&1; then
         echo "FAIL gopher | the Linux build of the same source failed; see $WORK/gopher.linux-build"
@@ -752,7 +752,7 @@ fi
 if [ "$want" = soak ]; then
     GOPHER_ROOT="${GOPHER_ROOT:-$HOME/showell_repos/angry-gopher}"
     if [ ! -f "$HERE/gopher.elf" ]; then
-        echo "FAIL soak | no gopher.elf; run: ./port.sh && zig build gopher"
+        echo "FAIL soak | no gopher.elf; run: zig build gopher"
         failed=1
     else
         python3 "$HERE/judge_soak.py" "$HERE/gopher.elf" "$GOPHER_ROOT" "$WORK/soak"

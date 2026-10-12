@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """**CHAT'S BOOT DISK, FOR A DROPLET.** The real server (gopher.elf) in
 partition 1, and in partition 2 the site's own files, which come with every
-image: the judge's pages, the home page's pictures (gallery/) and
-gopher-metal.conf. Chat's data is not here: it is on a DigitalOcean volume,
+image: what angry-gopher's routes read at request time (its assets.zon's
+`.site`: pages/, gallery/) and gopher-metal.conf. Chat's data is not here: it is on a DigitalOcean volume,
 built once by `droplet/new_volume.py` and never touched by a new boot image.
 
 gopher-metal.conf says nothing about `requests`, so the server serves until
@@ -124,10 +124,6 @@ def main() -> int:
         judge.stage(content, GOPHER_ROOT)
         for d in judge.DATA_DIRS:
             shutil.rmtree(os.path.join(content, d))
-        # The home page's pictures: prod's deploy copies gallery/ beside
-        # pages/, and the server reads them from disk. The judge's site leaves
-        # them out (it compares answers, not pictures), so they are added here.
-        shutil.copytree(os.path.join(GOPHER_ROOT, "gallery"), os.path.join(content, "gallery"))
         # A connection that makes no progress for ten seconds is let go, as in
         # the judge; no `requests` line, so the machine never stops on its own;
         # only the private card, where prod's Caddy reaches it; and the volume.

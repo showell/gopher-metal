@@ -3,9 +3,8 @@
 // probe/link.ld and booted by QEMU through the PVH note it carries.
 //
 //   zig build kernels   every probe kernel into probe/ (`zig build --help` lists each)
-//   zig build gopher    the real server, after ./port.sh
+//   zig build gopher    the real server, from angry-gopher's checkout
 const std = @import("std");
-const assets = @import("gen/assets.zig");
 
 /// A kernel's root module: bare metal, no red zone, and **ONE THREAD, AND
 /// THERE WILL NOT BE ANOTHER.** A freestanding target is not single-threaded
@@ -147,15 +146,13 @@ pub fn build(b: *std.Build) void {
     // The application's own modules, each importing `metal` for its Io.
     //
     // **NOT part of `kernels`**, and not depended on by the install step: this
-    // needs angry-gopher's checkout (and port.sh's asset list from it), and a
-    // checkout without angry-gopher beside it should still build everything
-    // else. `zig build
-    // gopher` says plainly what is missing when it is missing.
+    // needs angry-gopher's checkout, and a checkout without angry-gopher
+    // beside it should still build everything else. `zig build gopher` says
+    // plainly what is missing when it is missing.
     // What the application's own build.zig supplies and this one must too: a
     // `build_options` module, and the front-end artifacts each page embeds by
-    // name. That table lives in angry-gopher/zig-server/build.zig; port.sh
-    // extracts it into gen/assets.zig, and the build refuses a list that is
-    // not the checkout's, so the two cannot drift.
+    // name. That table is angry-gopher's zig-server/assets.zon, which its
+    // build.zig and this one both read (`servedBy`), so the two cannot drift.
     //
     // **THIS IS THE PART OF THE PORT THAT IS NOT ABOUT THE MACHINE.** The
     // modules compile freestanding unchanged, handed this machine's `host_io`;
@@ -206,10 +203,11 @@ pub fn build(b: *std.Build) void {
             .{ .name = "build_options", .module = build_opts.createModule() },
         },
     });
-    // Every asset the application's own build.zig declares, read out of it by
-    // port.sh rather than copied here. A page embeds these by name, and a name
-    // that no build graph declared is a compile error with a confusing message.
-    for (assets.assets) |a| {
+    // Every asset the application embeds, from its own table
+    // (zig-server/assets.zon's `.embedded`, which its build.zig reads too).
+    // A page embeds these by name, and a name that no build graph declared is
+    // a compile error with a confusing message.
+    for (servedBy(b, gopher_root).embedded) |a| {
         // Their paths are relative to zig-server/, which is one level in.
         app.addAnonymousImport(a.name, .{
             .root_source_file = .{ .cwd_relative = b.fmt("{s}/zig-server/{s}", .{ gopher_root, a.path }) },
@@ -229,7 +227,7 @@ pub fn build(b: *std.Build) void {
     gopher.entry = .{ .symbol_name = "_start" };
     const gopher_copy = b.addUpdateSourceFiles();
     gopher_copy.addCopyFileToSource(gopher.getEmittedBin(), "probe/gopher.elf");
-    const gopher_step = b.step("gopher", "the real server, compiled from angry-gopher's checkout as it is now (port.sh's asset list first)");
+    const gopher_step = b.step("gopher", "the real server, compiled from angry-gopher's checkout as it is now");
     gopher_step.dependOn(&gopher_copy.step);
 
     // **EVERY KERNEL TYPE-CHECKED, ON EVERY `zig build test`** (metal-vmm
@@ -245,8 +243,8 @@ pub fn build(b: *std.Build) void {
     // behind `builtin.mode != .Debug` is not analyzed either. native and
     // droplet are host programs, and are built and linked whole.
     //
-    // gopher.elf needs angry-gopher's checkout and port.sh's asset list from
-    // it; without either it is not checked, and the step says so rather than
+    // gopher.elf needs angry-gopher's checkout, its sources and its
+    // assets.zon; without them it is not checked, and the step says so rather than
     // pass in silence.
     const check_step = b.step("check", "type-check every kernel (analysis only, not codegen or link), and build native and droplet (part of `test`)");
     // **EVERY PLANT TYPE-CHECKED** (src/plant.zig): a plant's code is
@@ -287,12 +285,12 @@ pub fn build(b: *std.Build) void {
         // **A KERNEL NOT CHECKED FAILS THE CHECK** (Steve, 2026-10-10: fail,
         // never warn). It printed and passed; a stale port then hid a kernel
         // that did not build (48a167f).
-        const fail = b.addFail(b.fmt("check: gopher.elf NOT type-checked: {s} (checkout {s}): see ./port.sh, or -Dgopher-root=<dir> for another checkout", .{ port_state, gopher_root }));
+        const fail = b.addFail(b.fmt("check: gopher.elf NOT type-checked: {s} (checkout {s}): -Dgopher-root=<dir> for another checkout", .{ port_state, gopher_root }));
         check_step.dependOn(&fail.step);
         // **NOR BUILT** (the protocols-in-prose hunt, K10), with
         // probe/gopher.elf left as it was: a kernel of a port that is not
         // the checkout's would be judged as if it were.
-        const no_build = b.addFail(b.fmt("gopher: NOT built: {s} (checkout {s}): see ./port.sh, or -Dgopher-root=<dir> for another checkout", .{ port_state, gopher_root }));
+        const no_build = b.addFail(b.fmt("gopher: NOT built: {s} (checkout {s}): -Dgopher-root=<dir> for another checkout", .{ port_state, gopher_root }));
         gopher_copy.step.dependOn(&no_build.step);
     }
 
@@ -726,6 +724,26 @@ fn wanted(test_file: ?[]const u8, path: []const u8) bool {
 
 /// `git rev-parse --short HEAD` in `dir`, with `+dirty` when its tree has
 /// uncommitted changes; `unknown` when git cannot say.
+/// **WHAT AN APPLICATION SERVES BESIDES ITS CODE** (Phase B step 3): its
+/// zig-server/assets.zon, read here as its own build.zig reads it, so the
+/// two cannot drift: `.embedded`, compiled in by name; `.site`, directories
+/// its routes read at request time (laid onto the site disk by
+/// droplet/chat.py and the judge). A checkout without one serves nothing
+/// extra here, and tools/verdicts.py's freshness refuses to build it.
+const Served = struct {
+    embedded: []const struct { name: []const u8, path: []const u8, built_by: []const u8 = "" } = &.{},
+    site: []const []const u8 = &.{},
+};
+
+fn servedBy(b: *std.Build, gopher_root: []const u8) Served {
+    const io = b.graph.io;
+    const path = b.fmt("{s}/zig-server/assets.zon", .{gopher_root});
+    const text = std.Io.Dir.cwd().readFileAlloc(io, path, b.allocator, .limited(1 << 20)) catch return .{};
+    const z = b.allocator.dupeZ(u8, text) catch @panic("out of memory");
+    return std.zon.parse.fromSliceAlloc(Served, b.allocator, z, null, .{}) catch
+        std.process.fatal("{s} does not read as an application's assets (.embedded and .site)", .{path});
+}
+
 fn commitOf(b: *std.Build, dir: []const u8) []const u8 {
     var code: u8 = 0;
     const head = b.runAllowFail(&.{ "git", "-C", dir, "rev-parse", "--short", "HEAD" }, &code, .ignore) catch return "unknown";

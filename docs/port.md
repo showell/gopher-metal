@@ -48,8 +48,11 @@ machine) it spins.
 (Phase B step 2b, 2026-10-13). Every file that does I/O opens with
 `const Io = @import("host_io").Io;`, and this build hands them
 `src/host_io_metal.zig` as `host_io`. A file that aliases std's `Io` instead
-is refused, by the build's check and by `port.sh`, which is left with only
-the asset list (`gen/assets.zig`) until step 3 makes the assets a build input.
+is refused by the build's check. What the application serves besides its code
+is its `zig-server/assets.zon` (Phase B step 3): `.embedded`, the front-end
+artifacts the build compiles in by name, read by this build as by its own; and
+`.site`, the directories its routes read at request time (pages/, gallery/),
+laid whole onto the site disk by `droplet/chat.py` and the judge.
 A gate names angry-gopher by the content id of what it serves, and keeps no
 verdict if that changed during the run (`tools/verdicts.py`).
 

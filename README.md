@@ -178,7 +178,7 @@ One run, on one evening: DigitalOcean's neighbours vary.
 
 By hand, in this order:
 
-0. **Both gates pass for the pair.** `./port.sh`, then `./gates.sh` and
+0. **Both gates pass for the pair.** `./gates.sh` and
    `./long.sh` on the dev box; each records its verdict for the exact
    gopher-metal / angry-gopher commit pair it judged (`tools/verdicts.py`).
    `droplet/chat.py` refuses to build unless both trees are clean and both
@@ -279,8 +279,7 @@ SECRET-LEAK.md and ADMIN-PASSWORD-LOST.md and when each is needed):
   for a batch: host tests, every probe, the chat judge on FAT32 on microvm
   and on the droplet-shaped machine side by side, the droplet boot checks,
   and metal-vmm's `check.sh`, `same.sh` and `pc_vs_microvm.sh all`. It rebuilds
-  `gopher.elf` and metal-vmm from angry-gopher's checkout as it is; run
-  `./port.sh` first if angry-gopher's asset table changed.
+  `gopher.elf` and metal-vmm from angry-gopher's checkout as it is.
 - `./long.sh` is the long tier: the simulators at 10,000 seeds against
   `coverage/floor-sim.txt`, the chat judge on FAT16, and the real kernel on
   metal-vmm losing each of its frames in turn, and facing a peer that
@@ -296,7 +295,7 @@ SECRET-LEAK.md and ADMIN-PASSWORD-LOST.md and when each is needed):
     zig build kernels      # every kernel into probe/
     probe/run.sh           # boot each one under microvm (~45 s)
     probe/run.sh clock     # just one
-    ./port.sh && zig build gopher && probe/run.sh gopher   # the real server, judged against Linux
+    zig build gopher && probe/run.sh gopher   # the real server, judged against Linux
     probe/run.sh gopher uploads   # ONE gate of that judge, in seconds
     probe/run.sh gopher isolated  # a boot per single request
     probe/run.sh quick     # Debug kernels, every probe, the judge's quick tier
