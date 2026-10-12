@@ -118,9 +118,11 @@ test "a FAT whose copies differ in more sectors than are weighed is held as the 
     // The first mending write fails: the run of the second copy that holds
     // sector 0 is read, then sector 0 is written. The FAT is held, the
     // mount goes on, and the copies are left as far apart as they were.
+    // Unchecked (no room to weigh): with room, copies this far apart are
+    // weighed whole (metal-vmm QUEUE 181), below.
     try d.mount(false);
     d.blk.fault = .{ .at = d.blk.requests + before + 1, .kind = .fails };
-    const m = try d.vol.cacheFatChecked(buf, room);
+    const m = try d.vol.cacheFatChecked(buf, null);
     d.blk.fault = null;
     try testing.expectEqual(.refused, m.repair);
     try testing.expectEqual(.past_weighing, m.found);
@@ -128,10 +130,17 @@ test "a FAT whose copies differ in more sectors than are weighed is held as the 
     try testing.expectEqual(l.end(), l.get(d.bytes, 1, 100));
     try testing.expect(!d.fatsAgree());
 
-    // The next mount writes every differing sector from the first, unweighed.
+    // The next mount, with room, weighs the copies whole: the first checks
+    // clean and the second leaks, so every differing sector is written from
+    // the first.
+    try d.mount(false);
+    const w = try d.vol.cacheFatChecked(buf, room);
+    try testing.expectEqual(.weighed, w.found);
+    try testing.expectEqual(@as(u32, 0), w.trusted);
+    try testing.expect(w.health[1].leaked > w.health[0].leaked);
+    try testing.expectEqual(@as(u32, apart), w.repaired);
     try d.mount(true);
-    try testing.expectEqual(@as(u32, apart), d.repaired);
-    try testing.expectEqual(@as(u32, 0), d.trusted);
+    try testing.expectEqual(@as(u32, 0), d.repaired);
     try testing.expect(d.fatsAgree());
     try testing.expectEqual(@as(u32, 0), l.get(d.bytes, 1, 100));
     try d.expectFile("data/f", "x");

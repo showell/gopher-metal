@@ -1453,3 +1453,39 @@ test "a write that lands and answers failure as a counted orphan run is tombston
     // the read-back failing too, none is; the other three find some).
     try testing.expect(refused_landed > 0);
 }
+
+test "a disk that lies to any one request of an upload-sized write on FAT32 never damages the volume the next boot mounts (metal-vmm QUEUE 181)" {
+    const virtio = @import("virtio.zig");
+    // Six MB: 12,288 clusters, 96 FAT sectors a copy, past what is weighed
+    // sector by sector.
+    const bytes = try testing.allocator.alloc(u8, 6 << 20);
+    defer testing.allocator.free(bytes);
+    for (bytes, 0..) |*b, i| b.* = @truncate(i *% 13 +% 1);
+    var total: u64 = 0;
+    {
+        const d = try Disk.make("upload-lies-count", test_disk.small32, true);
+        defer d.deinit();
+        const before = d.blk.requests;
+        try d.vol.writeFile("up.bin", bytes);
+        total = d.blk.requests - before;
+    }
+    var runs: u32 = 0;
+    for ([_]@FieldType(virtio.Block.Fault, "kind"){ .lands_nothing, .torn, .torn_tail }) |lie| {
+        var n: u64 = 0;
+        while (n < total) : (n += 1) {
+            const d = try Disk.makeUnkept("limit-upload-lies", test_disk.small32, true);
+            defer d.deinit();
+            d.blk.fault = .{ .at = d.blk.requests + n, .kind = lie };
+            d.vol.writeFile("up.bin", bytes) catch {};
+            d.blk.fault = null;
+            try d.mount(true);
+            const r = try d.check();
+            for (r.found[0..r.len]) |f| if (f.problem.damage()) {
+                std.debug.print("{s} at request {d} of {d}: {s} at '{s}'\n", .{ @tagName(lie), n, total, @tagName(f.problem), f.text() });
+                return error.TestUnexpectedResult;
+            };
+            runs += 1;
+        }
+    }
+    try testing.expect(runs > 10);
+}

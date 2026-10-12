@@ -75,7 +75,7 @@ pub fn kmain() noreturn {
     // a file longer than one request): its disk's requests are held to 64 KiB,
     // what they were before metal-vmm QUEUE 178 made them 1 MiB, so its small
     // volume still splits them.
-    blk.most_sectors = 128;
+    blk.most_sectors = @min(blk.most_sectors, 128); // never more than the device said (180.3)
     var vol = disk_fat.Volume.mount(&blk, &scratch, 0) catch
         serial.fail("this is not the FAT16 volume the probe expects");
     Io.mount(vol);

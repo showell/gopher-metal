@@ -102,8 +102,12 @@ pub fn cacheFat(self: *Volume, buf: []u8) Error!u32 {
 /// and the other is written from it. So a stop keeps whichever copy
 /// agrees with the directories, and a first copy that reads wrong is not
 /// written over a good second. A tie, or a check that cannot run, holds
-/// the first and writes neither. Without `seen`, or with more than
-/// `max_weighed_sectors` differing, the first is the FAT.
+/// the first and writes neither. Without `seen`, the first is the FAT.
+///
+/// **MORE APART THAN ARE KEPT TO WEIGH, THE COPIES ARE WEIGHED WHOLE**
+/// (metal-vmm QUEUE 181, `weighWhole`): a FAT run written as one request
+/// can leave hundreds of sectors apart after one lie or one cut, and taking
+/// the first copy then lost a file the second held whole.
 pub fn cacheFatChecked(self: *Volume, buf: []u8, seen: ?[]u8) Error!Mirrors {
     if (buf.len < self.fatBytes()) {
         props.reachable(@src(), "fat: a FAT cache buffer too small for the FAT is refused", null);
@@ -135,6 +139,7 @@ pub fn cacheFatChecked(self: *Volume, buf: []u8, seen: ?[]u8) Error!Mirrors {
     self.fat = fat;
     if (n_differ == 0) return .{};
     if (n_differ > differ.len) {
+        if (seen) |room| return weighWhole(self, fat, room, &run);
         props.reachable(@src(), "fat: more FAT sectors differ than are weighed, and the first copy is the FAT", null);
         const n = self.mirrorFirst(fat, &run) catch {
             repairRefused();
@@ -217,11 +222,71 @@ pub fn cacheFatChecked(self: *Volume, buf: []u8, seen: ?[]u8) Error!Mirrors {
     return m;
 }
 
+/// **COPIES WEIGHED WHOLE**, where more sectors differ than are kept to
+/// weigh one by one: the volume checked with the first copy held, then
+/// with the second read over it (the first is still on the disk, so no
+/// memory is kept for it). The one with fewer problems, then fewer leaked
+/// clusters, is the FAT, and the other is written from it, as in
+/// `cacheFatChecked`; a tie holds the first and writes neither. A check,
+/// or the read of the second, that fails leaves the first held and
+/// neither written (`unweighed`).
+///
+/// Why it holds for a lie and a cut alike: the copies are written one
+/// after the other, so one lie or one cut leaves at most one of them other
+/// than the writes meant. A copy that lost part of a committed chain
+/// checks broken; one that holds part of an uncommitted chain checks
+/// leaked; the other copy checks as the volume should.
+fn weighWhole(self: *Volume, fat: []u8, room: []u8, run: *[run_sectors * sector_size]u8) Error!Mirrors {
+    props.reachable(@src(), "fat: more FAT sectors differ than are kept to weigh, and the copies are weighed whole", null);
+    var m: Mirrors = .{ .found = .weighed };
+    m.health[0] = self.check(room, {}, ignoreFinding) catch {
+        unweighed();
+        return .{ .found = .unweighed };
+    };
+    const second: ?Health = if (self.readSectors(self.fat_start + self.sectors_per_fat, self.sectors_per_fat, fat.ptr))
+        self.check(room, {}, ignoreFinding) catch null
+    else |_|
+        null;
+    m.health[1] = second orelse {
+        try self.readSectors(self.fat_start, self.sectors_per_fat, fat.ptr);
+        unweighed();
+        return .{ .found = .unweighed };
+    };
+    const better = m.health[1].problems < m.health[0].problems or
+        (m.health[1].problems == m.health[0].problems and m.health[1].leaked < m.health[0].leaked);
+    if (better) {
+        props.reachable(@src(), "fat: the second FAT copy, weighed whole, checks cleaner than the first, and is the FAT", null);
+        m.trusted = 1;
+        // Mount counted the first copy's free clusters.
+        self.free_clusters = (try self.deriveFrom(.held)).free;
+    } else {
+        try self.readSectors(self.fat_start, self.sectors_per_fat, fat.ptr);
+        if (m.health[0].problems == m.health[1].problems and m.health[0].leaked == m.health[1].leaked) {
+            props.reachable(@src(), "fat: FAT copies apart check alike, and neither is written over", null);
+            m.found = .tied;
+            return m;
+        }
+    }
+    m.repaired = mirrorHeld(self, fat, run, m.trusted) catch {
+        repairRefused();
+        m.repair = .refused;
+        return m;
+    };
+    m.repair = .written;
+    return m;
+}
+
 /// Every other copy written from the first where they differ.
 pub fn mirrorFirst(self: *Volume, fat: []u8, run: *[run_sectors * sector_size]u8) Error!u32 {
+    return mirrorHeld(self, fat, run, 0);
+}
+
+/// Every copy but `trusted` written from the held FAT where they differ.
+fn mirrorHeld(self: *Volume, fat: []u8, run: *[run_sectors * sector_size]u8, trusted: u32) Error!u32 {
     var repaired: u32 = 0;
-    var copy: u32 = 1;
+    var copy: u32 = 0;
     while (copy < self.num_fats) : (copy += 1) {
+        if (copy == trusted) continue;
         var s: u32 = 0;
         while (s < self.sectors_per_fat) {
             const n = @min(run_sectors, self.sectors_per_fat - s);

@@ -63,7 +63,7 @@ echo "the kept free count is the oracle's on $k healthy images"
 # fat16.max_name, each name the first that many characters of a fixed
 # alphabet. The oracle must list each, whole: a name it read under its 8.3
 # alias, or cut short, is missing.
-max_name=$(grep -o 'pub const max_name: usize = [0-9]*' "$ROOT/src/disk_fat.zig" | grep -o '[0-9]*$')
+max_name=$(grep -o 'pub const max_name: usize = [0-9]*' "$ROOT/src/disk_fat_dirent.zig" | grep -o '[0-9]*$')
 for img in "$DIR"/names-*.img; do
     name="$(basename "$img")"
     want="$(python3 -c "

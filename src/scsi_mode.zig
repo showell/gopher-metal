@@ -125,3 +125,50 @@ test "the cache report is derived from what the disk says now and one bit of bri
     try testing.expectEqual(Report.unknown, report(null, true));
     try testing.expectEqual(Report.unknown, report(null, false));
 }
+
+/// **THE DISK'S OWN MOST IN ONE COMMAND** (metal-vmm QUEUE 180.1): MAXIMUM
+/// TRANSFER LENGTH, in sectors, from INQUIRY's Block Limits page (B0h,
+/// SBC-3 6.6.3), of which the disk sent `got` bytes. Null where it says
+/// nothing: a page too short to hold the field, another page, or 0 (no
+/// limit). Virtio-scsi's `max_sectors` is the controller's hint; this is
+/// the disk's, which Linux's sd obeys.
+pub fn blockLimitsMost(page: []const u8, got: usize) ?u32 {
+    // Within what the disk sent, and within the page's own length (bytes
+    // 2..3, past its 4-byte head): padding past it is not the field (187.2).
+    if (@min(got, page.len) < 4) return null;
+    const n = @min(got, page.len, 4 + @as(usize, std.mem.readInt(u16, page[2..4], .big)));
+    if (n < 12 or page[1] != 0xB0) return null;
+    const most = std.mem.readInt(u32, page[8..12], .big);
+    return if (most == 0) null else most;
+}
+
+test "Block Limits: the disk's most is read from its page, and nothing is read from a page that does not say it (metal-vmm QUEUE 180.1)" {
+    var page: [64]u8 = @splat(0);
+    page[1] = 0xB0;
+    page[3] = 0x3C;
+    std.mem.writeInt(u32, page[8..12], 256, .big);
+    try std.testing.expectEqual(@as(?u32, 256), blockLimitsMost(&page, 64));
+    // Exactly the field, and one byte short of it.
+    try std.testing.expectEqual(@as(?u32, 256), blockLimitsMost(&page, 12));
+    try std.testing.expectEqual(@as(?u32, null), blockLimitsMost(&page, 11));
+    // Another page, and a limit of 0: nothing said.
+    page[1] = 0x83;
+    try std.testing.expectEqual(@as(?u32, null), blockLimitsMost(&page, 64));
+    page[1] = 0xB0;
+    std.mem.writeInt(u32, page[8..12], 0, .big);
+    try std.testing.expectEqual(@as(?u32, null), blockLimitsMost(&page, 64));
+}
+
+test "Block Limits: what lies past the page's own length is not read as the limit (metal-vmm QUEUE 187.2)" {
+    var page: [64]u8 = @splat(0xFF);
+    page[1] = 0xB0;
+    // A page of 4 bytes past its head, padded: no field there.
+    std.mem.writeInt(u16, page[2..4], 4, .big);
+    try std.testing.expectEqual(@as(?u32, null), blockLimitsMost(&page, 64));
+    // A page whose length just holds the field (8: bytes 4..11).
+    std.mem.writeInt(u16, page[2..4], 8, .big);
+    std.mem.writeInt(u32, page[8..12], 256, .big);
+    try std.testing.expectEqual(@as(?u32, 256), blockLimitsMost(&page, 64));
+    std.mem.writeInt(u16, page[2..4], 7, .big);
+    try std.testing.expectEqual(@as(?u32, null), blockLimitsMost(&page, 64));
+}

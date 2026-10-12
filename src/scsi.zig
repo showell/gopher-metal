@@ -399,6 +399,17 @@ pub fn bring(device: virtio.Device, mem: *virtio.BlockMemory) Error!virtio.Block
             }
             b.capacity = @as(u64, last) + 1;
             b.address = at;
+            // **THE DISK'S OWN MOST** (metal-vmm QUEUE 180.1): Block Limits'
+            // MAXIMUM TRANSFER LENGTH, obeyed where it is less than the
+            // controller's and ours. A disk with no such page (CHECK
+            // CONDITION), or one that says 0, is not limited by it.
+            const limits = [6]u8{ 0x12, 1, 0xB0, 0, 64, 0 };
+            const lo = commandSettled(&b, at, &limits, .from_disk, scratch, 64);
+            b.disk_most_sectors = if (good(lo)) mode.blockLimitsMost(&mem.scsi.scratch, 64 -| lo.residual) else null;
+            if (b.disk_most_sectors) |most| {
+                props.reachable(@src(), "scsi: a disk says the most one command carries", .{ .sectors = most });
+                b.most_sectors = @min(b.most_sectors, most);
+            }
             var got: usize = 0;
             b.write_cache = writeCache(&b, at, scratch, &mem.scsi.scratch, &got);
             if (b.write_cache == true) {

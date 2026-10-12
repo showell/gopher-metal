@@ -548,3 +548,355 @@ test "a request's most is ours, 1 MiB, or less where the device says less, never
     try testing.expectEqual(@as(u32, 1), virtio.Block.mostSectors(1023));
     try testing.expectEqual(@as(u32, 0), virtio.Block.mostSectors(511));
 }
+
+// ---- the FAT written as runs, each sector once (metal-vmm QUEUE 179) ----
+
+/// Writes into the FAT's copies, by copy: requests, and the sectors they carry.
+const FatWrites = struct {
+    blk: *virtio.Block,
+    fat_start: u64,
+    per_fat: u64,
+    copies: [2]u32 = .{ 0, 0 },
+    sectors: [2]u32 = .{ 0, 0 },
+    /// The request number of the first write into the first copy, and of
+    /// the second.
+    first_at: ?u64 = null,
+    second_at: ?u64 = null,
+    fn each(context: *anyopaque, write: bool, lba: u64, sectors: u32) void {
+        const r: *FatWrites = @ptrCast(@alignCast(context));
+        if (!write or lba < r.fat_start or lba >= r.fat_start + 2 * r.per_fat) return;
+        const c: usize = @intCast((lba - r.fat_start) / r.per_fat);
+        r.copies[c] += 1;
+        r.sectors[c] += sectors;
+        if (c == 0 and r.first_at != null and r.second_at == null) r.second_at = r.blk.requests - 1;
+        if (c == 0 and r.first_at == null) r.first_at = r.blk.requests - 1;
+    }
+    fn watch(d: *test_disk.Disk) FatWrites {
+        return .{ .blk = &d.blk, .fat_start = d.vol.fat_start, .per_fat = d.vol.sectors_per_fat };
+    }
+    fn on(r: *FatWrites, d: *test_disk.Disk) void {
+        d.blk.observe = .{ .context = r, .each = each };
+    }
+};
+
+/// Clusters a FAT sector holds.
+fn perFatSector(d: *test_disk.Disk) u32 {
+    return disk_fat.sector_size / d.vol.entryBytes();
+}
+
+/// A file of `clusters` two-sector clusters.
+fn clusterFile(d: *test_disk.Disk, name: []const u8, clusters: u32, seed: u8) !void {
+    const bytes = try testing.allocator.alloc(u8, @as(usize, clusters) * 2 * disk_fat.sector_size);
+    defer testing.allocator.free(bytes);
+    try d.vol.writeFile(name, pattern(bytes, seed));
+    try expectClusterFile(d, name, clusters, seed);
+}
+
+fn expectClusterFile(d: *test_disk.Disk, name: []const u8, clusters: u32, seed: u8) !void {
+    const bytes = try testing.allocator.alloc(u8, @as(usize, clusters) * 2 * disk_fat.sector_size);
+    defer testing.allocator.free(bytes);
+    try d.expectFile(name, pattern(bytes, seed));
+}
+
+test "a chain's FAT sectors are one request a copy up to the device's most, and one sector more is two (metal-vmm QUEUE 179)" {
+    for ([_]struct { sectors: u32, requests: u32 }{ .{ .sectors = 4, .requests = 1 }, .{ .sectors = 5, .requests = 2 } }) |c| {
+        const d = try Disk.make("fat-runs-most", two_sector_clusters, true);
+        defer d.deinit();
+        defer d.blk.observe = null;
+        d.blk.most_sectors = 4;
+        const start = @max(d.vol.alloc_hint, 2);
+        // A chain from the first free cluster to the last of FAT sector `c.sectors - 1`.
+        const clusters = c.sectors * perFatSector(d) - start;
+        var w = FatWrites.watch(d);
+        w.on(d);
+        try clusterFile(d, "chain.bin", clusters, 5);
+        try testing.expectEqual([2]u32{ c.requests, c.requests }, w.copies);
+        // Each sector once.
+        try testing.expectEqual([2]u32{ c.sectors, c.sectors }, w.sectors);
+    }
+}
+
+/// FAT sector 0 taken and given back, sector 1 full: the next chain of
+/// more than sector 0 holds skips sector 1.
+fn gapDisk(label: []const u8) !*test_disk.Disk {
+    const d = try Disk.make(label, two_sector_clusters, true);
+    errdefer d.deinit();
+    const per = perFatSector(d);
+    const start = @max(d.vol.alloc_hint, 2);
+    try clusterFile(d, "first.bin", per - start, 1);
+    try clusterFile(d, "middle.bin", per, 2);
+    try d.vol.remove("first.bin");
+    return d;
+}
+
+test "changed FAT sectors with a full one between them are two runs, and a refusal of the second, the first landed, leaves a counted leak (metal-vmm QUEUE 179)" {
+    var second_at: u64 = undefined;
+    var split: u32 = undefined;
+    {
+        const d = try gapDisk("fat-runs-gap");
+        defer d.deinit();
+        defer d.blk.observe = null;
+        // All of sector 0's, then ten in sector 2.
+        split = perFatSector(d) - @max(d.vol.alloc_hint, 2) + 10;
+        var w = FatWrites.watch(d);
+        w.on(d);
+        try clusterFile(d, "split.bin", split, 3);
+        try testing.expectEqual([2]u32{ 2, 2 }, w.copies);
+        try testing.expectEqual([2]u32{ 2, 2 }, w.sectors);
+        try expectClusterFile(d, "middle.bin", perFatSector(d), 2);
+        second_at = w.second_at.?;
+    }
+    // The second run refused, the first landed: landed in part, so the
+    // first copy is written again and the chain left a counted leak.
+    {
+        const d = try gapDisk("damaged-fat-runs-gap-refused");
+        defer d.deinit();
+        d.blk.fault = .{ .at = second_at, .kind = .fails };
+        const bytes = try testing.allocator.alloc(u8, @as(usize, split) * 2 * disk_fat.sector_size);
+        defer testing.allocator.free(bytes);
+        try testing.expectError(disk_fat.Error.WriteFailed, d.vol.writeFile("split.bin", pattern(bytes, 3)));
+        d.blk.fault = null;
+        try testing.expectEqual(@as(u64, split), d.vol.leaked_clusters);
+        try testing.expect(d.fatsAgree());
+        try d.expectKept();
+        const r = try d.check();
+        // Leaked as two runs of clusters, sector 0's and sector 2's.
+        const per = perFatSector(d);
+        try r.expect(&.{
+            .{ .problem = .leaked, .cluster = 2, .count = split - 10 },
+            .{ .problem = .leaked, .cluster = 2 * per, .count = 10 },
+        });
+        try expectClusterFile(d, "middle.bin", perFatSector(d), 2);
+    }
+}
+
+test "a chain whose last link lands in the next FAT sector writes both sectors once, as one run (metal-vmm QUEUE 179)" {
+    const d = try Disk.make("fat-runs-link", two_sector_clusters, true);
+    defer d.deinit();
+    defer d.blk.observe = null;
+    const per = perFatSector(d);
+    const start = @max(d.vol.alloc_hint, 2);
+    // Up to five before sector 0's end.
+    try clusterFile(d, "before.bin", per - start - 5, 1);
+    var w = FatWrites.watch(d);
+    w.on(d);
+    // Five in sector 0, the last in sector 1.
+    try clusterFile(d, "across.bin", 6, 2);
+    try testing.expectEqual([2]u32{ 1, 1 }, w.copies);
+    try testing.expectEqual([2]u32{ 2, 2 }, w.sectors);
+}
+
+/// The request number of the first copy's FAT run in writing `clusters`
+/// to a fresh disk: found on one, failed on another made the same.
+fn firstCopyRunAt(clusters: u32) !u64 {
+    const d = try Disk.make("fat-runs-probe", two_sector_clusters, true);
+    defer d.deinit();
+    defer d.blk.observe = null;
+    var w = FatWrites.watch(d);
+    w.on(d);
+    try clusterFile(d, "f.bin", clusters, 9);
+    return w.first_at.?;
+}
+
+test "a FAT run whose first copy's write fails, and whose second's does not (metal-vmm QUEUE 179)" {
+    const clusters = 300; // two FAT sectors
+    const at = try firstCopyRunAt(clusters);
+    // The second copy refused: saved, the copies apart until a mount mends them.
+    {
+        const d = try Disk.make("damaged-fat-runs-second", two_sector_clusters, true);
+        defer d.deinit();
+        d.blk.fault = .{ .at = at + 1, .kind = .fails };
+        try clusterFile(d, "f.bin", clusters, 9);
+        try testing.expectEqual(@as(u64, 1), d.vol.fat_copies_failed);
+        try testing.expect(!d.fatsAgree());
+        d.blk.fault = null;
+        try d.mount(true);
+        try testing.expect(d.fatsAgree());
+        try expectClusterFile(d, "f.bin", clusters, 9);
+    }
+    // The first copy refused, nothing landed: nothing taken, nothing left.
+    {
+        const d = try Disk.make("fat-runs-first", two_sector_clusters, true);
+        defer d.deinit();
+        const free = d.vol.free_clusters;
+        d.blk.fault = .{ .at = at, .kind = .fails };
+        const bytes = try testing.allocator.alloc(u8, clusters * 2 * disk_fat.sector_size);
+        defer testing.allocator.free(bytes);
+        try testing.expectError(disk_fat.Error.WriteFailed, d.vol.writeFile("f.bin", pattern(bytes, 9)));
+        d.blk.fault = null;
+        try testing.expectEqual(free, d.vol.free_clusters);
+        try testing.expect(d.fatsAgree());
+        try d.expectKept();
+    }
+    // The first copy cut short by a stop: its first sector landed, its
+    // second not, and nothing after. Read as a cut-short sector is: nothing
+    // points at the chain, and nothing is damaged.
+    {
+        const d = try Disk.make("damaged-fat-runs-torn", two_sector_clusters, true);
+        defer d.deinit();
+        d.blk.fault = .{ .at = at, .kind = .torn };
+        d.blk.fail_after = at + 1;
+        const bytes = try testing.allocator.alloc(u8, clusters * 2 * disk_fat.sector_size);
+        defer testing.allocator.free(bytes);
+        try testing.expect(std.meta.isError(d.vol.writeFile("f.bin", pattern(bytes, 9))));
+        d.blk.fault = null;
+        d.blk.fail_after = null;
+        try d.mount(true);
+        const r = try d.check();
+        // Lost clusters at most (the mount may trust the copy the cut left
+        // untouched, and mend the other), never damage.
+        for (r.found[0..r.len]) |f| try testing.expect(!f.problem.damage());
+        try d.expectKept();
+        try testing.expectError(disk_fat.Error.NotFound, d.vol.open("f.bin"));
+    }
+}
+
+// ---- a lie or a cut inside an upload-sized FAT run (metal-vmm QUEUE 181) ----
+
+/// Twenty MB on `small32`: a chain of 40,960 clusters, 320 FAT sectors, one
+/// run a copy: more than the mount weighs sector by sector.
+const upload_clusters = 40_960;
+
+fn uploadBytes() ![]u8 {
+    const bytes = try testing.allocator.alloc(u8, upload_clusters * disk_fat.sector_size);
+    return pattern(bytes, 0x5A);
+}
+
+/// The request number of the upload's first-copy FAT run, on a fresh `small32`.
+fn uploadRunAt() !u64 {
+    const d = try Disk.make("upload-probe", test_disk.small32, true);
+    defer d.deinit();
+    defer d.blk.observe = null;
+    const bytes = try uploadBytes();
+    defer testing.allocator.free(bytes);
+    var w = FatWrites.watch(d);
+    w.on(d);
+    try d.vol.writeFile("up.bin", bytes);
+    try testing.expect(w.sectors[0] > disk_fat.Volume.max_weighed_sectors);
+    return w.first_at.?;
+}
+
+test "one lie to the first copy's upload-sized FAT run costs nothing: the mount keeps the copy that checks clean, and the file reads whole (metal-vmm QUEUE 181)" {
+    const at = try uploadRunAt();
+    const bytes = try uploadBytes();
+    defer testing.allocator.free(bytes);
+    for ([_]@FieldType(virtio.Block.Fault, "kind"){ .lands_nothing, .torn, .torn_tail }) |lie| {
+        const d = try Disk.make("upload-lie", test_disk.small32, true);
+        defer d.deinit();
+        d.blk.fault = .{ .at = at, .kind = lie };
+        try d.vol.writeFile("up.bin", bytes);
+        d.blk.fault = null;
+        try d.mount(true);
+        try testing.expectEqual(@as(u32, 1), d.trusted);
+        try d.expectFile("up.bin", bytes);
+        try testing.expect(d.fatsAgree());
+        const r = try d.check();
+        try r.expect(&.{});
+        // And the next write is a write like any other.
+        try d.vol.writeFile("next.bin", bytes[0 .. 4 << 20]);
+        try d.expectFile("next.bin", bytes[0 .. 4 << 20]);
+    }
+}
+
+test "a cut inside the first copy's upload-sized FAT run leaves nothing: the mount keeps the untouched copy (metal-vmm QUEUE 181)" {
+    const at = try uploadRunAt();
+    const bytes = try uploadBytes();
+    defer testing.allocator.free(bytes);
+    const d = try Disk.make("upload-cut", test_disk.small32, true);
+    defer d.deinit();
+    const free = d.vol.free_clusters;
+    d.blk.fault = .{ .at = at, .kind = .torn };
+    d.blk.fail_after = at + 1;
+    try testing.expect(std.meta.isError(d.vol.writeFile("up.bin", bytes)));
+    d.blk.fault = null;
+    d.blk.fail_after = null;
+    try d.mount(true);
+    try testing.expectEqual(@as(u32, 1), d.trusted);
+    try testing.expectEqual(free, d.vol.free_clusters);
+    try d.expectKept();
+    const r = try d.check();
+    try r.expect(&.{});
+}
+
+test "a FAT run that landed and answered failure is given back as runs, not a cluster at a time (metal-vmm QUEUE 181)" {
+    const clusters = 300; // two FAT sectors, one run
+    const at = try firstCopyRunAt(clusters);
+    const d = try Disk.make("fat-runs-landed", two_sector_clusters, true);
+    defer d.deinit();
+    defer d.blk.observe = null;
+    const free = d.vol.free_clusters;
+    d.blk.fault = .{ .at = at, .kind = .lands_and_fails };
+    var w = FatWrites.watch(d);
+    w.on(d);
+    const bytes = try testing.allocator.alloc(u8, clusters * 2 * disk_fat.sector_size);
+    defer testing.allocator.free(bytes);
+    try testing.expectError(disk_fat.Error.WriteFailed, d.vol.writeFile("f.bin", pattern(bytes, 9)));
+    d.blk.fault = null;
+    // Taken (the run that landed, then copy 1), then given back (copy 0, copy 1).
+    try testing.expectEqual([2]u32{ 2, 2 }, w.copies);
+    try testing.expectEqual(free, d.vol.free_clusters);
+    try testing.expect(d.fatsAgree());
+    try d.expectKept();
+}
+
+test "virtio-blk's size_max is per segment: a request carries it times the segments, and 0 is unset (metal-vmm QUEUE 180.2)" {
+    const most = virtio.Block.mostSectorsBlk;
+    // Unset, or 0: ours.
+    try testing.expectEqual(@as(u32, 2048), most(null, null));
+    try testing.expectEqual(@as(u32, 2048), most(0, 8));
+    // One segment where seg_max is not said, as Linux takes it.
+    try testing.expectEqual(@as(u32, 8), most(4096, null));
+    // Up to seg_max segments, at most the six a request's chain holds.
+    try testing.expectEqual(@as(u32, 24), most(4096, 3));
+    try testing.expectEqual(@as(u32, 48), most(4096, 6));
+    try testing.expectEqual(@as(u32, 48), most(4096, 126));
+    // Never more than ours.
+    try testing.expectEqual(@as(u32, 2048), most(1 << 20, 126));
+    // A size_max under a cluster served by segments (before 180.2, refused at mount).
+    try testing.expect(most(512, 126) >= 2);
+}
+
+test "a file whose size is near 4 GiB is checked, not a panic: its clusters are counted in 64 bits (metal-vmm QUEUE 182.3)" {
+    for ([_]u32{ std.math.maxInt(u32) - 512 * 4 + 1, std.math.maxInt(u32) }) |size| {
+        const d = try Disk.make("damaged-near-4gib", test_disk.small32, true);
+        defer d.deinit();
+        try d.vol.writeFile("BIG.BIN", "x");
+        // The entry's size, raised by hand: a FAT32 file may be that big.
+        const at = std.mem.indexOf(u8, d.bytes, "BIG     BIN").?;
+        std.mem.writeInt(u32, d.bytes[at + 28 ..][0..4], size, .little);
+        try d.mount(true);
+        const r = try d.check();
+        try r.expect(&.{.{ .problem = .short, .path = "/BIG.BIN", .cluster = (try d.vol.open("BIG.BIN")).first_cluster, .count = 1 }});
+    }
+}
+
+test "a FAT longer than 32-bit entry numbers reach is refused at mount, in the driver itself (metal-vmm QUEUE 182)" {
+    const d = try Disk.make("limit-fat-length", test_disk.small32, false);
+    defer d.deinit();
+    const b = d.bytes[0..disk_fat.sector_size];
+    const saved = b.*;
+    defer b.* = saved;
+    // A boot sector that says a volume of nearly 2^32 sectors, 128 to a
+    // cluster, and a FAT of `spf` sectors: 2^25 of them is 2^32 entries,
+    // the last numbered 2^32 - 1; one more and its numbers overflow u32.
+    b[13] = 128;
+    std.mem.writeInt(u32, b[32..36], 0xFFFF_0000, .little);
+    for ([_]struct { spf: u32, ok: bool }{ .{ .spf = 1 << 25, .ok = true }, .{ .spf = (1 << 25) + 1, .ok = false } }) |c| {
+        std.mem.writeInt(u32, b[36..40], c.spf, .little);
+        var scratch: [disk_fat.sector_size]u8 align(16) = undefined;
+        const got = disk_fat.Volume.mount(&d.blk, &scratch, 0);
+        // At the edge the bound lets it by, and the mount reads on, past
+        // this small disk; one more is refused as a boot sector.
+        if (c.ok) try testing.expectError(disk_fat.Error.ReadFailed, got) else try testing.expectError(disk_fat.Error.BadBootSector, got);
+    }
+}
+
+test "a virtio-blk request that would need more segments than its chain holds is refused, never built past the ring (metal-vmm QUEUE 187.2)" {
+    const n = virtio.Block.segmentsFor;
+    try testing.expectEqual(@as(u32, 1), n(512, null));
+    try testing.expectEqual(@as(u32, 1), n(512, 512));
+    try testing.expectEqual(@as(u32, 6), n(512, 86));
+    try testing.expectEqual(@as(u32, 7), n(512, 85));
+    try testing.expectEqual(@as(u32, 2), n(4096, 4095));
+    try testing.expect(n(512, 85) > virtio.Block.most_segments);
+}
