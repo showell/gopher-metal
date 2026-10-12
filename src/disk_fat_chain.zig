@@ -135,24 +135,34 @@ pub fn allocChain(self: *Volume, count: u32, spend: Spend) Error!Cluster {
     return first;
 }
 
-/// `allocChain` with the FAT held: **A FAT SECTOR AT A TIME** (metal-vmm
-/// B42). Every free cluster the chain still needs in one sector is
-/// marked and linked in the held sector, the last an end, and the sector
-/// is written once to each copy; then the batch is linked to the chain
-/// so far by one `fatSet`, as a single cluster was. Per cluster, two
-/// entries each wrote their sector to both copies: four writes, ~5.8 ms
-/// each on production's volume. Nothing points at the chain until the
-/// caller's commit, so a stop between the writes leaves lost clusters,
-/// as it did.
+/// `allocChain` with the FAT held: **THE CHAIN PLANNED IN THE HELD FAT,
+/// THEN WRITTEN AS RUNS, EACH SECTOR ONCE** (metal-vmm QUEUE 179). Every
+/// cluster the chain needs is marked and linked in the held FAT first, in
+/// ascending order (a segment); then the FAT sectors it changed are
+/// written, contiguous ones as one request up to the disk's most (a gap
+/// starts another), to the first copy and then each other. A sector was
+/// written when its clusters were taken and again when the chain was
+/// linked on into the next (B42), to each copy: ~390 of a 100 MB upload's
+/// ~590 requests (178). Nothing points at the chain until the caller's
+/// commit, so a stop part-way leaves lost clusters, as it did.
 ///
-/// **A BATCH'S WRITE HAS ONE VERDICT** (`heldRefused`), as one mark's
-/// did: not landed, the held sector goes back as it was; landed, the
-/// batch is taken and given back; unknown, taken as written and never
-/// counted taken, a counted leak.
+/// **A SEGMENT ENDS ONLY WHERE THE CURSOR WRAPS** round the volume: the
+/// next one is linked on by one `fatSet` after it is written, as a batch
+/// was. A volume found full while one is planned answers Full having
+/// written nothing of it.
+///
+/// **A SEGMENT'S WRITE HAS ONE VERDICT** (`segmentRefused`), as a
+/// sector's did: not landed, the held FAT goes back as it was; landed,
+/// the segment is taken and given back; anything else, a run that landed
+/// in part among them, taken as written and the first copy written again
+/// once: a counted leak, or unsure where that fails too. A cut-short run
+/// is read as a cut-short sector was: lost clusters, nothing pointing at
+/// them. Its last landed link may name a cluster still free, which only
+/// a leaked chain does, and the check counts leaked by marks, not links.
 pub fn allocChainHeld(self: *Volume, fat: []u8, count: u32) Error!Cluster {
     var first: Cluster = 0;
     var previous: Cluster = 0;
-    // The clusters linked from `first`: `taken`, and a batch whose
+    // The clusters linked from `first`: `taken`, and a segment whose
     // failed link landed.
     var in_chain: u32 = 0;
     errdefer if (first != 0) self.giveBack(first, in_chain);
@@ -165,70 +175,67 @@ pub fn allocChainHeld(self: *Volume, fat: []u8, count: u32) Error!Cluster {
     const width = self.entryBytes();
 
     while (taken < count) {
-        // The batch's first: the next free cluster.
-        while (true) {
+        // The segment: free clusters in ascending order, each linked from
+        // the one before in the held FAT, the last an end.
+        var seg_first: Cluster = 0;
+        var seg_last: Cluster = 0;
+        var n: u32 = 0;
+        while (taken + n < count) {
             if (candidate > self.max_cluster) {
                 props.reachable(@src(), "fat: the allocation cursor wraps around the volume", null);
                 candidate = 2;
+                if (n > 0) break;
             }
             if (looked == clusters) {
-                props.reachable(@src(), "fat: an allocation finds the volume full", .{ .count = count, .taken = taken });
-                if (first != 0) {
-                    props.reachable(@src(), "fat: a volume full part-way through an allocation gives back what it took", .{ .taken = taken });
+                props.reachable(@src(), "fat: an allocation finds the volume full", .{ .count = count, .taken = taken + n });
+                if (first != 0 or n > 0) {
+                    props.reachable(@src(), "fat: a volume full part-way through an allocation gives back what it took", .{ .taken = taken + n });
                 }
-                return Error.Full; // the errdefer gives it back
+                unplan(self, fat, seg_first, n);
+                return Error.Full; // the errdefer gives back what was written
             }
             looked += 1;
-            if ((try self.fatGet(candidate)) == 0) break;
-            candidate += 1;
-        }
-        // Let go before the first change, as `fatSet` does: a full
-        // volume answers Full having written nothing.
-        try self.forgetFsInfo();
-        const in_sector = candidate * width / sector_size;
-        const sector = fat[in_sector * sector_size ..][0..sector_size];
-        var was: [sector_size]u8 = undefined;
-        @memcpy(&was, sector);
-        const batch_first = candidate;
-        var last: Cluster = 0;
-        var n: u32 = 0;
-        // Every free cluster left in this sector that the chain still
-        // needs, each linked from the one before, the last an end.
-        batch: while (true) {
+            const in_sector = candidate * width / sector_size;
+            const sector = fat[in_sector * sector_size ..][0..sector_size];
+            if (self.entryIn(sector, candidate * width % sector_size / width) != 0) {
+                candidate += 1;
+                continue;
+            }
             self.putEntry(sector, candidate * width % sector_size, self.endMark());
-            if (last != 0) self.putEntry(sector, last * width % sector_size, candidate);
-            last = candidate;
+            if (n > 0) {
+                const last_sector = seg_last * width / sector_size;
+                if (last_sector == in_sector) props.reachable(@src(), "fat: an allocation takes several clusters in one FAT sector write", .{ .clusters = n + 1 });
+                self.putEntry(fat[last_sector * sector_size ..][0..sector_size], seg_last * width % sector_size, candidate);
+            } else seg_first = candidate;
+            seg_last = candidate;
             n += 1;
             candidate += 1;
-            if (taken + n == count) break;
-            while (candidate <= self.max_cluster and candidate * width / sector_size == in_sector and looked < clusters) {
-                looked += 1;
-                if (self.entryIn(sector, candidate * width % sector_size / width) == 0) continue :batch;
-                candidate += 1;
-            }
-            break;
         }
-        if (n > 1) props.reachable(@src(), "fat: an allocation takes several clusters in one FAT sector write", .{ .clusters = n });
 
-        self.writeSector(self.fat_start + in_sector, sector) catch |e| {
-            switch (self.heldRefused(self.fat_start + in_sector, sector, &was)) {
-                .before => @memcpy(sector, &was),
+        // Let go before the first write, as `fatSet` does.
+        self.forgetFsInfo() catch |e| {
+            unplan(self, fat, seg_first, n);
+            return e;
+        };
+        writeSegment(self, fat, seg_first, n, 0) catch |e| {
+            switch (segmentRefused(self, fat, seg_first, n)) {
+                .before => unplan(self, fat, seg_first, n),
                 .landed => {
                     self.keepTaken(n);
-                    self.writeCopies(in_sector, sector);
+                    writeSegmentCopies(self, fat, seg_first, n);
                     self.took(n);
-                    self.giveBack(batch_first, n);
+                    self.giveBack(seg_first, n);
                 },
                 // Taken as written, and the first copy written again
-                // once, as `fatSet` does: the batch is then taken on the
-                // disk too, nothing pointing at it, so taken and a
+                // once, as `fatSet` does: the segment is then taken on
+                // the disk too, nothing pointing at it, so taken and a
                 // counted leak, all `n` of it. Where that write fails
                 // too, the disk may hold it taken or free (148(b)).
                 .unknown => {
                     self.keepTaken(n);
-                    const again = if (self.writeSector(self.fat_start + in_sector, sector)) true else |_| false;
+                    const again = if (writeSegment(self, fat, seg_first, n, 0)) true else |_| false;
                     if (!again) self.copyApart();
-                    self.writeCopies(in_sector, sector);
+                    writeSegmentCopies(self, fat, seg_first, n);
                     self.took(n);
                     if (again) self.leftLeaked(n) else self.leftUnsure(n);
                 },
@@ -236,18 +243,18 @@ pub fn allocChainHeld(self: *Volume, fat: []u8, count: u32) Error!Cluster {
             return e;
         };
         self.keepTaken(n);
-        self.writeCopies(in_sector, sector);
+        writeSegmentCopies(self, fat, seg_first, n);
         self.took(n);
-        // The batch linked on, by the verdict, as one cluster was.
-        // Landed: the chain has the batch, and the errdefer frees both.
-        // Not landed: the batch goes back alone, the chain by the
-        // errdefer. Unknown: batch and chain are a counted leak, and the
+        // The segment linked on, by the verdict, as one cluster was.
+        // Landed: the chain has the segment, and the errdefer frees both.
+        // Not landed: the segment goes back alone, the chain by the
+        // errdefer. Unknown: segment and chain are a counted leak, and the
         // errdefer does not walk them.
         var link: Landing = .before;
-        if (previous != 0) self.fatSet(previous, batch_first, &link) catch |e| {
+        if (previous != 0) self.fatSet(previous, seg_first, &link) catch |e| {
             switch (link) {
                 .landed => in_chain += n,
-                .before => self.giveBack(batch_first, n),
+                .before => self.giveBack(seg_first, n),
                 .unknown => {
                     self.leftLeaked(taken + n);
                     first = 0;
@@ -255,13 +262,138 @@ pub fn allocChainHeld(self: *Volume, fat: []u8, count: u32) Error!Cluster {
             }
             return e;
         };
-        if (first == 0) first = batch_first;
-        previous = last;
+        if (first == 0) first = seg_first;
+        previous = seg_last;
         taken += n;
         in_chain = taken;
     }
     self.alloc_hint = candidate;
     return first;
+}
+
+/// The segment from `seg_first`, `n` clusters, planned and not written:
+/// its entries in the held FAT free again, as they were.
+fn unplan(self: *Volume, fat: []u8, seg_first: Cluster, n: u32) void {
+    const width = self.entryBytes();
+    var c = seg_first;
+    var k: u32 = 0;
+    while (k < n) : (k += 1) {
+        const sector = fat[c * width / sector_size * sector_size ..][0..sector_size];
+        const next = self.entryIn(sector, c * width % sector_size / width);
+        self.putEntry(sector, c * width % sector_size, 0);
+        c = next;
+    }
+}
+
+/// **THE FAT SECTORS A SEGMENT CHANGED, AS RUNS**: contiguous sectors, at
+/// most the disk's most a run, found by walking the segment in the held
+/// FAT (its clusters ascend, so its sectors do).
+const SegmentRuns = struct {
+    vol: *Volume,
+    fat: []u8,
+    cluster: Cluster,
+    left: u32,
+
+    const Run = struct { start: u32, len: u32 };
+
+    fn of(vol: *Volume, fat: []u8, seg_first: Cluster, n: u32) SegmentRuns {
+        return .{ .vol = vol, .fat = fat, .cluster = seg_first, .left = n };
+    }
+
+    /// The sector of the next cluster of the segment, and steps past it.
+    fn nextSector(it: *SegmentRuns) ?u32 {
+        if (it.left == 0) return null;
+        const width = it.vol.entryBytes();
+        const s = it.cluster * width / sector_size;
+        it.cluster = it.vol.entryIn(it.fat[s * sector_size ..][0..sector_size], it.cluster * width % sector_size / width);
+        it.left -= 1;
+        return s;
+    }
+
+    fn next(it: *SegmentRuns) ?Run {
+        const width = it.vol.entryBytes();
+        const start = it.nextSector() orelse return null;
+        var run: Run = .{ .start = start, .len = 1 };
+        while (it.left > 0) {
+            const s = it.cluster * width / sector_size;
+            if (s == run.start + run.len - 1) {
+                _ = it.nextSector();
+                continue;
+            }
+            if (s != run.start + run.len or run.len == it.vol.blk.most_sectors) break;
+            _ = it.nextSector();
+            run.len += 1;
+        }
+        return run;
+    }
+};
+
+/// One run of held FAT sectors to copy `copy`: as a sector was written
+/// where it is one (`writeSector`), as one request where more.
+fn writeFatRun(self: *Volume, fat: []u8, copy: u32, run: SegmentRuns.Run) Error!void {
+    const lba = self.fat_start + copy * self.sectors_per_fat + run.start;
+    const from = fat[run.start * sector_size ..];
+    if (run.len == 1) return self.writeSector(lba, from[0..sector_size]);
+    props.reachable(@src(), "fat: an allocation writes several FAT sectors as one request", .{ .sectors = run.len });
+    return self.writeSectors(lba, run.len, from.ptr);
+}
+
+/// The segment's sectors to copy `copy`, run by run; the first failure is
+/// the answer.
+fn writeSegment(self: *Volume, fat: []u8, seg_first: Cluster, n: u32, copy: u32) Error!void {
+    var runs = SegmentRuns.of(self, fat, seg_first, n);
+    while (runs.next()) |run| try writeFatRun(self, fat, copy, run);
+}
+
+/// The segment's sectors to every copy past the first, each run's
+/// failure a copy left apart (`writeCopies`, by runs).
+fn writeSegmentCopies(self: *Volume, fat: []u8, seg_first: Cluster, n: u32) void {
+    var c: u32 = 1;
+    while (c < self.num_fats) : (c += 1) {
+        var runs = SegmentRuns.of(self, fat, seg_first, n);
+        while (runs.next()) |run| writeFatRun(self, fat, c, run) catch self.copyApart();
+    }
+}
+
+/// **WHETHER A SEGMENT'S REFUSED WRITE LANDED**: each sector it changed
+/// read back and judged by `heldRefused` against the sector as it was
+/// (the held one with the segment's entries free). Every one landed,
+/// `landed`; every one as it was, `before`; anything else (a run cut
+/// short, a sector neither) `unknown`.
+fn segmentRefused(self: *Volume, fat: []u8, seg_first: Cluster, n: u32) Landing {
+    const width = self.entryBytes();
+    var landed = true;
+    var before = true;
+    var walk = SegmentRuns.of(self, fat, seg_first, n);
+    var sector_of = walk.nextSector();
+    // The segment's clusters, in step with the sectors judged.
+    var cluster = seg_first;
+    var left = n;
+    while (sector_of) |s| {
+        const held = fat[s * sector_size ..][0..sector_size];
+        var was: [sector_size]u8 = undefined;
+        @memcpy(&was, held);
+        while (left > 0 and cluster * width / sector_size == s) : (left -= 1) {
+            const next = self.entryIn(held, cluster * width % sector_size / width);
+            self.putEntry(&was, cluster * width % sector_size, 0);
+            cluster = next;
+        }
+        switch (self.heldRefused(self.fat_start + s, held, &was)) {
+            .landed => before = false,
+            .before => landed = false,
+            .unknown => return .unknown,
+        }
+        // The next sector the segment changed.
+        sector_of = null;
+        while (walk.nextSector()) |t| if (t != s) {
+            sector_of = t;
+            break;
+        };
+    }
+    if (landed) return .landed;
+    if (before) return .before;
+    props.reachable(@src(), "fat: a FAT run's refused write landed in part", null);
+    return .unknown;
 }
 
 /// `n` free clusters taken, in the kept count.
