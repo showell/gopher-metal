@@ -261,12 +261,13 @@ def main() -> int:
 
     # What the story is for, said on the Linux side (the comparison carries it
     # to metal): the restart kept the viewport and the move, not the leash.
-    # Dog 0 heads (10, -10); cow 0, 85 px east and 90 north of it, is left
-    # of its path, so it steps half the dog's 14 px to the left: (-5, -5).
+    # Dog 0 heads (10, -10) from 53 px off cow 0, which stands in its path,
+    # left of the line: the cow goes left, across the heading, (-26, -26),
+    # fast, as the dog is close (dog-park's cows.zig).
     first = dict(zip([st[0] for st in FIRST], seen["first boot:"][0]))
     scare = first["Alice's dog scares a cow"].get("body")
-    if scare != b'{"moved":0,"park_x":165,"park_y":340,"cows":[{"id":0,"park_x":245,"park_y":245}]}':
-        problems.append(f"first boot: dog 0's move did not step cow 0 to (245, 245): {scare!r}")
+    if scare != b'{"moved":0,"park_x":165,"park_y":340,"cows":[{"id":0,"park_x":224,"park_y":224}]}':
+        problems.append(f"first boot: dog 0's move did not step cow 0 to (224, 224): {scare!r}")
     after = seen["after a restart:"][0]
     if after and after[0].get("body") != b'{"viewport":{"at":{"park_x":1200,"park_y":700}},"leash":{"none":{}}}':
         problems.append(f"after a restart: Alice's /me is {after[0].get('body')!r}, not her kept viewport and no leash")
