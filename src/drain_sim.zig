@@ -27,8 +27,12 @@
 //!   room, and the small drains (heads aside) never hold more than it; an
 //!   upload's room is its exact length;
 //! - **everything ends**: no request waits past the longest the rule allows
-//!   (a slot's wait, then an upload's five minutes), and at the end every
-//!   byte of memory and every slot is given back.
+//!   (a slot's wait, then an upload's five minutes), in free time and, with
+//!   what turns may add, on the wall (175.1); at the end every byte of
+//!   memory and every slot is given back.
+//! - **each 503 by its cause** (177.5): the budget's only in a seed whose
+//!   budget is tight, memory's only where an allocation failed, a slot
+//!   wait's only after the slot wait, whatever the budget.
 
 const std = @import("std");
 const drain = @import("drain.zig");
@@ -43,6 +47,13 @@ fn here() std.builtin.SourceLocation {
 }
 
 const conns = 10;
+/// The longest turn a pass may take (`runSeed`).
+const turn_most_ms = 10_000;
+/// The most the wall moves between two passes: a step and a turn.
+const step_most_ms = 35_000 + turn_most_ms;
+/// The wall's bound on a request (`noneForgotten`): its clocks twice over,
+/// a turn for every connection served ahead of it, and a minute's slack.
+const wall_most_ms = 2 * (body_rule.slot_wait_ms + body_rule.upload_ms) + conns * turn_most_ms + 60_000;
 const D = drain.Drains(body_rule, conns);
 const ns_per_ms = std.time.ns_per_ms;
 
@@ -87,6 +98,12 @@ const Client = struct {
     slot_wait_began: ?Mark = null,
     last_arrival: Mark,
     opened: u64,
+    /// The module's clock when it opened: the wall's bound is judged by it
+    /// (177.5).
+    opened_now: i96,
+    /// When the module first said it is to be served: what it decided is
+    /// judged by then, not by its turn to be served, one a pass.
+    ready_at: ?Mark = null,
     /// An allocation failed while it waited, or its asker could not be told.
     excused_busy: bool = false,
     /// When it asked who it is (`Sim.asks`).
@@ -265,6 +282,7 @@ const Sim = struct {
             .closes = closes,
             .last_arrival = s.mark(),
             .opened = s.free_ms,
+            .opened_now = s.now,
         };
         s.next_serial += 1;
         // The head arrives at once (one segment's worth or the buffer).
@@ -333,7 +351,10 @@ const Sim = struct {
             if (w.slot_wait_since != null and c.slot_wait_began == null) c.slot_wait_began = s.mark();
             switch (next.then) {
                 .wait => return false,
-                .serve => return true,
+                .serve => {
+                    if (c.ready_at == null) c.ready_at = s.mark();
+                    return true;
+                },
                 .send_continue => {
                     if (c.continued) return s.fail("told to send twice", .{});
                     // The send queue full now and then: asked again.
@@ -388,6 +409,9 @@ const Sim = struct {
         if (held != s.d.slots.inUse()) return s.fail("{d} slots held, {d} waits say so", .{ s.d.slots.inUse(), held });
         if (charged != s.d.charged) return s.fail("charged {d}, drains hold {d}", .{ s.d.charged, charged });
         if (small > s.d.budget) return s.fail("small drains hold {d}, past the budget {d}", .{ small, s.d.budget });
+        // **THE BUDGET HOLDS EVERYTHING CHARGED** (175.3's claim, judged
+        // directly, 177.5): heads kept to answer from as well.
+        if (s.d.charged > s.d.budget) return s.fail("charged {d}, past the budget {d}", .{ s.d.charged, s.d.budget });
     }
 
     fn serve(s: *Sim, i: usize) !void {
@@ -406,6 +430,11 @@ const Sim = struct {
                 const t = from orelse return s.fail("408 with no clock begun", .{});
                 const ms_waited = s.waited(t, deadline);
                 if (ms_waited < deadline) return s.fail("408 after {d} ms waited, its deadline {d}", .{ ms_waited, deadline });
+                // **NOR LATE ON THE WALL** (175.1, judged here by 177.5): turns
+                // move a clock on by at most its own length, so a 408 comes
+                // by twice its deadline, and a step's slack.
+                const wall: u64 = @intCast(@divTrunc(c.ready_at.?.now - t.now, ns_per_ms));
+                if (wall > 2 * deadline + step_most_ms) return s.fail("408 after {d} ms of the wall, its deadline {d}", .{ wall, deadline });
             },
             .stalled => {
                 props.reachable(@src(), "drain_sim: a dropped phone's upload stalls, 408", null);
@@ -413,15 +442,28 @@ const Sim = struct {
                 // The wall's time: turns never hold a stall (175.1).
                 const since: u64 = @intCast(@divTrunc(s.now - c.last_arrival.now, ns_per_ms));
                 if (since < body_rule.upload_stall_ms) return s.fail("stalled {d} ms after a byte", .{since});
+                const by: u64 = @intCast(@divTrunc(c.ready_at.?.now - c.last_arrival.now, ns_per_ms));
+                // A stall clock is never moved by turns: the stall comes by
+                // its 30 s from the byte taken (a pass after it came) and the
+                // pass that sees it.
+                if (by > body_rule.upload_stall_ms + 2 * step_most_ms) return s.fail("stalled only {d} ms of the wall after a byte", .{by});
             },
             .busy => {
                 props.reachable(@src(), "drain_sim: an upload told the host is busy, 503", null);
-                // A tight budget is a 503 at once (175.2), for a small body or
-                // a head kept to answer from.
-                if (!c.excused_busy and !s.tight_budget) {
-                    const t = c.slot_wait_began orelse return s.fail("503 with no slot wait, no failure", .{});
-                    const ms_waited = s.waited(t, body_rule.slot_wait_ms);
-                    if (ms_waited < body_rule.slot_wait_ms) return s.fail("503 after {d} ms waiting for a slot", .{ms_waited});
+                // **EACH 503 BY ITS OWN CAUSE** (177.5): a tight budget's
+                // excused only in a tight seed, never a slot wait's.
+                switch (w.busy_why) {
+                    .none => return s.fail("503 with no cause", .{}),
+                    // A full budget is a 503 at once (175.2), for a small body
+                    // or a head kept to answer from; only a tight budget fills.
+                    .budget => if (!s.tight_budget) return s.fail("the budget's 503 with the budget out of play", .{}),
+                    .memory => if (!c.excused_busy) return s.fail("a 503 for memory with no allocation failed", .{}),
+                    .asking => if (c.who != .unknown) return s.fail("a 503 for an asker who could be told", .{}),
+                    .slot_wait => {
+                        const t = c.slot_wait_began orelse return s.fail("a slot wait's 503 with no slot wait", .{});
+                        const ms_waited = s.waited(t, body_rule.slot_wait_ms);
+                        if (ms_waited < body_rule.slot_wait_ms) return s.fail("503 after {d} ms waiting for a slot", .{ms_waited});
+                    },
                 }
             },
             .replaced => {
@@ -469,11 +511,17 @@ const Sim = struct {
         if (age > body_rule.slot_wait_ms + body_rule.upload_ms + 60_000) return s.fail("served {d} ms after it opened", .{age});
     }
 
-    /// No request has waited past the longest the rule allows.
+    /// No request has waited past the longest the rule allows: in free
+    /// time, a slot's wait then an upload's five minutes; on the wall,
+    /// each of those plus at most its own length again, what turns may add
+    /// (175.1, judged by the wall's clock, 177.5), and the turns of the
+    /// requests served ahead of it.
     fn noneForgotten(s: *Sim) !void {
         for (s.clients) |slot| if (slot) |c| {
             const age = s.free_ms - c.opened;
             if (age > body_rule.slot_wait_ms + body_rule.upload_ms + 60_000) return s.fail("a request still waits {d} ms after it opened", .{age});
+            const wall: u64 = @intCast(@divTrunc(s.now - c.opened_now, ns_per_ms));
+            if (wall > wall_most_ms) return s.fail("a request still waits {d} ms of the wall after it opened", .{wall});
         };
     }
 };
@@ -483,6 +531,9 @@ pub fn runSeed(seed: u64) !void {
     const r = prng.random();
     var flaky: Flaky = .{ .backing = std.testing.allocator, .rng = r, .one_in = if (seed % 4 == 0) 40 else 0 };
     const tight = seed % 3 == 0;
+    // **A BUSY LOOP** (177.5): every pass a long turn, as one busy client
+    // makes, so what turns may add to a wait (175.1) is judged on the wall.
+    const busy_loop = seed % 5 == 2;
     var s: Sim = .{
         .gpa = std.testing.allocator,
         .rng = r,
@@ -508,7 +559,7 @@ pub fn runSeed(seed: u64) !void {
         s.free_ms += dt;
         s.now += @as(i96, dt) * ns_per_ms;
         s.deliver(dt);
-        const turn: u64 = if (r.uintLessThan(u8, 5) == 0) r.uintLessThan(u64, 10_000) else r.uintLessThan(u64, 20);
+        const turn: u64 = if (busy_loop) turn_most_ms - r.uintLessThan(u64, 1_000) else if (r.uintLessThan(u8, 5) == 0) r.uintLessThan(u64, turn_most_ms) else r.uintLessThan(u64, 20);
         try s.pass(turn);
         try s.noneForgotten();
     }

@@ -35,7 +35,10 @@
 //! every small drain's room and every head kept to answer from; and, for the
 //! moment a drain grows, its old room beside its new (a realloc that cannot
 //! grow in place holds both until it copies), at most one drain at a time,
-//! so at most 1 MiB past the budget.
+//! so at most the largest room a drain may have past the budget: its head
+//! and its body's most, a Content-Length body's 1 MiB, a chunked one's
+//! `body.chunkedRawMost` of its cap (1.25 MiB and 4 KiB, metal-vmm QUEUE
+//! 177.5: "1 MiB" understated it).
 //!
 //! Every decision here is a function of what it is handed: no clock but the
 //! `now` given, no I/O. So each edge is a unit test (both sides of every
@@ -60,6 +63,12 @@ pub const first_bytes = 64 * 1024;
 
 /// What the host answers a request before its route runs, besides what the
 /// head itself refuses.
+/// Why a wait was told the host is busy (metal-vmm QUEUE 177.5): the
+/// budget full, memory that did not come, an asker that could not be told,
+/// or the slot wait run out. One 503 to the client; the simulator excuses
+/// each by its own cause, and a log may say it.
+pub const Busy = enum { none, budget, memory, asking, slot_wait };
+
 pub const Verdict = enum {
     none,
     /// An upload by nobody the site knows: served from its head, its body
@@ -209,6 +218,8 @@ pub fn Drains(comptime Rule: type, comptime conns: usize) type {
             /// human's uploads, the one that asked last is the retry.
             asked: u64 = 0,
             verdict: Verdict = .none,
+            /// With `verdict` busy, why (177.5).
+            busy_why: Busy = .none,
 
             /// The host's refusal before the route, if any. Late is first: a
             /// body that did not come is 408 whatever else was decided.
@@ -352,13 +363,11 @@ pub fn Drains(comptime Rule: type, comptime conns: usize) type {
                         // other.
                         .over_budget => {
                             props.reachable(@src(), "drain: a small body finds the budget full, 503", null);
-                            w.verdict = .busy;
-                            return .{ .then = .serve };
+                            return busy(w, .budget);
                         },
                         .no_memory => {
                             props.reachable(@src(), "drain: no memory for a small body's drain", null);
-                            w.verdict = .busy;
-                            return .{ .then = .serve };
+                            return busy(w, .memory);
                         },
                     }
                     return self.stepDrain(i, c, now);
@@ -375,7 +384,10 @@ pub fn Drains(comptime Rule: type, comptime conns: usize) type {
                 const who = switch (w.uploader orelse return .{ .then = .ask_who }) {
                     .who => |k| k,
                     .stranger => return self.headOnly(i, head, .stranger, now),
-                    .unknown => return self.headOnly(i, head, .busy, now),
+                    .unknown => {
+                        w.busy_why = .asking;
+                        return self.headOnly(i, head, .busy, now);
+                    },
                 };
                 const taken = self.slots.take(who);
                 switch (taken) {
@@ -406,6 +418,7 @@ pub fn Drains(comptime Rule: type, comptime conns: usize) type {
                         const since = startWait(w, &w.slot_wait_since, now, Rule.slot_wait_ms);
                         if (now - since < msNs(Rule.slot_wait_ms)) return .{ .then = .wait };
                         props.reachable(@src(), "drain: an upload waits out the slot wait", null);
+                        w.busy_why = .slot_wait;
                         return self.headOnly(i, head, .busy, now);
                     },
                 }
@@ -418,7 +431,10 @@ pub fn Drains(comptime Rule: type, comptime conns: usize) type {
             switch (self.begin(i, head_len, read, parsed.transfer_encoding == .chunked, self.limit(parsed.target), true, now, now + msNs(read.deadline_ms))) {
                 .begun => {},
                 .over_budget => unreachable, // an upload has its slot, and no budget
-                .no_memory => return self.headOnly(i, head, .busy, now),
+                .no_memory => {
+                    w.busy_why = .memory;
+                    return self.headOnly(i, head, .busy, now);
+                },
             }
             return self.stepDrain(i, c, now);
         }
@@ -454,14 +470,14 @@ pub fn Drains(comptime Rule: type, comptime conns: usize) type {
         /// A drain's room doubled toward its most, a small one's charged to
         /// the budget as it grows. `refused` when the budget or the memory
         /// says no: a 503 (175.2).
-        fn grow(self: *Self, d: *Drain) enum { grown, at_most, refused } {
+        fn grow(self: *Self, d: *Drain) enum { grown, at_most, over_budget, no_memory } {
             if (d.bytes.len >= d.most) return .at_most;
             const next = @min(d.most, d.bytes.len * 2);
             if (d.charged and self.charged + (next - d.bytes.len) > self.budget) {
                 props.reachable(@src(), "drain: a small drain's growth finds the budget full, 503", null);
-                return .refused;
+                return .over_budget;
             }
-            const grown = self.gpa.realloc(d.bytes, next) catch return .refused;
+            const grown = self.gpa.realloc(d.bytes, next) catch return .no_memory;
             if (d.charged) self.charged += next - d.bytes.len;
             d.bytes = grown;
             return .grown;
@@ -472,9 +488,10 @@ pub fn Drains(comptime Rule: type, comptime conns: usize) type {
         fn stepDrain(self: *Self, i: usize, c: Conn, now: i96) Step {
             const w = &self.waits[i];
             const d = &w.drain.?;
-            if (c.pending.len > d.bytes.len - d.len) if (self.grow(d) == .refused) {
-                w.verdict = .busy;
-                return .{ .then = .serve };
+            if (c.pending.len > d.bytes.len - d.len) switch (self.grow(d)) {
+                .grown, .at_most => {},
+                .over_budget => return busy(w, .budget),
+                .no_memory => return busy(w, .memory),
             };
             const n = @min(c.pending.len, d.bytes.len - d.len);
             if (n > 0) d.last_progress = now;
@@ -508,6 +525,13 @@ pub fn Drains(comptime Rule: type, comptime conns: usize) type {
             return .{ .consumed = n, .then = if (ready_now) .serve else .wait };
         }
 
+        /// Told the host is busy, and why (177.5).
+        fn busy(w: *Wait, why: Busy) Step {
+            w.verdict = .busy;
+            w.busy_why = why;
+            return .{ .then = .serve };
+        }
+
         /// A request to be answered from its head alone (its body never
         /// read): the head kept in memory, the verdict said.
         fn headOnly(self: *Self, i: usize, head: []const u8, verdict: Verdict, now: i96) Step {
@@ -516,14 +540,12 @@ pub fn Drains(comptime Rule: type, comptime conns: usize) type {
             // kept, answered before any route could read the network.
             if (self.charged + head.len > self.budget) {
                 props.reachable(@src(), "drain: a head to answer from finds the budget full, 503", null);
-                w.verdict = .busy;
-                return .{ .then = .serve };
+                return busy(w, .budget);
             }
             const bytes = self.gpa.dupe(u8, head) catch {
                 // No memory for even the head: told the host is busy, before
                 // any route could read a body from the network.
-                w.verdict = .busy;
-                return .{ .then = .serve };
+                return busy(w, .memory);
             };
             w.verdict = verdict;
             self.charged += bytes.len;
