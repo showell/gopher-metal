@@ -921,7 +921,7 @@ fn quiet(table: *tcp.Table, now: i96, idle_ns: u64) ?usize {
 /// **A CLIENT THAT STOPPED TALKING IS NOT A BROKEN NIC.** It is logged as a
 /// request that never came, the way it always has been, and closed.
 fn letGo(wire: *stream.Wire, table: *tcp.Table, i: usize, number: u64) void {
-    logRequest(number, "(no request)", "the client stopped sending, and was let go", 0, null);
+    logRequest(number, wallMs(), "(no request)", "the client stopped sending, and was let go", 0, null);
     close(wire, table, i);
 }
 
@@ -982,7 +982,7 @@ fn serveOne(
             s.writer().writeAll("HTTP/1.1 431 Request Header Fields Too Large\r\n" ++
                 "connection: close\r\ncontent-length: 0\r\n\r\n") catch {};
             s.writer().flush() catch {};
-            logRequest(number, "(no request)", "a head that filled the buffer unended: 431", 431, null);
+            logRequest(number, wallMs(), "(no request)", "a head that filled the buffer unended: 431", 431, null);
             close(wire, table, i);
             return;
         }
@@ -1008,7 +1008,7 @@ fn serveOne(
                 "connection: close\r\ncontent-length: 0\r\n\r\n") catch {};
             s.writer().flush() catch {};
         }
-        logRequest(number, "(no request)", if (s.timed_out)
+        logRequest(number, wallMs(), "(no request)", if (s.timed_out)
             "the client stopped sending, and was let go"
         else
             @errorName(e), if (e == error.HttpHeadersInvalid) 400 else 0, null);
@@ -1053,7 +1053,7 @@ fn serveOne(
         const refused_status: u16 = @intFromEnum(webbox.edge.statusFor(r.kind));
         // Its method and path, so /admin/log's `path=` finds it (194.5).
         var refused_buf: [300]u8 = undefined;
-        logRequest(number, metal.request_line.what(&refused_buf, @tagName(req.head.method), metal.log_ring.withoutQuery(req.head.target), true), r.msg[0 .. r.msg.len - 1], refused_status, null);
+        logRequest(number, wallMs(), metal.request_line.what(&refused_buf, @tagName(req.head.method), metal.log_ring.withoutQuery(req.head.target), true), r.msg[0 .. r.msg.len - 1], refused_status, null);
         // A drained body refused (late, past what is kept): what came of it.
         // **AN UPLOAD REFUSED FROM ITS HEAD IS AN UPLOAD** (194.1), with
         // or without a drain: busy, no memory, an asker unknown, an older
@@ -1149,7 +1149,7 @@ fn serveOne(
             kept_open = true;
         } else close(wire, table, i);
     }
-    logRequest(number, what, outcome, bus.status, if (done_at >= head_at) @intCast(done_at - head_at) else null);
+    logRequest(number, bus.at_unix_ms, what, outcome, bus.status, if (done_at >= head_at) @intCast(done_at - head_at) else null);
     // **THE LOG SAYS A BODY'S SIZE AND HOW LONG IT TOOK TO ARRIVE** (169), so
     // a slow link is read, not inferred.
     const disk_after = diskWork();
@@ -1796,13 +1796,16 @@ fn noteUpload(number: u64, drained: ?Drains.Drain, path: []const u8, kind: []con
 /// A request's line (src/request_line.zig): its UTC time, what it was, how it
 /// ended, its status and how long it took; then what memory held after it.
 /// `status` 0 and `took_ns` null where no request came.
-fn logRequest(number: u64, what: []const u8, outcome: []const u8, status: u16, took_ns: ?u64) void {
+/// `at_unix_ms`: when the request came (189's minor 7: a 40-second upload
+/// was stamped when it ended, and the 5xx list's time, which is when it
+/// came, did not match its line).
+fn logRequest(number: u64, at_unix_ms: ?i64, what: []const u8, outcome: []const u8, status: u16, took_ns: ?u64) void {
     const mem = webbox.mem_meter.snapshot();
     var line: [512]u8 = undefined;
     var w: std.Io.Writer = .fixed(&line);
     metal.request_line.write(&w, .{
         .number = number,
-        .unix_ms = wallMs(),
+        .unix_ms = at_unix_ms,
         .what = what,
         .outcome = outcome,
         .status = status,

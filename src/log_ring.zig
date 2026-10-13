@@ -74,6 +74,10 @@ pub const Ring = struct {
     /// `buf.len`, the oldest are gone. **THE ONE POSITION** (metal-vmm B36):
     /// a head kept beside it could disagree with it, and nothing checked.
     total: u64 = 0,
+    /// Bytes lost before a move (`moveTo`), which `total` no longer counts:
+    /// what /admin/log says was written and is no longer held (189's minor
+    /// 12). Not a position.
+    lost_before_move: u64 = 0,
     redactor: Redactor = .{},
 
     pub fn init(buf: []u8) Ring {
@@ -105,6 +109,11 @@ pub const Ring = struct {
 
     /// How many bytes were stored and are no longer held.
     pub fn lost(self: *const Ring) u64 {
+        return self.lostHere() + self.lost_before_move;
+    }
+
+    /// Lost from this buffer: what a read skips the cut line of.
+    fn lostHere(self: *const Ring) u64 {
         return self.total -| self.buf.len;
     }
 
@@ -122,7 +131,7 @@ pub const Ring = struct {
     /// `buf` must not overlap the ring's own buffer.
     pub fn moveTo(self: *const Ring, buf: []u8) Ring {
         const text = self.read(buf);
-        return .{ .buf = buf, .total = text.len, .redactor = self.redactor };
+        return .{ .buf = buf, .total = text.len, .lost_before_move = self.lost_before_move + (self.total - text.len), .redactor = self.redactor };
     }
 
     /// What is held, oldest first, copied into `out`: everything, unless
@@ -133,7 +142,7 @@ pub const Ring = struct {
     pub fn read(self: *const Ring, out: []u8) []u8 {
         const p = self.parts();
         var skip: usize = 0;
-        if (self.lost() > 0) {
+        if (self.lostHere() > 0) {
             if (std.mem.indexOfScalar(u8, p[0], '\n')) |i| {
                 skip = i + 1;
             } else if (std.mem.indexOfScalar(u8, p[1], '\n')) |i| {
@@ -614,4 +623,20 @@ test "an upload's id after a doubled slash, or in any case, is still taken out (
         const kept = try std.fmt.bufPrint(&want, "GET {s} -> ok\n", .{c[1]});
         try expectRedacted(kept, &.{line});
     }
+}
+
+test "a moved ring still counts what it lost before the move (189's minor 12)" {
+    var a: [16]u8 = undefined;
+    var b: [64]u8 = undefined;
+    var small = Ring.init(&a);
+    small.write("aaaaaaaaaa\nbbbbbbbbbb\ncc"); // 24 bytes into 16: 8 lost
+    try testing.expectEqual(@as(u64, 8), small.lost());
+    var moved = small.moveTo(&b);
+    // The 8, and the 3 of the cut line the move did not carry.
+    try testing.expectEqual(@as(u64, 11), moved.lost());
+    var out: [64]u8 = undefined;
+    try testing.expectEqualStrings("bbbbbbbbbb\ncc", moved.read(&out));
+    moved.write("\nmore\n");
+    try testing.expectEqualStrings("bbbbbbbbbb\ncc\nmore\n", moved.read(&out));
+    try testing.expectEqual(@as(u64, 11), moved.lost());
 }
