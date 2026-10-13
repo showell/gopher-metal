@@ -11,12 +11,14 @@ fails on the laptop first.
 
 ## What a host does before the first request
 
-angry-gopher's webbox library declares the host contract (`site.zig`). A host
-takes two modules: the library, `webbox`, and the application's root, `app`,
-which exports `site` (its `Site(App)`: `start`, `route`, the body rule's two
-questions) and `hosting` (what only it can say: its data's name, its largest
-whole read, its setup's report in words). Linux in angry-gopher's `server.zig`,
-metal in `probe/gopher.zig`. Three calls:
+The `webbox` library (zig-webbox) declares the host contract (`site.zig`). A
+host takes two modules: the library, `webbox`, and the application's root,
+`app`, which exports `site` (its `Site(App)`: `start`, `route`, the body
+rule's two questions, `bodyLimit` and `uploader`) and `hosting` (what only it
+can say: its data's name, its largest whole read, its setup's report in
+words). Linux is zig-webbox's `linux_host.zig` (`Server(S).run`, which
+angry-gopher's `server.zig` calls with its names and settings), with
+`linux_durable.zig` beside it; metal is `probe/gopher.zig`. Three calls:
 
 1. `mem_meter.init(base)`: the process-lifetime allocator, before anything
    else.
@@ -26,31 +28,44 @@ metal in `probe/gopher.zig`. Three calls:
    the one right order, and the answer is the `Hub` live streams publish
    through.
 3. Per request, `route`, then serve the stream it answered, if any
-   (`streams.serveKept`, or `streams.nextFrame` for a host with one loop;
-   `streams.drop` ends it either way).
+   (zig-webbox's `bus.zig`: `bus.serveKept` for a host with a task per
+   connection, `bus.nextFrame` for a host with one loop; `bus.drop` ends it
+   either way).
 
 ## One handler at a time *(Steve, 2026-10-07)*
 
 **A handler runs to its end with no other handler interleaved, on both
-hosts.** Metal already works this way: one loop. Linux runs requests on many
-tasks at once, and angry-gopher holds 45 locks to make that safe, so today the
-two hosts run the same code as different machines, and the judge, which
-replays one request at a time, cannot see the difference.
+hosts.** What runs around the handlers differs:
 
-So Linux serializes handlers too: one handler at a time, with connections
-still accepted, read and written concurrently around it. A kept stream is
-served between handlers, never during one, as metal serves it. The
-application's locks then guard nothing and go, and what's left is one
-machine, judged the same way on both hosts.
+- **Metal** has one loop. It reads, runs one handler, and serves kept
+  streams (`bus.nextFrame`), one thing at a time: a kept stream is served
+  between handlers, never during one.
+- **Linux** runs each connection as its own task and holds one lock, the
+  turn (zig-webbox `linux_host.zig`, `turn`), around `route` alone.
+  Everything else a connection does runs on its own task, at the same time
+  as whichever handler holds the turn: reading the head and the body; asking
+  who is uploading (the site's `uploader`, from the head's cookies); and
+  serving a kept stream, `bus.serveKept`, which renders each event with the
+  stream's `render` (angry-gopher's `chat_sse.renderLive`, or webbox's
+  `sse.forward`'s `renderForward`) and writes it, until `bus.drop`. A kept
+  stream is served during handlers, not between them.
 
-**A small body arrives before the turn, on both hosts** (2026-10-07):
-zig-metal-unikernel starts a handler only once a small body (one that fits the
-connection's 16 KiB buffer) has arrived (`ready.zig`), and Linux's
-`server.zig` reads such a body before taking the turn. A large, chunked or
-`Expect: 100-continue` body is read by the handler as it arrives on both
-hosts, holding the turn while it does. Checked live on Linux: a client that
-stalled 3 s before its body held another client's request for 2.51 s before,
-and not at all after.
+So what Linux runs outside the turn may reach only its own state and the
+library's, under the library's own locks: the bus's (the hub's registry, and
+each subscriber's mailbox) and the host's (the streams held, the upload
+slots, the small-body budget). The application holds no lock: what it shares
+is reached only from handlers, and from its setup before the listener
+opens. A `render` or an `uploader` that reached shared application state
+would need a lock again.
+
+**Every body is whole in memory before the turn, on both hosts** (webbox's
+`body.zig`, the one rule both read): the turn never waits on the network.
+Metal starts a request only once its body is here (`ready.zig`): a small one
+that fits the connection's buffer is waited for in it, a larger one is
+drained into memory by the host, and an upload is read by the host into one
+of its slots once its uploader is known. Linux reads every body on the
+connection's task before taking the turn (`bodyBeforeTurn`). A stranger's
+upload is never read, on either host, and its route refuses it.
 
 Cost: Linux loses request parallelism. At lynrummy.com's load (a handful of
 people, requests answered in milliseconds) that costs nothing measurable,
@@ -60,23 +75,37 @@ and a slow handler is a bug on metal already.
 
 **No response leaves before the writes ahead of it are durable** (v18). The
 application never flushes; the host flushes at the one moment that matters,
-before the first byte of a response, and a failed flush is logged and the
-response still goes. On Linux the same promise is an `fsync` of what the
-request wrote.
+before any byte of a response or of a kept stream's frame goes out. A failed
+flush is logged and counted, the response still goes, and the next one
+tries again.
+
+- **Metal:** `io.durable` (`src/io.zig`), called from `Stream.sendAll`
+  (`src/stream.zig`), flushes each disk that has writes it may not have
+  kept. Failed flushes are counted per disk and shown on `/admin/host`.
+- **Linux:** the store counts every call that may have changed the disk
+  (zig-webbox `store.changes`); each connection's writer
+  (`linux_durable.zig`) runs `syncfs` before passing bytes on when that
+  count is past what the last finished sync covered. `syncfs` syncs the whole
+  filesystem under each of the data and auth roots (the working directory's,
+  in a run with no roots), so more than the request wrote, and twice over
+  when both roots share a filesystem. Two senders at once may both sync.
+  Failed syncs are counted (`Durable.failures`), but no admin page shows the
+  count yet: the log line is the only sign.
 
 ## Limits: one source of truth *(Steve, 2026-10-07)*
 
-**Each limit is defined once, in angry-gopher**, where the application that
-depends on it lives (`zig-server/src/limits.zig`; the head's size is the
-library's, `webbox.http.head_bytes`, which limits.zig names),
-and every other place either reads it or is checked against it:
+**Each limit is defined once**, and every other place either reads it or is
+checked against it. The application's caps are angry-gopher's
+(`zig-server/src/limits.zig`); the head's size is the library's
+(`webbox.http.head_bytes`, which limits.zig names); a store path's limits
+are the FAT driver's, which the library restates:
 
 | limit | defined | read or checked by |
 |---|---|---|
 | a request's head (16 KiB) | webbox's `http.zig` (`head_bytes`), named by `limits.zig` | both hosts size their head buffers from it (`webbox.http.head_bytes`); metal asserts at compile time that a connection's receive buffer holds one |
 | an ordinary body, per route | `limits.zig` | every route's `http.readLimitedBody`; Caddy's `request_body`, held to it by `tools/check_caddy_limits.py` in `ops/check_zig` |
-| an upload (10 MiB images, 100 MiB video) | `chat_upload.zig`'s kinds | Caddy, by the same script |
-| a name, a path, a depth (96, 256, 16) | angry-gopher `store.zig` | metal's `disk_fat.zig` and `io.zig`, by `tools/check_limits.py` (the FAT driver needs them at compile time and can't import angry-gopher) |
+| an upload (10 MiB images, 100 MiB video) | `limits.zig` (`upload_image`, `upload_video`) | `chat_upload.zig`'s kinds; Caddy, by the same script |
+| a name, a path, a depth (96, 256, 16) | metal's `disk_fat_dirent.zig`, `io.zig` and `disk_fat.zig` | zig-webbox's `store.zig` restates them for every host; `tools/check_limits.py` holds the two together, first in `gates.sh` |
 
 The Caddy check fails if Caddy's caps are below the application's (a request
 the app allows would be refused at the door) or far above them (harmless,
@@ -91,9 +120,12 @@ contract, as `bus.zig` has it and both hosts serve it:
   derives it again. Nothing is owed to a reader that wasn't listening.
 - **Each key's events in the order they were published.**
 - **A stream ends** when its reader goes away, or when the host gives up on
-  a reader that has stopped reading (metal: `idle_timeout_ms`).
+  it: metal, a reader that has stopped reading for `idle_timeout_ms`; Linux,
+  the oldest of `streams_most` (64) held streams when another is kept. Linux
+  has no write deadline, so a reader that stays connected and stops reading
+  holds its task until then.
 
-**Simulated** (angry-gopher `bus.zig`, "the mailbox contract over seeded
+**Simulated** (zig-webbox `bus.zig`, "the mailbox contract over seeded
 runs", 300 runs, slow readers included so the overflow is met): a reader
 sees exactly its key's events since it opened, in order, nothing skipped,
 and ends with `EventsMissed` if and only if its mailbox was full when an
@@ -102,8 +134,10 @@ resumes.
 
 ## The clock and random bytes
 
-- **Wall time** for what people read (timestamps); **monotonic time** for
-  timeouts and throttles. Metal sets wall time from the hardware clock at
+- **Wall time** for what people read (timestamps), and for the
+  application's windows (the login throttle's, the game limits' hours,
+  presence's five minutes: `login_throttle.zig`, `game_limits.zig`,
+  `presence.zig`); **monotonic time** for the hosts' timeouts. Metal sets wall time from the hardware clock at
   boot and never corrects it; metal-vmm decides it.
 - **Random bytes are cryptographic** on both hosts (metal: virtio-rng and
   RDRAND; Linux: the OS). In tests both come from the tape, so the seed
@@ -111,9 +145,17 @@ resumes.
 
 ## Config
 
-A value by name, typed when read. A malformed value stops the boot; **so
-does a file that exists but can't be read** (Steve, 2026-10-07: halting is
-right; B21). A missing file is the defaults.
+A value by name, typed when read.
+
+- **Metal** (`probe/gopher.zig`, `readConfig`): a malformed value stops the
+  boot; **so does a file that exists but can't be read** (Steve, 2026-10-07:
+  halting is right; B21). A missing file is the defaults.
+- **Linux** (zig-webbox `linux_config.zig`, `linux_host.zig`): the file
+  names only the data and auth roots, and the rest are environment
+  variables. No file named is the defaults; a file named that is missing or
+  won't read stops the start, and so does a malformed bind or keepalive. A
+  line with no `=`, and a key other than the two, are skipped, and a port
+  that is not a port is the default port.
 
 ## Idle time *(Steve, 2026-10-10; metal only, for now)*
 
