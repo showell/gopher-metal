@@ -162,9 +162,11 @@ fn command(b: *virtio.Block, at: Address, cdb: []const u8, dir: Direction, addr:
     // No answer: a response no command reads as good (193.2).
     if (!b.answered(ended)) return .{ .response = 0xFF, .status = 0xFF, .sense_key = 0, .asc = 0, .ascq = 0, .residual = 0 };
 
-    const sense_key: u8 = if (mem.response.sense_len >= 3) mem.response.sense[2] & 0x0F else 0;
-    const asc: u8 = if (mem.response.sense_len >= 14) mem.response.sense[12] else 0;
-    const ascq: u8 = if (mem.response.sense_len >= 14) mem.response.sense[13] else 0;
+    // Fixed or descriptor format (mode.senseOf, 197.3).
+    const got = mode.senseOf(mem.response.sense[0..@min(mem.response.sense_len, mem.response.sense.len)]);
+    const sense_key = got.key;
+    const asc = got.asc;
+    const ascq = got.ascq;
     b.failures.noteScsi(mem.response.response, mem.response.status, sense_key, asc, ascq);
     return .{ .response = mem.response.response, .status = mem.response.status, .sense_key = sense_key, .asc = asc, .ascq = ascq, .residual = mem.response.residual };
 }

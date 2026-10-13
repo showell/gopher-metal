@@ -172,3 +172,50 @@ test "Block Limits: what lies past the page's own length is not read as the limi
     std.mem.writeInt(u16, page[2..4], 7, .big);
     try std.testing.expectEqual(@as(?u32, null), blockLimitsMost(&page, 64));
 }
+
+/// **A SENSE BUFFER, IN EITHER FORMAT** (SPC-4 §4.5; metal-vmm QUEUE 197.3):
+/// fixed (response code 70h/71h: the key in byte 2, ASC and ASCQ in bytes
+/// 12 and 13) or descriptor (72h/73h: the key in byte 1, ASC and ASCQ in
+/// bytes 2 and 3). It was read as fixed only, so a disk answering in
+/// descriptor format had its ILLEGAL REQUEST read as NO SENSE: SYNCHRONIZE
+/// never marked it write-through, and a UNIT ATTENTION was never sent again.
+/// A buffer too short, or of another code, says nothing.
+pub const Sense = struct { key: u8 = 0, asc: u8 = 0, ascq: u8 = 0 };
+
+pub fn senseOf(sense: []const u8) Sense {
+    if (sense.len == 0) return .{};
+    return switch (sense[0] & 0x7F) {
+        0x70, 0x71 => .{
+            .key = if (sense.len >= 3) sense[2] & 0x0F else 0,
+            .asc = if (sense.len >= 14) sense[12] else 0,
+            .ascq = if (sense.len >= 14) sense[13] else 0,
+        },
+        0x72, 0x73 => if (sense.len >= 4) .{ .key = sense[1] & 0x0F, .asc = sense[2], .ascq = sense[3] } else .{},
+        else => .{},
+    };
+}
+
+test "sense in descriptor format is read as such: ILLEGAL REQUEST and UNIT ATTENTION are not NO SENSE (metal-vmm QUEUE 197.3)" {
+    var fixed = [_]u8{0} ** 18;
+    fixed[0] = 0x70;
+    fixed[2] = 0x05; // ILLEGAL REQUEST
+    fixed[12] = 0x20; // invalid command operation code
+    fixed[13] = 0x00;
+    try std.testing.expectEqual(Sense{ .key = 5, .asc = 0x20, .ascq = 0 }, senseOf(&fixed));
+    fixed[0] = 0x71; // deferred, same layout
+    try std.testing.expectEqual(Sense{ .key = 5, .asc = 0x20, .ascq = 0 }, senseOf(&fixed));
+
+    const descriptor = [_]u8{ 0x72, 0x06, 0x29, 0x00, 0, 0, 0, 0 }; // UNIT ATTENTION, power on or reset
+    try std.testing.expectEqual(Sense{ .key = 6, .asc = 0x29, .ascq = 0 }, senseOf(&descriptor));
+    const deferred = [_]u8{ 0x73, 0x05, 0x20, 0x00 };
+    try std.testing.expectEqual(Sense{ .key = 5, .asc = 0x20, .ascq = 0 }, senseOf(&deferred));
+
+    // Too short for what it names, or no sense at all: nothing.
+    try std.testing.expectEqual(Sense{}, senseOf(&.{}));
+    try std.testing.expectEqual(Sense{}, senseOf(&.{ 0x72, 0x06 }));
+    try std.testing.expectEqual(Sense{ .key = 5 }, senseOf(fixed[0..3]));
+    // A code that is neither format says nothing.
+    var vendor = fixed;
+    vendor[0] = 0x7F;
+    try std.testing.expectEqual(Sense{}, senseOf(&vendor));
+}
