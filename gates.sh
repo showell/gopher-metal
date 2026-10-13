@@ -44,10 +44,12 @@ lap() { echo "time: $1 $((SECONDS - t)) s"; t=$SECONDS; }
 
 GOPHER_ROOT="${GOPHER_ROOT:-$HOME/showell_repos/angry-gopher}"
 export GOPHER_ROOT
+WEBBOX_ROOT="${WEBBOX_ROOT:-$HOME/showell_repos/zig-webbox}"
+export WEBBOX_ROOT
 # **ONE CHECKOUT FOR EVERY JUDGE** (metal-vmm 147(d)): verdicts.py reads it
 # from the environment, build.zig from its option, whose defaults are the same
 # place only while neither is set elsewhere.
-ZIG_GOPHER=(-Dgopher-root="$GOPHER_ROOT")
+ZIG_GOPHER=(-Dgopher-root="$GOPHER_ROOT" -Dwebbox-root="$WEBBOX_ROOT")
 # **WHICH CODE THIS RUN JUDGES** (tools/verdicts.py): both, printed, and a
 # checkout the build cannot take refused. The build reads the checkout live:
 # an edit to it during the run changes its content id, and `record` keeps no
@@ -62,7 +64,7 @@ mkdir -p "$VERDICTS"
 # ── the kernels and host tests ───────────────────────────────────────────────
 # The limits angry-gopher's store copies from disk_fat.zig and io.zig: a
 # second, so first (tools/check_limits.py).
-python3 tools/check_limits.py "$GOPHER_ROOT/zig-server/src" || failed+=(limits)
+python3 tools/check_limits.py "$WEBBOX_ROOT/src" || failed+=(limits)
 # The whole summary is kept: each test binary's time is in it, and this step
 # is the gates' longest.
 zig build test "${ZIG_GOPHER[@]}" --summary all > "$VERDICTS/test-summary.txt" 2>&1

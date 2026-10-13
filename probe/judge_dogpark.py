@@ -35,10 +35,11 @@ import judge_gopher as j  # noqa: E402
 
 GM = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DOGPARK = os.path.abspath(os.environ.get("DOGPARK_ROOT", os.path.join(GM, "..", "dog-park")))
-# **ONE webbox ON BOTH SIDES.** The kernel takes webbox from -Dgopher-root,
-# Dog Park's Linux build from its build.zig.zon's ../angry-gopher: the judge
+# **ONE webbox ON BOTH SIDES.** The kernel takes webbox from -Dwebbox-root,
+# Dog Park's Linux build from its build.zig.zon's ../zig-webbox: the judge
 # refuses to compare two hosts built on two different libraries.
 GOPHER_ROOT = os.path.realpath(os.environ.get("GOPHER_ROOT", os.path.join(GM, "..", "angry-gopher")))
+WEBBOX_ROOT = os.path.realpath(os.environ.get("WEBBOX_ROOT", os.path.join(GM, "..", "zig-webbox")))
 ELF = os.path.join(GM, "probe", "dogpark.elf")
 LINUX = os.path.join(DOGPARK, "zig-out", "bin", "dog-park-play")
 
@@ -230,16 +231,16 @@ def files_compare(label: str, metal: dict, linux: dict) -> list:
 
 
 def main() -> int:
-    linux_webbox = os.path.realpath(os.path.join(DOGPARK, "..", "angry-gopher"))
-    if linux_webbox != GOPHER_ROOT:
-        print(f"FAIL dogpark | the kernel's webbox is {GOPHER_ROOT}'s, the Linux build's {linux_webbox}'s "
+    linux_webbox = os.path.realpath(os.path.join(DOGPARK, "..", "zig-webbox"))
+    if linux_webbox != WEBBOX_ROOT:
+        print(f"FAIL dogpark | the kernel's webbox is {WEBBOX_ROOT}, the Linux build's {linux_webbox} "
               "(dog-park's build.zig.zon): not one library")
         return 1
     t0 = time.time()
     # Dog Park's first: it makes zig-out/web/cows.wasm, which the kernel
     # compiles in (its assets.zon's `.embedded`).
     for cmd, cwd in ((["zig", "build"], DOGPARK),
-                     (["zig", "build", "dogpark", f"-Ddogpark-root={DOGPARK}", f"-Dgopher-root={GOPHER_ROOT}"], GM)):
+                     (["zig", "build", "dogpark", f"-Ddogpark-root={DOGPARK}", f"-Dgopher-root={GOPHER_ROOT}", f"-Dwebbox-root={WEBBOX_ROOT}"], GM)):
         r = subprocess.run(cmd, cwd=cwd, capture_output=True, text=True)
         if r.returncode != 0:
             print(f"{' '.join(cmd)} in {cwd} failed:\n{r.stderr[-3000:]}")

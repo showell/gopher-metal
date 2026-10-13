@@ -123,6 +123,12 @@ pub fn build(b: *std.Build) void {
     const gopher_root = b.option([]const u8, "gopher-root", "the angry-gopher checkout") orelse
         b.pathFromRoot("../angry-gopher");
     const gopher_src = b.fmt("{s}/zig-server/src", .{gopher_root});
+    // **THE LIBRARY**, webbox, from its own checkout (zig-webbox): the kernel
+    // compiles its sources with this machine's `host_io`. -Dwebbox-root=<dir>
+    // names another checkout.
+    const webbox_root = b.option([]const u8, "webbox-root", "the zig-webbox checkout") orelse
+        b.pathFromRoot("../zig-webbox");
+    const webbox_src = b.fmt("{s}/src", .{webbox_root});
 
     const all = b.step("kernels", "every kernel");
     for (kernels) |k| {
@@ -190,7 +196,7 @@ pub fn build(b: *std.Build) void {
         .imports = &.{.{ .name = "metal", .module = metal }},
     });
     const webbox = b.createModule(.{
-        .root_source_file = .{ .cwd_relative = b.fmt("{s}/webbox.zig", .{gopher_src}) },
+        .root_source_file = .{ .cwd_relative = b.fmt("{s}/webbox.zig", .{webbox_src}) },
         .red_zone = false,
         .imports = &.{.{ .name = "host_io", .module = host_io }},
     });
@@ -282,7 +288,7 @@ pub fn build(b: *std.Build) void {
     // asset list is its table. tools/verdicts.py says whether it is fresh, as
     // gates.sh asks it, and one not fresh fails the check.
     const port_state: []const u8 = blk: {
-        const out = b.runAllowFail(&.{ "env", b.fmt("GOPHER_ROOT={s}", .{gopher_root}), "python3", b.pathFromRoot("tools/verdicts.py"), "fresh" }, &port_code, .ignore) catch break :blk "tools/verdicts.py could not be run";
+        const out = b.runAllowFail(&.{ "env", b.fmt("GOPHER_ROOT={s}", .{gopher_root}), b.fmt("WEBBOX_ROOT={s}", .{webbox_root}), "python3", b.pathFromRoot("tools/verdicts.py"), "fresh" }, &port_code, .ignore) catch break :blk "tools/verdicts.py could not be run";
         break :blk std.mem.trim(u8, out, " \t\r\n");
     };
     if (std.mem.eql(u8, port_state, "fresh")) {
@@ -406,10 +412,10 @@ pub fn build(b: *std.Build) void {
     }
     // Outside src/, so not importable from unit_tests.zig: its own binary.
     const own_binary = [_][]const u8{"droplet/image.zig"};
-    // **THE ONE BODY RULE** (angry-gopher's webbox body.zig, metal-vmm QUEUE
+    // **THE ONE BODY RULE** (zig-webbox's body.zig, metal-vmm QUEUE
     // 166): ready.zig takes it as a parameter, which the kernel passes as
-    // `webbox.body` and the unit tests as angry-gopher's file itself.
-    const body_rule = b.createModule(.{ .root_source_file = .{ .cwd_relative = b.fmt("{s}/body.zig", .{gopher_src}) } });
+    // `webbox.body` and the unit tests as zig-webbox's file itself.
+    const body_rule = b.createModule(.{ .root_source_file = .{ .cwd_relative = b.fmt("{s}/body.zig", .{webbox_src}) } });
     const unit_imports = [_]std.Build.Module.Import{
         .{ .name = "body_rule", .module = body_rule },
         .{ .name = "kernel_partition", .module = kernel_partition },
@@ -461,7 +467,6 @@ pub fn build(b: *std.Build) void {
     // sibling angry-gopher checkout, so it is a step of its own,
     // not part of `test`, and not yet in gates.sh: its model is still
     // gopher-metal's Store, not the seam's (STORE.md).
-    const ag_src = b.option([]const u8, "angry-gopher-src", "angry-gopher's zig-server/src, the Linux side of store-judge") orelse "../angry-gopher/zig-server/src";
     const judge_world = b.createModule(.{
         .root_source_file = b.path("src/judge_world.zig"),
         .target = b.graph.host,
@@ -485,11 +490,11 @@ pub fn build(b: *std.Build) void {
             .imports = &.{
                 .{ .name = "judge_world", .module = judge_world },
                 .{ .name = "ag_store_linux", .module = b.createModule(.{
-                    .root_source_file = .{ .cwd_relative = b.pathFromRoot(b.fmt("{s}/store.zig", .{ag_src})) },
-                    .imports = &.{.{ .name = "host_io", .module = b.createModule(.{ .root_source_file = .{ .cwd_relative = b.pathFromRoot(b.fmt("{s}/host_io_std.zig", .{ag_src})) } }) }},
+                    .root_source_file = .{ .cwd_relative = b.fmt("{s}/store.zig", .{webbox_src}) },
+                    .imports = &.{.{ .name = "host_io", .module = b.createModule(.{ .root_source_file = .{ .cwd_relative = b.fmt("{s}/host_io_std.zig", .{webbox_src}) } }) }},
                 }) },
                 .{ .name = "ag_store_metal", .module = b.createModule(.{
-                    .root_source_file = .{ .cwd_relative = b.fmt("{s}/store.zig", .{gopher_src}) },
+                    .root_source_file = .{ .cwd_relative = b.fmt("{s}/store.zig", .{webbox_src}) },
                     .imports = &.{.{ .name = "host_io", .module = judge_host_io }},
                 }) },
             },
@@ -508,7 +513,7 @@ pub fn build(b: *std.Build) void {
             .imports = &.{
                 .{ .name = "judge_world", .module = judge_world },
                 .{ .name = "ag_store_metal", .module = b.createModule(.{
-                    .root_source_file = .{ .cwd_relative = b.fmt("{s}/store.zig", .{gopher_src}) },
+                    .root_source_file = .{ .cwd_relative = b.fmt("{s}/store.zig", .{webbox_src}) },
                     .imports = &.{.{ .name = "host_io", .module = judge_host_io }},
                 }) },
             },

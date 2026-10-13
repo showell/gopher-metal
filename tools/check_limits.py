@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
-"""**THE LIMITS ANGRY-GOPHER COPIES FROM THIS REPO, CHECKED** (gates.sh).
+"""**THE LIMITS WEBBOX COPIES FROM THIS REPO, CHECKED** (gates.sh).
 
-angry-gopher's `zig-server/src/store.zig` keeps FAT's rules on every host, so
+zig-webbox's `src/store.zig` keeps FAT's rules on every host, so
 it restates three of this repo's limits, each with a comment naming where it
 came from. Nothing else ties them: B5 moved the depth limit on 2026-10-05,
-and angry-gopher's copy stayed right only because the two count depth
+and the store's copy stayed right only because the two count depth
 differently and the move happened to land on the same answer. This compares
 them, so the next move cannot leave one behind.
 
-    tools/check_limits.py [angry-gopher's zig-server/src]
+    tools/check_limits.py [zig-webbox's src]
 
 - the longest name: store.zig's `max_name` is disk_fat_dirent.zig's `max_name`;
 - the longest path: store.zig's `max_path` is io.zig's `max_path`;
@@ -27,7 +27,7 @@ import sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
-AG = sys.argv[1] if len(sys.argv) > 1 else os.path.join(ROOT, "..", "angry-gopher", "zig-server", "src")
+AG = sys.argv[1] if len(sys.argv) > 1 else os.path.join(ROOT, "..", "zig-webbox", "src")
 
 
 def const(path: str, name: str) -> int:
@@ -68,7 +68,7 @@ def main() -> int:
     if bad:
         print(f"LIMITS: {bad} differ: angry-gopher would accept what metal refuses, or the reverse")
         return 1
-    print("LIMITS: angry-gopher's store keeps metal's limits")
+    print("LIMITS: webbox's store keeps metal's limits")
     return 0
 
 

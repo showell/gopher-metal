@@ -47,11 +47,16 @@ import time
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 GOPHER_ROOT = os.environ.get("GOPHER_ROOT", os.path.expanduser("~/showell_repos/angry-gopher"))
 SRC = os.path.join(GOPHER_ROOT, "zig-server", "src")
+# The webbox library's checkout (zig-webbox), which both applications and
+# the kernel build compile: its source and build files.
+WEBBOX_ROOT = os.path.realpath(os.environ.get("WEBBOX_ROOT", os.path.join(ROOT, "..", "zig-webbox")))
+WEBBOX_SRC = os.path.join(WEBBOX_ROOT, "src")
+WEBBOX_BUILT = ("src", "build.zig", "build.zig.zon")
 VERDICT_DIR = os.environ.get("GATES_VERDICT_DIR", os.path.expanduser("~/build/gopher-metal/verdicts"))
 # Dog Park's checkout, as probe/judge_dogpark.py finds it.
 DOGPARK_ROOT = os.path.realpath(os.environ.get("DOGPARK_ROOT", os.path.join(ROOT, "..", "dog-park")))
 # What Dog Park's two builds read besides its assets.zon's `.site`: its
-# source and its build files (webbox comes from angry-gopher's, counted there).
+# source and its build files (webbox is zig-webbox's, counted on its own).
 DOGPARK_ASSETS = "assets.zon"
 DOGPARK_BUILT = ("src", "build.zig", "build.zig.zon")
 SDK = os.environ.get("COVERAGE_SDK", os.path.join(os.path.dirname(ROOT), "zig-coverage-sdk"))
@@ -139,10 +144,12 @@ def dogpark_files() -> list:
 
 def content_id() -> str:
     """`content-` and a hash of every served file's repo, path and bytes, both
-    applications' (a file named but not there counts as missing)."""
+    applications' and the library's (a file named but not there counts as
+    missing)."""
     h = hashlib.sha256()
     for repo, root, rels in (("angry-gopher", GOPHER_ROOT, served_files()),
-                             ("dog-park", DOGPARK_ROOT, dogpark_files())):
+                             ("dog-park", DOGPARK_ROOT, dogpark_files()),
+                             ("zig-webbox", WEBBOX_ROOT, sorted(walk(WEBBOX_ROOT, WEBBOX_BUILT)))):
         for rel in rels:
             h.update(f"{repo}/{rel}".encode() + b"\0")
             try:
@@ -245,6 +252,8 @@ def require() -> list:
         why.append("angry-gopher's served files have uncommitted changes")
     if git(DOGPARK_ROOT, "status", "--porcelain", "--untracked-files=no", "--", *dogpark_dirs(), DOGPARK_ASSETS):
         why.append("dog-park's judged files have uncommitted changes")
+    if git(WEBBOX_ROOT, "status", "--porcelain", "--untracked-files=no", "--", *WEBBOX_BUILT):
+        why.append("zig-webbox has uncommitted changes")
     for tier in TIERS:
         try:
             with open(verdict_path(tier, ours, theirs)) as f:
@@ -281,12 +290,15 @@ def freshness() -> str:
     check of the build has no use for."""
     if not os.path.isdir(SRC):
         return f"no angry-gopher sources at {SRC}"
+    if not os.path.isdir(WEBBOX_SRC):
+        return f"no zig-webbox sources at {WEBBOX_SRC} (WEBBOX_ROOT)"
     escaped = []
-    for name in sorted(os.listdir(SRC)):
-        if name.endswith(".zig") and name != "host_io_std.zig":
-            with open(os.path.join(SRC, name)) as f:
-                if STD_IO_ALIAS.search(f.read()):
-                    escaped.append(name)
+    for src in (SRC, WEBBOX_SRC):
+        for name in sorted(os.listdir(src)):
+            if name.endswith(".zig") and name != "host_io_std.zig":
+                with open(os.path.join(src, name)) as f:
+                    if STD_IO_ALIAS.search(f.read()):
+                        escaped.append(name)
     if escaped:
         return "these alias std's Io, not host_io's, and would be std's here: " + " ".join(escaped)
     # **AND ITS ASSETS READ** (Phase B step 3): the build reads the same
