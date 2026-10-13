@@ -33,7 +33,7 @@ sys.path.insert(0, os.path.join(ROOT, "probe"))
 import build_volume  # noqa: E402
 import judge_gopher as G  # noqa: E402
 
-GOPHER_ROOT = os.environ.get("GOPHER_ROOT", os.path.expanduser("~/showell_repos/angry-gopher"))
+GOPHER_ROOT = os.environ.get("GOPHER_ROOT", os.path.normpath(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "..", "angry-gopher")))
 PAGES = ["/tutorial", "/steve-resume", "/", "/steve-resume.pdf", "/safari_download"]
 LINE = re.compile(r"request \d+: GET (\S+) -> [^\n]*\n\s+waited \d+ us, answered in (\d+) us, "
                   r"(\d+) disk requests taking (\d+) us")

@@ -60,14 +60,14 @@
 set -u
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$HERE"
-VMM="${METAL_VMM:-$HOME/showell_repos/metal-vmm}"
-SDK="${COVERAGE_SDK:-$HOME/showell_repos/zig-coverage-sdk}"
+VMM="${METAL_VMM:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/metal-vmm}"
+SDK="${COVERAGE_SDK:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/zig-coverage-sdk}"
 # **THE SITE VOLUME IS THIS CHECKOUT'S** (tools/site_volume.py), built below
 # unless SITE names one: it was a default path whatever chat judge ran last
 # had left, which nothing kept fresh.
 SITE="${SITE:-}"
-GOPHER_ROOT="${GOPHER_ROOT:-$HOME/showell_repos/angry-gopher}"
-WEBBOX_ROOT="${WEBBOX_ROOT:-$HOME/showell_repos/zig-webbox}"
+GOPHER_ROOT="${GOPHER_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/angry-gopher}"
+WEBBOX_ROOT="${WEBBOX_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/zig-webbox}"
 export WEBBOX_ROOT
 SEEDS="${SEEDS:-10000}"
 FAT_SEEDS="${FAT_SEEDS:-300}"

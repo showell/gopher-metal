@@ -1,11 +1,16 @@
 # Restarting on failure while serving
 
-**For the cutover: nothing to do.** It is off in every image built, and
-CUTOVER.md, "Before the day" step 4, keeps it off. Turning it on waits on
-one test on a real droplet, written up for the console in
-[droplet/RESTART-TEST.md](droplet/RESTART-TEST.md).
+**ON BY DEFAULT, AND SERVED** (since 2026-10-03, `9a337ca`; served since
+`v29`). A droplet's reset was measured to restart it
+([droplet/RESTART-TEST.md](droplet/RESTART-TEST.md), the test that
+decided it), and gopher.elf restarts on a failure while serving unless
+built with `-Drestart=false`. Since metal-vmm QUEUE 198.3 a disk that
+stops answering restarts it too (see "Two kinds of failure"). What
+follows was written before the switch; where it says "off", read the
+history of how it was turned on.
 
-> **Status (QUEUE.md item 16): built, and off in every deployed image.**
+> **Status (QUEUE.md item 16), as it stood before 2026-10-03: built, and
+> off in every deployed image.**
 >
 > - **What is built:**
 >   - `src/restart.zig` (the record and the back-off, host-tested);
@@ -13,9 +18,10 @@ one test on a real droplet, written up for the console in
 >   - `src/reset.zig` (the three methods);
 >   - `src/restarting.zig`, the glue: `serial.on_fatal`, set by
 >     `serving()`, routes `serial.fail` and the panic handler to the restart.
-> - **gopher.elf** builds it in only with `-Drestart=true`. The default stays
->   off until the box Claude and Steve have measured, on a real droplet, that
->   a guest's reset restarts it rather than powering it off.
+> - **gopher.elf** built it in only with `-Drestart=true`, until the box
+>   Claude and Steve measured, on a real droplet, that a guest's reset
+>   restarts it rather than powering it off. They did, and it is the
+>   default now.
 > - **`probe/backoff.elf`** (`probe/run.sh backoff`) runs it end to end,
 >   measured here under TCG on three machines (QEMU's `pc`; the
 >   droplet-shaped boot through SeaBIOS and our loader, on dirty RAM; and

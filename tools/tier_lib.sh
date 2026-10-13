@@ -14,7 +14,8 @@ lap() { echo "time: $1 $((SECONDS - t)) s"; t=$SECONDS; }
 
 # **THE SIBLINGS ARE BESIDE THIS CHECKOUT** unless named (GOPHER_ROOT,
 # WEBBOX_ROOT, DOGPARK_ROOT, METAL_VMM): ../<name>, as build.zig's own
-# defaults, which on the box is ~/showell_repos/<name> and in check-cc.sh's
+# defaults and every script's (README, "What you need"): on the box that is
+# ~/showell_repos/<name>, and in check-cc.sh's
 # worktrees is the worktree's sibling. Only tiers 2 and 3 read them.
 sibling() { (cd "$HERE/../$1" 2>/dev/null && pwd) || echo "$HERE/../$1"; }
 GOPHER_ROOT="${GOPHER_ROOT:-$(sibling angry-gopher)}"

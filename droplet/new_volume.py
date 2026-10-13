@@ -31,7 +31,7 @@ ROOT = os.path.dirname(HERE)
 sys.path.insert(0, os.path.join(ROOT, "probe"))
 import judge_gopher as judge  # noqa: E402
 
-GOPHER_ROOT = os.environ.get("GOPHER_ROOT", os.path.expanduser("~/showell_repos/angry-gopher"))
+GOPHER_ROOT = os.environ.get("GOPHER_ROOT", os.path.normpath(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "..", "angry-gopher")))
 # The volume to ask DigitalOcean for, and the image written onto it: 2 GiB on
 # FAT16, which is as large as it goes. FAT32 takes a size, and 32 KiB clusters
 # (64 sectors): its FAT is then 4 bytes for each 32 KiB, 512 KiB a GiB, which

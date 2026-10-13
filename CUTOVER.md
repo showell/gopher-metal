@@ -107,7 +107,10 @@ Each of these is done, and checked, at least a day before.
      way back's live compare against metal (the volume path has metal in
      recovery, so `extract_volume.py`'s own check that the tree matches the
      volume is the comparison; the backup path keeps metal up).
-4. **The restart stays off** (RESTART.md) unless a real droplet has been
+4. *(The cutover's step, kept as it was run. Since 2026-10-03 the restart
+   is on by default, a droplet's reset having been measured to restart
+   it; see RESTART.md.)*
+   **The restart stays off** (RESTART.md) unless a real droplet has been
    seen to restart after a reset (droplet/RESTART-TEST.md). A failure while serving
    then halts the machine, and the first-day watch catches it.
    - GO: the boot image is built without `-Drestart=true` (the default),

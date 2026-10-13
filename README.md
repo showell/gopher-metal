@@ -166,10 +166,11 @@ Six repos, kept separate, checked out side by side:
 - **The sibling checkouts**, in one folder beside this one: `zig-webbox`,
   `angry-gopher`, `dog-park`, `zig-coverage-sdk`, and, for the full checks,
   `metal-vmm`. `build.zig` finds them as `../<name>` (`-Dgopher-root`,
-  `-Dwebbox-root`, `-Ddogpark-root` name another place), and so do the
-  tier scripts below. `long.sh` still defaults to `~/showell_repos/<name>`.
-  Set `GOPHER_ROOT`, `WEBBOX_ROOT`, `DOGPARK_ROOT`, `METAL_VMM` and
-  `COVERAGE_SDK` if yours are elsewhere.
+  `-Dwebbox-root`, `-Ddogpark-root` name another place). **One rule for
+  every script too:** a sibling is `../<name>` beside the checkout running
+  it, in this repo and in metal-vmm; an environment variable names another
+  place (`GOPHER_ROOT`, `WEBBOX_ROOT`, `DOGPARK_ROOT`, `METAL_VMM`,
+  `COVERAGE_SDK`, and metal-vmm's `GUESTS`, this repo's `probe/`).
 - **The pinned zig-coverage-sdk commit.** `build.zig` names the SDK commit it
   was written against and refuses another, printing the `git checkout` that
   fixes it. `-Dcoverage-sdk-unpinned` builds anyway.
@@ -313,7 +314,7 @@ what serves is always a tag, never a branch. The tag's message
 | a disk check at every boot | served | both disks; a damaged disk is reported and still served |
 | a disk check in idle time | served | after 200 ms with nothing arriving, the kernel checks the volume a slice at a time ([HOST.md](HOST.md), "Idle time"). Its cost on production's full volume: unmeasured here |
 | exact accounting of what a failed write leaves | served | leaked clusters, orphaned name entries and long chains, counted on `/admin/host` |
-| restarting after a crash | served | on by default since a droplet's reset was measured to restart it (2026-10-03); the last boot's log is kept across the restart ([RESTART.md](RESTART.md) predates this) |
+| restarting after a crash | served | on by default since a droplet's reset was measured to restart it (2026-10-03); the last boot's log is kept across the restart, and a disk that stops answering restarts it too ([RESTART.md](RESTART.md)) |
 | the log on `/admin/host` | served | the newest 60 lines of a 64 KiB ring, secrets removed as they are written |
 | a larger, timed log, and `/admin/log` | master | a 1.25 MiB ring; every request line with its time, status and duration; `/admin/log` as plain text for scripts; recent uploads and request counts ([docs/admin-for-agents.md](docs/admin-for-agents.md)) |
 | the new name, and zig-webbox as its own checkout | master | v29 still reads `gopher-metal.conf` and builds the library from angry-gopher's tree |

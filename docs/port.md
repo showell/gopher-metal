@@ -2,7 +2,7 @@
 
 How angry-gopher's server runs on a machine with no operating system, and
 why the seam is where it is. The README is the orientation; this page is the
-design behind its "How it works".
+design behind its "What it is".
 
 ## `std.http.Server`, unmodified
 

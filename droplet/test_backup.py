@@ -27,7 +27,7 @@ ROOT = os.path.dirname(HERE)
 sys.path.insert(0, os.path.join(ROOT, "probe"))
 import judge_gopher as G  # noqa: E402
 
-GOPHER_ROOT = os.environ.get("GOPHER_ROOT", os.path.expanduser("~/showell_repos/angry-gopher"))
+GOPHER_ROOT = os.environ.get("GOPHER_ROOT", os.path.normpath(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "..", "angry-gopher")))
 ADMIN_PW = G.MEMBER_PASSWORD  # the staged admin (Steve, uid 1)
 PASSPHRASE = "a test passphrase for the backup"
 

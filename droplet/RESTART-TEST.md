@@ -1,5 +1,9 @@
 # Does a reset restart a droplet? A test for Steve, at the console
 
+> **DONE (2026-10-03): a reset restarts a droplet.** The restart has been
+> on by default since (`9a337ca`, served from `v29`). This page is kept as
+> the test that decided it, and to run again on another provider.
+
 RESTART.md's open question, and QUEUE.md item 16's condition. zig-metal-unikernel
 can restart itself after a crash (`-Drestart=true`), but only if resetting
 a DigitalOcean droplet's machine starts it again. If a reset **powers the
@@ -84,6 +88,8 @@ steps 2-3), or ask the box for the image again. The volume was not
 touched.
 
 ## What flipping `-Drestart=true` by default would then take
+
+*(Done: the default is `orelse true`, and `-Drestart=false` halts instead.)*
 
 - **If a reset restarts:**
   1. Steve's note of the boot number goes into RESTART.md, in place of
