@@ -614,6 +614,7 @@ pub fn kmain() noreturn {
         .trusted_proxy = trusted_proxy,
         .facts = metalFacts,
         .log = metalLog,
+        .logs = metalLogs,
     }) catch |e| {
         serial.put("  ");
         serial.put(@errorName(e));
@@ -902,7 +903,7 @@ fn quiet(table: *tcp.Table, now: i96, idle_ns: u64) ?usize {
 /// **A CLIENT THAT STOPPED TALKING IS NOT A BROKEN NIC.** It is logged as a
 /// request that never came, the way it always has been, and closed.
 fn letGo(wire: *stream.Wire, table: *tcp.Table, i: usize, number: u64) void {
-    logRequest(number, "(no request)", "the client stopped sending, and was let go");
+    logRequest(number, "(no request)", "the client stopped sending, and was let go", 0, null);
     close(wire, table, i);
 }
 
@@ -963,7 +964,7 @@ fn serveOne(
             s.writer().writeAll("HTTP/1.1 431 Request Header Fields Too Large\r\n" ++
                 "connection: close\r\ncontent-length: 0\r\n\r\n") catch {};
             s.writer().flush() catch {};
-            logRequest(number, "(no request)", "a head that filled the buffer unended: 431");
+            logRequest(number, "(no request)", "a head that filled the buffer unended: 431", 431, null);
             close(wire, table, i);
             return;
         }
@@ -992,7 +993,7 @@ fn serveOne(
         logRequest(number, "(no request)", if (s.timed_out)
             "the client stopped sending, and was let go"
         else
-            @errorName(e));
+            @errorName(e), if (e == error.HttpHeadersInvalid) 400 else 0, null);
         close(wire, table, i);
         return;
     };
@@ -1031,9 +1032,14 @@ fn serveOne(
         req.head.expect = null;
         webbox.edge.reject(&req, r.kind, r.msg) catch {};
         s.writer().flush() catch {};
-        logRequest(number, "(refused at its head)", r.msg[0 .. r.msg.len - 1]);
+        const refused_status: u16 = @intFromEnum(webbox.edge.statusFor(r.kind));
+        logRequest(number, "(refused at its head)", r.msg[0 .. r.msg.len - 1], refused_status, null);
         // A drained body refused (late, past what is kept): what came of it.
-        if (wait.drain) |d| if (d.len > d.head_len) logBody(d, Io.awakeNs() orelse 0);
+        if (wait.drain) |d| {
+            if (d.upload) {
+                noteUpload(number, d, metal.log_ring.withoutQuery(req.head.target), metal.uploads_seen.kindOf(d.body()) orelse "", refused_status, r.msg, null, 0, Io.awakeNs() orelse 0);
+            } else if (d.len > d.head_len) logBody(d, Io.awakeNs() orelse 0);
+        }
         close(wire, table, i);
         return;
     }
@@ -1055,12 +1061,16 @@ fn serveOne(
     var bus = Bus.of(hub);
     var peer_text: [15]u8 = undefined;
     bus.peer = ipText(&peer_text, table.conns[i].peer_ip);
+    bus.at_unix_ms = wallMs();
     // The stream the handler kept is route's answer (angry-gopher 157(a)):
     // on an error, route has already dropped it.
     // A drained body handed to the handler's read as it is (170.5): only a
     // Content-Length one that came whole to its length. A chunked one is
     // still framed, and a short one (its client gone) must be refused: std
     // reads both from memory, decoding the one and refusing the other.
+    // An upload's kind, from its part's own header, before the handler
+    // reads the body (189.4).
+    const upload_kind: metal.uploads_seen.Text(48) = if (wait.drain) |d| .of(if (d.upload) metal.uploads_seen.kindOf(d.body()) orelse "" else "") else .{};
     switch (wait.handover()) {
         .whole => |body| webbox.http.held_body = body,
         .network, .memory => {},
@@ -1119,16 +1129,23 @@ fn serveOne(
             kept_open = true;
         } else close(wire, table, i);
     }
-    logRequest(number, what, outcome);
+    logRequest(number, what, outcome, bus.status, if (done_at >= head_at) @intCast(done_at - head_at) else null);
     // **THE LOG SAYS A BODY'S SIZE AND HOW LONG IT TOOK TO ARRIVE** (169), so
     // a slow link is read, not inferred.
-    if (wait.drain) |d| if (wait.verdict == .none) logBody(d, d.whole_at);
+    const disk_after = diskWork();
+    if (wait.drain) |d| {
+        if (d.upload) {
+            // `what`, the log's own copy: the target is borrowed from the
+            // read buffer, which the handler may have consumed.
+            const copied = if (std.mem.indexOfScalar(u8, what, ' ')) |sp| what[sp + 1 ..] else what;
+            noteUpload(number, d, copied, upload_kind.slice(), bus.status, outcome, if (done_at >= head_at) @intCast(done_at - head_at) else null, disk_after.requests - disk_before.requests, done_at);
+        } else if (wait.verdict == .none) logBody(d, d.whole_at);
+    }
     serial.put("    waited ");
     serial.putDec(@intCast(@divTrunc(head_at - opened_at, 1000)));
     serial.put(" us, answered in ");
     serial.putDec(@intCast(@divTrunc(done_at - head_at, 1000)));
     serial.put(" us, ");
-    const disk_after = diskWork();
     serial.putDec(disk_after.requests - disk_before.requests);
     serial.put(" disk requests taking ");
     serial.putDec(@intCast(@divTrunc(Io.ticksToNs(disk_after.ticks -% disk_before.ticks), 1000)));
@@ -1717,14 +1734,58 @@ fn diskCheck(vol: *disk_fat.Volume, what: []const u8) void {
     }
 }
 
-fn logRequest(number: u64, what: []const u8, outcome: []const u8) void {
+/// **THE LAST UPLOADS, AND EVERY ONE COUNTED** (metal-vmm QUEUE 189.4,
+/// src/uploads_seen.zig), for /admin/host and the log.
+var uploads: metal.uploads_seen.Seen = .{};
+/// How many of them /admin/host shows; the log has every one.
+const uploads_shown = 10;
+
+/// Now as Unix milliseconds, if the wall clock is set.
+fn wallMs() ?i64 {
+    if (!Io.realTimeIsSet()) return null;
+    return @intCast(@divFloor(Io.Clock.now(.real, Io.io()).nanoseconds, std.time.ns_per_ms));
+}
+
+/// An upload's answer, recorded and said under its request's line.
+fn noteUpload(number: u64, d: Drains.Drain, path: []const u8, kind: []const u8, status: u16, ended: []const u8, turn_ns: ?u64, disk_requests: u64, now: i96) void {
+    const u: metal.uploads_seen.Upload = .{
+        .number = number,
+        .unix_ms = wallMs(),
+        .path = .of(path),
+        .kind = .of(kind),
+        .bytes = d.len - d.head_len,
+        .arrival_ms = @intCast(@divTrunc(@max((if (d.whole) d.whole_at else now) - d.began, 0), std.time.ns_per_ms)),
+        .turn_ms = if (turn_ns) |t| t / std.time.ns_per_ms else null,
+        .disk_requests = disk_requests,
+        .status = status,
+        .outcome = metal.uploads_seen.classify(status, d.whole, ended),
+    };
+    uploads.record(u);
+    var line: [512]u8 = undefined;
+    var w: std.Io.Writer = .fixed(&line);
+    u.write(&w) catch {}; // cut short past 512 bytes
+    serial.put("    upload: ");
+    serial.put(w.buffered());
+    serial.put("\n");
+}
+
+/// A request's line (src/request_line.zig): its UTC time, what it was, how it
+/// ended, its status and how long it took; then what memory held after it.
+/// `status` 0 and `took_ns` null where no request came.
+fn logRequest(number: u64, what: []const u8, outcome: []const u8, status: u16, took_ns: ?u64) void {
     const mem = webbox.mem_meter.snapshot();
-    serial.put("  request ");
-    serial.putDec(number);
-    serial.put(": ");
-    serial.put(what);
-    serial.put(" -> ");
-    serial.put(outcome);
+    var line: [512]u8 = undefined;
+    var w: std.Io.Writer = .fixed(&line);
+    metal.request_line.write(&w, .{
+        .number = number,
+        .unix_ms = wallMs(),
+        .what = what,
+        .outcome = outcome,
+        .status = status,
+        .took_ns = took_ns,
+    }) catch {}; // a line past 512 bytes is cut short; what fits is said
+    serial.put("  ");
+    serial.put(w.buffered());
     serial.put(" (base: ");
     serial.putDec(mem.live_bytes);
     serial.put(" live bytes, ");
@@ -1921,13 +1982,39 @@ fn configNumber(comptime T: type, value: []const u8) !T {
     return std.fmt.parseInt(T, value, 10);
 }
 
-/// **THE LOG, FOR /admin/host**: what the serial ring holds (its last 64 KiB),
-/// oldest first from its first whole line. Its secrets were taken out as it
-/// was written (log_ring.zig's Redactor), so it is shown as it is.
+/// **THE LOG, FOR /admin/host**: the newest `page_log_bytes` of what the
+/// serial ring holds, from a whole line. Its secrets were taken out as it
+/// was written (log_ring.zig's Redactor), so it is shown as it is. **THE
+/// PAGE STAYS SHORT** (metal-vmm QUEUE 189.1): the ring holds 1.25 MiB, and
+/// the page shows what it did before, 64 KiB; the whole ring is the text
+/// view's.
+const page_log_bytes = 64 * 1024;
 fn metalLog(io: Io, alloc: std.mem.Allocator) anyerror!?[]const u8 {
     _ = io;
-    const buf = try alloc.alloc(u8, serial.ring.len());
-    return serial.ring.read(buf);
+    const buf = try alloc.alloc(u8, @min(serial.ring.len(), page_log_bytes));
+    const text = serial.ring.read(buf);
+    // Cut short: the newest bytes begin part way through a line.
+    if (text.len < serial.ring.len()) if (std.mem.indexOfScalar(u8, text, '\n')) |i| return text[i + 1 ..];
+    return text;
+}
+
+/// **THE WHOLE LOG, FOR /admin/log** (metal-vmm QUEUE 189.3): the ring, all
+/// 1.25 MiB of it, and the boot before this one's where the restart kept it.
+fn metalLogs(io: Io, alloc: std.mem.Allocator) anyerror!?webbox.host_facts.Logs {
+    _ = io;
+    const now = try alloc.alloc(u8, serial.ring.len());
+    var logs: webbox.host_facts.Logs = .{
+        .this_boot = serial.ring.read(now),
+        .capacity = serial.ring.buf.len,
+        .lost = serial.ring.lost(),
+        .booted_unix = if (booted_unix != 0) booted_unix else null,
+        .host_commit = gm_build.commit,
+    };
+    if (gm_build.restart) if (metal.restarting.keptBefore()) |p| {
+        const before = try alloc.alloc(u8, p.ring.len());
+        logs.before = .{ .boot = p.boot, .text = p.read(before) };
+    };
+    return logs;
 }
 
 /// **WHAT THIS MACHINE SAYS ABOUT ITSELF**, for /admin/host: what a Linux
@@ -1986,6 +2073,19 @@ fn metalFacts(io: Io, alloc: std.mem.Allocator) anyerror![]const webbox.host_fac
     try add(&facts, alloc, "memory (pages)", "{d} MB taken now, {d} MB at most, of {d} MB", .{
         p.bytes_taken >> 20, (p.pages_high_water * pages.page_size) >> 20, p.bytes_total >> 20,
     });
+    // **UPLOADS** (189.4): every one counted by its answer, then the newest.
+    {
+        var counts: std.Io.Writer.Allocating = .init(alloc);
+        try uploads.writeCounts(&counts.writer);
+        try facts.append(alloc, .{ .label = "uploads", .value = counts.written() });
+        var k: usize = 0;
+        while (uploads.newest(k)) |u| : (k += 1) {
+            if (k == uploads_shown) break;
+            var one: std.Io.Writer.Allocating = .init(alloc);
+            try u.write(&one.writer);
+            try facts.append(alloc, .{ .label = if (k == 0) "an upload, the newest first" else "", .value = one.written() });
+        }
+    }
     if (Io.siteVolume()) |v| try addVolume(&facts, alloc, "the boot disk (the site)", "the boot disk's write cache", "the boot disk's folders in memory", v);
     if (Io.dataVolume()) |v| {
         try addVolume(&facts, alloc, "the volume (" ++ app.hosting.data_name ++ ")", "the volume's write cache", "the volume's folders in memory", v);

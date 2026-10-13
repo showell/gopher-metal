@@ -48,7 +48,7 @@ pub fn kmain() noreturn {
     const restarts: u8 = if (found.record) |r| r.count else 0;
 
     if (restarts > 0) {
-        var line: [metal.kept_log.slot_bytes]u8 = undefined;
+        var line: [4096]u8 = undefined; // its newest bytes: the last line (`Previous.lastLine`)
         var want: [64]u8 = undefined;
         const reason = std.fmt.bufPrint(&want, "RESTART: a failure: on purpose, while serving: restart {d}", .{restarts}) catch unreachable;
         const p = found.previous orelse serial.fail("restarted, and the boot before left no kept log");

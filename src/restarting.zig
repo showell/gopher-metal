@@ -82,7 +82,7 @@ pub fn begin(now: *const fn () ?i64) Boot {
     serial.put("  restart: this is boot ");
     serial.putDec(k.boot);
     serial.put(" of the kept log; the boot before it ");
-    var line: [kept_log.slot_bytes]u8 = undefined;
+    var line: [4096]u8 = undefined; // its newest bytes: the last line (`Previous.lastLine`)
     if (k.previous) |p| {
         serial.put("(");
         serial.putDec(p.boot);
@@ -111,6 +111,13 @@ pub fn begin(now: *const fn () ?i64) Boot {
 }
 
 /// From here on, a fatal error restarts the machine.
+/// The boot before this one's log, as the kept log found it, if it did
+/// (for /admin/log, metal-vmm QUEUE 189.3).
+pub fn keptBefore() ?kept_log.Previous {
+    const k = kept orelse return null;
+    return k.previous;
+}
+
 pub fn serving() void {
     heapClear(keptRegion());
     serial.on_fatal = fatal;

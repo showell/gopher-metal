@@ -1,0 +1,186 @@
+# /admin/host and /admin/log, for agents
+
+How an agent finds out what the running server is doing (metal-vmm QUEUE
+189). There are two views, behind one key:
+
+- **`/admin/host`**: the page for Steve, in HTML. A health summary, then
+  the details, then the log's newest 60 lines.
+- **`/admin/log`**: the log for you, in plain text, to fetch and grep. It
+  holds the whole log, this boot's and the boot before's, and it can be
+  narrowed.
+
+Both are GET only, admin only, and change nothing. Without the admin's key,
+`/admin/log` sends you to sign in (anonymous), or answers 404 (a member who
+is not the admin).
+
+## Fetching
+
+The admin's key is Steve's prod key, in `~/.gopher_api_key`. **Never print
+it.** Read it inline, as below, and never `cat` or `echo` it on its own.
+
+```bash
+SITE=https://lynrummy.com
+admin() { curl -s -H "Authorization: Bearer $(cat ~/.gopher_api_key)" "$SITE$1"; }
+
+admin /admin/log                                  # the whole log, both boots
+admin '/admin/log?boot=this'                      # this boot only
+admin '/admin/log?since=2026-10-13T14:02'         # from 14:02 UTC on
+admin '/admin/log?since=2026-10-13T14:02&until=2026-10-13T14:03'
+admin '/admin/log?request=1234'                   # one request and its lines
+admin '/admin/log?path=/chat/c/1_3'               # one conversation's requests
+admin /admin/host                                 # the page (HTML)
+```
+
+**The filters**, each optional, all applied together:
+
+| Filter | What it keeps |
+|---|---|
+| `since=` | Lines from that time on. The time is ISO UTC (`2026-10-13T14:02:07.123Z`) or any leading part of one, a year at least. |
+| `until=` | Lines before that time, spelled the same way. |
+| `request=N` | Request N's line and the lines indented under it. |
+| `path=/prefix` | The requests whose path begins so, and the lines under them. |
+| `boot=` | `this`, `before` or `both` (the default). |
+
+**How the time filters treat lines:**
+- A request's line carries its own time.
+- Any other line counts as the time of the last timed line before it.
+- With `since=` or `until=` set, lines before the first timed line (the
+  boot's own) are left out.
+
+A filter spelled wrong is a 400 that lists what each one takes. A `:` may
+be sent as is or as `%3A`.
+
+## What the log says
+
+**The header.** Every line of it begins `# `, so `grep -v '^#'` gives the
+log alone. It holds:
+- the application's commit and gopher-metal's commit;
+- when this boot began;
+- the requests since boot by status class and by part of the site;
+- one `# 5xx:` line for each of the last 20 answers of 500 or over;
+- one `# slow:` line for each of the 5 slowest requests;
+- for each boot: the bytes and lines it holds, how much was lost to the
+  ring, and the time on its oldest timed line.
+
+**A request's line** leads with its UTC time:
+
+```
+  2026-10-13T14:02:07.123Z request 12: POST /chat/c/1_3/general/upload -> ok, 200 in 41.3 ms (base: ...)
+    upload: 2026-10-13T14:02:07.164Z request 12: /chat/c/1_3/general/upload, image/png, 9000 bytes, arrived in 40 ms, its turn 3 ms, 7 disk requests: ok (200)
+    waited 812 us, answered in 41301 us, 7 disk requests taking 2100 us
+```
+
+- **On the request line:** after `->` comes how it ended (`ok`, or an
+  error's name), its status code, and how long its answer took. `(base:
+  ...)` is what memory held after it.
+- **Indented under it:**
+  - `body: N bytes, arrived in X ms` for a body. A chat message is logged
+    this way, by its length only.
+  - `upload: ...` for an upload, with its answer.
+  - `waited`, the time from the connection to its head.
+- **Lines that are not about a request** (boot, disks, streams ending, the
+  idle check) have no time of their own.
+
+**What is never in it.** Secrets are taken out as the log is written, so
+nothing can bring them back. That covers cookies, the `Authorization`
+header, passwords, keys, tokens, session values, and an upload's name in
+its path (`/uploads/[redacted].png`). A message's words are never written,
+nor any other part of a message: not a link, not a name, not a mention.
+
+**How much it holds.** The ring holds 1.25 MiB, about a busy hour of
+requests. When it fills, the oldest lines go. The header says how much was
+lost.
+
+## What the page says
+
+From the top:
+1. **Errors since boot**, shown only when there are any: every answer of
+   500 or over, the newest first.
+2. **The application**: its version and commit, and its memory. Then the
+   requests since boot by status class and by part of the site (uploads,
+   streams, docs, chat, games, admin, site), the 5 slowest, and the
+   refusals counted at the edge.
+3. **The host**: gopher-metal's own facts.
+   - The clock and the processor.
+   - Connections and streams, open now and at most.
+   - Memory.
+   - **Uploads**: a count since boot by answer, and the newest 10. The
+     answers are ok, too big, over quota, a kind not taken, writes refused,
+     busy, taken over by a newer upload, the client gone, failed, and
+     refused.
+   - Each volume:
+     - free space;
+     - its write cache;
+     - its idle check, with what it last found;
+     - whether it takes writes. "writes: REFUSED" means its FAT copies
+       could not be weighed at mount; it is weighed again once a minute.
+4. **The log**: its newest 60 lines.
+
+## Five questions, answered
+
+**Did the upload at 14:02 work?**
+
+```bash
+admin '/admin/log?since=2026-10-13T14:02&until=2026-10-13T14:03' | grep 'upload:'
+```
+
+Each upload's line ends in its answer: `ok (200)`, `refused: over quota
+(403)`, `refused: writes refused (503)`, `the client gone`, and so on. It
+also says how long the upload took to arrive and how many disk requests it
+cost. The `uploads` row on `/admin/host` counts every upload since boot by
+answer.
+
+**What failed since boot?**
+
+```bash
+admin '/admin/log?boot=this' | grep -E '^# (requests since boot|5xx)'
+```
+
+The first line counts the requests by status class. Each `# 5xx:` line
+gives a failure's time, path, status, duration and error. To see a failure
+in context, take its time from that line:
+
+```bash
+admin '/admin/log?since=2026-10-13T14:02:07&until=2026-10-13T14:02:08'
+```
+
+On the page, "Errors since boot" leads when there are any.
+
+**Why did the machine restart?**
+
+```bash
+admin '/admin/log?boot=before' | grep -v '^#' | tail -20
+admin '/admin/log?boot=this' | grep -m3 'restart'
+```
+
+The boot before's log ends with its reason (`RESTART: ...`). This boot's
+own line says which boot it is and what the boot before ended on. The boot
+before's log is kept only by a kernel built with the restart (`-Drestart`).
+`# the boot before: none kept` means a first boot, or one that did not end
+on purpose: a hang, a power cut, or an external reset.
+
+**Is the disk healthy?**
+
+```bash
+admin /admin/host | grep -oE '(the volume|the boot disk|writes)[^<]*</td><td>[^<]*'
+admin '/admin/log?boot=this' | grep -E 'disk check|FAT|refuses|weighed'
+```
+
+On the page, check each volume's row:
+- free space;
+- the cleanups and FAT copy writes that failed;
+- its idle check's last finding ("no damage", or what it found first);
+- whether it takes writes.
+
+In the log, the boot's `disk check` line and any FAT line say what the
+mount found.
+
+**Who is connected?**
+
+```bash
+admin /admin/host | grep -oE '(connections|streams|requests since boot|by part of the site)</td><td>[^<]*'
+```
+
+These are counts, never names: connections open now and at most, live
+streams held now and at most, and the requests by part of the site. Nothing
+on either view names a person.

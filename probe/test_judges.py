@@ -282,6 +282,39 @@ class Differences(unittest.TestCase):
         # Linux may show a log too, once it keeps one.
         self.assertEqual(G.host_page_differences(self.metal_page(good), self.LINUX.replace(self.LINUX_LOG, self.METAL_LOG)), [])
 
+    # **THE TEXT VIEW** (metal-vmm QUEUE 189.3, 189.7): /admin/log.
+    LOG_HEAD = (b"# The host's log, for agents (metal-vmm QUEUE 189.3): lines beginning \"# \" are\n"
+                b"# this header; the rest is the log as written, its secrets taken out then.\n"
+                b"# the application: commit abc\n# requests since boot: 9 requests: 9 2xx\n")
+    METAL_VIEW = (LOG_HEAD + b"# the host: commit def\n# this boot: 400 bytes in 4 lines held, of 1310720 kept at most; 0 written before them and no longer held; the oldest timed line 2026-10-13T14:01:59.900Z; 3 lines below\n"
+                  b"  2026-10-13T14:01:59.900Z request 11: GET /chat -> ok, 200 in 3.0 ms (base: 1)\n"
+                  b"  2026-10-13T14:02:07.123Z request 12: POST /chat/c/1_2/general/send -> ok, 200 in 4.1 ms (base: 2)\n"
+                  b"    body: 37 bytes, arrived in 0 ms\n")
+    LINUX_VIEW = LOG_HEAD + b"# This host keeps no log of its own to show here.\n"
+
+    def test_the_log_view_is_checked_for_its_shape_its_filter_and_secrets(self):
+        ok = lambda body: {"status": 200, "headers": {"content-type": "text/plain; charset=utf-8"}, "body": body}
+        whole = {"path": "/admin/log"}
+        chat = {"path": "/admin/log?path=/chat&boot=this"}
+        self.assertEqual(G.log_view_differences(whole, ok(self.METAL_VIEW), ok(self.LINUX_VIEW)), [])
+        self.assertEqual(G.log_view_differences(chat, ok(self.METAL_VIEW), ok(self.LINUX_VIEW)), [])
+        # Not text, or without its header, on either host.
+        html = {"status": 200, "headers": {"content-type": "text/html"}, "body": self.METAL_VIEW}
+        self.assertTrue(G.log_view_differences(whole, html, ok(self.LINUX_VIEW)))
+        self.assertTrue(G.log_view_differences(whole, ok(self.METAL_VIEW[len(self.LOG_HEAD):]), ok(self.LINUX_VIEW)))
+        # Metal holding no lines of this boot; Linux claiming a log it has not.
+        self.assertTrue(G.log_view_differences(whole, ok(self.LOG_HEAD), ok(self.LINUX_VIEW)))
+        self.assertTrue(G.log_view_differences(whole, ok(self.METAL_VIEW), ok(self.LOG_HEAD)))
+        # A filter by path that let another path through.
+        stray = self.METAL_VIEW + b"  2026-10-13T14:03:00.000Z request 13: GET /admin/host -> ok, 200 in 9.1 ms (base: 3)\n"
+        got = G.log_view_differences(chat, ok(stray), ok(self.LINUX_VIEW))
+        self.assertTrue(any("/admin/host" in g for g in got), got)
+        # Every secret the story sends, and every message's words.
+        for leak in (b"cookie: __Host-gopher_auth=MQ.1758000000.abc", b"hash $2b$12$abcdefghijk", b"password=hunter2",
+                     b"correct horse battery staple", G.SESSION_SECRET, b"text: hello from bare metal"):
+            got = G.log_view_differences(whole, ok(self.METAL_VIEW + b"  " + leak + b"\n"), ok(self.LINUX_VIEW))
+            self.assertTrue(any("secret" in g or "message" in g for g in got), (leak, got))
+
     def test_the_host_page_s_disk_figures_must_be_sane(self):
         good = (b"the boot disk (the site)", b"FAT16, serial 92DE-8831: 30 MB free of 62 MB")
         self.assertEqual(G.host_page_differences(self.metal_page(good), self.LINUX), [])

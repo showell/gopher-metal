@@ -49,7 +49,7 @@ const Com1 = struct {
     }
 };
 
-/// **THE LAST 64 KiB OF THE LOG, FOR A STATUS PAGE TO SERVE** (log_ring.zig),
+/// **THE LAST 1.25 MiB OF THE LOG, FOR A STATUS PAGE TO SERVE** (log_ring.zig),
 /// with secrets taken out on the way in. The port and the screen still get
 /// every byte as written. `putPort` alone, the NMI handler's, does not reach
 /// it.
@@ -60,7 +60,7 @@ const Com1 = struct {
 /// the ring's count places every write (`next()`), so it does not lean on that: in `.data`
 /// the loader writes it empty from the file. The bytes may be anything until
 /// written, and nothing reads past what the ring says it holds.
-var ring_bytes: [64 * 1024]u8 = undefined;
+var ring_bytes: [log_ring.capacity]u8 = undefined;
 pub var ring: log_ring.Ring linksection(".data") = .{ .buf = &ring_bytes };
 
 pub fn put(bytes: []const u8) void {
@@ -219,10 +219,7 @@ fn stop(reason: restart.Reason, label: []const u8, why: []const u8) noreturn {
 /// only to start a read at a whole line, and what moves already starts at
 /// one.
 pub fn keepIn(buf: []u8) void {
-    var held: [64 * 1024]u8 = undefined;
-    const text = ring.read(&held);
-    ring = log_ring.Ring.init(buf);
-    ring.write(text);
+    ring = ring.moveTo(buf);
 }
 
 pub fn pass() noreturn {
