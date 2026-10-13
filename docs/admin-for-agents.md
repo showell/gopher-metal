@@ -120,6 +120,17 @@ From the top:
        late on the way in (incoming loss); from behind: the peer sent
        again what had already come; past the window: the peer sent more
        than there was room for. Growing "ahead" is loss toward the machine.
+     - resets from peers: connections the other end ended at once (Caddy
+       dropping an upstream connection does this); inexact ones
+       challenged: resets whose number was off, which a real peer
+       follows with an exact one and a forged one does not; bad
+       handshake ACKs reset: a client answered our SYN-ACK wrongly;
+     - given up by the host: the machine cut a client off. "Stopped
+       taking a response" is a slow or vanished reader; "streams too far
+       behind" is a live stream whose reader could not keep up; "closes
+       of an unfinished handshake" is a connection closed before it was
+       ever open. A count that grows with no change in traffic is worth
+       a look.
    - **Network card stalls**: sends that waited a whole second for the card
      to take a frame back, the card asking for a reset, and frames dropped
      while it took none. Any above zero means the card stopped taking

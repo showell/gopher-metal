@@ -758,7 +758,7 @@ pub fn kmain() noreturn {
     }
     for (&draining, 0..) |*slot, i| {
         if (slot.*) |*d| {
-            table.abandon(&wire, i);
+            table.abandon(&wire, i, .slow_client);
             serial.put("  let go at the end: the client stopped taking the response\n");
             d.spill.deinit();
             table.release(i);
@@ -1136,7 +1136,7 @@ fn serveOne(
     // done when the response is, not when the console has caught up.
     if (!kept_open) {
         if (s.timed_out) {
-            table.abandon(wire, i);
+            table.abandon(wire, i, .slow_client);
         } else if (spill.pending().len > 0 and table.conns[i].state == .established) {
             draining[i] = .{ .spill = spill, .since = Io.awakeNs() orelse 0, .una = table.conns[i].una };
             draining_now += 1;
@@ -1186,7 +1186,7 @@ fn serviceDraining(wire: *stream.Wire, table: *tcp.Table, now: i96, idle_ns: u64
                 close(wire, table, i);
                 done = true;
             } else if (now - d.since >= idle_ns) {
-                table.abandon(wire, i);
+                table.abandon(wire, i, .slow_client);
                 serial.put("  let go: the client stopped taking the response\n");
                 done = true;
             }
@@ -1339,7 +1339,7 @@ fn endStream(slot: *?Held, wire: *stream.Wire, table: *tcp.Table, hub: *Hub, end
     streams.drop(hub, h.kept);
     if (h.carry.len > 0) hub.gpa.free(h.carry);
     switch (ending) {
-        .lagging, .missed_events => table.abandon(wire, h.conn),
+        .lagging, .missed_events => table.abandon(wire, h.conn, .stream_behind),
         else => table.finish(h.conn),
     }
     table.release(h.conn);
@@ -1395,7 +1395,7 @@ fn reportStack(deepest: usize) usize {
 /// which comes after the request's log is written.
 fn close(wire: *stream.Wire, table: *tcp.Table, i: usize) void {
     table.finish(i);
-    if (table.conns[i].state != .closing) return table.abandon(wire, i);
+    if (table.conns[i].state != .closing) return table.abandon(wire, i, .unfinished);
     const now = Io.awakeNs() orelse 0;
     table.transmit(wire, now);
     if (coverage_checks) stream.checkTable(table, now, .after_transmit);

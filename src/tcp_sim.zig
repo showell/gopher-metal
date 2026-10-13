@@ -997,14 +997,14 @@ const Host = struct {
     fn close(self: *Host, sim: *Sim, i: usize) void {
         var wire = TableWire{ .sim = sim };
         sim.table.finish(i);
-        if (sim.table.conns[i].state != .closing) sim.table.abandon(&wire, i);
+        if (sim.table.conns[i].state != .closing) sim.table.abandon(&wire, i, .unfinished);
         sim.table.release(i);
         self.finished = true;
     }
 
     fn giveUp(self: *Host, sim: *Sim, i: usize) void {
         var wire = TableWire{ .sim = sim };
-        sim.table.abandon(&wire, i);
+        sim.table.abandon(&wire, i, .slow_client);
         sim.table.release(i);
         self.let_go = true;
     }
@@ -1213,7 +1213,7 @@ const Server = struct {
             const slot = h.slot;
             self.held = null;
             var wire = TableWire{ .sim = sim };
-            sim.table.abandon(&wire, slot);
+            sim.table.abandon(&wire, slot, .stream_behind);
             sim.table.release(slot);
             self.let_go[w] = true;
         }
@@ -1232,7 +1232,7 @@ const Server = struct {
 
     fn giveUp(self: *Server, sim: *Sim, k: usize, w: usize) void {
         var wire = TableWire{ .sim = sim };
-        sim.table.abandon(&wire, k);
+        sim.table.abandon(&wire, k, .slow_client);
         sim.table.release(k);
         self.let_go[w] = true;
         self.current = null;
@@ -1242,7 +1242,7 @@ const Server = struct {
     fn close(sim: *Sim, k: usize) void {
         var wire = TableWire{ .sim = sim };
         sim.table.finish(k);
-        if (sim.table.conns[k].state != .closing) sim.table.abandon(&wire, k);
+        if (sim.table.conns[k].state != .closing) sim.table.abandon(&wire, k, .unfinished);
         sim.table.release(k);
     }
 };

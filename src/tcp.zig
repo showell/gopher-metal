@@ -512,6 +512,21 @@ pub const Table = struct {
     arrived_ahead: u64 = 0,
     arrived_behind: u64 = 0,
     past_window: u64 = 0,
+    /// **RESETS, BY WHO AND WHY** (metal-vmm QUEUE 193, gap 6): exact
+    /// resets from the peer (each one a connection it ended), inexact ones
+    /// answered with a challenge ACK, and our resets of a SYN-RECEIVED
+    /// peer whose ACK named the wrong number.
+    resets_received: u64 = 0,
+    challenge_acks: u64 = 0,
+    bad_ack_resets: u64 = 0,
+    /// Connections the host gave up on, by its reason (`abandon`): a client
+    /// that stopped taking its response, a stream that fell too far behind,
+    /// and a close of a connection that never finished its handshake. A
+    /// silent peer and an unanswered FIN are `given_up` and
+    /// `fin_waits_expired`.
+    abandoned_slow_client: u64 = 0,
+    abandoned_stream_behind: u64 = 0,
+    abandoned_unfinished: u64 = 0,
     /// Reopened windows said again.
     window_updates: u64 = 0,
     /// Round trips measured, and the newest SRTT.
@@ -738,9 +753,18 @@ pub const Table = struct {
         c.state = .closing;
     }
 
+    /// Why a connection is given up on, for its count.
+    pub const Abandon = enum { silent_peer, fin_wait, slow_client, stream_behind, unfinished };
+
     /// Gives up on connection `i` with a reset, so a peer waiting for the
     /// rest of an answer, or for its handshake, does not wait out its timer.
-    pub fn abandon(self: *Table, wire: anytype, i: usize) void {
+    pub fn abandon(self: *Table, wire: anytype, i: usize, why: Abandon) void {
+        switch (why) {
+            .silent_peer, .fin_wait => {}, // `given_up`, `fin_waits_expired`
+            .slow_client => self.abandoned_slow_client +%= 1,
+            .stream_behind => self.abandoned_stream_behind +%= 1,
+            .unfinished => self.abandoned_unfinished +%= 1,
+        }
         const c = &self.conns[i];
         if (c.state != .closed) {
             self.emit(wire, i, flag_rst | flag_ack, c.highest(), "");
@@ -790,7 +814,7 @@ pub const Table = struct {
             // FIN-WAIT-2: nothing of ours in flight.
             if (c.fin_wait_until) |until| if (now >= until) {
                 self.fin_waits_expired += 1;
-                self.abandon(wire, i);
+                self.abandon(wire, i, .fin_wait);
             };
             return;
         }
@@ -954,7 +978,7 @@ pub const Table = struct {
     fn giveUp(self: *Table, wire: anytype, i: usize) void {
         self.given_up += 1;
         props.reachable(@src(), "tcp: a silent peer is given up on", .{ .conn = i });
-        self.abandon(wire, i);
+        self.abandon(wire, i, .silent_peer);
     }
 
     /// Takes the peer's ACK and window as RFC 9293 §3.10.7.4 does in
@@ -1043,8 +1067,14 @@ pub const Table = struct {
             const c = &self.conns[i];
             props.sometimes(@src(), seq == c.rcv_nxt, "tcp: an exact reset closes a connection", null);
             props.sometimes(@src(), seq != c.rcv_nxt and c.ahead(seq), "tcp: an inexact reset in the window draws a challenge ACK", null);
-            if (seq == c.rcv_nxt) return self.close(i);
-            if (c.ahead(seq)) self.emit(wire, i, flag_ack, c.highest(), "");
+            if (seq == c.rcv_nxt) {
+                self.resets_received +%= 1;
+                return self.close(i);
+            }
+            if (c.ahead(seq)) {
+                self.challenge_acks +%= 1;
+                self.emit(wire, i, flag_ack, c.highest(), "");
+            }
             return .{ .event = .nothing };
         }
 
@@ -1171,6 +1201,7 @@ pub const Table = struct {
             if (number != c.una +% 1) {
                 // An unacceptable ACK draws <SEQ=SEG.ACK><CTL=RST> (RFC 9293
                 // §3.10.7.4, SYN-RECEIVED).
+                self.bad_ack_resets +%= 1;
                 self.segment(wire, .{ .mac = c.peer_mac, .ip = c.peer_ip, .port = c.peer_port }, flag_rst, number, 0, 0, "");
                 return .{ .event = .nothing };
             }
@@ -1311,6 +1342,9 @@ pub fn writeCounts(t: *const Table, w: *std.Io.Writer) std.Io.Writer.Error!void 
     });
     try w.print("{d} segments arrived ahead of the next byte (one before them lost or late), {d} from behind (resends), {d} past the window; ", .{
         t.arrived_ahead, t.arrived_behind, t.past_window,
+    });
+    try w.print("{d} resets from peers ({d} inexact ones challenged), {d} bad handshake ACKs reset; given up by the host: {d} clients that stopped taking a response, {d} streams too far behind, {d} closes of an unfinished handshake; ", .{
+        t.resets_received, t.challenge_acks, t.bad_ack_resets, t.abandoned_slow_client, t.abandoned_stream_behind, t.abandoned_unfinished,
     });
     try w.print("{d} round trips measured, the newest {d} ns", .{ t.samples, t.measured_ns });
 }
