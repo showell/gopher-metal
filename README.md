@@ -60,6 +60,8 @@ live item says "metal-vmm"; a bare "QUEUE.md item N" is the retired queue's.
 - **angry-gopher** — the program: every route and app, written and tested
   on Linux. The build compiles its `zig-server/src` from a sibling checkout
   (`-Dgopher-root`, no copy), handing each file this repo's `host_io`.
+- **zig-webbox** — the library both applications are built on (`webbox`),
+  compiled the same way from its sibling checkout (`-Dwebbox-root`).
 
 A release is a new boot image from this repo carrying both repos' commits
 ("A deploy", below). prod's old Linux droplet runs only Caddy, which

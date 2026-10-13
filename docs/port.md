@@ -44,8 +44,9 @@ machine) it spins.
 ## The real server
 
 `build.zig` compiles angry-gopher's `zig-server/src/*.zig` from its checkout
-(`-Dgopher-root`, `../angry-gopher` by default), unchanged and uncopied
-(Phase B step 2b, 2026-10-13). Every file that does I/O opens with
+(`-Dgopher-root`, `../angry-gopher` by default) and the webbox library's
+`src/*.zig` from zig-webbox's (`-Dwebbox-root`, `../zig-webbox`), unchanged
+and uncopied (Phase B step 2b, 2026-10-13). Every file that does I/O opens with
 `const Io = @import("host_io").Io;`, and this build hands them
 `src/host_io_metal.zig` as `host_io`. A file that aliases std's `Io` instead
 is refused by the build's check. What the application serves besides its code

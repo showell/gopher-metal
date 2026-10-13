@@ -1,6 +1,6 @@
 # The Store: one seam for the application's data
 
-*2026-10-07. The unified interface: angry-gopher's `zig-server/src/store.zig`
+*2026-10-07. The unified interface: webbox's `store.zig` (zig-webbox `src/`, until 2026-10-13 angry-gopher's `zig-server/src`)
 is the seam production runs, and the contract below is what every host
 implementation keeps. Essay: notes/where-the-metal-stack-stands.md, "The
 Store". The census of what the application calls: STORE-CENSUS.md.*
@@ -9,7 +9,7 @@ Store". The census of what the application calls: STORE-CENSUS.md.*
 
 | | what it is | where |
 |---|---|---|
-| **the seam** | the eleven operations below | angry-gopher `zig-server/src/store.zig` |
+| **the seam** | the eleven operations below | zig-webbox `src/store.zig` |
 | **on Linux** | that file over `std.Io` | as written |
 | **on metal** | that file over this repo's `io.zig` and `fat16` | the port's copy (`port.sh`), `Io = metal.io` |
 | **the model** | the oracle: plain, in memory | `src/store_model.zig` |
