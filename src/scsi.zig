@@ -113,12 +113,10 @@ pub const Memory = struct {
 /// an underrun, which is not the whole transfer it was asked for.
 const Outcome = struct { response: u8, status: u8, sense_key: u8, asc: u8 = 0, ascq: u8 = 0, residual: u32 = 0 };
 
-/// The additional sense codes of a UNIT ATTENTION that can mean the mode
-/// pages are not what this driver set (SPC-4 §4.5.6, table 47): a power on
-/// or reset (29h, any qualifier), or mode parameters changed (2Ah/01h).
-const asc_reset: u8 = 0x29;
-const asc_parameters_changed: u8 = 0x2A;
-const ascq_mode_parameters_changed: u8 = 0x01;
+// The additional sense codes of a UNIT ATTENTION that can mean the mode
+// pages are not what this driver set (a power on or reset, 29h with any
+// qualifier, or mode parameters changed, 2Ah/01h) are told apart, with the
+// others, in disk_failures.zig's `noteAttention`.
 
 const Direction = enum { none, from_disk, to_disk };
 
@@ -184,8 +182,9 @@ fn commandSettled(b: *virtio.Block, at: Address, cdb: []const u8, dir: Direction
         // MODE SELECT with SP clear saves nothing, so after a power on or a
         // reset the write cache this driver turned off is on again. Marked
         // here, and the caller looks again once its own command is done.
-        if (attention and (o.asc == asc_reset or (o.asc == asc_parameters_changed and o.ascq == ascq_mode_parameters_changed)))
-            b.cache_recheck = true;
+        // Every unit attention is counted by what it says (193, gap 7).
+        if (attention and b.failures.noteAttention(o.asc, o.ascq)) b.cache_recheck = true;
+        if (attention and tries == 2) b.failures.attentions_unsettled +%= 1;
         if (!attention or tries == 2) return o;
     }
 }

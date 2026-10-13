@@ -39,6 +39,20 @@ pub const Failures = struct {
     /// SCSI: a read or write that ended GOOD having moved fewer bytes than
     /// asked, which the driver fails.
     short_transfers: u64 = 0,
+    /// **UNIT ATTENTIONS, BY WHAT THEY SAY** (metal-vmm QUEUE 193, gap 7):
+    /// a reset or power on, mode parameters changed, capacity changed (the
+    /// volume resized under the machine), LUNs changed (re-attached), the
+    /// thin-provisioning threshold, and any other (with the last ASC/ASCQ);
+    /// and those that lasted every try, which failed their command.
+    attention_resets: u64 = 0,
+    attention_mode_changed: u64 = 0,
+    attention_capacity_changed: u64 = 0,
+    attention_luns_changed: u64 = 0,
+    attention_thin_threshold: u64 = 0,
+    attention_other: u64 = 0,
+    last_attention_asc: u8 = 0,
+    last_attention_ascq: u8 = 0,
+    attentions_unsettled: u64 = 0,
 
     /// A virtio-blk (or the Block's) status a request ended with.
     pub fn noteStatus(self: *Failures, status: u8) void {
@@ -77,9 +91,42 @@ pub const Failures = struct {
         }
     }
 
+    /// A UNIT ATTENTION a command met, counted by its ASC/ASCQ. Answers
+    /// whether it says the mode pages were put back (a reset, or mode
+    /// parameters changed), so the write cache must be looked at again.
+    pub fn noteAttention(self: *Failures, asc: u8, ascq: u8) bool {
+        switch (asc) {
+            asc_reset => self.attention_resets +%= 1,
+            asc_parameters_changed => switch (ascq) {
+                ascq_mode_parameters_changed => self.attention_mode_changed +%= 1,
+                ascq_capacity_changed => self.attention_capacity_changed +%= 1,
+                else => self.noteOtherAttention(asc, ascq),
+            },
+            asc_luns_changed_group => if (ascq == ascq_luns_changed) {
+                self.attention_luns_changed +%= 1;
+            } else self.noteOtherAttention(asc, ascq),
+            asc_thin_group => if (ascq == ascq_thin_threshold) {
+                self.attention_thin_threshold +%= 1;
+            } else self.noteOtherAttention(asc, ascq),
+            else => self.noteOtherAttention(asc, ascq),
+        }
+        return asc == asc_reset or (asc == asc_parameters_changed and ascq == ascq_mode_parameters_changed);
+    }
+
+    fn noteOtherAttention(self: *Failures, asc: u8, ascq: u8) void {
+        self.attention_other +%= 1;
+        self.last_attention_asc = asc;
+        self.last_attention_ascq = ascq;
+    }
+
+    pub fn attentions(self: *const Failures) u64 {
+        return self.attention_resets + self.attention_mode_changed + self.attention_capacity_changed +
+            self.attention_luns_changed + self.attention_thin_threshold + self.attention_other;
+    }
+
     pub fn any(self: *const Failures) bool {
         return self.ioerr + self.unsupported + self.ended + self.other_status +
-            self.scsi_responses + self.check_conditions + self.other_scsi_status + self.short_transfers > 0;
+            self.scsi_responses + self.check_conditions + self.other_scsi_status + self.short_transfers + self.attentions() > 0;
     }
 
     /// `none`, or each kind there was.
@@ -139,8 +186,27 @@ pub const Failures = struct {
             try Sep.put(w, &first);
             try w.print("{d} short transfers", .{self.short_transfers});
         }
+        if (self.attentions() > 0) {
+            if (!first) try w.writeAll("; ");
+            try w.print("unit attentions: {d} resets, {d} mode parameters changed, {d} capacity changed, {d} LUNs changed, {d} thin-provisioning threshold, {d} other", .{
+                self.attention_resets,       self.attention_mode_changed,   self.attention_capacity_changed,
+                self.attention_luns_changed, self.attention_thin_threshold, self.attention_other,
+            });
+            if (self.attention_other > 0) try w.print(" (last {X:0>2}h/{X:0>2}h)", .{ self.last_attention_asc, self.last_attention_ascq });
+            if (self.attentions_unsettled > 0) try w.print(", {d} lasted every try and failed their command", .{self.attentions_unsettled});
+        }
     }
 };
+
+/// SPC-4 annex F: the unit attentions told apart.
+pub const asc_reset: u8 = 0x29;
+pub const asc_parameters_changed: u8 = 0x2A;
+pub const ascq_mode_parameters_changed: u8 = 0x01;
+pub const ascq_capacity_changed: u8 = 0x09;
+const asc_luns_changed_group: u8 = 0x3F;
+const ascq_luns_changed: u8 = 0x0E;
+const asc_thin_group: u8 = 0x38;
+const ascq_thin_threshold: u8 = 0x07;
 
 /// virtio-blk's and the Block's status bytes (virtio.zig's blk_s_*).
 pub const status_ok: u8 = 0;
@@ -194,4 +260,27 @@ test "disk failures: SCSI's CHECK CONDITION by sense key, with the last ASC/ASCQ
     const t = try text(&f);
     defer testing.allocator.free(t);
     try testing.expectEqualStrings("3 CHECK CONDITION (MEDIUM ERROR 2, UNIT ATTENTION 1; the last ASC/ASCQ 11h/00h), 1 virtio-scsi response not OK (last 09h), 1 other SCSI status (last 08h)", t);
+}
+
+test "a capacity-changed unit attention is counted by its ASC; a reset's and mode change's ask for the cache to be looked at again (metal-vmm QUEUE 193, gap 7)" {
+    var f: Failures = .{};
+    try testing.expect(!f.noteAttention(0x2A, 0x09)); // capacity data has changed
+    try testing.expectEqual(@as(u64, 1), f.attention_capacity_changed);
+    try testing.expect(f.noteAttention(0x29, 0x00)); // power on or reset
+    try testing.expect(f.noteAttention(0x29, 0x02)); // SCSI bus reset
+    try testing.expectEqual(@as(u64, 2), f.attention_resets);
+    try testing.expect(f.noteAttention(0x2A, 0x01)); // mode parameters changed
+    try testing.expectEqual(@as(u64, 1), f.attention_mode_changed);
+    try testing.expect(!f.noteAttention(0x3F, 0x0E)); // reported LUNs data has changed
+    try testing.expectEqual(@as(u64, 1), f.attention_luns_changed);
+    try testing.expect(!f.noteAttention(0x38, 0x07)); // thin provisioning soft threshold
+    try testing.expectEqual(@as(u64, 1), f.attention_thin_threshold);
+    try testing.expect(!f.noteAttention(0x2A, 0x10)); // timestamp changed
+    try testing.expectEqual(@as(u64, 1), f.attention_other);
+    try testing.expectEqual(@as(u8, 0x10), f.last_attention_ascq);
+    try testing.expectEqual(@as(u64, 7), f.attentions());
+    var buf: [400]u8 = undefined;
+    var w: std.Io.Writer = .fixed(&buf);
+    try f.write(&w);
+    try testing.expect(std.mem.indexOf(u8, w.buffered(), "unit attentions: 2 resets, 1 mode parameters changed, 1 capacity changed, 1 LUNs changed, 1 thin-provisioning threshold, 1 other (last 2Ah/10h)") != null);
 }

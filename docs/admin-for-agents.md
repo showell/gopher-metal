@@ -180,7 +180,14 @@ From the top:
        changed, and is normal once after attaching), with the last ASC/ASCQ
        to look up in SPC-4; a virtio-scsi response other than OK (the
        hypervisor's transport failed); another SCSI status (BUSY, ...); and
-       short transfers (GOOD, but fewer bytes moved than asked);
+       short transfers (GOOD, but fewer bytes moved than asked). Then
+       its **unit attentions** by what they said: resets (normal once
+       after attaching), mode parameters changed, capacity changed (the
+       volume was resized under the machine: the filesystem still uses
+       the old size), LUNs changed (something re-attached), the
+       thin-provisioning threshold (the backing store is filling), and
+       others with the last ASC/ASCQ. "Lasted every try" is a command that
+       met one three times running and failed;
      - **at boot**: reads that failed at boot and answered when tried
        again (above zero: the disk was slow or flaky as the machine came
        up), and how the FAT's two copies stood at mount. "Agreed" is the
