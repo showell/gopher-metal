@@ -1053,10 +1053,13 @@ fn serveOne(
         const refused_status: u16 = @intFromEnum(webbox.edge.statusFor(r.kind));
         logRequest(number, "(refused at its head)", r.msg[0 .. r.msg.len - 1], refused_status, null);
         // A drained body refused (late, past what is kept): what came of it.
-        if (wait.drain) |d| {
-            if (d.upload) {
-                noteUpload(number, d, metal.log_ring.withoutQuery(req.head.target), metal.uploads_seen.kindOf(d.body()) orelse "", refused_status, r.msg, null, 0, Io.awakeNs() orelse 0);
-            } else if (d.len > d.head_len) logBody(d, Io.awakeNs() orelse 0);
+        // **AN UPLOAD REFUSED FROM ITS HEAD IS AN UPLOAD** (194.1), with
+        // or without a drain: busy, no memory, an asker unknown, an older
+        // retry's 409, a stranger.
+        if (wait.wasUpload()) {
+            noteUpload(number, wait.drain, metal.log_ring.withoutQuery(req.head.target), if (wait.drain) |d| metal.uploads_seen.kindOf(d.body()) orelse "" else "", refused_status, r.msg, null, 0, Io.awakeNs() orelse 0);
+        } else if (wait.drain) |d| {
+            if (d.len > d.head_len) logBody(d, Io.awakeNs() orelse 0);
         }
         close(wire, table, i);
         return;
@@ -1766,7 +1769,9 @@ fn wallMs() ?i64 {
 }
 
 /// An upload's answer, recorded and said under its request's line.
-fn noteUpload(number: u64, d: Drains.Drain, path: []const u8, kind: []const u8, status: u16, ended: []const u8, turn_ns: ?u64, disk_requests: u64, now: i96) void {
+fn noteUpload(number: u64, drained: ?Drains.Drain, path: []const u8, kind: []const u8, status: u16, ended: []const u8, turn_ns: ?u64, disk_requests: u64, now: i96) void {
+    // Refused at its head before a drain was begun: no body, no time.
+    const d: Drains.Drain = drained orelse .{ .bytes = &.{}, .head_len = 0, .framing = .length, .want = 0, .most = 0, .began = now, .deadline_at = now, .last_progress = now, .whole = true, .whole_at = now, .upload = true, .charged = false };
     const u: metal.uploads_seen.Upload = .{
         .number = number,
         .unix_ms = wallMs(),

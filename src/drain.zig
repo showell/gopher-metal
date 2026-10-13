@@ -206,6 +206,11 @@ pub fn Drains(comptime Rule: type, comptime conns: usize) type {
             head_at: ?i96 = null,
             late: bool = false,
             drain: ?Drain = null,
+            /// **AN UPLOAD, WHETHER OR NOT ITS BODY WAS READ** (metal-vmm
+            /// QUEUE 194.1): set as its rule says upload, so one refused
+            /// from its head (busy, no memory, an asker unknown, an older
+            /// retry's 409, a stranger) is still counted as an upload.
+            upload_asked: bool = false,
             slot: ?usize = null,
             /// Since when an uploader has waited for a slot.
             slot_wait_since: ?i96 = null,
@@ -223,6 +228,10 @@ pub fn Drains(comptime Rule: type, comptime conns: usize) type {
 
             /// The host's refusal before the route, if any. Late is first: a
             /// body that did not come is 408 whatever else was decided.
+            pub fn wasUpload(w: *const Wait) bool {
+                return w.upload_asked;
+            }
+
             pub fn refusal(w: *const Wait) ?Refusal {
                 if (w.late) return .too_slow;
                 return switch (w.verdict) {
@@ -378,6 +387,7 @@ pub fn Drains(comptime Rule: type, comptime conns: usize) type {
 
         fn upload(self: *Self, i: usize, c: Conn, now: i96, head_len: usize, read: Rule.Read) Step {
             const w = &self.waits[i];
+            w.upload_asked = true;
             const head = c.pending[0..head_len];
             const parsed = std.http.Server.Request.Head.parse(head) catch return .{ .then = .serve };
             if (w.slot == null) {
@@ -549,7 +559,7 @@ pub fn Drains(comptime Rule: type, comptime conns: usize) type {
             };
             w.verdict = verdict;
             self.charged += bytes.len;
-            w.drain = .{ .bytes = bytes, .len = bytes.len, .head_len = bytes.len, .framing = .length, .want = 0, .most = bytes.len, .began = now, .deadline_at = now, .last_progress = now, .whole = true, .whole_at = now, .upload = false, .charged = true };
+            w.drain = .{ .bytes = bytes, .len = bytes.len, .head_len = bytes.len, .framing = .length, .want = 0, .most = bytes.len, .began = now, .deadline_at = now, .last_progress = now, .whole = true, .whole_at = now, .upload = w.upload_asked, .charged = true };
             return .{ .then = .serve };
         }
     };
@@ -1135,4 +1145,36 @@ test "a head kept to answer from is held to the budget too: past it, 503 with no
     try testing.expectEqual(Refusal.busy, d.waits[0].refusal().?);
     try testing.expect(d.waits[0].drain == null);
     try testing.expectEqual(@as(usize, 0), d.charged);
+}
+
+test "an upload refused from its head is still known to be an upload: a stranger, an asker unknown, the slot wait run out (metal-vmm QUEUE 194.1)" {
+    const req = try request("/up", 10_000, "", "");
+    defer testing.allocator.free(req);
+    const small = try request("/doc", 100, "", "");
+    defer testing.allocator.free(small);
+    var d: TestDrains = .{ .gpa = testing.allocator, .limit = caps };
+    var s: Client = .{ .i = 0, .serial = 1, .bytes = req, .sent = req.len };
+    try testing.expectEqual(Then.serve, s.upload(&d, .stranger, 0));
+    try testing.expect(d.waits[0].wasUpload());
+    d.release(0);
+    var u: Client = .{ .i = 1, .serial = 2, .bytes = req, .sent = req.len };
+    try testing.expectEqual(Then.serve, u.upload(&d, .unknown, 0));
+    try testing.expect(d.waits[1].wasUpload());
+    d.release(1);
+    // Every slot held: the next uploader waits, then is told busy.
+    var held: [3]Client = undefined;
+    for (&held, 0..) |*h, k| {
+        h.* = .{ .i = 2 + k, .serial = 10 + k, .bytes = req, .sent = req.len };
+        _ = h.upload(&d, .{ .who = @intCast(10 + k) }, 0);
+    }
+    var e: Client = .{ .i = 5, .serial = 20, .bytes = req, .sent = req.len };
+    _ = e.upload(&d, .{ .who = 30 }, 0);
+    try testing.expectEqual(Then.serve, e.step(&d, ms(body_rule.slot_wait_ms)));
+    try testing.expectEqual(Refusal.busy, d.waits[5].refusal().?);
+    try testing.expect(d.waits[5].wasUpload());
+    // A small body is not an upload.
+    var p: Client = .{ .i = 6, .serial = 21, .bytes = small, .sent = small.len };
+    _ = p.settle(&d, 0);
+    try testing.expect(!d.waits[6].wasUpload());
+    for (2..7) |k| d.release(k);
 }
