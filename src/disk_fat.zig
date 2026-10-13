@@ -449,6 +449,9 @@ pub const Volume = struct {
     /// **FAILED SECTOR READS AND WRITES** (metal-vmm QUEUE 193.3): requests
     /// the disk did not answer OK, as this volume met them (a read tried
     /// again and failed is one). The Block says why (`blk.failures`).
+    /// How the FAT's copies stood at mount (`cacheFatChecked`), kept for
+    /// /admin/host (metal-vmm QUEUE 193, gap 10); null before.
+    mounted: ?Mirrors = null,
     /// Writes turned away because writes are refused (`refuseWrite`):
     /// each one a save that did not happen (metal-vmm QUEUE 193, gap 9).
     writes_turned_away: u64 = 0,

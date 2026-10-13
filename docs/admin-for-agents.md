@@ -176,6 +176,13 @@ From the top:
        to look up in SPC-4; a virtio-scsi response other than OK (the
        hypervisor's transport failed); another SCSI status (BUSY, ...); and
        short transfers (GOOD, but fewer bytes moved than asked);
+     - **at boot**: reads that failed at boot and answered when tried
+       again (above zero: the disk was slow or flaky as the machine came
+       up), and how the FAT's two copies stood at mount. "Agreed" is the
+       normal case; "differed" means a machine stopped between the
+       copies' writes, or a copy reads wrong, and says which was kept and
+       what was written. "REFUSED the repair" means the copies are still
+       apart;
      - its idle check, with what it last found;
      - whether it takes writes. "writes: REFUSED" means its FAT copies
        could not be weighed at mount; it is weighed again once a minute.

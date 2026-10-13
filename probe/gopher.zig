@@ -1551,6 +1551,7 @@ fn mountFat(blk: *virtio.Block, scratch: *[disk_fat.sector_size]u8, what: []cons
         serial.put("\n");
         serial.fail("the FAT could not be held in memory");
     };
+    vol.mounted = mirrors;
     // Lookups read a directory up to a cluster per request (disk_fat's
     // `dir_burst`), within the most one request carries.
     const burst_sectors = @min(vol.sectors_per_cluster, vol.blk.most_sectors);
@@ -2117,9 +2118,9 @@ fn metalFacts(io: Io, alloc: std.mem.Allocator) anyerror![]const webbox.host_fac
             try facts.append(alloc, .{ .label = if (k == 0) "an upload, the newest first" else "", .value = one.written() });
         }
     }
-    if (Io.siteVolume()) |v| try addVolume(&facts, alloc, "the boot disk (the site)", "the boot disk's write cache", "the boot disk's folders in memory", v);
+    if (Io.siteVolume()) |v| try addVolume(&facts, alloc, "the boot disk (the site)", "the boot disk's write cache", "the boot disk's folders in memory", "the boot disk at boot", v);
     if (Io.dataVolume()) |v| {
-        try addVolume(&facts, alloc, "the volume (" ++ app.hosting.data_name ++ ")", "the volume's write cache", "the volume's folders in memory", v);
+        try addVolume(&facts, alloc, "the volume (" ++ app.hosting.data_name ++ ")", "the volume's write cache", "the volume's folders in memory", "the volume at boot", v);
     } else try add(&facts, alloc, "the volume (" ++ app.hosting.data_name ++ ")", "none attached: the data is on the boot disk", .{});
     const kept = Io.siteCache();
     try add(&facts, alloc, "site files in memory", "{d} kept, {d} KB of {d} KB; {d} reads answered from them", .{
@@ -2198,7 +2199,7 @@ fn kindName(v: *const disk_fat.Volume) []const u8 {
     return if (v.kind == .fat32) "FAT32" else "FAT16";
 }
 
-fn addVolume(facts: *std.ArrayList(webbox.host_facts.Fact), alloc: std.mem.Allocator, label: []const u8, cache_label: []const u8, dirs_label: []const u8, v: *disk_fat.Volume) !void {
+fn addVolume(facts: *std.ArrayList(webbox.host_facts.Fact), alloc: std.mem.Allocator, label: []const u8, cache_label: []const u8, dirs_label: []const u8, boot_label: []const u8, v: *disk_fat.Volume) !void {
     var serial_text: [9]u8 = undefined;
     const named = if (v.serial) |n| serialText(&serial_text, n) else "no serial";
     const value = if (v.space()) |sp|
@@ -2211,6 +2212,12 @@ fn addVolume(facts: *std.ArrayList(webbox.host_facts.Fact), alloc: std.mem.Alloc
     else |e|
         try std.fmt.allocPrint(alloc, "{s}, serial {s}: free space unreadable ({s})", .{ kindName(v), named, @errorName(e) });
     try facts.append(alloc, .{ .label = label, .value = value });
+    // **WHAT THE BOOT FOUND** (193, gap 10): once only boot log lines.
+    {
+        var boot: std.Io.Writer.Allocating = .init(alloc);
+        try metal.boot_facts.write(&boot.writer, v.blk.reads_retried, v.mounted);
+        try facts.append(alloc, .{ .label = boot_label, .value = boot.written() });
+    }
     // **A VOLUME THAT REFUSES WRITES SAYS SO** (metal-vmm QUEUE 188.2).
     if (v.writes == .refused or v.reweighs > 0) try facts.append(alloc, .{
         .label = "writes",
