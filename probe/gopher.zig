@@ -1778,11 +1778,12 @@ fn noteUpload(number: u64, drained: ?Drains.Drain, path: []const u8, kind: []con
         .path = .of(path),
         .kind = .of(kind),
         .bytes = d.len - d.head_len,
-        .arrival_ms = @intCast(@divTrunc(@max((if (d.whole) d.whole_at else now) - d.began, 0), std.time.ns_per_ms)),
+        .arrival_ms = @intCast(@divTrunc(@max((if (d.cameWhole()) d.whole_at else now) - d.began, 0), std.time.ns_per_ms)),
         .turn_ms = if (turn_ns) |t| t / std.time.ns_per_ms else null,
         .disk_requests = disk_requests,
         .status = status,
-        .outcome = metal.uploads_seen.classify(status, d.whole, ended),
+        .came_whole = d.cameWhole(),
+        .outcome = metal.uploads_seen.classify(status, d.cameWhole(), ended),
     };
     uploads.record(u);
     var line: [512]u8 = undefined;

@@ -44,7 +44,8 @@ pub const Outcome = enum {
 };
 
 /// What an upload's answer is named from: its status (0: none went out),
-/// whether its body came whole, and how the route ended (an error's name).
+/// whether its body came whole (all of it, not cut short by its client:
+/// the drain's `cameWhole`), and how the route ended (an error's name).
 pub fn classify(status: u16, whole: bool, ended: []const u8) Outcome {
     // Refused at its head, before the body was waited for: whole or not,
     // the refusal is the answer.
@@ -89,6 +90,9 @@ pub const Upload = struct {
     turn_ms: ?u64,
     disk_requests: u64,
     status: u16,
+    /// Its body all in (194.2's `cameWhole`); a body that never arrived
+    /// is said "not whole after", not "arrived in" (189's minor 9).
+    came_whole: bool = true,
     outcome: Outcome,
 
     pub fn write(u: *const Upload, w: *std.Io.Writer) std.Io.Writer.Error!void {
@@ -98,7 +102,7 @@ pub const Upload = struct {
         }
         try w.print("request {d}: {s}", .{ u.number, u.path.slice() });
         if (u.kind.len > 0) try w.print(", {s}", .{u.kind.slice()});
-        try w.print(", {d} bytes, arrived in {d} ms", .{ u.bytes, u.arrival_ms });
+        try w.print(", {d} bytes, {s} {d} ms", .{ u.bytes, if (u.came_whole) "arrived in" else "not whole after", u.arrival_ms });
         if (u.turn_ms) |t| try w.print(", its turn {d} ms", .{t});
         try w.print(", {d} disk requests: {s}", .{ u.disk_requests, u.outcome.text() });
         if (u.status != 0) try w.print(" ({d})", .{u.status});
@@ -171,7 +175,9 @@ test "uploads: each answer named from its status, its body and how it ended" {
     try testing.expectEqual(Outcome.taken_over, classify(409, false, "a newer upload"));
     try testing.expectEqual(Outcome.client_gone, classify(408, false, "too slow"));
     try testing.expectEqual(Outcome.client_gone, classify(0, false, "EndOfStream"));
-    try testing.expectEqual(Outcome.client_gone, classify(500, false, "ReadFailed")); // not whole: the client's going came first
+    // A body its client stopped short of (a tab closed mid-upload) is the
+    // client gone, whatever its route then answered (194.2).
+    try testing.expectEqual(Outcome.client_gone, classify(400, false, "ok"));
     try testing.expectEqual(Outcome.failed, classify(500, true, "OutOfMemory"));
     try testing.expectEqual(Outcome.refused, classify(400, true, "MalformedForm"));
 }

@@ -182,6 +182,9 @@ pub fn Drains(comptime Rule: type, comptime conns: usize) type {
             /// When a byte last came.
             last_progress: i96,
             whole: bool = false,
+            /// Its client stopped sending before it was all in: `whole`, so
+            /// it is served, but it did not come (194.2).
+            cut_short: bool = false,
             /// When it came whole, for the log.
             whole_at: i96 = 0,
             upload: bool,
@@ -194,6 +197,13 @@ pub fn Drains(comptime Rule: type, comptime conns: usize) type {
 
             pub fn body(d: *const Drain) []u8 {
                 return d.bytes[d.head_len..d.len];
+            }
+
+            /// **CAME WHOLE, NOT ENDED SHORT** (metal-vmm QUEUE 194.2):
+            /// `whole` also marks a body its client stopped sending, so it
+            /// is served and its route refuses it; that one did not come.
+            pub fn cameWhole(d: *const Drain) bool {
+                return d.whole and !d.cut_short;
             }
         };
 
@@ -521,7 +531,10 @@ pub fn Drains(comptime Rule: type, comptime conns: usize) type {
             }
             // The client finished sending without finishing the body: served,
             // its short body refused by its route's read.
-            if (!d.whole and w.verdict == .none and c.peer_done and c.pending.len == n) d.whole = true;
+            if (!d.whole and w.verdict == .none and c.peer_done and c.pending.len == n) {
+                d.whole = true;
+                d.cut_short = true;
+            }
             if (d.whole) d.whole_at = now;
             w.late = !d.whole and w.verdict == .none and now >= d.deadline_at;
             // **A STALLED UPLOAD GIVES ITS SLOT BACK** (170.1): no byte for
@@ -1177,4 +1190,26 @@ test "an upload refused from its head is still known to be an upload: a stranger
     _ = p.settle(&d, 0);
     try testing.expect(!d.waits[6].wasUpload());
     for (2..7) |k| d.release(k);
+}
+
+test "an upload cut short by its client did not come whole, and is the client gone (metal-vmm QUEUE 194.2)" {
+    const uploads_seen = @import("uploads_seen.zig");
+    const body = try pattern(10_000);
+    defer testing.allocator.free(body);
+    const req = try request("/up", body.len, "", body);
+    defer testing.allocator.free(req);
+    const short = req[0 .. req.len - 4_000];
+    var d: TestDrains = .{ .gpa = testing.allocator, .limit = caps };
+    defer d.release(0);
+    var c: Client = .{ .i = 0, .serial = 1, .bytes = short, .sent = short.len, .done = true };
+    try testing.expectEqual(Then.serve, c.upload(&d, .{ .who = 1 }, 0));
+    const got = d.waits[0].drain.?;
+    try testing.expect(got.whole); // served, so its route refuses it
+    try testing.expect(!got.cameWhole());
+    try testing.expectEqual(uploads_seen.Outcome.client_gone, uploads_seen.classify(400, got.cameWhole(), "ok"));
+    // All of it: came whole.
+    var e: Client = .{ .i = 1, .serial = 2, .bytes = req, .sent = req.len, .done = true };
+    _ = e.upload(&d, .{ .who = 2 }, 0);
+    try testing.expect(d.waits[1].drain.?.cameWhole());
+    d.release(1);
 }
