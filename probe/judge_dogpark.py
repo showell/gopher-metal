@@ -80,6 +80,11 @@ def content(root: str) -> None:
 # A step: (name, method, path, who, body). `who` is None (no cookie), ALICE or
 # BOB (minted here), or "stranger" (the cookie this host's /me handed out).
 J = "application/json"
+# Dog Park's world is 64 x 64 tiles of 500 px, its populated 10 x 10 park
+# 13,500 px (27 tiles) in on each axis (dog-park's tiles.zig): the story's
+# points and tiles are the park's, shifted so.
+P = 13_500
+T = 27
 FIRST = [
     ("the page", "GET", "/", None, None),
     ("its script", "GET", "/park.js", None, None),
@@ -92,25 +97,26 @@ FIRST = [
     ("a stranger arrives", "GET", "/me", None, None),
     ("the stranger, known", "GET", "/me", "stranger", None),
     ("Alice, first sight", "GET", "/me", ALICE, None),
-    ("Alice's viewport", "POST", "/viewport", ALICE, b'{"park_x":1200,"park_y":700}'),
-    ("Alice's tiles", "POST", "/tiles", ALICE, b'{"tiles":[{"col":0,"row":0,"is":"new"},{"col":1,"row":0,"is":"new"}]}'),
-    ("Alice's tiles, one held", "POST", "/tiles", ALICE, b'{"tiles":[{"col":0,"row":0,"is":"held"},{"col":1,"row":1,"is":"new"}]}'),
-    ("a tile outside", "POST", "/tiles", ALICE, b'{"tiles":[{"col":10,"row":0,"is":"new"}]}'),
+    ("Alice's viewport", "POST", "/viewport", ALICE, f'{{"park_x":{P + 1200},"park_y":{P + 700}}}'.encode()),
+    ("Alice's tiles", "POST", "/tiles", ALICE, f'{{"tiles":[{{"col":{T},"row":{T},"is":"new"}},{{"col":{T + 1},"row":{T},"is":"new"}}]}}'.encode()),
+    ("Alice's tiles, one held", "POST", "/tiles", ALICE, f'{{"tiles":[{{"col":{T},"row":{T},"is":"held"}},{{"col":{T + 1},"row":{T + 1},"is":"new"}}]}}'.encode()),
+    ("a tile outside", "POST", "/tiles", ALICE, b'{"tiles":[{"col":64,"row":0,"is":"new"}]}'),
     ("too many tiles", "POST", "/tiles", ALICE,
-     ('{"tiles":[' + ",".join(f'{{"col":{i % 10},"row":{i // 10},"is":"new"}}' for i in range(26)) + "]}").encode()),
+     ('{"tiles":[' + ",".join(f'{{"col":{i % 64},"row":{i // 64},"is":"new"}}' for i in range(65)) + "]}").encode()),
     ("a body that does not read", "POST", "/tiles", ALICE, b'{"tiles":'),
     ("Alice leashes 0", "POST", "/leash", ALICE, b'{"dog":0}'),
     ("Alice leashes 1", "POST", "/leash", ALICE, b'{"dog":1}'),
     ("Bob wants 1", "POST", "/leash", BOB, b'{"dog":1}'),
     ("no such dog", "POST", "/leash", BOB, b'{"dog":100000}'),
-    # Dog 0 at (155, 350) heads for cow 0 at (250, 250): the cow steps aside.
-    ("Alice's dog scares a cow", "POST", "/move", ALICE, b'{"dog":0,"path":[[165,340]]}'),
-    ("Alice drags 1 along a path", "POST", "/move", ALICE, b'{"dog":1,"path":[[360,160],[372,171],[385,180],[399,191]]}'),
-    ("Alice moves 1", "POST", "/move", ALICE, b'{"dog":1,"path":[[2345,1234]]}'),
+    # Dog 0 at the park's (155, 350) heads for cow 0 at its (250, 250): the cow steps aside.
+    ("Alice's dog scares a cow", "POST", "/move", ALICE, f'{{"dog":0,"path":[[{P + 165},{P + 340}]]}}'.encode()),
+    ("Alice drags 1 along a path", "POST", "/move", ALICE,
+     ('{"dog":1,"path":[' + ",".join(f"[{P + x},{P + y}]" for x, y in ((360, 160), (372, 171), (385, 180), (399, 191))) + "]}").encode()),
+    ("Alice moves 1", "POST", "/move", ALICE, f'{{"dog":1,"path":[[{P + 2345},{P + 1234}]]}}'.encode()),
     ("a move outside", "POST", "/move", ALICE, b'{"dog":1,"path":[[-5,10]]}'),
     ("a move with no path", "POST", "/move", ALICE, b'{"dog":1,"path":[]}'),
     ("a path past 100 points", "POST", "/move", ALICE,
-     ('{"dog":1,"path":[' + ",".join(f"[{2000 + i},1234]" for i in range(101)) + "]}").encode()),
+     ('{"dog":1,"path":[' + ",".join(f"[{P + 2000 + i},{P + 1234}]" for i in range(101)) + "]}").encode()),
     ("Bob releases 1", "POST", "/release", BOB, b'{"dog":1}'),
     ("Alice, again", "GET", "/me", ALICE, None),
     ("Alice releases 1", "POST", "/release", ALICE, b'{"dog":1}'),
@@ -120,7 +126,7 @@ FIRST = [
 SECOND = [
     ("Alice, after a restart", "GET", "/me", ALICE, None),
     ("Bob, after a restart", "GET", "/me", BOB, None),
-    ("the moved dog's tile", "POST", "/tiles", BOB, b'{"tiles":[{"col":4,"row":2,"is":"new"}]}'),
+    ("the moved dog's tile", "POST", "/tiles", BOB, f'{{"tiles":[{{"col":{T + 4},"row":{T + 2},"is":"new"}}]}}'.encode()),
 ]
 COMPARED_HEADERS = ("content-type", "allow", "cache-control")
 STRANGER = re.compile(r"^dogpark_human=([0-9a-f]{32})\.(\d+)\.[A-Za-z0-9_-]{43}; Path=/; Max-Age=31536000; "
@@ -270,18 +276,20 @@ def main() -> int:
     # What the story is for, said on the Linux side (the comparison carries it
     # to metal): the restart kept the viewport and the move, not the leash.
     # Dog 0 moves (10, -10), east then north (dog-park's cows.zig: a police
-    # car on a grid). Cow 0, at (250, 250), is ahead of it both ways and out
-    # of its lanes: the east part moves it north half as far, 5 px, the north
-    # part east 5 px. Half pixels.
+    # car on a grid). Cow 0, at the park's (250, 250), is ahead of it both
+    # ways and out of its lanes: the east part moves it north half as far,
+    # 5 px, the north part east 5 px. Half pixels.
     first = dict(zip([st[0] for st in FIRST], seen["first boot:"][0]))
     scare = first["Alice's dog scares a cow"].get("body")
-    if scare != b'{"moved":0,"park_x":165,"park_y":340,"cows":[{"id":0,"half_x":510,"half_y":490}]}':
-        problems.append(f"first boot: dog 0's move did not step cow 0 to half pixels (510, 490): {scare!r}")
+    want = (f'{{"moved":0,"park_x":{P + 165},"park_y":{P + 340},'
+            f'"cows":[{{"id":0,"half_x":{2 * P + 510},"half_y":{2 * P + 490}}}]}}').encode()
+    if scare != want:
+        problems.append(f"first boot: dog 0's move did not step cow 0 to half pixels ({2 * P + 510}, {2 * P + 490}): {scare!r}")
     after = seen["after a restart:"][0]
-    if after and after[0].get("body") != b'{"viewport":{"at":{"park_x":1200,"park_y":700}},"leash":{"none":{}}}':
+    if after and after[0].get("body") != f'{{"viewport":{{"at":{{"park_x":{P + 1200},"park_y":{P + 700}}}}},"leash":{{"none":{{}}}}}}'.encode():
         problems.append(f"after a restart: Alice's /me is {after[0].get('body')!r}, not her kept viewport and no leash")
-    if after and b'{"id":1,"emoji":' not in after[2].get("body", b"") or b'"park_x":2345,"park_y":1234}' not in after[2].get("body", b""):
-        problems.append(f"after a restart: dog 1 is not at (2345, 1234) on its tile: {j.abbrev(after[2].get('body'))}")
+    if after and b'{"id":1,"emoji":' not in after[2].get("body", b"") or f'"park_x":{P + 2345},"park_y":{P + 1234}}}'.encode() not in after[2].get("body", b""):
+        problems.append(f"after a restart: dog 1 is not at ({P + 2345}, {P + 1234}) on its tile: {j.abbrev(after[2].get('body'))}")
 
     steps = len(FIRST) + len(SECOND)
     for p in problems:
