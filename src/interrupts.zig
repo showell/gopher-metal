@@ -49,6 +49,7 @@
 //! Intel SDM vol. 3A: §6.10-6.14 (the IDT), §11.4-11.5 (the local APIC and its
 //! timer), §10.11 (MSI message format).
 
+const apic_rule = @import("apic_rule.zig");
 const rest_count = @import("rest_count.zig");
 const std = @import("std");
 const port = @import("port.zig");
@@ -64,7 +65,7 @@ const spurious_vector: u8 = 0xFF;
 
 /// The local APIC's registers, at the address every PC puts them (and the
 /// handler below writes to without asking).
-const lapic_base: usize = 0xFEE0_0000;
+const lapic_base: usize = apic_rule.lapic_base;
 const lapic_id = 0x020;
 const lapic_tpr = 0x080;
 const lapic_eoi = 0x0B0;
@@ -95,12 +96,7 @@ const IdtPointer = packed struct { limit: u16, base: u64 };
 var idt_pointer: IdtPointer = undefined;
 
 /// The vectors whose exception pushes an error code before the return address.
-fn hasErrorCode(vector: usize) bool {
-    return switch (vector) {
-        8, 10, 11, 12, 13, 14, 17, 21, 29, 30 => true,
-        else => false,
-    };
-}
+const hasErrorCode = apic_rule.hasErrorCode;
 
 // The handlers. `boot.zig` loaded the 64-bit code segment as selector 0x08.
 comptime {
@@ -335,21 +331,21 @@ fn lapicRead(reg: usize) u32 {
     return @as(*volatile u32, @ptrFromInt(lapic_base + reg)).*;
 }
 
-/// Why the local APIC could not be used, for the log.
-pub const Refusal = enum { no_apic, no_tsc_deadline, apic_elsewhere, x2apic };
+/// Why the local APIC could not be used, for the log (apic_rule.zig: the
+/// decisions, pure and tested, 198.2).
+pub const Refusal = apic_rule.Refusal;
 
 /// The local APIC, ready to take interrupts and to time a rest: its ID, which
 /// an MSI-X message names as its destination.
 pub fn startApic() union(enum) { id: u8, refused: Refusal } {
     const features = cpuid(1);
+    // Every refusal is apic_rule's. In x2APIC mode the registers below are
+    // not in memory at all (SDM §11.12): every write here, the handler's EOI
+    // among them, would go nowhere, and the first rest would never wake.
+    // The MSR is read only once CPUID says there is an APIC.
     if (features.edx & (1 << 9) == 0) return .{ .refused = .no_apic };
-    if (features.ecx & (1 << 24) == 0) return .{ .refused = .no_tsc_deadline };
     const base = rdmsr(msr_apic_base);
-    if (base & 0xFFFF_F000 != lapic_base) return .{ .refused = .apic_elsewhere };
-    // In x2APIC mode the registers below are not in memory at all (SDM
-    // §11.12): every write here, the handler's EOI among them, would go
-    // nowhere, and the first rest would never wake.
-    if (base & (1 << 10) != 0) return .{ .refused = .x2apic };
+    if (apic_rule.refusal(features.edx, features.ecx, base)) |r| return .{ .refused = r };
     wrmsr(msr_apic_base, base | (1 << 11)); // globally enabled
 
     // **THE BIOS'S OLD INTERRUPT CONTROLLER IS CUT OFF.** It still runs the
@@ -399,7 +395,7 @@ var slice_ticks: u64 = 0;
 /// From now on `rest` halts. Only once something will wake it: the APIC
 /// started and the network card routed to `wake_vector`.
 pub fn arm(tsc_hz: u64) void {
-    slice_ticks = tsc_hz / (1_000_000_000 / slice_ns);
+    slice_ticks = apic_rule.sliceTicks(tsc_hz, slice_ns);
 }
 
 pub fn armed() bool {

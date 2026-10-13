@@ -94,8 +94,6 @@ const status_check_condition: u8 = 2;
 /// The sense key a disk reports once after it is attached or reset: a fact to
 /// be told, not a failure. The command is simply sent again.
 const sense_unit_attention: u8 = 6;
-/// The sense key of a command the disk does not support.
-const sense_illegal_request: u8 = 5;
 
 /// The memory a SCSI disk needs on top of `virtio.BlockMemory`'s ring: the
 /// controller's two other queues, the header and response, and a sector of
@@ -186,8 +184,14 @@ fn commandSettled(b: *virtio.Block, at: Address, cdb: []const u8, dir: Direction
         // here, and the caller looks again once its own command is done.
         // Every unit attention is counted by what it says (193, gap 7).
         if (attention and b.failures.noteAttention(o.asc, o.ascq)) b.cache_recheck = true;
-        if (attention and tries == 2) b.failures.attentions_unsettled +%= 1;
-        if (!attention or tries == 2) return o;
+        switch (mode.retry(tries, attention)) {
+            .again => {},
+            .done => return o,
+            .gave_up => {
+                b.failures.attentions_unsettled +%= 1;
+                return o;
+            },
+        }
     }
 }
 
@@ -236,13 +240,15 @@ pub fn synchronize(b: *virtio.Block, at: Address) u8 {
     const cdb = [10]u8{ 0x35, 0, 0, 0, 0, 0, 0, 0, 0, 0 };
     const o = commandSettled(b, at, &cdb, .none, 0, 0);
     if (b.cache_recheck) recheckCache(b, at);
-    if (good(o)) return virtio.blk_s_ok;
-    if (o.response == response_ok and o.status == status_check_condition and o.sense_key == sense_illegal_request) {
-        b.write_cache = false;
-        b.synchronize_unknown = true;
-        return virtio.blk_s_ok;
+    switch (mode.synced(good(o), o.response == response_ok and o.status == status_check_condition, o.sense_key)) {
+        .ok => return virtio.blk_s_ok,
+        .write_through => {
+            b.write_cache = false;
+            b.synchronize_unknown = true;
+            return virtio.blk_s_ok;
+        },
+        .failed => return virtio.blk_s_ioerr,
     }
-    return virtio.blk_s_ioerr;
 }
 
 /// **DOES THE DISK CACHE WRITES?** MODE SENSE(10) for the caching mode page
@@ -262,14 +268,10 @@ fn writeCache(b: *virtio.Block, at: Address, scratch: u64, page: []const u8, got
     // Only what the disk sent is its answer: the bytes past it in `page` are
     // whatever was there before.
     got.* = want -| o.residual;
-    if (got.* < 8) return null;
-    const descriptors = (@as(usize, page[6]) << 8) | page[7];
-    const p = 8 + descriptors;
-    if (p + 3 > got.* or page[p] & 0x3F != 0x08) {
-        props.reachable(@src(), "scsi: a MODE SENSE answer without the caching page is taken to cache", null);
-        return null;
-    }
-    return page[p + 2] & 0x04 != 0;
+    // The page read: scsi_mode.wceOf, pure and tested (198.2).
+    const wce = mode.wceOf(page, got.*);
+    if (wce == null) props.reachable(@src(), "scsi: a MODE SENSE answer without the caching page is taken to cache", null);
+    return wce;
 }
 
 /// **THE WRITE CACHE TURNED OFF** (metal-vmm QUEUE 112, Steve's choice
@@ -311,26 +313,27 @@ fn recheckCache(b: *virtio.Block, at: Address) void {
     const mem = b.scsi.?;
     const scratch = @intFromPtr(&mem.scratch);
     var got: usize = 0;
+    // What the disk says at each step is asked here; what it leaves is
+    // scsi_mode.afterReset's, pure and tested (198.2).
     const on = writeCache(b, at, scratch, &mem.scratch, &got);
-    if (on != true) {
-        b.write_cache = on;
-        return;
+    var taken = false;
+    var after: ?bool = on;
+    if (on == true) {
+        props.reachable(@src(), "scsi: a reset turned the write cache back on, and it is turned off again", null);
+        taken = turnCacheOff(b, at, scratch, &mem.scratch, got);
+        after = writeCache(b, at, scratch, &mem.scratch, &got);
     }
-    props.reachable(@src(), "scsi: a reset turned the write cache back on, and it is turned off again", null);
-    const taken = turnCacheOff(b, at, scratch, &mem.scratch, got);
-    b.write_cache = writeCache(b, at, scratch, &mem.scratch, &got);
-    if (!taken or b.write_cache != false) {
-        // Still caching: what it holds waits for io.durable's flush.
-        b.unflushed = true;
-        return;
+    var r = mode.afterReset(on, taken, after);
+    if (r.synchronize) {
+        // What the cache took before it was turned off again.
+        const sync = [10]u8{ 0x35, 0, 0, 0, 0, 0, 0, 0, 0, 0 };
+        if (!good(commandSettled(b, at, &sync, .none, 0, 0))) {
+            props.reachable(@src(), "scsi: after a reset, the cache turned off again, its held writes fail to synchronize", null);
+            r = mode.after_failed_sync;
+        }
     }
-    // What the cache took before it was turned off again.
-    const sync = [10]u8{ 0x35, 0, 0, 0, 0, 0, 0, 0, 0, 0 };
-    if (!good(commandSettled(b, at, &sync, .none, 0, 0))) {
-        props.reachable(@src(), "scsi: after a reset, the cache turned off again, its held writes fail to synchronize", null);
-        b.write_cache = null; // flushed as if on, before every answer
-        b.unflushed = true;
-    }
+    b.write_cache = r.write_cache;
+    if (r.unflushed) b.unflushed = true;
 }
 
 fn be32(bytes: []const u8) u32 {

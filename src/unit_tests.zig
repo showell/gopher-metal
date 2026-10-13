@@ -67,4 +67,5 @@ test {
     _ = @import("serial.zig");
     _ = @import("after_turn.zig");
     _ = @import("spill_rule.zig");
+    _ = @import("apic_rule.zig");
 }
