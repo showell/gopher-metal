@@ -58,4 +58,5 @@ test {
     _ = @import("idle_check.zig");
     _ = @import("request_line.zig");
     _ = @import("uploads_seen.zig");
+    _ = @import("device_wait.zig");
 }

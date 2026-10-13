@@ -124,6 +124,9 @@ const Direction = enum { none, from_disk, to_disk };
 
 /// One command, start to finish, polled to completion.
 fn command(b: *virtio.Block, at: Address, cdb: []const u8, dir: Direction, addr: u64, len: u32) Outcome {
+    // A disk that stopped answering is sent nothing more (193.2): reads and
+    // writes are refused before they get here, a flush or a recheck here.
+    if (b.refuseEnded()) return .{ .response = 0xFF, .status = 0xFF, .sense_key = 0, .asc = 0, .ascq = 0, .residual = 0 };
     const mem = b.scsi.?;
     mem.request = .{ .lun = at.field(), .tag = 0, .task_attr = 0, .prio = 0, .crn = 0, .cdb = [_]u8{0} ** cdb_size };
     @memcpy(mem.request.cdb[0..cdb.len], cdb);
@@ -154,10 +157,12 @@ fn command(b: *virtio.Block, at: Address, cdb: []const u8, dir: Direction, addr:
     const began = tsc.read();
     b.q.offer(0);
     b.q.notify();
-    _ = b.q.wait();
+    const ended = b.q.waitFor(virtio.wait_budget_ticks);
     virtio.ack(b.device);
     b.busy_ticks +%= tsc.read() -% began;
     b.requests +%= 1;
+    // No answer: a response no command reads as good (193.2).
+    if (!b.answered(ended)) return .{ .response = 0xFF, .status = 0xFF, .sense_key = 0, .asc = 0, .ascq = 0, .residual = 0 };
 
     const sense_key: u8 = if (mem.response.sense_len >= 3) mem.response.sense[2] & 0x0F else 0;
     const asc: u8 = if (mem.response.sense_len >= 14) mem.response.sense[12] else 0;

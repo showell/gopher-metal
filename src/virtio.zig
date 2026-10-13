@@ -25,6 +25,18 @@ const tsc = @import("tsc.zig");
 const pci = @import("pci.zig");
 const scsi = @import("scsi.zig");
 const durable = @import("durable.zig");
+const device_wait = @import("device_wait.zig");
+
+/// **HOW LONG A REQUEST MAY GO UNANSWERED**, in TSC ticks (metal-vmm QUEUE
+/// 193.2). 30 seconds, as Linux's SCSI layer gives a command. Until the
+/// kernel has measured the TSC's rate it is 30 s at 3 GHz (longer on a
+/// slower clock, never shorter); the kernel sets it from the rate.
+pub var wait_budget_ticks: u64 = 30 * 3_000_000_000;
+
+/// The device's status byte, for `device_wait`.
+pub fn deviceStatus(d: Device) u32 {
+    return getStatus(d);
+}
 
 /// A device, found on whichever transport this machine has.
 pub const Device = union(enum) {
@@ -539,11 +551,25 @@ pub fn Queue(comptime size: u16) type {
             return e;
         }
 
-        /// Spins until a completion arrives. Nothing here has interrupts yet.
-        pub fn wait(self: *Self) UsedElem {
+        /// How a wait ended: a completion, or `device_wait`'s verdict.
+        pub const Ended = union(enum) { done: UsedElem, needs_reset, timed_out };
+
+        /// **SPINS UNTIL A COMPLETION ARRIVES, OR IT NEVER WILL** (193.2): every
+        /// `device_wait.look_every` spins it asks the clock and the device's
+        /// status whether to go on (a status read is a trip to the hypervisor).
+        pub fn waitFor(self: *Self, budget_ticks: u64) Ended {
+            const began = tsc.read();
+            var spins: u32 = 0;
             while (true) {
-                if (self.take()) |e| return e;
+                if (self.take()) |e| return .{ .done = e };
                 asm volatile ("pause");
+                spins +%= 1;
+                if (spins % device_wait.look_every != 0) continue;
+                switch (device_wait.verdict(began, tsc.read(), budget_ticks, getStatus(self.device))) {
+                    .wait => {},
+                    .needs_reset => return .needs_reset,
+                    .timed_out => return .timed_out,
+                }
             }
         }
     };
@@ -689,6 +715,9 @@ const blk_t_out: u32 = 1; // write to the device
 pub const blk_s_ok: u8 = 0;
 pub const blk_s_ioerr: u8 = 1;
 pub const blk_s_unsupp: u8 = 2;
+/// Ours, not virtio's: the disk stopped answering (a request it never ended,
+/// or it asked for a reset), so no request goes to it any more (193.2).
+pub const blk_s_ended: u8 = 0xEE;
 
 const BlkReqHeader = extern struct {
     type: u32,
@@ -727,6 +756,14 @@ pub const Block = struct {
     /// soak could only see the whole machine slowing down; these split it.
     requests: u64 = 0,
     busy_ticks: u64 = 0,
+    /// **A DISK THAT STOPPED ANSWERING** (metal-vmm QUEUE 193.2): a request
+    /// it never ended in `wait_budget_ticks`, or it set DEVICE_NEEDS_RESET.
+    /// The abandoned request's buffers are still the device's, which may
+    /// yet write into them, so nothing more goes to it: every later request
+    /// is `blk_s_ended`, counted. Only a reset (or a restart) brings it back.
+    ended: enum { serving, timed_out, needs_reset } = .serving,
+    /// Requests refused because the disk had stopped answering.
+    refused_after_end: u64 = 0,
 
     /// **ON A SCSI CONTROLLER, THE DISK THIS BLOCK IS** (`scsi.zig`), and the
     /// memory its commands are built in. Null on virtio-blk.
@@ -994,6 +1031,7 @@ pub const Block = struct {
     /// pass through this function.
     fn transfer(self: *Block, kind: u32, lba: u64, addr: u64, len: u32) u8 {
         if (self.memory) |disk| return self.memoryTransfer(disk, kind, lba, addr, len);
+        if (self.refuseEnded()) return blk_s_ended;
         if (self.address) |at| {
             // Set before the command: a write that fails may still have
             // landed in part, in the cache.
@@ -1030,11 +1068,30 @@ pub const Block = struct {
         const began = tsc.read();
         self.q.offer(0);
         self.q.notify();
-        _ = self.q.wait();
+        const ended = self.q.waitFor(wait_budget_ticks);
         ack(self.device);
         self.busy_ticks +%= tsc.read() -% began;
         self.requests +%= 1;
+        if (!self.answered(ended)) return blk_s_ended;
         return self.status.*;
+    }
+
+    /// Whether a disk that stopped answering refuses this request, counted.
+    pub fn refuseEnded(self: *Block) bool {
+        if (self.ended == .serving) return false;
+        self.refused_after_end +%= 1;
+        return true;
+    }
+
+    /// Whether a wait ended in a completion; if not, the disk is ended.
+    pub fn answered(self: *Block, how: Q.Ended) bool {
+        switch (how) {
+            .done => return true,
+            .timed_out => self.ended = .timed_out,
+            .needs_reset => self.ended = .needs_reset,
+        }
+        props.reachable(@src(), "virtio: a disk stops answering, and is ended", null);
+        return false;
     }
 
     /// The sector at `lba` into the 512 bytes at `addr`.

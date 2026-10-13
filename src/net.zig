@@ -39,6 +39,15 @@
 
 const virtio = @import("virtio.zig");
 const interrupts = @import("interrupts.zig");
+const tsc = @import("tsc.zig");
+const device_wait = @import("device_wait.zig");
+const props = @import("coverage");
+
+/// **HOW LONG A SEND MAY WAIT FOR A BUFFER**, in TSC ticks (193.2): one
+/// second at 3 GHz until the kernel sets it from the measured rate. A card
+/// that takes no frame back in a second is stalled; TCP resends what it
+/// drops.
+pub var send_budget_ticks: u64 = 3_000_000_000;
 
 /// The header on every buffer in both directions. With VIRTIO_F_VERSION_1 it
 /// always carries `num_buffers`, so it is 12 bytes and not the legacy 10.
@@ -103,6 +112,13 @@ pub const Net = struct {
     /// doing — so it is counted and shown on /admin/host, loud, rather than
     /// overrunning the buffer into the next frame's. See `send`.
     oversized: u64 = 0,
+    /// **WAITS FOR A SEND BUFFER THAT ENDED** (metal-vmm QUEUE 193.2): the
+    /// card took no frame back in `send_budget_ticks`, or asked for a
+    /// reset; and the frames dropped since, while it had taken none back.
+    send_stalls: u64 = 0,
+    reset_asked: u64 = 0,
+    dropped_stalled: u64 = 0,
+    stalled: bool = false,
 
     pub fn init(found: virtio.Device, mem: *Memory) virtio.Error!Net {
         const st = try virtio.negotiate(found, feature_mac);
@@ -164,11 +180,33 @@ pub const Net = struct {
         // The device's thread takes the frames; on a droplet it needs this
         // processor to do it, so the wait rests rather than spins.
         if (self.free_len == 0) {
+            // **A CARD THAT TAKES NO FRAMES ENDS THE WAIT** (metal-vmm QUEUE
+            // 193.2): it hung the machine. After `send_budget_ticks` with no
+            // buffer back, or the card asking for a reset, the frame is
+            // dropped and counted, and TCP sends it again later; while the
+            // card has taken none back since, the next frames drop at once
+            // rather than each waiting out its own budget.
+            if (self.stalled) {
+                self.dropped_stalled +%= 1;
+                return;
+            }
             // Now a completion is worth an interrupt: it ends the wait. One
             // that landed before the flag changed is found by `reclaim`.
             self.tx.interruptOnCompletion(true);
             self.reclaim();
+            const began = tsc.read();
             while (self.free_len == 0) {
+                switch (device_wait.verdict(began, tsc.read(), send_budget_ticks, virtio.deviceStatus(self.device))) {
+                    .wait => {},
+                    .timed_out, .needs_reset => |why| {
+                        self.tx.interruptOnCompletion(false);
+                        self.stalled = true;
+                        if (why == .needs_reset) self.reset_asked +%= 1 else self.send_stalls +%= 1;
+                        self.dropped_stalled +%= 1;
+                        props.reachable(@src(), "net: a card that takes no frames back ends the wait, and the frame is dropped", null);
+                        return;
+                    },
+                }
                 interrupts.rest();
                 self.reclaim();
             }
@@ -200,6 +238,8 @@ pub const Net = struct {
             self.lent[e.id] = false;
             self.free[self.free_len] = @intCast(e.id);
             self.free_len += 1;
+            // A buffer back: the card is taking frames again.
+            self.stalled = false;
         }
     }
 

@@ -116,6 +116,11 @@ From the top:
      - strays reset: segments for a connection the machine no longer has;
      - dropped for a bad checksum: frames damaged on the way in. On a
        droplet's private network this should stay at zero.
+   - **Network card stalls**: sends that waited a whole second for the card
+     to take a frame back, the card asking for a reset, and frames dropped
+     while it took none. Any above zero means the card stopped taking
+     frames for a while; TCP sends dropped frames again. "STALLED NOW"
+     means it has not taken one back since.
    - Memory.
    - **Uploads**: a count since boot by answer, and the newest 10. The
      answers are ok, too big, over quota, a kind not taken, writes refused,
@@ -123,7 +128,11 @@ From the top:
      refused.
    - Each volume:
      - free space;
-     - its write cache;
+     - its write cache, and whether the disk is still answering.
+       "STOPPED ANSWERING" means a request went 30 s with no answer, or
+       the disk asked for a reset. Nothing more is sent to it: every read
+       and write after that fails, counted, and the requests that needed
+       it are answered with an error. Only a restart brings it back;
      - its idle check, with what it last found;
      - whether it takes writes. "writes: REFUSED" means its FAT copies
        could not be weighed at mount; it is weighed again once a minute.

@@ -533,6 +533,12 @@ pub fn kmain() noreturn {
     serial.put("\n");
     booted_unix = @intCast(clock.unix);
     tsc_hz_seen = clock.tsc_hz;
+    // **A DEVICE WAIT ENDS** (metal-vmm QUEUE 193.2): 30 s for a disk
+    // request, as Linux's SCSI layer gives one, and 1 s for a send buffer,
+    // now that the TSC's rate is known. Before this, the defaults assume
+    // 3 GHz (longer on a slower clock).
+    metal.virtio.wait_budget_ticks = clock.tsc_hz * 30;
+    metal.net.send_budget_ticks = clock.tsc_hz;
 
     // ── the restart (RESTART.md), only with -Drestart ───────────────────────
     if (gm_build.restart) {
@@ -2137,6 +2143,11 @@ fn metalFacts(io: Io, alloc: std.mem.Allocator) anyerror![]const webbox.host_fac
     });
     try add(&facts, alloc, "NMIs", "{d}", .{interrupts.nmis});
     if (turning) |t| try add(&facts, alloc, "frames refused (too long to send)", "{d}", .{t.wire.nic.oversized});
+    // **A CARD THAT STOPPED TAKING FRAMES** (193.2): sends that waited out
+    // their budget, the card asking for a reset, and frames dropped since.
+    if (turning) |t| try add(&facts, alloc, "network card stalls", "{d} sends waited out their second, {d} times the card asked for a reset, {d} frames dropped while it took none back{s}", .{
+        t.wire.nic.send_stalls, t.wire.nic.reset_asked, t.wire.nic.dropped_stalled, if (t.wire.nic.stalled) "; STALLED NOW" else "",
+    });
     return facts.items;
 }
 
@@ -2211,7 +2222,15 @@ fn addVolume(facts: *std.ArrayList(webbox.host_facts.Fact), alloc: std.mem.Alloc
     };
     try facts.append(alloc, .{
         .label = cache_label,
-        .value = try std.fmt.allocPrint(alloc, "{s}; {d} flushes, {d} failed; looked at again after {d} resets", .{ cache, v.blk.flushes, v.blk.flush_failures, v.blk.cache_rechecks }),
+        .value = try std.fmt.allocPrint(alloc, "{s}; {d} flushes, {d} failed; looked at again after {d} resets; {s}", .{
+            cache, v.blk.flushes, v.blk.flush_failures, v.blk.cache_rechecks,
+            // **A DISK THAT STOPPED ANSWERING** (193.2).
+            switch (v.blk.ended) {
+                .serving => "answering",
+                .timed_out => try std.fmt.allocPrint(alloc, "STOPPED ANSWERING: a request went 30 s unanswered; {d} requests refused since", .{v.blk.refused_after_end}),
+                .needs_reset => try std.fmt.allocPrint(alloc, "STOPPED ANSWERING: it asked for a reset; {d} requests refused since", .{v.blk.refused_after_end}),
+            },
+        }),
     });
     if (v.dirs) |d| try facts.append(alloc, .{
         .label = dirs_label,
