@@ -2094,6 +2094,10 @@ fn metalFacts(io: Io, alloc: std.mem.Allocator) anyerror![]const webbox.host_fac
         var counts: std.Io.Writer.Allocating = .init(alloc);
         try tcp.writeCounts(t, &counts.writer);
         try facts.append(alloc, .{ .label = "tcp since boot", .value = counts.written() });
+        // **FRAMES PASSED OVER** (193, gap 8), by why.
+        var passed: std.Io.Writer.Allocating = .init(alloc);
+        try t.passed.write(&passed.writer);
+        try facts.append(alloc, .{ .label = "frames passed over", .value = passed.written() });
     }
     try add(&facts, alloc, "streams", "{d} held now, {d} at most, {d} ended", .{ held_now, held_most, streams_ended });
     const p = pages.stats();

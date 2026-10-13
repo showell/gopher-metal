@@ -131,6 +131,12 @@ From the top:
        of an unfinished handshake" is a connection closed before it was
        ever open. A count that grows with no change in traffic is worth
        a look.
+   - **Frames passed over**: frames that were not a TCP segment for
+     this machine, by why. On a droplet's private network most are ARP
+     for other machines and other ethertypes, and those are no fault.
+     A damaged IP header should stay at zero (damage on the way in);
+     fragments mean a sender's MTU is wrong somewhere; growing "not TCP"
+     or "for another address or port" is misrouting or a scan.
    - **Network card stalls**: sends that waited a whole second for the card
      to take a frame back, the card asking for a reset, and frames dropped
      while it took none. Any above zero means the card stopped taking

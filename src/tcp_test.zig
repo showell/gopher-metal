@@ -2156,3 +2156,65 @@ test "resets are counted by who and why: the peer's exact and inexact ones, ours
     try testing.expectEqual(@as(u64, 1), f.table.abandoned_stream_behind);
     try testing.expectEqual(@as(u64, 1), f.table.abandoned_unfinished);
 }
+
+/// A copy of `frame` with its IP header changed by `change` and its
+/// checksum made right again (unless `keep_sum`).
+fn retouched(out: []u8, frame: []const u8, change: *const fn ([]u8) void, keep_sum: bool) []const u8 {
+    @memcpy(out[0..frame.len], frame);
+    const ip = out[proto.eth_header_len..][0..20];
+    change(ip);
+    if (!keep_sum) {
+        ip[10] = 0;
+        ip[11] = 0;
+        @memcpy(ip[10..12], &proto.be16(proto.checksum(ip)));
+    }
+    return out[0..frame.len];
+}
+
+test "frames passed over are counted by why: damaged IP header, fragment, not TCP, not for us, another ethertype (metal-vmm QUEUE 193, gap 8)" {
+    var f: Fixture = .{};
+    f.init();
+    var p = Peer{ .ip = .{ 10, 0, 2, 2 }, .port = 40000 };
+    var buf: [1600]u8 = undefined;
+    var out: [1600]u8 = undefined;
+    const frame = p.frame(&buf, flag_syn, 1, "");
+    const ttl = struct {
+        fn change(ip: []u8) void {
+            ip[8] -%= 1;
+        }
+    }.change;
+    const fragment = struct {
+        fn change(ip: []u8) void {
+            ip[6] |= 0x20;
+        }
+    }.change;
+    const udp = struct {
+        fn change(ip: []u8) void {
+            ip[9] = proto.proto_udp;
+        }
+    }.change;
+    const elsewhere = struct {
+        fn change(ip: []u8) void {
+            ip[19] +%= 1;
+        }
+    }.change;
+    _ = handle(&f.table, &f.wire, retouched(&out, frame, ttl, true), 1);
+    try testing.expectEqual(@as(u64, 1), f.table.passed.bad_ip_checksum);
+    _ = handle(&f.table, &f.wire, retouched(&out, frame, fragment, false), 1);
+    try testing.expectEqual(@as(u64, 1), f.table.passed.fragments);
+    _ = handle(&f.table, &f.wire, retouched(&out, frame, udp, false), 1);
+    try testing.expectEqual(@as(u64, 1), f.table.passed.not_tcp);
+    _ = handle(&f.table, &f.wire, retouched(&out, frame, elsewhere, false), 1);
+    @memcpy(out[0..frame.len], frame);
+    @memcpy(out[segment_at + 2 .. segment_at + 4], &proto.be16(8080));
+    _ = handle(&f.table, &f.wire, out[0..frame.len], 1);
+    try testing.expectEqual(@as(u64, 2), f.table.passed.not_for_us);
+    @memcpy(out[0..frame.len], frame);
+    out[12] = 0x86;
+    out[13] = 0xDD;
+    _ = handle(&f.table, &f.wire, out[0..frame.len], 1);
+    try testing.expectEqual(@as(u64, 1), f.table.passed.other_ethertype);
+    _ = handle(&f.table, &f.wire, "not a frame", 1);
+    try testing.expectEqual(@as(u64, 1), f.table.passed.malformed_ip);
+    try testing.expectEqual(@as(usize, 0), f.table.inUse());
+}

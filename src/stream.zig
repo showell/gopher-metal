@@ -170,7 +170,7 @@ pub fn pump(wire: *Wire, table: *tcp.Table, ip: [4]u8) ?tcp.Result {
                 var out: [64]u8 = undefined;
                 const n = arp.writeReply(&out, nic.mac, ip, req);
                 nic.send(out[0..n]);
-            }
+            } else table.passed.arp_for_others +%= 1;
             continue;
         }
         const r = table.handle(wire, got.frame, now);

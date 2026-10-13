@@ -517,6 +517,8 @@ pub const Table = struct {
     /// answered with a challenge ACK, and our resets of a SYN-RECEIVED
     /// peer whose ACK named the wrong number.
     resets_received: u64 = 0,
+    /// Frames that were not a TCP segment for us, by why (gap 8).
+    passed: proto.Passed = .{},
     challenge_acks: u64 = 0,
     bad_ack_resets: u64 = 0,
     /// Connections the host gave up on, by its reason (`abandon`): a client
@@ -1035,13 +1037,31 @@ pub const Table = struct {
 
     /// Feeds one received frame in. `now` is the caller's clock.
     pub fn handle(self: *Table, wire: anytype, frame: []const u8, now: i96) Result {
-        const pkt = proto.parseIpv4(frame) orelse return .{ .event = .nothing };
-        if (pkt.protocol != proto.proto_tcp) return .{ .event = .nothing };
-        if (!eql(&pkt.dst_ip, &self.local_ip)) return .{ .event = .nothing };
-        if (pkt.payload.len < header_len) return .{ .event = .nothing };
+        const pkt = switch (proto.readIpv4(frame)) {
+            .packet => |p| p,
+            .not => |why| {
+                self.passed.note(why);
+                return .{ .event = .nothing };
+            },
+        };
+        if (pkt.protocol != proto.proto_tcp) {
+            self.passed.not_tcp +%= 1;
+            return .{ .event = .nothing };
+        }
+        if (!eql(&pkt.dst_ip, &self.local_ip)) {
+            self.passed.not_for_us +%= 1;
+            return .{ .event = .nothing };
+        }
+        if (pkt.payload.len < header_len) {
+            self.passed.malformed_ip +%= 1;
+            return .{ .event = .nothing };
+        }
 
         const t = pkt.payload;
-        if (proto.readBe16(t[2..4]) != self.port) return .{ .event = .nothing };
+        if (proto.readBe16(t[2..4]) != self.port) {
+            self.passed.not_for_us +%= 1;
+            return .{ .event = .nothing };
+        }
         if (proto.pseudoChecksum(pkt.src_ip, pkt.dst_ip, proto.proto_tcp, t) != 0) {
             self.damaged += 1;
             props.reachable(@src(), "tcp: a damaged segment is dropped", null);
