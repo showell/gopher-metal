@@ -1644,7 +1644,10 @@ fn mountFat(blk: *virtio.Block, scratch: *[disk_fat.sector_size]u8, what: []cons
 /// outside), so this is the nearest thing: the state after the last request
 /// is the state the run ended in.
 fn checkVolumes() void {
-    for ([_]?*disk_fat.Volume{ Io.siteVolume(), Io.dataVolume() }) |maybe| {
+    // **WHICH DISK** (metal-vmm P128, 198.5): the boot disk holds the site,
+    // the volume the data; each property says which it found its damage
+    // on, so sweep.sh excuses it only by a fault on that disk.
+    for ([_]?*disk_fat.Volume{ Io.siteVolume(), Io.dataVolume() }, [_][]const u8{ "boot", "volume" }) |maybe, disk| {
         const vol = maybe orelse continue;
         // **A CHECK THAT CANNOT RUN SAYS SO** (the normalization hunt,
         // 2026-10-10): it went quietly unrun. Memory for its marks is the
@@ -1666,7 +1669,7 @@ fn checkVolumes() void {
             couldNotCheck(e);
             continue;
         };
-        metal.coverage.always(@src(), damage == 0, "fat: after a request, a volume has no damage beyond what a stop leaves", .{ .damage = damage });
+        metal.coverage.always(@src(), damage == 0, "fat: after a request, a volume has no damage beyond what a stop leaves", .{ .damage = damage, .disk = disk });
         // **WHAT THE VOLUME KEEPS OF ITS FAT IS WHAT THE FAT SAYS NOW**
         // (essay web-server-in-a-box; kernel-facts #8): the kept count, and
         // a hint with no free cluster below it.
@@ -1745,7 +1748,7 @@ fn diskCheck(vol: *disk_fat.Volume, what: []const u8) void {
     serial.putDec(h.problems);
     serial.put(" problems\n");
     // At boot, so the last run's end: observed in every build.
-    metal.coverage.always(@src(), shown.damage == 0, "fat: at boot, a volume has no damage beyond what a stop leaves", .{ .damage = shown.damage });
+    metal.coverage.always(@src(), shown.damage == 0, "fat: at boot, a volume has no damage beyond what a stop leaves", .{ .damage = shown.damage, .disk = if (std.mem.eql(u8, what, "the boot disk")) "boot" else "volume" });
     for (shown.held[0..@min(shown.n, Shown.most)]) |f| {
         serial.put("    ");
         serial.put(@tagName(f.problem));
