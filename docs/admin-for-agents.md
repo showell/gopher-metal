@@ -103,6 +103,19 @@ From the top:
 3. **The host**: zig-metal-unikernel's own facts.
    - The clock and the processor.
    - Connections and streams, open now and at most.
+   - **TCP since boot**: every count the TCP table keeps. Any of these
+     above zero is something that happened, not a fault in itself; what
+     to look at is a count that grows:
+     - turned away for want of a slot: every connection slot was taken;
+     - half-open gave way, revived, found no room: handshakes that did not
+       finish (a lost packet, or a flood of new connections);
+     - segments sent again, window probes: the network lost something
+       between Caddy and the machine, or the peer stopped reading;
+     - peers given up on, closes never finished: a client stopped
+       answering in the middle of a connection;
+     - strays reset: segments for a connection the machine no longer has;
+     - dropped for a bad checksum: frames damaged on the way in. On a
+       droplet's private network this should stay at zero.
    - Memory.
    - **Uploads**: a count since boot by answer, and the newest 10. The
      answers are ok, too big, over quota, a kind not taken, writes refused,

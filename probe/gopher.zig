@@ -290,6 +290,9 @@ var streams_ended: u64 = 0;
 var served: u64 = 0;
 var open_now: usize = 0;
 var busiest: usize = 0;
+/// The serving loop's TCP table, for /admin/host's counts (metal-vmm QUEUE
+/// 193.1): set once the table is made.
+var serving_table: ?*const tcp.Table = null;
 /// When this boot's wall clock started, and the TSC's measured rate.
 var booted_unix: i64 = 0;
 var tsc_hz_seen: u64 = 0;
@@ -592,6 +595,7 @@ pub fn kmain() noreturn {
         .tx = tx_all[k * tx_bytes ..][0..tx_bytes],
     };
     var table = tcp.Table.init(lease.address, nic.mac, 80, &conn_slots, &tcp_out, isn);
+    serving_table = &table;
     var wire = stream.Wire{ .nic = &nic, .lose_one_sent_in = conf.lose_one_sent_in };
     if (conf.lose_one_sent_in != 0) {
         serial.put("  losing one TCP frame in ");
@@ -2080,6 +2084,11 @@ fn metalFacts(io: Io, alloc: std.mem.Allocator) anyerror![]const webbox.host_fac
     });
     try add(&facts, alloc, "requests served", "{d}", .{served});
     try add(&facts, alloc, "connections", "{d} open now, {d} at most, of {d}", .{ open_now, busiest, max_connections });
+    if (serving_table) |t| {
+        var counts: std.Io.Writer.Allocating = .init(alloc);
+        try tcp.writeCounts(t, &counts.writer);
+        try facts.append(alloc, .{ .label = "tcp since boot", .value = counts.written() });
+    }
     try add(&facts, alloc, "streams", "{d} held now, {d} at most, {d} ended", .{ held_now, held_most, streams_ended });
     const p = pages.stats();
     try add(&facts, alloc, "memory (pages)", "{d} MB taken now, {d} MB at most, of {d} MB", .{

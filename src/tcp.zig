@@ -1282,3 +1282,52 @@ fn eql(a: []const u8, b: []const u8) bool {
     for (a, b) |x, y| if (x != y) return false;
     return true;
 }
+
+/// **EVERY COUNT THE TABLE KEEPS, IN ONE LINE** (metal-vmm QUEUE 193.1), for
+/// /admin/host: they were said only by the run's closing log, which a
+/// server that serves until stopped never writes.
+pub fn writeCounts(t: *const Table, w: *std.Io.Writer) std.Io.Writer.Error!void {
+    try w.print("{d} connections arrived, {d} turned away for want of a slot, {d} half-open gave way to a new one ({d} revived, {d} found no room); ", .{
+        t.arrivals, t.refused, t.half_open_given_way, t.revived, t.revival_no_room,
+    });
+    try w.print("{d} segments sent again ({d} of them asked for by duplicate ACKs), {d} window probes, {d} reopened windows said again; ", .{
+        t.retransmits, t.fast_retransmits, t.probes, t.window_updates,
+    });
+    try w.print("{d} peers given up on, {d} closes never finished, {d} strays reset, {d} segments dropped for a bad checksum; ", .{
+        t.given_up, t.fin_waits_expired, t.strays, t.damaged,
+    });
+    try w.print("{d} round trips measured, the newest {d} ns", .{ t.samples, t.measured_ns });
+}
+
+test "tcp: the host page's line says every count the table keeps, each by its own value" {
+    var conns: [1]Conn = undefined;
+    var out: [64]u8 = undefined;
+    const isn = struct {
+        fn f() u32 {
+            return 1;
+        }
+    }.f;
+    var t = Table.init(.{ 10, 0, 0, 1 }, .{0} ** 6, 80, &conns, &out, isn);
+    // Each counter a value of its own, from the table's own fields, so a
+    // counter added later and left off the line fails here.
+    comptime var n: u64 = 1001;
+    inline for (@typeInfo(Table).@"struct".fields) |f| {
+        if (f.type == u64) {
+            @field(t, f.name) = n;
+            n += 1;
+        }
+    }
+    var buf: [1024]u8 = undefined;
+    var w: std.Io.Writer = .fixed(&buf);
+    try writeCounts(&t, &w);
+    const line = w.buffered();
+    var k: u64 = 1001;
+    while (k < n) : (k += 1) {
+        var num: [24]u8 = undefined;
+        const want = std.fmt.bufPrint(&num, "{d}", .{k}) catch unreachable;
+        if (std.mem.indexOf(u8, line, want) == null) {
+            std.debug.print("the line leaves out the counter set to {d}: {s}\n", .{ k, line });
+            return error.TestExpectedEqual;
+        }
+    }
+}
