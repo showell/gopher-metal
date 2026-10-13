@@ -47,6 +47,18 @@ pub fn write(w: *std.Io.Writer, l: Line) std.Io.Writer.Error!void {
     }
 }
 
+/// **WHAT A REQUEST WAS: ITS METHOD AND PATH** (metal-vmm QUEUE 194.5),
+/// for the route's line and a refusal's alike, so /admin/log's `path=`
+/// finds a request refused at its head too. `path` is without its query;
+/// past 256 bytes it is cut.
+pub fn what(buf: []u8, method: []const u8, path: []const u8, refused_at_head: bool) []const u8 {
+    return std.fmt.bufPrint(buf, "{s} {s}{s}", .{
+        method,
+        path[0..@min(path.len, 256)],
+        if (refused_at_head) " (refused at its head)" else "",
+    }) catch "(unprintable)";
+}
+
 const testing = std.testing;
 
 fn formatted(buf: []u8, l: Line) ![]const u8 {
@@ -148,4 +160,13 @@ test "the plants (metal-vmm QUEUE 189.6): a line of each kind the log writes, ca
     // And the lines are still there to read: each request, and the upload.
     try testing.expect(std.mem.indexOf(u8, held, "request 8: /chat/c/1_2/T/send -> ok, 200") != null);
     try testing.expect(std.mem.indexOf(u8, held, "/uploads/[redacted].jpg, image/jpeg, 9 bytes") != null);
+}
+
+test "a request refused at its head says its method and path, as the route's line does (metal-vmm QUEUE 194.5)" {
+    var buf: [300]u8 = undefined;
+    try testing.expectEqualStrings("POST /chat/c/1_2/T/upload (refused at its head)", what(&buf, "POST", "/chat/c/1_2/T/upload", true));
+    try testing.expectEqualStrings("GET /docs", what(&buf, "GET", "/docs", false));
+    var long: [400]u8 = @splat('a');
+    long[0] = '/';
+    try testing.expectEqual(@as(usize, 4 + 256), what(&buf, "GET", &long, false).len);
 }

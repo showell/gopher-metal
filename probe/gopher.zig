@@ -1051,7 +1051,9 @@ fn serveOne(
         webbox.edge.reject(&req, r.kind, r.msg) catch {};
         s.writer().flush() catch {};
         const refused_status: u16 = @intFromEnum(webbox.edge.statusFor(r.kind));
-        logRequest(number, "(refused at its head)", r.msg[0 .. r.msg.len - 1], refused_status, null);
+        // Its method and path, so /admin/log's `path=` finds it (194.5).
+        var refused_buf: [300]u8 = undefined;
+        logRequest(number, metal.request_line.what(&refused_buf, @tagName(req.head.method), metal.log_ring.withoutQuery(req.head.target), true), r.msg[0 .. r.msg.len - 1], refused_status, null);
         // A drained body refused (late, past what is kept): what came of it.
         // **AN UPLOAD REFUSED FROM ITS HEAD IS AN UPLOAD** (194.1), with
         // or without a drain: busy, no memory, an asker unknown, an older
@@ -1070,10 +1072,7 @@ fn serveOne(
     // is not the log's to keep (serial.log_ring.withoutQuery; QUEUE.md item 95).
     var what_buf: [300]u8 = undefined;
     const path = metal.log_ring.withoutQuery(req.head.target);
-    const what = std.fmt.bufPrint(&what_buf, "{s} {s}", .{
-        @tagName(req.head.method),
-        path[0..@min(path.len, 256)],
-    }) catch "(unprintable)";
+    const what = metal.request_line.what(&what_buf, @tagName(req.head.method), path, false);
 
     const head_at = Io.awakeNs() orelse 0;
     const disk_before = diskWork();
