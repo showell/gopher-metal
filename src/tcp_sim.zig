@@ -958,13 +958,12 @@ const Host = struct {
                         return;
                     }
                 }
-                // As streamFn: a window that had shrunk below a segment is
-                // announced when it reopens.
-                const was_tight = c.room() < tcp.our_mss;
-                c.consume(n);
+                // As streamFn, by the same rule (Conn.consumeReopens): a
+                // tight window is announced when it reopens.
+                const reopened = c.consumeReopens(n);
                 self.consumed += n;
                 self.last_progress = sim.now;
-                if (sim.sc.host_announces and was_tight and c.room() >= tcp.our_mss) table.ack(&wire, i);
+                if (sim.sc.host_announces and reopened) table.ack(&wire, i);
             } else if (c.peerDone() or !c.open()) {
                 // The request will never be whole: answered and closed, as
                 // the host does a request that ends early.

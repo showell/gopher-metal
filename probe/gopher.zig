@@ -883,9 +883,7 @@ fn readyNow(io: Io, wire: *stream.Wire, table: *tcp.Table, i: usize, now: i96) b
         const next = drains.step(i, .{ .serial = c.serial, .pending = c.pending(), .peer_done = c.peerDone(), .capacity = c.rx.len }, now);
         if (next.consumed > 0) {
             // Drained into memory: the window reopens.
-            const was_tight = c.tight(c.window());
-            c.consume(next.consumed);
-            if (was_tight and !c.tight(c.window())) table.ack(wire, i);
+            if (c.consumeReopens(next.consumed)) table.ack(wire, i);
         }
         switch (next.then) {
             .wait => return false,

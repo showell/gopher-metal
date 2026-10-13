@@ -331,6 +331,17 @@ pub const Conn = struct {
         }
     }
 
+    /// **`consume`, AND WHETHER THE WINDOW REOPENED** (metal-vmm QUEUE
+    /// 197.3): true when the window was `tight` before and is not after, so
+    /// the caller announces it (`Table.ack`) and a peer that filled it does
+    /// not sit waiting for its own probe. The one rule: the host's stream,
+    /// its drain and tcp_sim's host each wrote it, and the sim another way.
+    pub fn consumeReopens(self: *Conn, n: usize) bool {
+        const was_tight = self.tight(self.window());
+        self.consume(n);
+        return was_tight and !self.tight(self.window());
+    }
+
     /// Free space at the end of the receive buffer: what arriving bytes go
     /// into and what the window advertises. Space freed at the front counts
     /// only once `consume` compacts.
@@ -1400,4 +1411,25 @@ test "tcp: the host page's line says every count the table keeps, each by its ow
             return error.TestExpectedEqual;
         }
     }
+}
+
+test "tcp: a consume that reopens a tight window says so, by `tight`'s rule, a segment or half the buffer (metal-vmm QUEUE 197.3)" {
+    var rx: [2048]u8 = undefined;
+    var tx: [16]u8 = undefined;
+    var c: Conn = .{ .rx = &rx, .tx = &tx };
+    // 49 bytes of room: tight. Consuming 51 compacts 948 pending to the
+    // front: 1100 of room, past half the buffer (1024) though under a
+    // segment (1460). It reopened, as `tight` has it.
+    c.start = 1000;
+    c.end = 1999;
+    try std.testing.expect(c.tight(c.window()));
+    try std.testing.expect(c.consumeReopens(51));
+    try std.testing.expectEqual(@as(usize, 1100), c.room());
+    // Not tight before: nothing to say.
+    try std.testing.expect(!c.consumeReopens(10));
+    // Tight before and still tight after (no compaction): nothing to say.
+    c.start = 0;
+    c.end = 2040;
+    try std.testing.expect(!c.consumeReopens(10));
+    try std.testing.expect(c.tight(c.window()));
 }

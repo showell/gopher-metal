@@ -455,10 +455,8 @@ fn streamFn(r: *Reader, w: *Writer, limit: std.Io.Limit) Reader.StreamError!usiz
     // A window that was tight (tcp's own rule, `Conn.tight`) is announced
     // when it reopens, so a peer that filled it does not sit waiting for its
     // own probe.
-    const was_tight = c.tight(c.window());
     // Handed on, the bytes are the reader's: the table releases them.
-    c.consume(n);
-    if (was_tight and !c.tight(c.window())) self.table.ack(self.wire, self.index);
+    if (c.consumeReopens(n)) self.table.ack(self.wire, self.index);
     return n;
 }
 
