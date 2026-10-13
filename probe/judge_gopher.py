@@ -3118,11 +3118,41 @@ class Laps:
         return time.time() - self.start
 
 
+# **ONE webbox ON BOTH SIDES.** The kernel takes webbox from -Dwebbox-root
+# (WEBBOX_ROOT, whose default is build.zig's: ../zig-webbox), the Linux
+# zig-server from its build.zig.zon's dependency path: the judge refuses to
+# compare two hosts built on two different libraries.
+WEBBOX_ROOT = os.path.realpath(os.environ.get(
+    "WEBBOX_ROOT", os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "..", "zig-webbox")))
+ZON_WEBBOX = re.compile(r'\.webbox\s*=\s*\.\{\s*\.path\s*=\s*"([^"]+)"')
+
+
+def two_webboxes(gopher_root: str, webbox_root: str):
+    """The refusal when the Linux zig-server's webbox (the path its
+    build.zig.zon names) is not `webbox_root`, the kernel's; None when they
+    are one checkout."""
+    zig_server = os.path.join(gopher_root, "zig-server")
+    zon = os.path.join(zig_server, "build.zig.zon")
+    with open(zon, encoding="utf-8") as f:
+        m = ZON_WEBBOX.search(f.read())
+    if m is None:
+        return f"FAIL webbox | {zon} names no webbox path: the Linux build's library is unknown"
+    linux = os.path.realpath(os.path.join(zig_server, m.group(1)))
+    if linux != os.path.realpath(webbox_root):
+        return (f"FAIL webbox | the kernel's webbox is {os.path.realpath(webbox_root)}, the Linux build's {linux} "
+                f"({zon}): not one library")
+    return None
+
+
 def main() -> int:
     if len(sys.argv) != 5:
         print(__doc__.strip())
         return 2
     elf, linux_bin, gopher_root, work = sys.argv[1:]
+    refusal = two_webboxes(gopher_root, WEBBOX_ROOT)
+    if refusal:
+        print(refusal)
+        return 1
     if FAT_KIND not in ("16", "32"):
         print(f"FAT must be 16 or 32, not {FAT_KIND}")
         return 2

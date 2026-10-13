@@ -1170,6 +1170,36 @@ class Uploads(unittest.TestCase):
 
 
 
+class OneWebbox(unittest.TestCase):
+    """**ONE webbox ON BOTH SIDES.** The kernel's library and the Linux
+    zig-server's (its build.zig.zon's path) must be one checkout, or the
+    judge compares two libraries."""
+
+    def tree(self, dependency='.webbox = .{ .path = "../../zig-webbox" },'):
+        top = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, top)
+        gopher = os.path.join(top, "angry-gopher")
+        os.makedirs(os.path.join(gopher, "zig-server"))
+        os.makedirs(os.path.join(top, "zig-webbox"))
+        with open(os.path.join(gopher, "zig-server", "build.zig.zon"), "w") as f:
+            f.write(".{\n    .dependencies = .{\n        " + dependency + "\n    },\n}\n")
+        return gopher, os.path.join(top, "zig-webbox")
+
+    def test_the_sibling_the_zon_names_is_one_library(self):
+        gopher, webbox = self.tree()
+        self.assertIsNone(G.two_webboxes(gopher, webbox))
+
+    def test_another_checkout_is_refused(self):
+        gopher, _ = self.tree()
+        refusal = G.two_webboxes(gopher, tempfile.gettempdir())
+        self.assertTrue(refusal.startswith("FAIL webbox |"), refusal)
+
+    def test_a_zon_that_names_no_webbox_is_refused(self):
+        gopher, webbox = self.tree(dependency="")
+        refusal = G.two_webboxes(gopher, webbox)
+        self.assertTrue(refusal.startswith("FAIL webbox |"), refusal)
+
+
 class Gates(unittest.TestCase):
     """**EVERY GATE IS ASKABLE, AND EVERY GATE IS GUARDED.** A gate that runs
     whatever was asked for costs a QEMU boot that nobody wanted; one that is
