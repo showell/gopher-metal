@@ -242,6 +242,12 @@ MEMBER_STORY = [
     step("a session minted outside both servers", "GET", "/chat/conversations", FRESH),
     step("a session 400 days old", "GET", "/chat/conversations", STALE),
     step("a forged session", "GET", "/chat/conversations", FORGED),
+    # **THE LOG AS TEXT, FOR AGENTS** (metal-vmm QUEUE 189.3): whole, by one
+    # path, and a filter spelled wrong (a 400 alike on both hosts). Last
+    # before logging out, so it holds the story's messages and sign-ins.
+    step("the host's log as text, as the admin", "GET", "/admin/log", JAR),
+    step("the host's log, this boot's chat requests", "GET", "/admin/log?path=/chat&boot=this", JAR),
+    step("the host's log, a filter spelled wrong", "GET", "/admin/log?since=yesterday", JAR),
     step("logging out", "POST", "/logout", JAR, "release=no"),
     step("chat, after logging out", "GET", "/chat", JAR),
     # **ONLY THE ADMIN** (REVIEW-admin-host.md finding 2): the gate that
@@ -252,6 +258,9 @@ MEMBER_STORY = [
     step("the running server, anonymous", "GET", "/admin/host"),
     step("the running server, as a bare uid", "GET", "/admin/host", P1),
     step("the running server, as a member who is not the admin", "GET", "/admin/host", MEMBER2),
+    step("the host's log, anonymous", "GET", "/admin/log"),
+    step("the host's log, as a bare uid", "GET", "/admin/log", P1),
+    step("the host's log, as a member who is not the admin", "GET", "/admin/log", MEMBER2),
     # What arrives on a socket is not always a request, and a server that takes
     # one connection at a time has to survive each of these AND answer the next
     # caller. (These four came from the Lyn Rummy story, which is gone.)
@@ -1188,6 +1197,10 @@ def differences(c: dict, metal: dict, linux: dict) -> list:
         out += backup_differences(metal["body"], linux["body"], metal["window"], linux["window"])
     elif c["path"].endswith("/download") and metal["status"] == 200 and linux["status"] == 200:
         out += download_differences(c["path"], metal["body"], linux["body"], metal["window"], linux["window"])
+    elif c["path"].split("?")[0] == "/admin/log" and metal["status"] == 200:
+        # The text view (189.3): each host's own log, so its shape is
+        # compared, its filter checked, and no secret may be in it.
+        out += log_view_differences(c, metal, linux)
     elif c["path"] == "/admin/host" and metal["status"] == 200:
         # A refusal (no session, not the admin) is an ordinary page, compared
         # whole below; only the page itself differs on purpose.
@@ -1354,6 +1367,58 @@ def backup_differences(metal: bytes, linux: bytes, metal_window=None, linux_wind
     return out
 
 
+# **WHAT NO LOG MAY HOLD** (metal-vmm QUEUE 189.6): every secret this story
+# sends, and the words of every message it posts, which are logged by their
+# length only. A session cookie's value, a password hash, the passwords, the
+# session secret.
+LOG_SECRETS = (b"gopher_auth=", b"$2a$", b"$2b$", b"hunter2", b"correct horse", b"correct+horse")
+LOG_MESSAGES = (b"hello from bare metal", b"hello+from+bare+metal", b"a second topic", b"the same topic")
+
+
+def log_leaks(text: bytes) -> list:
+    """What of LOG_SECRETS, the session secret and LOG_MESSAGES is in `text`."""
+    out = [f"a secret ({s.decode()!r})" for s in LOG_SECRETS + (SESSION_SECRET,) if s in text]
+    out += [f"a message's words ({m.decode()!r})" for m in LOG_MESSAGES if m in text]
+    return out
+
+
+def log_view_differences(c, metal, linux) -> list:
+    """**/admin/log, THE TEXT VIEW FOR AGENTS** (metal-vmm QUEUE 189.3, 189.7):
+    each host's own log, so its shape is compared, not its lines:
+      - both plain text, opening with the view's header;
+      - metal says what this boot holds and holds lines of it; Linux, which
+        keeps no log of its own, says so;
+      - asked for one path, metal's lines are that path's requests and the
+        lines under them;
+      - neither holds a secret the story sent, or a message's words."""
+    out = []
+    head = b"# The host's log, for agents"
+    for name, r in (("metal", metal), ("Linux", linux)):
+        if "text/plain" not in r["headers"].get("content-type", ""):
+            out.append(f"/admin/log on {name} is not plain text: {r['headers'].get('content-type')!r}")
+        if not r["body"].startswith(head):
+            out.append(f"/admin/log on {name} does not open with its header")
+        out += [f"/admin/log on {name} holds {leak}" for leak in log_leaks(r["body"])]
+    m = metal["body"]
+    if b"# this boot: " not in m:
+        out.append("/admin/log on metal does not say what this boot holds")
+    lines = [l for l in m.split(b"\n") if l and not l.startswith(b"# ")]
+    if not lines:
+        out.append("/admin/log on metal holds no line of the log")
+    if b"keeps no log of its own" not in linux["body"] and b"# this boot: " not in linux["body"]:
+        out.append("/admin/log on Linux neither shows a log nor says it keeps none")
+    query = c["path"].split("?", 1)[1] if "?" in c["path"] else ""
+    want = dict(kv.split("=", 1) for kv in query.split("&") if "=" in kv).get("path")
+    if want:
+        for l in lines:
+            if l.startswith(b"    "):
+                continue
+            got = re.search(rb"request \d+: \S+ (\S+)", l)
+            if not got or not got.group(1).startswith(want.encode()):
+                out.append(f"/admin/log?path={want} on metal holds another line: {l.decode('latin-1')!r}")
+    return out
+
+
 def host_page_differences(metal: bytes, linux: bytes, image: str = None, boot_disk: str = None) -> list:
     """**/admin/host DIFFERS ON PURPOSE**: its second table is each host's own
     account of itself. So what is compared is its shape: both have the
@@ -1400,6 +1465,8 @@ def host_page_differences(metal: bytes, linux: bytes, image: str = None, boot_di
         out.append("/admin/host on metal shows no log lines")
     elif b"gopher_auth=" in shown.group(1) or b"$2a$" in shown.group(1) or b"$2b$" in shown.group(1):
         out.append("/admin/host on metal shows a session cookie or a password hash in its log")
+    elif log_leaks(shown.group(1)):
+        out.append(f"/admin/host on metal shows in its log {', '.join(log_leaks(shown.group(1)))}")
     if b'<pre class="log">' not in linux and b"keeps no log of its own" not in linux:
         out.append("/admin/host on Linux neither shows a log nor says it keeps none")
 
