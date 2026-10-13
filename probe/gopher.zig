@@ -293,6 +293,8 @@ var busiest: usize = 0;
 /// The serving loop's TCP table, for /admin/host's counts (metal-vmm QUEUE
 /// 193.1): set once the table is made.
 var serving_table: ?*const tcp.Table = null;
+/// The DHCP lease taken at boot, for /admin/host (193, gap 12).
+var lease_held: ?dhcp.Lease = null;
 /// When this boot's wall clock started, and the TSC's measured rate.
 var booted_unix: i64 = 0;
 var tsc_hz_seen: u64 = 0;
@@ -577,6 +579,7 @@ pub fn kmain() noreturn {
     var nic = net.Net.init(nic_base, &nic_mem) catch serial.fail("the NIC would not come up");
     const lease = dhcp.acquire(&nic, &dhcp_frame, &dhcp_reply) catch
         serial.fail("no DHCP lease, so there is no address to listen on");
+    lease_held = lease;
     restBetweenFrames(&nic, clock.tsc_hz);
     serial.put("  address: ");
     serial.putIp(lease.address);
@@ -2088,6 +2091,18 @@ fn metalFacts(io: Io, alloc: std.mem.Allocator) anyerror![]const webbox.host_fac
     try add(&facts, alloc, "processor", "TSC at {d} MHz; {s}", .{
         tsc_hz_seen / 1_000_000,
         if (interrupts.armed()) "rests between frames" else "never rests (polls)",
+    });
+    // **THE LEASE IS NEVER RENEWED** (193, gap 12): its length, and
+    // whether the machine has run past it.
+    if (lease_held) |l| try add(&facts, alloc, "address", "{d}.{d}.{d}.{d} from DHCP, never renewed; {s}", .{
+        l.address[0], l.address[1], l.address[2], l.address[3],
+        if (l.seconds) |lent|
+            if (now - booted_unix > lent)
+                try std.fmt.allocPrint(alloc, "lent for {s}, and the machine has run PAST ITS LEASE", .{try hs.duration(alloc, lent)})
+            else
+                try std.fmt.allocPrint(alloc, "lent for {s}", .{try hs.duration(alloc, lent)})
+        else
+            "the server did not say for how long",
     });
     try add(&facts, alloc, "requests served", "{d}", .{served});
     try add(&facts, alloc, "connections", "{d} open now, {d} at most, of {d}", .{ open_now, busiest, max_connections });

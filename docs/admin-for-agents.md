@@ -102,6 +102,11 @@ From the top:
    refusals counted at the edge.
 3. **The host**: zig-metal-unikernel's own facts.
    - The clock and the processor.
+   - **Address**: the address DHCP lent at boot, and for how long. The
+     machine never renews it. On DigitalOcean's private network the
+     address is fixed and running past the lease is harmless; elsewhere,
+     "PAST ITS LEASE" with Caddy unable to reach the machine means the
+     address was given to someone else.
    - Connections and streams, open now and at most.
    - **TCP since boot**: every count the TCP table keeps. Any of these
      above zero is something that happened, not a fault in itself; what
