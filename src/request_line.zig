@@ -25,12 +25,18 @@ pub const Line = struct {
     took_ns: ?u64 = null,
 };
 
+/// `2026-10-13T14:02:07.123Z`: Unix milliseconds as UTC, ISO 8601.
+pub fn writeTime(w: *std.Io.Writer, ms: i64) std.Io.Writer.Error!void {
+    const c = civil.fromUnix(@divFloor(ms, std.time.ms_per_s));
+    try w.print("{d:0>4}-{d:0>2}-{d:0>2}T{d:0>2}:{d:0>2}:{d:0>2}.{d:0>3}Z", .{
+        @as(u32, @intCast(c.year)), c.month, c.day, c.hour, c.minute, c.second, @as(u32, @intCast(@mod(ms, std.time.ms_per_s))),
+    });
+}
+
 pub fn write(w: *std.Io.Writer, l: Line) std.Io.Writer.Error!void {
     if (l.unix_ms) |ms| {
-        const c = civil.fromUnix(@divFloor(ms, std.time.ms_per_s));
-        try w.print("{d:0>4}-{d:0>2}-{d:0>2}T{d:0>2}:{d:0>2}:{d:0>2}.{d:0>3}Z ", .{
-            @as(u32, @intCast(c.year)), c.month, c.day, c.hour, c.minute, c.second, @as(u32, @intCast(@mod(ms, std.time.ms_per_s))),
-        });
+        try writeTime(w, ms);
+        try w.writeByte(' ');
     }
     try w.print("request {d}: {s} -> {s}", .{ l.number, l.what, l.outcome });
     if (l.status != 0) try w.print(", {d}", .{l.status});

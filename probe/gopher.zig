@@ -1032,9 +1032,14 @@ fn serveOne(
         req.head.expect = null;
         webbox.edge.reject(&req, r.kind, r.msg) catch {};
         s.writer().flush() catch {};
-        logRequest(number, "(refused at its head)", r.msg[0 .. r.msg.len - 1], @intFromEnum(webbox.edge.statusFor(r.kind)), null);
+        const refused_status: u16 = @intFromEnum(webbox.edge.statusFor(r.kind));
+        logRequest(number, "(refused at its head)", r.msg[0 .. r.msg.len - 1], refused_status, null);
         // A drained body refused (late, past what is kept): what came of it.
-        if (wait.drain) |d| if (d.len > d.head_len) logBody(d, Io.awakeNs() orelse 0);
+        if (wait.drain) |d| {
+            if (d.upload) {
+                noteUpload(number, d, metal.log_ring.withoutQuery(req.head.target), metal.uploads_seen.kindOf(d.body()) orelse "", refused_status, r.msg, null, 0, Io.awakeNs() orelse 0);
+            } else if (d.len > d.head_len) logBody(d, Io.awakeNs() orelse 0);
+        }
         close(wire, table, i);
         return;
     }
@@ -1062,6 +1067,9 @@ fn serveOne(
     // Content-Length one that came whole to its length. A chunked one is
     // still framed, and a short one (its client gone) must be refused: std
     // reads both from memory, decoding the one and refusing the other.
+    // An upload's kind, from its part's own header, before the handler
+    // reads the body (189.4).
+    const upload_kind: metal.uploads_seen.Text(48) = if (wait.drain) |d| .of(if (d.upload) metal.uploads_seen.kindOf(d.body()) orelse "" else "") else .{};
     switch (wait.handover()) {
         .whole => |body| webbox.http.held_body = body,
         .network, .memory => {},
@@ -1123,13 +1131,20 @@ fn serveOne(
     logRequest(number, what, outcome, bus.status, if (done_at >= head_at) @intCast(done_at - head_at) else null);
     // **THE LOG SAYS A BODY'S SIZE AND HOW LONG IT TOOK TO ARRIVE** (169), so
     // a slow link is read, not inferred.
-    if (wait.drain) |d| if (wait.verdict == .none) logBody(d, d.whole_at);
+    const disk_after = diskWork();
+    if (wait.drain) |d| {
+        if (d.upload) {
+            // `what`, the log's own copy: the target is borrowed from the
+            // read buffer, which the handler may have consumed.
+            const copied = if (std.mem.indexOfScalar(u8, what, ' ')) |sp| what[sp + 1 ..] else what;
+            noteUpload(number, d, copied, upload_kind.slice(), bus.status, outcome, if (done_at >= head_at) @intCast(done_at - head_at) else null, disk_after.requests - disk_before.requests, done_at);
+        } else if (wait.verdict == .none) logBody(d, d.whole_at);
+    }
     serial.put("    waited ");
     serial.putDec(@intCast(@divTrunc(head_at - opened_at, 1000)));
     serial.put(" us, answered in ");
     serial.putDec(@intCast(@divTrunc(done_at - head_at, 1000)));
     serial.put(" us, ");
-    const disk_after = diskWork();
     serial.putDec(disk_after.requests - disk_before.requests);
     serial.put(" disk requests taking ");
     serial.putDec(@intCast(@divTrunc(Io.ticksToNs(disk_after.ticks -% disk_before.ticks), 1000)));
@@ -1718,6 +1733,41 @@ fn diskCheck(vol: *disk_fat.Volume, what: []const u8) void {
     }
 }
 
+/// **THE LAST UPLOADS, AND EVERY ONE COUNTED** (metal-vmm QUEUE 189.4,
+/// src/uploads_seen.zig), for /admin/host and the log.
+var uploads: metal.uploads_seen.Seen = .{};
+/// How many of them /admin/host shows; the log has every one.
+const uploads_shown = 10;
+
+/// Now as Unix milliseconds, if the wall clock is set.
+fn wallMs() ?i64 {
+    if (!Io.realTimeIsSet()) return null;
+    return @intCast(@divFloor(Io.Clock.now(.real, Io.io()).nanoseconds, std.time.ns_per_ms));
+}
+
+/// An upload's answer, recorded and said under its request's line.
+fn noteUpload(number: u64, d: Drains.Drain, path: []const u8, kind: []const u8, status: u16, ended: []const u8, turn_ns: ?u64, disk_requests: u64, now: i96) void {
+    const u: metal.uploads_seen.Upload = .{
+        .number = number,
+        .unix_ms = wallMs(),
+        .path = .of(path),
+        .kind = .of(kind),
+        .bytes = d.len - d.head_len,
+        .arrival_ms = @intCast(@divTrunc(@max((if (d.whole) d.whole_at else now) - d.began, 0), std.time.ns_per_ms)),
+        .turn_ms = if (turn_ns) |t| t / std.time.ns_per_ms else null,
+        .disk_requests = disk_requests,
+        .status = status,
+        .outcome = metal.uploads_seen.classify(status, d.whole, ended),
+    };
+    uploads.record(u);
+    var line: [512]u8 = undefined;
+    var w: std.Io.Writer = .fixed(&line);
+    u.write(&w) catch {}; // cut short past 512 bytes
+    serial.put("    upload: ");
+    serial.put(w.buffered());
+    serial.put("\n");
+}
+
 /// A request's line (src/request_line.zig): its UTC time, what it was, how it
 /// ended, its status and how long it took; then what memory held after it.
 /// `status` 0 and `took_ns` null where no request came.
@@ -1727,7 +1777,7 @@ fn logRequest(number: u64, what: []const u8, outcome: []const u8, status: u16, t
     var w: std.Io.Writer = .fixed(&line);
     metal.request_line.write(&w, .{
         .number = number,
-        .unix_ms = if (Io.realTimeIsSet()) @intCast(@divFloor(Io.Clock.now(.real, Io.io()).nanoseconds, std.time.ns_per_ms)) else null,
+        .unix_ms = wallMs(),
         .what = what,
         .outcome = outcome,
         .status = status,
@@ -2022,6 +2072,19 @@ fn metalFacts(io: Io, alloc: std.mem.Allocator) anyerror![]const webbox.host_fac
     try add(&facts, alloc, "memory (pages)", "{d} MB taken now, {d} MB at most, of {d} MB", .{
         p.bytes_taken >> 20, (p.pages_high_water * pages.page_size) >> 20, p.bytes_total >> 20,
     });
+    // **UPLOADS** (189.4): every one counted by its answer, then the newest.
+    {
+        var counts: std.Io.Writer.Allocating = .init(alloc);
+        try uploads.writeCounts(&counts.writer);
+        try facts.append(alloc, .{ .label = "uploads", .value = counts.written() });
+        var k: usize = 0;
+        while (uploads.newest(k)) |u| : (k += 1) {
+            if (k == uploads_shown) break;
+            var one: std.Io.Writer.Allocating = .init(alloc);
+            try u.write(&one.writer);
+            try facts.append(alloc, .{ .label = if (k == 0) "an upload, the newest first" else "", .value = one.written() });
+        }
+    }
     if (Io.siteVolume()) |v| try addVolume(&facts, alloc, "the boot disk (the site)", "the boot disk's write cache", "the boot disk's folders in memory", v);
     if (Io.dataVolume()) |v| {
         try addVolume(&facts, alloc, "the volume (" ++ app.hosting.data_name ++ ")", "the volume's write cache", "the volume's folders in memory", v);

@@ -10,6 +10,7 @@ pub const pages = @import("pages.zig");
 pub const serial = @import("serial.zig");
 pub const log_ring = @import("log_ring.zig");
 pub const request_line = @import("request_line.zig");
+pub const uploads_seen = @import("uploads_seen.zig");
 pub const screen = @import("screen.zig");
 pub const virtio = @import("virtio.zig");
 pub const scsi = @import("scsi.zig");
