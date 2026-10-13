@@ -52,6 +52,14 @@ Every fatal path ends in `serial.exitQemu`: a write to the exit door at port
 
 ## Two kinds of failure
 
+*(Added 2026-10-13, metal-vmm QUEUE 198.3.)* **A disk that stops answering
+while serving restarts the machine** too (`restart.disk_ended`, one
+constant, `.serve_refusing` to overrule it): it answers nothing again until
+the device is reset, and a boot is what resets it. Its record says "a disk
+that stopped answering", and the kept log holds what the disk said last. A
+disk dead at boot fails the mount, which halts, as every refusal at boot
+does, so it cannot loop.
+
 **A refusal at boot keeps halting.** Before `listening on port 80`, a fatal
 error is a fact about the machine or its configuration, and a restart would
 meet it again:

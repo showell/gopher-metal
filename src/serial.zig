@@ -194,6 +194,12 @@ pub fn fail(why: []const u8) noreturn {
     stop(.failure, "FAIL: ", why);
 }
 
+/// `fail`, for a reason of its own in the restart record (a disk that
+/// stopped answering, metal-vmm QUEUE 198.3).
+pub fn failFor(reason: restart.Reason, why: []const u8) noreturn {
+    stop(reason, "FAIL: ", why);
+}
+
 /// **EVERY KERNEL'S PANIC HANDLER**: a kernel's root says
 /// `pub const panic = metal.serial.panic;`, and boot.zig refuses one that
 /// does not. A panic ends as `fail` does: the console written out, the

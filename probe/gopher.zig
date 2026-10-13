@@ -545,6 +545,7 @@ pub fn kmain() noreturn {
     // ── the restart (RESTART.md), only with -Drestart ───────────────────────
     if (gm_build.restart) {
         const restarted = metal.restarting.begin(wallNow);
+        restart_record = restarted.record;
         if (restarted.wait_seconds > 0) waitSeconds(restarted.wait_seconds);
     }
 
@@ -707,6 +708,7 @@ pub fn kmain() noreturn {
     // From here the console waits for idle turns (serial.deferred).
     serial.deferred = true;
     while (limit == null or served < limit.?) {
+        diskStopped();
         open_now = table.inUse();
         busiest = @max(busiest, open_now);
         const arrived = stream.pump(&wire, &table, lease.address);
@@ -2087,6 +2089,39 @@ fn checkFact(alloc: std.mem.Allocator, c: *const metal.idle_check.VolumeCheck) !
     });
 }
 
+/// The restart record this boot found, if it was a restart (198.3).
+var restart_record: ?metal.restart.Record = null;
+
+/// **A DISK THAT STOPPED ANSWERING RESTARTS THE MACHINE** (metal-vmm QUEUE
+/// 198.3; the choice, and the guard against a loop, are
+/// `metal.restart.disk_ended`'s). Asked once a turn: two fields. What the
+/// disk said is written first, so the kept log holds it (/admin/log, the
+/// boot before), and the next boot's /admin/host says it restarted after
+/// a disk that stopped answering.
+fn diskStopped() void {
+    if (metal.restart.onDiskEnded(metal.restart.disk_ended, gm_build.restart) != .restart) return;
+    for (disks, 0..) |maybe, k| {
+        const d = maybe orelse continue;
+        if (d.ended == .serving) continue;
+        const which = if (k == 0) "the boot disk" else "the volume";
+        serial.put("  ");
+        serial.put(which);
+        serial.put(switch (d.ended) {
+            .serving => unreachable,
+            .timed_out => " STOPPED ANSWERING: a request went unanswered for its whole budget; ",
+            .needs_reset => " STOPPED ANSWERING: it asked for a reset; ",
+        });
+        serial.putDec(d.refused_after_end);
+        serial.put(" requests refused since; what its failed requests ended with: ");
+        var line: [512]u8 = undefined;
+        var w: std.Io.Writer = .fixed(&line);
+        d.failures.write(&w) catch {};
+        serial.put(w.buffered());
+        serial.put("\n");
+        serial.failFor(.disk_stopped, if (k == 0) "the boot disk stopped answering: restarting, so a fresh boot negotiates it again" else "the volume stopped answering: restarting, so a fresh boot negotiates it again");
+    }
+}
+
 fn metalFacts(io: Io, alloc: std.mem.Allocator) anyerror![]const webbox.host_facts.Fact {
     const hs = webbox.host_facts;
     var facts: std.ArrayList(hs.Fact) = .empty;
@@ -2100,6 +2135,14 @@ fn metalFacts(io: Io, alloc: std.mem.Allocator) anyerror![]const webbox.host_fac
     try add(&facts, alloc, "zig-metal-unikernel commit", "{s}", .{gm_build.commit});
     try add(&facts, alloc, "booted", "{s}", .{try hs.utc(alloc, booted_unix)});
     try add(&facts, alloc, "up for", "{s}", .{try hs.duration(alloc, now - booted_unix)});
+    // **WHY THIS BOOT** (198.3): a restart says what ended the boot before.
+    if (gm_build.restart) try add(&facts, alloc, "restarted", "{s}", .{if (restart_record) |r|
+        try std.fmt.allocPrint(alloc, "yes, after {s} (restart {d} in a row{s}{s}); the boot before's log is the end of /admin/log", .{
+            r.reason.text(),                   r.count,
+            if (r.at != null) ", at " else "", if (r.at) |m| try hs.utc(alloc, metal.restart.unixOfMinutes(m)) else "",
+        })
+    else
+        "no: this boot was not a restart"});
     try add(&facts, alloc, "its clock now", "{s} (set from the hardware clock at boot, never corrected)", .{try hs.utc(alloc, now)});
     try add(&facts, alloc, "processor", "TSC at {d} MHz; {s}", .{
         tsc_hz_seen / 1_000_000,
