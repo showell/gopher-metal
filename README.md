@@ -50,6 +50,22 @@ What it is not:
   DigitalOcean's private network.
 - **Not general purpose.** It runs Zig applications written against one
   library, zig-webbox (below), and nothing else.
+- **Not for arbitrary hardware.** It has been made to work on one kind of
+  machine: a DigitalOcean droplet, and QEMU set up the same way. It does
+  not claim to run anywhere else. Virtio is a fairly common standard among
+  hypervisors, so other virtual machines are a plausible next step. The
+  kernel can be extended gradually as we get access to other kinds of
+  hardware. There are no promises beyond that.
+
+**Battle tested, and what that honestly means.** It has served
+lynrummy.com since 2026-10-04 for about three regular daily users, who
+upload from their phones. That is all the battle there has been. It has
+never been under real load or stress. Caddy sits in front of it on a
+private network, so production only exercises a well-behaved, happy-path
+setup: one polite client and no hostile or lossy traffic. The harder cases
+are tested elsewhere. The judges and metal-vmm's faults and sweeps drop,
+delay and damage frames, stall and reset clients, fail and cut disks, and
+check what the machine did about it.
 
 ## How it is used now
 
