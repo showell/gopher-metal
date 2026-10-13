@@ -116,6 +116,10 @@ pub const Error = error{
     /// QUEUE 178): a cluster is never split across requests, so such a disk
     /// is refused at mount.
     RequestSmallerThanCluster,
+    /// The FAT's copies are apart and could not be weighed (metal-vmm QUEUE
+    /// 188.2): every write is refused, and nothing is written, until a
+    /// weighing succeeds (`reweigh`).
+    WritesRefused,
 };
 
 /// **WHICH FAT A VOLUME IS**, decided as the specification decides it: by
@@ -281,7 +285,7 @@ pub const DirCache = struct {
     }
 
     /// A write to `n` sectors from `lba` failed: what they hold is unknown.
-    fn drop(c: *DirCache, lba: u32, n: u32) void {
+    pub fn drop(c: *DirCache, lba: u32, n: u32) void {
         var k: u32 = 0;
         while (k < n) : (k += 1) {
             const i = c.slot(lba + k);
@@ -431,6 +435,16 @@ pub const Volume = struct {
     reserve_clusters: u32 = 0,
     /// Writes of a FAT copy that failed and were left apart (`copyApart`).
     fat_copies_failed: u64 = 0,
+    /// **WRITES REFUSED, THE COPIES UNWEIGHED** (metal-vmm QUEUE 188.2): a
+    /// mount whose weighing of apart copies failed part way holds the first
+    /// copy, and a write made from it would allocate a lost file's clusters
+    /// and write over the second copy, the good one. Set by such a mount,
+    /// cleared by a weighing that succeeds; while set, `writeSector` and
+    /// `writeSectors`, which every write goes through, refuse.
+    writes_refused: bool = false,
+    /// Weighings tried again (`reweigh`), and those that failed.
+    reweighs: u64 = 0,
+    reweighs_failed: u64 = 0,
     /// The volume serial number (BS_VolID), or null on a boot sector without
     /// one. `blkid` shows it as the UUID, high half first.
     serial: ?u32 = null,
@@ -477,6 +491,7 @@ pub const Volume = struct {
     pub const max_weighed_sectors = disk_fat_fat.max_weighed_sectors;
     pub const cacheFat = disk_fat_fat.cacheFat;
     pub const cacheFatChecked = disk_fat_fat.cacheFatChecked;
+    pub const reweigh = disk_fat_fat.reweigh;
     pub const mirrorFirst = disk_fat_fat.mirrorFirst;
     pub const ignoreFinding = disk_fat_fat.ignoreFinding;
     pub const repairRefused = disk_fat_fat.repairRefused;
@@ -817,6 +832,7 @@ pub const Volume = struct {
     pub const aliasTaken = disk_fat_dir.aliasTaken;
 
     pub fn writeSector(self: *Volume, lba: u32, from: *[sector_size]u8) Error!void {
+        if (self.writes_refused) return refuseWrite();
         self.changes +%= 1;
         if (self.blk.write(self.start_lba + lba, @intFromPtr(from)) != virtio.blk_s_ok) {
             if (self.dirs) |*c| c.drop(lba, 1);
@@ -841,6 +857,7 @@ pub const Volume = struct {
             props.@"unreachable"(@src(), "fat: a write of more sectors than one request", null);
             return Error.TooBig;
         }
+        if (self.writes_refused) return refuseWrite();
         self.changes +%= 1;
         if (self.blk.writeMany(self.start_lba + lba, @intFromPtr(from), count) != virtio.blk_s_ok) {
             if (self.dirs) |*c| c.drop(lba, count);
@@ -928,3 +945,9 @@ pub const Volume = struct {
     pub const CheckRun = disk_fat_check.CheckRun;
     pub const Checker = disk_fat_check.Checker;
 };
+
+/// The one site every refused write passes (188.2).
+fn refuseWrite() Error {
+    props.reachable(@src(), "fat: a write is refused, the FAT's copies unweighed", null);
+    return Error.WritesRefused;
+}

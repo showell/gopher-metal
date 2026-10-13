@@ -1573,7 +1573,7 @@ fn mountFat(blk: *virtio.Block, scratch: *[disk_fat.sector_size]u8, what: []cons
     if (mirrors.found == .unweighed) {
         serial.put("  ");
         serial.put(what);
-        serial.put(": the FAT's copies differ and could not be weighed (a read failed): the first is held, neither written over\n");
+        serial.put(": the FAT's copies differ and could not be weighed (a read failed): the first is held, neither written over; writes are refused until a weighing succeeds, tried again once a minute in idle time (metal-vmm QUEUE 188.2)\n");
     }
     serial.put("  ");
     serial.put(what);
@@ -2070,6 +2070,15 @@ fn addVolume(facts: *std.ArrayList(webbox.host_facts.Fact), alloc: std.mem.Alloc
     else |e|
         try std.fmt.allocPrint(alloc, "{s}, serial {s}: free space unreadable ({s})", .{ kindName(v), named, @errorName(e) });
     try facts.append(alloc, .{ .label = label, .value = value });
+    // **A VOLUME THAT REFUSES WRITES SAYS SO** (metal-vmm QUEUE 188.2).
+    if (v.writes_refused or v.reweighs > 0) try facts.append(alloc, .{
+        .label = "writes",
+        .value = try std.fmt.allocPrint(alloc, "{s}; the FAT's copies weighed again {d} times, {d} failed", .{
+            if (v.writes_refused) "REFUSED: the FAT's copies differ and could not be weighed; reads are served, and the weighing is tried again once a minute" else "taken: a weighing succeeded",
+            v.reweighs,
+            v.reweighs_failed,
+        }),
+    });
     // **WHETHER A SAVE IS DURABLE BEFORE IT IS ANSWERED** (io.durable): what
     // the disk says of its write cache, and the flushes sent to it.
     const cache: []const u8 = switch (metal.scsi_mode.report(v.blk.write_cache, v.blk.cache_on_at_bringup)) {

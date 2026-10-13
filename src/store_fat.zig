@@ -50,7 +50,9 @@ pub const FatStore = struct {
             error.NotFat16 => if (writing) Error.BadName else Error.NotFound,
             error.TooBig => Error.TooBig,
             error.Full, error.DirectoryFull => Error.NoSpace,
-            error.ReadFailed, error.WriteFailed => Error.Io,
+            // A volume refusing writes (metal-vmm QUEUE 188.2) is the disk not
+            // taking them for now, not damage.
+            error.ReadFailed, error.WriteFailed, error.WritesRefused => Error.Io,
             else => Error.Damaged,
         };
     }

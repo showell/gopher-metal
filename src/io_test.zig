@@ -856,3 +856,25 @@ test "a read that fails while a missing path is probed is ReadFailed, never 'not
         }
     }
 }
+
+test "a volume whose FAT copies are unweighed refuses every write as a read-only filesystem, and reads go on (metal-vmm QUEUE 188.2)" {
+    const t = try Two.make(true);
+    defer t.deinit();
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    try cwd.createDirPath(io, "data/chat");
+    try cwd.writeFile(io, .{ .sub_path = "data/chat/plan.md", .data = "saved" });
+    // io holds its own copy of the volume (see `Two.deinit`): the flag goes on that one.
+    const v = io_mod.dataVolume().?;
+    v.writes_refused = true;
+    defer v.writes_refused = false;
+    const writes = t.volume.blk.writes;
+    try testing.expectError(error.ReadOnlyFileSystem, cwd.writeFile(io, .{ .sub_path = "data/chat/plan.md", .data = "again" }));
+    try testing.expectError(error.ReadOnlyFileSystem, cwd.createDirPath(io, "data/chat/new"));
+    try testing.expectError(error.ReadOnlyFileSystem, cwd.deleteFile(io, "data/chat/plan.md"));
+    try testing.expectEqual(writes, t.volume.blk.writes);
+    try testing.expectEqualStrings("saved", try cwd.readFileAlloc(io, "data/chat/plan.md", arena.allocator(), .unlimited));
+    // Weighed: writable again.
+    v.writes_refused = false;
+    try cwd.writeFile(io, .{ .sub_path = "data/chat/plan.md", .data = "again" });
+}

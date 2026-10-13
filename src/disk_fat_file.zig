@@ -63,6 +63,16 @@ pub const Landing = enum { before, landed, unknown };
 pub const Commit = struct {
     landing: Landing = .before,
     clusters: u32,
+    /// **READ BACK BEFORE IT COUNTS** (metal-vmm QUEUE 188.1): the entry's
+    /// sector read from the disk, past the directory cache, after a write
+    /// the disk answered; a commit that did not land is undone as a refused
+    /// one is. An overwrite asks it, since it frees the old chain after: a
+    /// commit that lied freed the chain the entry still pointed at.
+    read_back: bool = false,
+    /// The read-back read neither what was written nor what was there: the
+    /// commit stands (the disk answered it), and the old chain is not freed
+    /// (it may still be the file's): a counted leak at worst.
+    doubt: bool = false,
 
     pub fn done(c: *Commit, vol: *Volume, landing: Landing) void {
         c.landing = landing;
@@ -309,6 +319,7 @@ pub fn writeEntry(
 /// EISDIR): replacing its entry would orphan everything in it.
 pub fn writeFileIn(self: *Volume, dir_cluster: Cluster, given: []const u8, bytes: []const u8) Error!void {
     defer self.balanced();
+    if (self.writes_refused) return Error.WritesRefused;
     if (given.len == 0 or given.len > max_name) {
         props.reachable(@src(), "fat: a write's name is empty or too long", null);
         return Error.BadName;
@@ -365,7 +376,7 @@ pub fn overwrite(self: *Volume, old: Entry, clusters: u32, bytes: []const u8) Er
         self.giveBack(first, clusters);
         return err;
     };
-    var commit: Commit = .{ .clusters = clusters };
+    var commit: Commit = .{ .clusters = clusters, .read_back = true };
     self.setEntry(old, first, @intCast(bytes.len), &commit) catch |err| {
         switch (commit.landing) {
             .before => self.giveBack(first, clusters),
@@ -378,6 +389,7 @@ pub fn overwrite(self: *Volume, old: Entry, clusters: u32, bytes: []const u8) Er
         }
         return err;
     };
+    if (commit.doubt) return self.unlinkUnsure(old.first_cluster, 0);
     self.freeAfterCommit(old.first_cluster);
 }
 
@@ -391,6 +403,7 @@ pub fn overwrite(self: *Volume, old: Entry, clusters: u32, bytes: []const u8) Er
 /// free meanwhile: taking and writing the cluster touch no parent sector.
 pub fn makeDirIn(self: *Volume, dir_cluster: Cluster, name: []const u8) Error!Cluster {
     defer self.balanced();
+    if (self.writes_refused) return Error.WritesRefused;
     // Held to a file's length: one longer is written and never found
     // again, so every makePath would make another.
     if (name.len == 0 or name.len > max_name) {
@@ -445,6 +458,7 @@ pub fn makeDirIn(self: *Volume, dir_cluster: Cluster, name: []const u8) Error!Cl
 /// make a volume its own check calls `too_deep`. Refused `BadName`.
 pub fn makePath(self: *Volume, path: []const u8) Error!Cluster {
     defer self.balanced();
+    if (self.writes_refused) return Error.WritesRefused;
     // "" is the root (a top-level file's folder); otherwise every part is
     // named: `a//b/` made `a/b` (the normalization hunt).
     if (hasEmptyPart(path)) {
@@ -473,6 +487,7 @@ pub fn makePath(self: *Volume, path: []const u8) Error!Cluster {
 /// A whole file at a path, making the directories above it.
 pub fn writeFile(self: *Volume, path: []const u8, bytes: []const u8) Error!void {
     defer self.balanced();
+    if (self.writes_refused) return Error.WritesRefused;
     var slash: ?usize = null;
     for (path, 0..) |c, i| {
         if (c == '/') slash = i;
@@ -499,6 +514,7 @@ pub fn writeFile(self: *Volume, path: []const u8, bytes: []const u8) Error!void 
 /// fills. A write inside the file overwrites in place, not atomically.
 pub fn writeInto(self: *Volume, path: []const u8, offset: u32, bytes: []const u8) Error!void {
     defer self.balanced();
+    if (self.writes_refused) return Error.WritesRefused;
     if (bytes.len == 0) return;
     const entry = try self.open(path);
     if (entry.isDirectory()) {
@@ -736,6 +752,24 @@ pub fn setEntry(self: *Volume, entry: Entry, first_cluster: Cluster, size: u32, 
         commit.done(self, self.commitRefused(entry.lba, entry.slot, &was, &written, commit.clusters));
         return err;
     };
+    // **ONLY EVIDENCE OF A LIE UNDOES IT**: the disk answered the write.
+    // A read-back that fails says nothing (the answer stands); one that
+    // reads the entry as it was says the write landed nothing, and the
+    // commit is undone; one that reads neither leaves the commit standing
+    // and the old chain unfreed (`doubt`).
+    if (commit.read_back) if (self.readSectors(entry.lba, 1, self.scratch)) {
+        const now = self.scratch[entry.slot..][0..dirent_size];
+        if (!std.mem.eql(u8, now, &written)) {
+            if (self.dirs) |*c| c.drop(entry.lba, 1);
+            if (std.mem.eql(u8, now, &was)) {
+                props.reachable(@src(), "fat: a commit the disk answered reads back as it was, and is undone", null);
+                commit.done(self, .before);
+                return Error.WriteFailed;
+            }
+            props.reachable(@src(), "fat: a commit the disk answered reads back as neither, and the old chain is kept", null);
+            commit.doubt = true;
+        }
+    } else |_| {};
     commit.done(self, .landed);
 }
 

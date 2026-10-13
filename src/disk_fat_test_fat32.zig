@@ -900,3 +900,129 @@ test "a virtio-blk request that would need more segments than its chain holds is
     try testing.expectEqual(@as(u32, 2), n(4096, 4095));
     try testing.expect(n(512, 85) > virtio.Block.most_segments);
 }
+
+// ---- an overwrite reads its commit back (metal-vmm QUEUE 188.1) ----
+
+/// Request numbers of writes to one sector.
+const SectorWrites = struct {
+    blk: *virtio.Block,
+    lba: u64,
+    at: ?u64 = null,
+    fn each(context: *anyopaque, write: bool, lba: u64, _: u32) void {
+        const r: *SectorWrites = @ptrCast(@alignCast(context));
+        if (write and lba == r.lba and r.at == null) r.at = r.blk.requests - 1;
+    }
+};
+
+test "an overwrite whose commit lands nothing keeps the old file whole, never broken; read back past the directory cache (metal-vmm QUEUE 188.1)" {
+    for (configs) |cfg| {
+        const old = try testing.allocator.alloc(u8, 20 * 1024);
+        defer testing.allocator.free(old);
+        const new = try testing.allocator.alloc(u8, 30 * 1024);
+        defer testing.allocator.free(new);
+        _ = pattern(old, 1);
+        _ = pattern(new, 2);
+        // The commit's request, found on a disk made the same.
+        var commit_at: u64 = undefined;
+        {
+            const d = try Disk.make("commit-probe", cfg.shape, cfg.cached);
+            defer d.deinit();
+            defer d.blk.observe = null;
+            try d.vol.writeFile("f.bin", old);
+            var w: SectorWrites = .{ .blk = &d.blk, .lba = (try d.vol.open("f.bin")).lba };
+            d.blk.observe = .{ .context = &w, .each = SectorWrites.each };
+            try d.vol.writeFile("f.bin", new);
+            try d.expectFile("f.bin", new);
+            commit_at = w.at.?;
+        }
+        const d = try Disk.make("damaged-commit-lost", cfg.shape, cfg.cached);
+        defer d.deinit();
+        try d.vol.writeFile("f.bin", old);
+        _ = try d.vol.open("f.bin"); // the probe's one read, so the numbers agree
+        d.blk.fault = .{ .at = commit_at, .kind = .lands_nothing };
+        try testing.expectError(disk_fat.Error.WriteFailed, d.vol.writeFile("f.bin", new));
+        d.blk.fault = null;
+        // This boot reads the old file, and so does the next.
+        try d.expectFile("f.bin", old);
+        try d.mount(cfg.cached);
+        try d.expectFile("f.bin", old);
+        const r = try d.check();
+        try r.expect(&.{});
+        try d.expectKept();
+    }
+}
+
+// ---- an unweighed mount refuses writes (metal-vmm QUEUE 188.2) ----
+
+/// The request number of the first read in [lo, hi), from `from` on.
+const CopyReads = struct {
+    blk: *virtio.Block,
+    lo: u64,
+    hi: u64,
+    from: u64,
+    at: ?u64 = null,
+    fn each(context: *anyopaque, write: bool, lba: u64, _: u32) void {
+        const r: *CopyReads = @ptrCast(@alignCast(context));
+        if (!write and lba >= r.lo and lba < r.hi and r.at == null and r.blk.requests - 1 >= r.from) r.at = r.blk.requests - 1;
+    }
+};
+
+test "a mount whose weighing of apart copies fails refuses every write, writes nothing, and is writable again once a weighing succeeds (metal-vmm QUEUE 188.2)" {
+    // Whole (an upload's run, 320 sectors apart) and one sector apart (178's form).
+    for ([_]u32{ upload_clusters, 300 }) |clusters| {
+        const bytes = try testing.allocator.alloc(u8, @as(usize, clusters) * disk_fat.sector_size);
+        defer testing.allocator.free(bytes);
+        _ = pattern(bytes, 0x21);
+        // The lie, and the mount's first read of the second copy, found on
+        // a disk made the same.
+        var lie_at: u64 = undefined;
+        var weigh_read_at: u64 = undefined;
+        {
+            const d = try Disk.make("refuse-probe", test_disk.small32, true);
+            defer d.deinit();
+            defer d.blk.observe = null;
+            var w = FatWrites.watch(d);
+            w.on(d);
+            try d.vol.writeFile("up.bin", bytes);
+            lie_at = w.first_at.?;
+        }
+        {
+            const d = try Disk.make("refuse-probe2", test_disk.small32, true);
+            defer d.deinit();
+            defer d.blk.observe = null;
+            d.blk.fault = .{ .at = lie_at, .kind = .lands_nothing };
+            try d.vol.writeFile("up.bin", bytes);
+            d.blk.fault = null;
+            // The weighing's check: its first read of a directory, in the data.
+            var r: CopyReads = .{ .blk = &d.blk, .lo = d.vol.data_start, .hi = std.math.maxInt(u64), .from = d.blk.requests };
+            d.blk.observe = .{ .context = &r, .each = CopyReads.each };
+            try d.mount(true);
+            weigh_read_at = r.at.?;
+        }
+        const d = try Disk.make("damaged-refuse", test_disk.small32, true);
+        defer d.deinit();
+        d.blk.fault = .{ .at = lie_at, .kind = .lands_nothing };
+        try d.vol.writeFile("up.bin", bytes);
+        // The mount's weighing fails part way: unweighed.
+        d.blk.fault = .{ .at = weigh_read_at, .kind = .fails };
+        try d.mount(true);
+        d.blk.fault = null;
+        try testing.expect(d.vol.writes_refused);
+        // Every write refused, and nothing written.
+        const writes = d.blk.writes;
+        try testing.expectError(disk_fat.Error.WritesRefused, d.vol.writeFile("next.bin", bytes[0..4096]));
+        try testing.expectError(disk_fat.Error.WritesRefused, d.vol.remove("up.bin"));
+        try testing.expectError(disk_fat.Error.WritesRefused, d.vol.rename("up.bin", "moved.bin"));
+        try testing.expectError(disk_fat.Error.WritesRefused, d.vol.makePath("dir"));
+        try testing.expectError(disk_fat.Error.WritesRefused, d.vol.writeInto("up.bin", 0, "x"));
+        try testing.expectEqual(writes, d.blk.writes);
+        // Weighed again: the second copy is the FAT, the file whole, and
+        // the volume writable.
+        const m = try d.vol.reweigh(d.check_room.?);
+        try testing.expectEqual(.weighed, m.found);
+        try testing.expect(!d.vol.writes_refused);
+        try d.expectFile("up.bin", bytes);
+        try d.vol.writeFile("next.bin", bytes[0..4096]);
+        try d.expectFile("next.bin", bytes[0..4096]);
+    }
+}

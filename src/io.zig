@@ -365,7 +365,11 @@ fn writing(path: []const u8) Error!*disk_fat.Volume {
         serial.put("\n");
         return Error.WriteFailed;
     }
-    return volumeAt(place);
+    const v = try volumeAt(place);
+    // **THE ONE REFUSAL** (188.2): before anything of the write is done.
+    // disk_fat's own writes refuse too; this answers it as what it is.
+    if (v.writes_refused) return Error.ReadOnlyFileSystem;
+    return v;
 }
 
 /// The wall clock in whole seconds, or null if nothing has set it yet. Unlike
@@ -433,6 +437,9 @@ pub const Error = error{
     NameTooLong,
     NoSpaceLeft,
     PathAlreadyExists,
+    /// The volume refuses writes until its FAT's copies are weighed (metal-vmm
+    /// QUEUE 188.2): the application answers it as a 503.
+    ReadOnlyFileSystem,
 };
 
 /// max_path bounds the path a File remembers. The application's deepest is a
@@ -529,6 +536,7 @@ pub const File = struct {
                 error.NotFound => Error.FileNotFound,
                 error.BadName => Error.NameTooLong,
                 error.Full, error.DirectoryFull, error.TooBig => Error.NoSpaceLeft,
+                error.WritesRefused => Error.ReadOnlyFileSystem,
                 else => Error.WriteFailed,
             };
         };
@@ -776,6 +784,7 @@ pub const Dir = struct {
                 error.BadName => Error.NameTooLong,
                 error.IsDirectory => Error.IsDir,
                 error.Full, error.DirectoryFull => Error.NoSpaceLeft,
+                error.WritesRefused => Error.ReadOnlyFileSystem,
                 else => Error.WriteFailed,
             };
         };
@@ -797,6 +806,7 @@ pub const Dir = struct {
             switch (e) {
                 error.BadName => return Error.NameTooLong,
                 error.Full, error.DirectoryFull => return Error.NoSpaceLeft,
+                error.WritesRefused => return Error.ReadOnlyFileSystem,
                 else => return Error.WriteFailed,
             }
         };
@@ -847,6 +857,7 @@ pub const Dir = struct {
                 error.NotFound => return Error.FileNotFound,
                 // As std.Io answers a directory given to deleteFile.
                 error.IsDirectory => return Error.IsDir,
+                error.WritesRefused => return Error.ReadOnlyFileSystem,
                 else => return Error.WriteFailed,
             }
         };
@@ -873,6 +884,7 @@ pub const Dir = struct {
                 error.IsDirectory => Error.IsDir,
                 error.BadName => Error.NameTooLong,
                 error.Full, error.DirectoryFull => Error.NoSpaceLeft,
+                error.WritesRefused => Error.ReadOnlyFileSystem,
                 else => Error.WriteFailed,
             };
         };
@@ -900,7 +912,7 @@ pub const Dir = struct {
         // A tree that is not there is gone already; one through a file is
         // NotDir, as std.Io's deleteTree answers on Linux.
         if (try throughFile(v, sub_path)) return Error.NotDir;
-        v.removeTree(sub_path) catch return Error.WriteFailed;
+        v.removeTree(sub_path) catch |e| return if (e == error.WritesRefused) Error.ReadOnlyFileSystem else Error.WriteFailed;
     }
 
     /// This directory, a cursor over it: see `Iterator`. A directory whose

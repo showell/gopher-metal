@@ -29,6 +29,15 @@ pub const VolumeCheck = struct {
     /// When the next check may start; the first is due once the machine
     /// first goes quiet.
     next_at: i96 = 0,
+    /// **A VOLUME REFUSING WRITES IS WEIGHED AGAIN** (metal-vmm QUEUE 188.2):
+    /// one whose FAT copies the mount could not weigh serves reads and
+    /// refuses writes (`disk_fat.Volume.writes_refused`). Each quiet moment
+    /// at least `reweigh_ns` after the last try weighs it again
+    /// (`disk_fat.Volume.reweigh`), whole in one step: the FAT read afresh
+    /// and checked once or twice, as at mount. Before any check, which can
+    /// wait. The counts are the volume's (`reweighs`, `reweighs_failed`).
+    reweigh_ns: u64 = std.time.ns_per_min,
+    reweigh_at: i96 = 0,
 
     /// Checks finished, started again because the volume changed, and ended
     /// by a read that failed.
@@ -46,6 +55,14 @@ pub const VolumeCheck = struct {
 
     fn step(ctx: *anyopaque, now: i96) idle.Outcome {
         const self: *VolumeCheck = @ptrCast(@alignCast(ctx));
+        if (self.vol.writes_refused) {
+            if (now < self.reweigh_at) return .resting;
+            self.reweigh_at = now + self.reweigh_ns;
+            if (self.vol.reweigh(self.seen)) |m| {
+                if (m.found == .unweighed) props.reachable(@src(), "idle: a volume refusing writes is weighed again, and the weighing fails", null) else props.reachable(@src(), "idle: a volume refusing writes is weighed again, and takes writes", null);
+            } else |_| props.reachable(@src(), "idle: a volume refusing writes is weighed again, and a read fails", null);
+            return .worked;
+        }
         if (self.state == .waiting) {
             if (now < self.next_at) return .resting;
             self.run.begin(self.vol, self.seen) catch {
@@ -159,4 +176,58 @@ test "idle check: damage is counted, the first kind said" {
     while (check.finished == 0) try testing.expect(q.turn(now, clock));
     try testing.expectEqual(@as(u32, 1), check.last.?.tally.damage);
     try testing.expectEqual(disk_fat.Problem.short, check.last.?.tally.first.?.problem);
+}
+
+test "idle check: a volume refusing writes is weighed again once a minute, stays refused while the weighing fails, and takes writes once it succeeds (metal-vmm QUEUE 188.2)" {
+    const d = try test_disk.Disk.make("idle-reweigh", test_disk.small32, true);
+    defer d.deinit();
+    try d.mount(true);
+    try d.vol.writeFile("data/a.md", "hello");
+    const seen = try testing.allocator.alloc(u8, d.vol.checkBytes());
+    defer testing.allocator.free(seen);
+    var check: VolumeCheck = .{ .vol = &d.vol, .seen = seen, .slice = .{ .sectors = 1, .runs = 1 } };
+    var q: idle.Idle = .{};
+    try q.add(check.init("the volume's check"));
+    // As a mount leaves it whose weighing failed.
+    d.vol.writes_refused = true;
+    var now: i96 = std.time.ns_per_s;
+    clock_now = now;
+    // The disk answers nothing: the weighing fails, the volume stays refused.
+    d.blk.fail_after = d.blk.requests;
+    try testing.expect(q.turn(now, clock));
+    try testing.expect(d.vol.writes_refused);
+    try testing.expectEqual(@as(u64, 1), d.vol.reweighs);
+    try testing.expectEqual(@as(u64, 1), d.vol.reweighs_failed);
+    try testing.expectError(disk_fat.Error.WritesRefused, d.vol.writeFile("data/b.md", "no"));
+    // The disk answers again, but the next weighing waits its minute: no
+    // request until then, and no check runs ahead of it.
+    d.blk.fail_after = null;
+    const requests = d.blk.requests;
+    now += std.time.ns_per_min - 1;
+    clock_now = now;
+    _ = q.turn(now, clock);
+    try testing.expectEqual(requests, d.blk.requests);
+    try testing.expectEqual(@as(u64, 1), d.vol.reweighs);
+    now += 1;
+    clock_now = now;
+    try testing.expect(q.turn(now, clock));
+    try testing.expectEqual(@as(u64, 2), d.vol.reweighs);
+    try testing.expectEqual(@as(u64, 1), d.vol.reweighs_failed);
+    try testing.expect(!d.vol.writes_refused);
+    try d.vol.writeFile("data/b.md", "yes");
+}
+
+test "idle check: a volume taking writes is never weighed again" {
+    const d = try test_disk.Disk.make("idle-no-reweigh", test_disk.small32, true);
+    defer d.deinit();
+    try d.mount(true);
+    const seen = try testing.allocator.alloc(u8, d.vol.checkBytes());
+    defer testing.allocator.free(seen);
+    var check: VolumeCheck = .{ .vol = &d.vol, .seen = seen, .slice = .{ .sectors = 1, .runs = 1 } };
+    var q: idle.Idle = .{};
+    try q.add(check.init("the volume's check"));
+    const now: i96 = std.time.ns_per_s;
+    clock_now = now;
+    while (check.finished == 0) try testing.expect(q.turn(now, clock));
+    try testing.expectEqual(@as(u64, 0), d.vol.reweighs);
 }

@@ -481,10 +481,10 @@ const Sim = struct {
     fn probe(s: *Sim, r: std.Random) !void {
         const vol = &s.disk.vol;
         const E = disk_fat.Error;
-        const Kind = enum { boot, unreadable, bad_name, onto_dir, overwrite_dir, hole, through_open, through_write, through_remove, rename_across, rename_dir, rename_onto_dir, chain_out, chain_loop, failing };
+        const Kind = enum { boot, unreadable, bad_name, onto_dir, overwrite_dir, hole, through_open, through_write, through_remove, rename_across, rename_dir, rename_onto_dir, chain_out, chain_loop, refusing, failing };
         // Named choices (explore.pickAs, .pick, .flag), each drawn exactly as
         // the call it replaced, so a probe seed's run is the run it was.
-        const named = explore.pickAs(r, usize, "fat_sim: the probe", .{ .boot = 1, .unreadable = 1, .bad_name = 1, .onto_dir = 1, .overwrite_dir = 1, .hole = 1, .through_open = 1, .through_write = 1, .through_remove = 1, .rename_across = 1, .rename_dir = 1, .rename_onto_dir = 1, .chain_out = 1, .chain_loop = 1 });
+        const named = explore.pickAs(r, usize, "fat_sim: the probe", .{ .boot = 1, .unreadable = 1, .bad_name = 1, .onto_dir = 1, .overwrite_dir = 1, .hole = 1, .through_open = 1, .through_write = 1, .through_remove = 1, .rename_across = 1, .rename_dir = 1, .rename_onto_dir = 1, .chain_out = 1, .chain_loop = 1, .refusing = 1 });
         var kind: Kind = std.meta.stringToEnum(Kind, @tagName(named)).?;
         if (s.step + 1 == s.sc.ops and explore.pick(r, "fat_sim: the last probe fails the disk", .{ .yes = 1, .no = 1 }) == .yes) kind = .failing;
         var buf: [300]u8 = undefined;
@@ -563,6 +563,7 @@ const Sim = struct {
                 if (vol.rename(from, dir)) return s.fault("a rename onto a directory succeeded") else |e| if (e != E.IsDirectory) return s.fault(@errorName(e));
             },
             .chain_out, .chain_loop => try s.probeChain(r, kind == .chain_loop),
+            .refusing => try s.probeRefusing(r),
             .failing => {
                 // The disk stops answering a few requests into an operation.
                 s.disk.blk.fail_after = s.disk.blk.requests + r.uintLessThan(u64, if (explore.flag(r, "fat_sim: the disk fails within 12 requests, not 80")) 12 else 80);
@@ -795,6 +796,46 @@ const Sim = struct {
         if (loop) {
             if (s.disk.vol.writeInto(path, @intCast(bytes.len), "never")) return s.fault("an append to a file whose chain loops succeeded") else |e| if (e != E.BadChain) return s.fault(@errorName(e));
         }
+    }
+
+    /// **A VOLUME REFUSING WRITES** (metal-vmm QUEUE 188.2), as a mount whose
+    /// weighing of apart copies failed leaves it: every kind of write is
+    /// `WritesRefused`, before a sector goes to the disk; reads go on; and a
+    /// weighing that succeeds takes writes again. `verify` then finds the
+    /// volume as the model has it, so nothing of a refused write was kept.
+    fn probeRefusing(s: *Sim, r: std.Random) !void {
+        const vol = &s.disk.vol;
+        const E = disk_fat.Error;
+        var buf: [300]u8 = undefined;
+        var buf2: [300]u8 = undefined;
+        vol.writes_refused = true;
+        const writes = s.disk.blk.writes;
+        const dir = s.someDir(r);
+        const fresh = join(dir orelse "", "refused", &buf);
+        const Refused = struct {
+            fn is(sim: *Sim, got: anytype, what: []const u8) !void {
+                if (got) |_| return sim.fault(what) else |e| if (e != E.WritesRefused) return sim.fault(@errorName(e));
+            }
+        };
+        try Refused.is(s, vol.writeFile(fresh, "never"), "a write to a volume refusing writes succeeded");
+        try Refused.is(s, vol.makePath(fresh), "a directory made on a volume refusing writes");
+        if (s.someFile(r)) |f| {
+            try Refused.is(s, vol.writeFile(f.path, "never"), "an overwrite on a volume refusing writes succeeded");
+            try Refused.is(s, vol.writeInto(f.path, @intCast(f.bytes.len), "never"), "an append on a volume refusing writes succeeded");
+            try Refused.is(s, vol.remove(f.path), "a remove on a volume refusing writes succeeded");
+            try Refused.is(s, vol.rename(f.path, join(dir orelse "", "renamed", &buf2)), "a rename on a volume refusing writes succeeded");
+            const got = s.disk.read(f.path) catch |e| return s.fault(@errorName(e));
+            defer s.gpa.free(got);
+            if (!std.mem.eql(u8, got, f.bytes)) return s.fault("a volume refusing writes reads a file as other bytes");
+        }
+        if (dir) |d| try Refused.is(s, vol.removeTree(d), "a tree removed on a volume refusing writes");
+        if (s.disk.blk.writes != writes) return s.fault("a volume refusing writes wrote to the disk");
+        props.reachable(@src(), "fat_sim: a volume refusing writes refuses each kind, and writes nothing", null);
+        if (s.disk.check_room) |room| {
+            const m = vol.reweigh(room) catch |e| return s.fault(@errorName(e));
+            if (m.found == .unweighed or vol.writes_refused) return s.fault("a weighing on a disk that answers left the volume refusing writes");
+            props.reachable(@src(), "fat_sim: a volume refusing writes is weighed again, and takes writes", null);
+        } else vol.writes_refused = false; // a FAT on disk is never weighed, so never refused
     }
 
     /// A file the model holds, by the probe's dice, or none.
