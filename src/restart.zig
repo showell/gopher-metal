@@ -43,16 +43,45 @@ pub const Reason = enum(u8) {
     failure = 1,
     /// A Zig panic: a safety check, an `@panic`, the application's own.
     panic = 2,
+    /// A disk the machine serves from stopped answering (metal-vmm QUEUE
+    /// 198.3): nothing on it can be saved, and a fresh boot negotiates the
+    /// device again.
+    disk_stopped = 3,
     _,
 
     pub fn text(r: Reason) []const u8 {
         return switch (r) {
             .failure => "a failure",
             .panic => "a panic",
+            .disk_stopped => "a disk that stopped answering",
             _ => "an unknown reason",
         };
     }
 };
+
+/// **WHAT A DISK THAT STOPPED ANSWERING DOES TO THE MACHINE** (metal-vmm
+/// QUEUE 198.3, P193(c), Steve's choice 2026-10-13): restart it. A disk
+/// that has stopped answering (193.2: a request unanswered for its budget,
+/// or the device asking for a reset) answers nothing again until the
+/// device is reset, and only a boot resets it here; serving on refuses
+/// every page and every write. **THE ONE CONSTANT TO OVERRULE**: set it to
+/// `.serve_refusing` and the machine serves on as 193.2 left it, the disk
+/// marked STOPPED ANSWERING on /admin/host.
+///
+/// **NO RESTART LOOP** (the guard): a disk dead at boot fails the mount
+/// before `restarting.serving()`, and a failure at boot halts (serial's
+/// `on_fatal` is null until then); a disk that dies again and again just
+/// after boot restarts under the back-off every restart has
+/// (`backoffSeconds`: the fourth in an hour waits a minute, then 5, then
+/// 15).
+pub const DiskEnded = enum { restart, serve_refusing };
+pub const disk_ended: DiskEnded = .restart;
+
+/// What a disk that stopped answering does, under `policy`, on a machine
+/// with the restart built in or not (a machine without one cannot).
+pub fn onDiskEnded(policy: DiskEnded, restart_built: bool) DiskEnded {
+    return if (restart_built) policy else .serve_refusing;
+}
 
 pub const Record = struct {
     count: u8,
@@ -96,6 +125,11 @@ fn checksum(b: []const u8) u8 {
     var s: u8 = 0x5A;
     for (b) |c| s = std.math.rotl(u8, s, 1) +% c;
     return s;
+}
+
+/// The Unix time a record's minutes name.
+pub fn unixOfMinutes(m: u32) i64 {
+    return epoch_2020 + @as(i64, m) * 60;
 }
 
 /// Minutes since 2020 for a Unix time, or null for one before it or past
@@ -230,4 +264,21 @@ test "minutes since 2020" {
     try testing.expectEqual(@as(?u32, null), minutesSince2020(null));
     // 2026-10-02T12:00:00Z
     try testing.expectEqual(@as(?u32, (1_790_942_400 - epoch_2020) / 60), minutesSince2020(1_790_942_400));
+}
+
+test "a disk that stopped answering restarts the machine, says so in its record, and only where a restart is built (metal-vmm QUEUE 198.3)" {
+    const r: Record = .{ .count = 1, .at = 5, .reason = .disk_stopped };
+    try std.testing.expectEqual(r, Record.decode(r.encode()).?);
+    try std.testing.expectEqualStrings("a disk that stopped answering", Reason.disk_stopped.text());
+    try std.testing.expectEqual(DiskEnded.restart, disk_ended);
+    try std.testing.expectEqual(DiskEnded.restart, onDiskEnded(.restart, true));
+    // No restart built in: nothing can restart; the machine serves on,
+    // refusing what needs the disk, as 193.2 left it.
+    try std.testing.expectEqual(DiskEnded.serve_refusing, onDiskEnded(.restart, false));
+    try std.testing.expectEqual(DiskEnded.serve_refusing, onDiskEnded(.serve_refusing, true));
+    // A restart for it counts toward the back-off like any other: the
+    // fourth in the hour waits.
+    var rec: ?Record = null;
+    for (0..4) |_| rec = recordRestart(rec, 100, .disk_stopped);
+    try std.testing.expect(backoffSeconds(rec.?.count) > 0);
 }

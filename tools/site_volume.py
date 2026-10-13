@@ -24,7 +24,7 @@ def main() -> int:
         print(__doc__.strip())
         return 2
     out = os.path.abspath(sys.argv[1])
-    root = sys.argv[2] if len(sys.argv) == 3 else os.environ.get("GOPHER_ROOT", os.path.expanduser("~/showell_repos/angry-gopher"))
+    root = sys.argv[2] if len(sys.argv) == 3 else os.environ.get("GOPHER_ROOT", os.path.normpath(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "..", "angry-gopher")))
     work = tempfile.mkdtemp(prefix="site-volume-")
     try:
         content = os.path.join(work, "content")

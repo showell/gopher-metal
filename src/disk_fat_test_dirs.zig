@@ -579,7 +579,7 @@ test "a name removed leaves its entries for the next name of the same length (mu
     }
 }
 
-test "FAT copies apart that check alike: neither is written over (the night of 2026-10-08, seed 16341)" {
+test "FAT copies apart that check alike are merged toward allocated, the marked side kept (the night of 2026-10-08, seed 16341; 198.5)" {
     for (formats) |shape| {
         const d = try Disk.make("damaged-weigh-tie", shape, false);
         defer d.deinit();
@@ -590,50 +590,42 @@ test "FAT copies apart that check alike: neither is written over (the night of 2
         l.set(d.bytes, 0, c, l.bad());
         const writes = d.blk.writes;
         try d.mount(true);
-        try testing.expect(!d.fatsAgree());
-        try testing.expectEqual(@as(u32, 0), d.repaired);
-        try testing.expectEqual(writes, d.blk.writes); // nothing written
+        try testing.expect(d.fatsAgree());
+        try testing.expectEqual(@as(u32, 1), d.repaired); // the second copy's sector
+        try testing.expectEqual(writes + 1, d.blk.writes);
         try testing.expectEqual(l.bad(), l.get(d.bytes, 0, c));
-        try testing.expectEqual(@as(u32, 0), l.get(d.bytes, 1, c));
+        try testing.expectEqual(l.bad(), l.get(d.bytes, 1, c));
     }
 }
 
-test "FAT copies that tie: the next change to a differing sector writes the held copy's version to both (a finding, metal-vmm QUEUE 124(f): the box decides)" {
-    // **THIS PINS WHAT IS, NOT WHAT SHOULD BE.** On a tie the first copy is
-    // held and neither is written, so the second's version is kept for a
-    // boot that can weigh. But a change to a FAT sector writes the held
-    // sector to every copy, so the first change in a sector that differs
-    // makes the second copy the first's there, entries the change never
-    // touched among them: the tie postpones the choice, then makes it.
-    //
-    // **IT DOES NOT CHOOSE BETWEEN THE FIXES** (metal-vmm QUEUE 127(g)). The
-    // difference here is a bad-cluster mark against a free entry, and a tie
-    // needs a difference that neutral: rot that freed a cluster a file holds
-    // breaks that copy's chain, and the other copy wins outright. Under
-    // P124(f)'s "merge toward allocated" the mark is the nonzero side, so
-    // both copies end as here and this stays green; under "keep each copy's
-    // own" the second copy stays free at 900 and this goes red. A fix is
-    // judged by its own red test, not by this one.
+test "FAT copies that tie merge toward allocated: each differing entry's nonzero side wins, both copies written at once (metal-vmm QUEUE 198.5, P124(f))" {
     for (formats) |shape| {
-        const d = try Disk.make("damaged-weigh-tie-written", shape, false);
+        const d = try Disk.make("damaged-tie-merged", shape, false);
         defer d.deinit();
         const l = Layout.of(d.bytes);
-        const c: usize = 900;
-        l.set(d.bytes, 0, c, l.bad());
+        // A tie both ways in one sector: 900 marked only in the second
+        // copy, 901 only in the first. Each is neutral to the check, so
+        // the copies check alike.
+        l.set(d.bytes, 1, 900, l.bad());
+        l.set(d.bytes, 0, 901, l.bad());
+        const free_before = blk: {
+            try d.mount(false);
+            break :blk d.vol.free_clusters;
+        };
         try d.mount(true);
-        try testing.expect(!d.fatsAgree());
-        try testing.expectEqual(@as(u32, 0), l.get(d.bytes, 1, c));
-        // A file long enough that its chain runs through the FAT sector
-        // that holds entry 900, around it.
-        const per_sector: usize = if (l.kind == .fat32) 128 else 256;
-        const bytes = try testing.allocator.alloc(u8, (c / per_sector * per_sector + per_sector) * 512);
-        defer testing.allocator.free(bytes);
-        @memset(bytes, 'x');
-        try d.vol.writeFile("big", bytes);
-        // The second copy now says what the first said of a cluster the
-        // write never touched.
-        try testing.expectEqual(l.bad(), l.get(d.bytes, 1, c));
-        try testing.expectEqual(l.bad(), l.get(d.bytes, 0, c));
+        // Both marks in both copies, on the disk, at mount.
+        for ([_]usize{ 0, 1 }) |copy| {
+            try testing.expectEqual(l.bad(), l.get(d.bytes, copy, 900));
+            try testing.expectEqual(l.bad(), l.get(d.bytes, copy, 901));
+        }
+        try testing.expect(d.fatsAgree());
+        // The first copy was counted with 901 taken and 900 free: 900 is
+        // taken now too.
+        try testing.expectEqual(free_before - 1, d.vol.free_clusters);
+        // And a write after it keeps both.
+        try d.vol.writeFile("after", "x");
+        try testing.expectEqual(l.bad(), l.get(d.bytes, 1, 900));
+        try testing.expectEqual(l.bad(), l.get(d.bytes, 0, 900));
     }
 }
 

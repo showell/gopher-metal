@@ -62,7 +62,7 @@ import build_volume  # noqa: E402
 import check_volume_tree  # noqa: E402
 import judge_gopher as G  # noqa: E402
 
-GOPHER_ROOT = os.environ.get("GOPHER_ROOT", os.path.expanduser("~/showell_repos/angry-gopher"))
+GOPHER_ROOT = os.environ.get("GOPHER_ROOT", os.path.normpath(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "..", "angry-gopher")))
 ELF = os.path.join(ROOT, "probe", "gopher.elf")
 NETNS_PREFIX = "gm-rehearse-"
 NETNS = f"{NETNS_PREFIX}{os.getpid()}"

@@ -725,6 +725,24 @@ pub const Volume = struct {
         return if (self.kind == .fat32) 4 else 2;
     }
 
+    /// **MERGE TOWARD ALLOCATED** (metal-vmm QUEUE 198.5): in FAT sector
+    /// `at`, held, every cluster entry free here and taken in `other` takes
+    /// `other`'s, and the kept free count is moved for it. The two reserved
+    /// entries, and entries past the last cluster, are the held copy's.
+    pub fn mergeTowardAllocated(self: *Volume, held: *[sector_size]u8, other: *const [sector_size]u8, at: u32) void {
+        const per = self.entriesPerSector();
+        const width = sector_size / per;
+        var e: u32 = 0;
+        while (e < per) : (e += 1) {
+            const c = at * per + e;
+            if (c < 2 or c > self.max_cluster) continue;
+            if (self.entryIn(held, e) != 0 or self.entryIn(other, e) == 0) continue;
+            @memcpy(held[e * width ..][0..width], other[e * width ..][0..width]);
+            props.always(@src(), self.free_clusters > 0, "fat: a cluster merged taken was counted free", null);
+            self.free_clusters -|= 1;
+        }
+    }
+
     pub fn entriesPerSector(self: *const Volume) u32 {
         return sector_size / self.entryBytes();
     }

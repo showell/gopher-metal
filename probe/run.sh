@@ -683,7 +683,7 @@ fi
 # Linux build is made here from the checkout the kernel was compiled from, so
 # the two cannot be different versions of the code.
 if [ "$want" = gopher ] || [ $quick = 1 ]; then
-    GOPHER_ROOT="${GOPHER_ROOT:-$HOME/showell_repos/angry-gopher}"
+    GOPHER_ROOT="${GOPHER_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)/angry-gopher}"
     if [ ! -f "$HERE/gopher.elf" ]; then
         echo "FAIL gopher | no gopher.elf; run: zig build gopher"
         failed=1
@@ -750,7 +750,7 @@ fi
 # that memory is reclaimed, that it does not slow down, and that the Linux VFAT
 # driver still finds every mark at the end. SOAK_ROUNDS says how many rounds.
 if [ "$want" = soak ]; then
-    GOPHER_ROOT="${GOPHER_ROOT:-$HOME/showell_repos/angry-gopher}"
+    GOPHER_ROOT="${GOPHER_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)/angry-gopher}"
     if [ ! -f "$HERE/gopher.elf" ]; then
         echo "FAIL soak | no gopher.elf; run: zig build gopher"
         failed=1

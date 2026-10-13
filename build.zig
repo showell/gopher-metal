@@ -405,7 +405,7 @@ pub fn build(b: *std.Build) void {
     // QUEUE 142): one compile of the runner, std and the shared imports,
     // and each file's tests run once, not in every binary that imports it.
     // This list is the authority; unit_tests.zig must import exactly it.
-    const unit_files = [_][]const u8{ "src/rtc.zig", "src/pit.zig", "src/gpt.zig", "src/stack.zig", "src/civil.zig", "src/disk_fat.zig", "src/disk_fat_dirent.zig", "src/machine.zig", "src/seq.zig", "src/ring_pieces.zig", "src/pvh.zig", "src/pages.zig", "src/tcp.zig", "src/tcp_check.zig", "src/tcp_sim.zig", "src/fat_sim.zig", "src/page_sim.zig", "src/pure_sim.zig", "src/ready_sim.zig", "src/durable_sim.zig", "src/durable.zig", "src/scsi_mode.zig", "src/floor_sim.zig", "src/store.zig", "src/store_model.zig", "src/store_test.zig", "src/store_linux.zig", "src/store_sim.zig", "src/scratch_dir.zig", "src/io_test.zig", "src/log_ring.zig", "src/restart.zig", "src/kept_log.zig", "src/ready.zig", "src/drain.zig", "src/drain_sim.zig", "src/request_heap.zig", "src/page_cache.zig", "src/admin_reset.zig", "src/dhcp.zig", "src/screen.zig", "src/serial_gate.zig", "src/net.zig", "src/idle.zig", "src/idle_check.zig", "src/request_line.zig", "src/uploads_seen.zig", "src/device_wait.zig", "src/disk_failures.zig", "src/boot_facts.zig", "src/rest_count.zig", "src/config_text.zig", "src/virtio.zig", "src/serial.zig", "src/after_turn.zig" };
+    const unit_files = [_][]const u8{ "src/rtc.zig", "src/pit.zig", "src/gpt.zig", "src/stack.zig", "src/civil.zig", "src/disk_fat.zig", "src/disk_fat_dirent.zig", "src/machine.zig", "src/seq.zig", "src/ring_pieces.zig", "src/pvh.zig", "src/pages.zig", "src/tcp.zig", "src/tcp_check.zig", "src/tcp_sim.zig", "src/fat_sim.zig", "src/page_sim.zig", "src/pure_sim.zig", "src/ready_sim.zig", "src/durable_sim.zig", "src/durable.zig", "src/scsi_mode.zig", "src/floor_sim.zig", "src/store.zig", "src/store_model.zig", "src/store_test.zig", "src/store_linux.zig", "src/store_sim.zig", "src/scratch_dir.zig", "src/io_test.zig", "src/log_ring.zig", "src/restart.zig", "src/kept_log.zig", "src/ready.zig", "src/drain.zig", "src/drain_sim.zig", "src/request_heap.zig", "src/page_cache.zig", "src/admin_reset.zig", "src/dhcp.zig", "src/screen.zig", "src/serial_gate.zig", "src/net.zig", "src/idle.zig", "src/idle_check.zig", "src/request_line.zig", "src/uploads_seen.zig", "src/device_wait.zig", "src/disk_failures.zig", "src/boot_facts.zig", "src/rest_count.zig", "src/config_text.zig", "src/virtio.zig", "src/serial.zig", "src/after_turn.zig", "src/spill_rule.zig", "src/apic_rule.zig" };
     comptime {
         @setEvalBranchQuota(1_000_000);
         const root = @embedFile("src/unit_tests.zig");
@@ -654,6 +654,10 @@ pub fn build(b: *std.Build) void {
     // tools/check_fat16_images.sh does both.
     const disk_fat_opts = b.addOptions();
     disk_fat_opts.addOption([]const u8, "images_dir", b.option([]const u8, "fat16-images", "where disk_fat_test writes its disk images") orelse "");
+    // **THE FAULT SWEEPS, SAMPLED IN TIER 0** (metal-vmm QUEUE 198.11):
+    // every request a fault can land on under -Dfault-sweep=full, as long.sh
+    // runs them; the ends and two dozen between otherwise.
+    disk_fat_opts.addOption(bool, "fault_sweep_full", b.option(bool, "fault-sweep-full", "disk_fat_faults_test stops at every request, not a sample (long.sh)") orelse false);
     disk_fat_opts.addOption([]const u8, "foreign_dir", b.option([]const u8, "fat16-foreign", "volumes other tools made, for disk_fat_test's check to judge") orelse "");
     // **Debug, like every other test** (metal-vmm QUEUE 136): these were
     // ReleaseSafe for a run a third as long (12.5 s, not 33 s), but its
@@ -682,7 +686,7 @@ pub fn build(b: *std.Build) void {
     const disk_fat_faults_opts = disk_fat_opts.createModule();
     // **EVERY TEST IN THE FILE RUNS UNDER ONE FILTER OR THE OTHER**, or the
     // build stops: a test named outside them would never run, and say nothing.
-    const faults_filters = [_][]const u8{ "every operation stopped after every write", "a request that fails is an error", "a request that fails before a write's commit", "a request that fails or lies leaves no cluster lost" };
+    const faults_filters = [_][]const u8{ "every operation stopped after every write", "a request that fails is an error", "a request that fails before a write's commit", "a request that fails or lies leaves no cluster lost", "a sampled sweep" };
     const lies_filters = [_][]const u8{ "a disk that lies", "a write that lands and answers failure" };
     everyTestFiltered(b, "src/disk_fat_faults_test.zig", &(faults_filters ++ lies_filters));
     for ([_][]const []const u8{
@@ -848,7 +852,7 @@ fn commitOf(b: *std.Build, dir: []const u8) []const u8 {
 /// build stops and names both. Moving the SDK is moving this line, in the
 /// same commit as whatever needed the move.
 /// `-Dcoverage-sdk-unpinned` builds against any commit, and says so.
-const coverage_sdk_pin = "fe60fe876e8b4aeb26613f4e6be08d13e176169f";
+const coverage_sdk_pin = "177e34981a78f62206ef38957d2b40b5472064ad";
 
 fn pinnedSdk(b: *std.Build, sdk_path: []const u8) void {
     const unpinned = b.option(bool, "coverage-sdk-unpinned", "build against whatever commit ../zig-coverage-sdk holds, not the one build.zig pins") orelse false;

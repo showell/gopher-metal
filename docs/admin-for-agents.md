@@ -147,6 +147,17 @@ From the top:
      buffer was taken back). Ended early far more often than frames
      arrive is a device interrupting with nothing to say: an interrupt
      storm, which looks like a busy processor otherwise.
+   - **Restarted**: "no", or what ended the boot before this one ("a
+     failure", "a panic", "a disk that stopped answering"), how many
+     restarts in a row, and when. The boot before's last lines, the disk's
+     own report among them, are the end of `/admin/log`. Three in a row
+     within an hour, and the next waits before serving (a minute, then 5,
+     then 15).
+   - **Responses cut off (connection gone, rest unsent)**: a response
+     whose end still waited in memory to be sent when its connection went
+     (the client closed or reset it, or TCP gave up). Each is also a
+     request logged as failed, not "ok". A few are clients going away;
+     many, with no matching rise in let-go clients, is worth a look.
    - **Network card stalls**: sends that waited a whole second for the card
      to take a frame back, the card asking for a reset, and frames dropped
      while it took none. Any above zero means the card stopped taking
@@ -176,7 +187,10 @@ From the top:
        "STOPPED ANSWERING" means a request went 30 s with no answer, or
        the disk asked for a reset. Nothing more is sent to it: every read
        and write after that fails, counted, and the requests that needed
-       it are answered with an error. Only a restart brings it back;
+       it are answered with an error. Only a restart brings it back, and
+       **the machine restarts itself** at the next turn (198.3), so you
+       will rarely see this row say it: you see the next boot's
+       "restarted" row instead;
      - **what its failed requests ended with**: "none", or each kind with
        its count. On the boot disk (virtio-blk): I/O errors, unsupported
        requests, and requests refused after the disk stopped answering. On

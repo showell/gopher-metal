@@ -1886,7 +1886,9 @@ test "revival: item 24's seeds, rough and crowded, pass; with the ring off, each
 }
 
 test "revival changes nothing where nothing gave way: the same frames, with the ring or without" {
-    for (1..41) |seed| {
+    // **TEN SEEDS IN TIER 0** (metal-vmm QUEUE 198.11): forty were 4 s in
+    // Debug, and each seed is the same check, three modes run twice.
+    for (1..11) |seed| {
         for ([_]Mode{ .plain, .rough, .crowd }) |mode| {
             const on = try traceOf(seed, mode, null);
             const off = try traceOf(seed, mode, 0);

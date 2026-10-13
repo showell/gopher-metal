@@ -1,7 +1,8 @@
 #!/bin/bash
 # **TIER 2: TIER 1, AND METAL-VMM** (metal-vmm QUEUE 197): metal-vmm's
 # checks against THIS checkout's probe kernels (GUESTS: it read
-# ~/showell_repos/zig-metal-unikernel/probe whatever tree ran the gates).
+# ~/showell_repos/zig-metal-unikernel/probe whatever tree ran the gates;
+# since 198.8 their own default is ../zig-metal-unikernel/probe).
 # Needs metal-vmm beside this checkout (or METAL_VMM) and /dev/kvm; its
 # check.sh compares each guest against QEMU too.
 TIER="tier 2"

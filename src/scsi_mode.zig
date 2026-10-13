@@ -219,3 +219,108 @@ test "sense in descriptor format is read as such: ILLEGAL REQUEST and UNIT ATTEN
     vendor[0] = 0x7F;
     try std.testing.expectEqual(Sense{}, senseOf(&vendor));
 }
+
+/// **WCE, FROM A MODE SENSE ANSWER** (metal-vmm QUEUE 198.2): the caching
+/// page's WCE bit, or null when the answer (its first `got` bytes; the rest
+/// of `page` is stale) is too short or carries no caching page, which
+/// `Block.flush` treats as a cache.
+pub fn wceOf(page: []const u8, got: usize) ?bool {
+    if (got < 8 or got > page.len) return null;
+    const descriptors = (@as(usize, page[6]) << 8) | page[7];
+    const p = 8 + descriptors;
+    if (p + 3 > got or page[p] & 0x3F != 0x08) return null;
+    return page[p + 2] & 0x04 != 0;
+}
+
+/// What a recheck after a reset leaves (scsi.zig's `recheckCache`).
+pub const Recheck = struct { write_cache: ?bool, unflushed: bool, synchronize: bool };
+
+/// **THE CACHE AFTER A RESET** (metal-vmm QUEUE 119, 198.2): `on`, what the
+/// disk said first; `taken`, whether it took MODE SELECT; `after`, what it
+/// says once asked to turn the cache off. Off for certain: what the cache
+/// took meanwhile is synchronized (`synchronize`). Anything else: whatever
+/// it holds waits for io.durable's flush (`unflushed`).
+pub fn afterReset(on: ?bool, taken: bool, after: ?bool) Recheck {
+    if (on != true) return .{ .write_cache = on, .unflushed = false, .synchronize = false };
+    if (!taken or after != false) return .{ .write_cache = after, .unflushed = true, .synchronize = false };
+    return .{ .write_cache = false, .unflushed = false, .synchronize = true };
+}
+
+/// The synchronize after a recheck failed: flushed as if on, before every
+/// answer.
+pub const after_failed_sync: Recheck = .{ .write_cache = null, .unflushed = true, .synchronize = false };
+
+/// **A COMMAND MET BY UNIT ATTENTION IS SENT AGAIN, THREE TRIES IN ALL**
+/// (scsi.zig's `commandSettled`): what to do after try `tries` (from 0).
+pub const Retry = enum { done, again, gave_up };
+pub const attention_tries = 3;
+
+pub fn retry(tries: u8, attention: bool) Retry {
+    if (!attention) return .done;
+    return if (tries + 1 >= attention_tries) .gave_up else .again;
+}
+
+/// **SYNCHRONIZE CACHE'S ANSWER** (scsi.zig's `synchronize`): GOOD is done;
+/// ILLEGAL REQUEST is a disk with no cache to synchronize, written through
+/// from then on; anything else failed.
+pub const Synced = enum { ok, write_through, failed };
+
+pub fn synced(good: bool, check_condition: bool, key: u8) Synced {
+    if (good) return .ok;
+    if (check_condition and key == 0x05) return .write_through; // ILLEGAL REQUEST
+    return .failed;
+}
+
+test "WCE is read from the caching page past any block descriptors, within what the disk sent (metal-vmm QUEUE 198.2)" {
+    var page = [_]u8{0} ** 40;
+    page[8] = 0x08;
+    page[10] = 0x04;
+    try std.testing.expectEqual(@as(?bool, true), wceOf(&page, 28));
+    page[10] = 0x00;
+    try std.testing.expectEqual(@as(?bool, false), wceOf(&page, 28));
+    // The PS bit (0x80) set: still the caching page.
+    page[8] = 0x88;
+    try std.testing.expectEqual(@as(?bool, false), wceOf(&page, 28));
+    // Not the caching page, or short of its WCE byte, or no header: nothing.
+    page[8] = 0x0A;
+    try std.testing.expectEqual(@as(?bool, null), wceOf(&page, 28));
+    page[8] = 0x08;
+    try std.testing.expectEqual(@as(?bool, null), wceOf(&page, 10));
+    try std.testing.expectEqual(@as(?bool, false), wceOf(&page, 11));
+    try std.testing.expectEqual(@as(?bool, null), wceOf(&page, 7));
+    // Eight bytes of block descriptors: the page is past them.
+    page[7] = 8;
+    page[16] = 0x08;
+    page[18] = 0x04;
+    try std.testing.expectEqual(@as(?bool, true), wceOf(&page, 28));
+    // Descriptors that push the page past what was sent: nothing.
+    page[6] = 1;
+    try std.testing.expectEqual(@as(?bool, null), wceOf(&page, 28));
+    // A `got` past the buffer is not believed.
+    try std.testing.expectEqual(@as(?bool, null), wceOf(page[0..20], 28));
+}
+
+test "after a reset: off stays off; on and turned off is synchronized; refused or unknown waits for the flush (metal-vmm QUEUE 198.2)" {
+    try std.testing.expectEqual(Recheck{ .write_cache = false, .unflushed = false, .synchronize = false }, afterReset(false, false, null));
+    try std.testing.expectEqual(Recheck{ .write_cache = null, .unflushed = false, .synchronize = false }, afterReset(null, false, null));
+    try std.testing.expectEqual(Recheck{ .write_cache = false, .unflushed = false, .synchronize = true }, afterReset(true, true, false));
+    // Refused: still on, and what it holds is owed a flush.
+    try std.testing.expectEqual(Recheck{ .write_cache = true, .unflushed = true, .synchronize = false }, afterReset(true, false, true));
+    // Taken, but it still says on; or taken and then it would not say.
+    try std.testing.expectEqual(Recheck{ .write_cache = true, .unflushed = true, .synchronize = false }, afterReset(true, true, true));
+    try std.testing.expectEqual(Recheck{ .write_cache = null, .unflushed = true, .synchronize = false }, afterReset(true, true, null));
+    // Refused though it then says off: not believed as off for certain.
+    try std.testing.expectEqual(Recheck{ .write_cache = false, .unflushed = true, .synchronize = false }, afterReset(true, false, false));
+}
+
+test "a unit attention is tried three times in all; synchronize's answer read three ways (metal-vmm QUEUE 198.2)" {
+    try std.testing.expectEqual(Retry.done, retry(0, false));
+    try std.testing.expectEqual(Retry.again, retry(0, true));
+    try std.testing.expectEqual(Retry.again, retry(1, true));
+    try std.testing.expectEqual(Retry.gave_up, retry(2, true));
+    try std.testing.expectEqual(Retry.done, retry(2, false));
+    try std.testing.expectEqual(Synced.ok, synced(true, false, 0));
+    try std.testing.expectEqual(Synced.write_through, synced(false, true, 0x05));
+    try std.testing.expectEqual(Synced.failed, synced(false, true, 0x06));
+    try std.testing.expectEqual(Synced.failed, synced(false, false, 0x05));
+}

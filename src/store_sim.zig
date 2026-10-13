@@ -494,11 +494,26 @@ test "store_sim: on a disk with a write cache, a cut breaks disk_fat's promises 
     defer quiet = false;
     // Up to forty seeds, stopping at the first that breaks: one is the
     // finding (metal-vmm QUEUE 136: the rest cost time and said no more).
-    for (1..41) |seed| {
+    // **SEED 13 FIRST** (metal-vmm QUEUE 198.11): the first that breaks,
+    // found by running 1 to 40; the twelve before it cost 9 s and said
+    // nothing. Should a change make 13 hold, the rest are still tried.
+    const first_break = 13;
+    for ([_]u64{first_break} ++ seedsBut(first_break)) |seed| {
         runSeedCached(seed) catch {
             broken += 1;
             break;
         };
     }
     try std.testing.expect(broken > 0);
+}
+
+/// 1 to 40, but `skip`.
+fn seedsBut(comptime skip: u64) [39]u64 {
+    var out: [39]u64 = undefined;
+    var k: usize = 0;
+    for (1..41) |s| if (s != skip) {
+        out[k] = s;
+        k += 1;
+    };
+    return out;
 }

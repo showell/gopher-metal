@@ -545,6 +545,7 @@ pub fn kmain() noreturn {
     // ── the restart (RESTART.md), only with -Drestart ───────────────────────
     if (gm_build.restart) {
         const restarted = metal.restarting.begin(wallNow);
+        restart_record = restarted.record;
         if (restarted.wait_seconds > 0) waitSeconds(restarted.wait_seconds);
     }
 
@@ -707,6 +708,7 @@ pub fn kmain() noreturn {
     // From here the console waits for idle turns (serial.deferred).
     serial.deferred = true;
     while (limit == null or served < limit.?) {
+        diskStopped();
         open_now = table.inUse();
         busiest = @max(busiest, open_now);
         const arrived = stream.pump(&wire, &table, lease.address);
@@ -1642,7 +1644,10 @@ fn mountFat(blk: *virtio.Block, scratch: *[disk_fat.sector_size]u8, what: []cons
 /// outside), so this is the nearest thing: the state after the last request
 /// is the state the run ended in.
 fn checkVolumes() void {
-    for ([_]?*disk_fat.Volume{ Io.siteVolume(), Io.dataVolume() }) |maybe| {
+    // **WHICH DISK** (metal-vmm P128, 198.5): the boot disk holds the site,
+    // the volume the data; each property says which it found its damage
+    // on, so sweep.sh excuses it only by a fault on that disk.
+    for ([_]?*disk_fat.Volume{ Io.siteVolume(), Io.dataVolume() }, [_][]const u8{ "boot", "volume" }) |maybe, disk| {
         const vol = maybe orelse continue;
         // **A CHECK THAT CANNOT RUN SAYS SO** (the normalization hunt,
         // 2026-10-10): it went quietly unrun. Memory for its marks is the
@@ -1664,7 +1669,7 @@ fn checkVolumes() void {
             couldNotCheck(e);
             continue;
         };
-        metal.coverage.always(@src(), damage == 0, "fat: after a request, a volume has no damage beyond what a stop leaves", .{ .damage = damage });
+        metal.coverage.always(@src(), damage == 0, "fat: after a request, a volume has no damage beyond what a stop leaves", .{ .damage = damage, .disk = disk });
         // **WHAT THE VOLUME KEEPS OF ITS FAT IS WHAT THE FAT SAYS NOW**
         // (essay web-server-in-a-box; kernel-facts #8): the kept count, and
         // a hint with no free cluster below it.
@@ -1743,7 +1748,7 @@ fn diskCheck(vol: *disk_fat.Volume, what: []const u8) void {
     serial.putDec(h.problems);
     serial.put(" problems\n");
     // At boot, so the last run's end: observed in every build.
-    metal.coverage.always(@src(), shown.damage == 0, "fat: at boot, a volume has no damage beyond what a stop leaves", .{ .damage = shown.damage });
+    metal.coverage.always(@src(), shown.damage == 0, "fat: at boot, a volume has no damage beyond what a stop leaves", .{ .damage = shown.damage, .disk = if (std.mem.eql(u8, what, "the boot disk")) "boot" else "volume" });
     for (shown.held[0..@min(shown.n, Shown.most)]) |f| {
         serial.put("    ");
         serial.put(@tagName(f.problem));
@@ -2087,6 +2092,39 @@ fn checkFact(alloc: std.mem.Allocator, c: *const metal.idle_check.VolumeCheck) !
     });
 }
 
+/// The restart record this boot found, if it was a restart (198.3).
+var restart_record: ?metal.restart.Record = null;
+
+/// **A DISK THAT STOPPED ANSWERING RESTARTS THE MACHINE** (metal-vmm QUEUE
+/// 198.3; the choice, and the guard against a loop, are
+/// `metal.restart.disk_ended`'s). Asked once a turn: two fields. What the
+/// disk said is written first, so the kept log holds it (/admin/log, the
+/// boot before), and the next boot's /admin/host says it restarted after
+/// a disk that stopped answering.
+fn diskStopped() void {
+    if (metal.restart.onDiskEnded(metal.restart.disk_ended, gm_build.restart) != .restart) return;
+    for (disks, 0..) |maybe, k| {
+        const d = maybe orelse continue;
+        if (d.ended == .serving) continue;
+        const which = if (k == 0) "the boot disk" else "the volume";
+        serial.put("  ");
+        serial.put(which);
+        serial.put(switch (d.ended) {
+            .serving => unreachable,
+            .timed_out => " STOPPED ANSWERING: a request went unanswered for its whole budget; ",
+            .needs_reset => " STOPPED ANSWERING: it asked for a reset; ",
+        });
+        serial.putDec(d.refused_after_end);
+        serial.put(" requests refused since; what its failed requests ended with: ");
+        var line: [512]u8 = undefined;
+        var w: std.Io.Writer = .fixed(&line);
+        d.failures.write(&w) catch {};
+        serial.put(w.buffered());
+        serial.put("\n");
+        serial.failFor(.disk_stopped, if (k == 0) "the boot disk stopped answering: restarting, so a fresh boot negotiates it again" else "the volume stopped answering: restarting, so a fresh boot negotiates it again");
+    }
+}
+
 fn metalFacts(io: Io, alloc: std.mem.Allocator) anyerror![]const webbox.host_facts.Fact {
     const hs = webbox.host_facts;
     var facts: std.ArrayList(hs.Fact) = .empty;
@@ -2100,6 +2138,14 @@ fn metalFacts(io: Io, alloc: std.mem.Allocator) anyerror![]const webbox.host_fac
     try add(&facts, alloc, "zig-metal-unikernel commit", "{s}", .{gm_build.commit});
     try add(&facts, alloc, "booted", "{s}", .{try hs.utc(alloc, booted_unix)});
     try add(&facts, alloc, "up for", "{s}", .{try hs.duration(alloc, now - booted_unix)});
+    // **WHY THIS BOOT** (198.3): a restart says what ended the boot before.
+    if (gm_build.restart) try add(&facts, alloc, "restarted", "{s}", .{if (restart_record) |r|
+        try std.fmt.allocPrint(alloc, "yes, after {s} (restart {d} in a row{s}{s}); the boot before's log is the end of /admin/log", .{
+            r.reason.text(),                   r.count,
+            if (r.at != null) ", at " else "", if (r.at) |m| try hs.utc(alloc, metal.restart.unixOfMinutes(m)) else "",
+        })
+    else
+        "no: this boot was not a restart"});
     try add(&facts, alloc, "its clock now", "{s} (set from the hardware clock at boot, never corrected)", .{try hs.utc(alloc, now)});
     try add(&facts, alloc, "processor", "TSC at {d} MHz; {s}", .{
         tsc_hz_seen / 1_000_000,
@@ -2179,6 +2225,9 @@ fn metalFacts(io: Io, alloc: std.mem.Allocator) anyerror![]const webbox.host_fac
     // wakes by a device far past the frames that came.
     if (interrupts.armed()) try add(&facts, alloc, "rests", "{d}, {d} of them ended early by a device", .{ interrupts.rests.rests, interrupts.rests.woken_by_device });
     if (turning) |t| try add(&facts, alloc, "frames refused (too long to send)", "{d}", .{t.wire.nic.oversized});
+    // **A RESPONSE CUT OFF BEHIND ITS SPILL** (198.1): the connection went
+    // while part of the response still waited to be sent.
+    try add(&facts, alloc, "responses cut off (connection gone, rest unsent)", "{d}", .{stream.gone_behind_spill});
     // **A CARD THAT STOPPED TAKING FRAMES** (193.2): sends that waited out
     // their budget, the card asking for a reset, and frames dropped since.
     if (turning) |t| try add(&facts, alloc, "network card stalls", "{d} sends waited out their second, {d} times the card asked for a reset, {d} frames dropped while it took none back{s}", .{

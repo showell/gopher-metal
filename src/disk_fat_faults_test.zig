@@ -416,6 +416,40 @@ fn onlyAllowed(r: *const test_disk.Report, these: []const disk_fat.Problem, op: 
     }
 }
 
+/// **THE REQUESTS A SWEEP STOPS AT** (metal-vmm QUEUE 198.11): the stop
+/// after `n` of `total`. Every one under `-Dfault-sweep=full` (long.sh), and
+/// where there are few; otherwise, in tier 0, the first `edge` and the last
+/// `edge` (an operation's setup and its commit and cleanups) and `middle`
+/// spaced evenly between, the same ones every run, so a failure replays.
+/// Every stop was ~2 minutes of tier 0 in Debug; the property is the same,
+/// over a sample, and long.sh sweeps it whole.
+fn nextStop(n: u64, total: u64) u64 {
+    const edge = 6;
+    const middle = 12;
+    if (options.fault_sweep_full or total <= 2 * edge + middle) return n + 1;
+    if (n + 1 < edge or n + 1 >= total - edge) return n + 1;
+    const stride = (total - 2 * edge + middle - 1) / middle;
+    return @min(n + stride, total - edge);
+}
+
+test "a sampled sweep stops at every request of a short one, and at a long one's both ends (198.11)" {
+    if (options.fault_sweep_full) return error.SkipZigTest;
+    var n: u64 = 0;
+    var seen: usize = 0;
+    while (n < 20) : (n = nextStop(n, 20)) seen += 1;
+    try testing.expectEqual(@as(usize, 20), seen);
+    var stops: [64]u64 = undefined;
+    seen = 0;
+    n = 0;
+    while (n < 1000) : (n = nextStop(n, 1000)) {
+        stops[seen] = n;
+        seen += 1;
+    }
+    try testing.expect(seen <= 6 + 6 + 12 + 1);
+    for (0..6) |k| try testing.expectEqual(@as(u64, k), stops[k]);
+    for (0..6) |k| try testing.expectEqual(@as(u64, 994 + k), stops[seen - 6 + k]);
+}
+
 test "every operation stopped after every write leaves an outcome its doc names, and at worst leaked clusters" {
     var buf: [state_bytes]u8 = undefined;
     for (stopped_ops, 0..) |op, op_index| {
@@ -442,7 +476,17 @@ test "every operation stopped after every write leaves an outcome its doc names,
             setFsInfo(d);
             const before = try testing.allocator.dupe(u8, d.bytes);
             defer testing.allocator.free(before);
-            while (!finished) : (stop += 1) {
+            // The writes the operation makes with no fault: what the stops
+            // are sampled over in tier 0 (`nextStop`).
+            const writes_whole = blk: {
+                try d.mount(cfg.cached);
+                const w0 = d.blk.writes;
+                op.run(&d.vol) catch {};
+                const w = d.blk.writes - w0;
+                @memcpy(d.bytes, before);
+                break :blk w;
+            };
+            while (!finished) : (stop = nextStop(stop, writes_whole + 1)) {
                 @memcpy(d.bytes, before);
                 try d.mount(cfg.cached);
                 d.label = "limit-stopped";
@@ -645,7 +689,7 @@ test "a request that fails is an error, and the machine carries on with nothing 
             // requests come before any write, and the disk is 35 MB on FAT32.
             var clean_at: ?u64 = null;
             var n: u64 = 0;
-            while (n < total) : (n += 1) {
+            while (n < total) : (n = nextStop(n, total)) {
                 if (clean_at != d.blk.writes) @memcpy(d.bytes, before);
                 clean_at = d.blk.writes;
                 try d.mount(cfg.cached);
@@ -714,7 +758,7 @@ test "a write that lands and answers failure is an error, and leaves nothing wor
             defer testing.allocator.free(before);
             var clean_at: ?u64 = null;
             var n: u64 = 0;
-            while (n < total) : (n += 1) {
+            while (n < total) : (n = nextStop(n, total)) {
                 if (clean_at != d.blk.writes) @memcpy(d.bytes, before);
                 clean_at = d.blk.writes;
                 try d.mount(cfg.cached);
@@ -767,7 +811,7 @@ test "a write that lands and answers failure, and the read after it fails too, l
             const before = try testing.allocator.dupe(u8, d.bytes);
             defer testing.allocator.free(before);
             var n: u64 = 0;
-            while (n < total) : (n += 1) {
+            while (n < total) : (n = nextStop(n, total)) {
                 @memcpy(d.bytes, before);
                 try d.mount(cfg.cached);
                 d.blk.fault = .{ .at = d.blk.requests + n, .kind = .lands_and_fails, .then_fail = 1, .seed = @truncate(n) };
@@ -812,7 +856,7 @@ test "a write that lands and answers failure (or fails) to a held FAT sector, it
             defer testing.allocator.free(before);
             var unsure: u64 = 0;
             var n: u64 = 0;
-            while (n < total) : (n += 1) {
+            while (n < total) : (n = nextStop(n, total)) {
                 @memcpy(d.bytes, before);
                 try d.mount(true);
                 d.blk.fault = .{ .at = d.blk.requests + n, .kind = fault, .then_fail = 2, .seed = @truncate(n) };
@@ -861,7 +905,7 @@ test "a write that lands and answers failure, its read-back failing too, while a
         try d.vol.writeFile("data/full/BIG.DAT", &big);
         const total = d.blk.requests - r0;
         var n: u64 = 0;
-        while (n < total) : (n += 1) {
+        while (n < total) : (n = nextStop(n, total)) {
             @memcpy(d.bytes, before);
             try d.mount(cfg.cached);
             d.blk.fault = .{ .at = d.blk.requests + n, .kind = .lands_and_fails, .then_fail = 1, .seed = @truncate(n) };
@@ -896,7 +940,7 @@ test "a write that lands and answers failure, as an allocation links its chain, 
         try d.vol.writeFile("data/BIG.DAT", &big);
         const total = d.blk.requests - r0;
         var n: u64 = 0;
-        while (n < total) : (n += 1) {
+        while (n < total) : (n = nextStop(n, total)) {
             @memcpy(d.bytes, before);
             try d.mount(cfg.cached);
             coverage.reset();
@@ -942,7 +986,7 @@ test "a write that lands and answers failure, its read-back rotten: the kept fre
         try d.vol.writeFile("data/BIG.DAT", &big);
         const total = d.blk.requests - r0;
         var n: u64 = 0;
-        while (n < total) : (n += 1) {
+        while (n < total) : (n = nextStop(n, total)) {
             @memcpy(d.bytes, before);
             try d.mount(cfg.cached);
             d.blk.fault_lba = null;
@@ -986,7 +1030,7 @@ test "a write that lands and answers failure, with the FAT on the disk and its r
     try d.vol.writeFile("data/BIG.DAT", &big);
     const total = d.blk.requests - r0;
     var n: u64 = 0;
-    while (n < total) : (n += 1) {
+    while (n < total) : (n = nextStop(n, total)) {
         @memcpy(d.bytes, before);
         try d.mount(false);
         coverage.reset();
@@ -1030,7 +1074,7 @@ test "a disk that lies (a write that lands nothing or half, a read of other byte
                 defer testing.allocator.free(before);
                 var clean_at: ?u64 = null;
                 var n: u64 = 0;
-                while (n < total) : (n += 1) {
+                while (n < total) : (n = nextStop(n, total)) {
                     if (clean_at != d.blk.writes) @memcpy(d.bytes, before);
                     clean_at = d.blk.writes;
                     try d.mount(cfg.cached);
@@ -1232,7 +1276,7 @@ test "a request that fails or lies leaves no cluster lost uncounted, its commit 
                 try op.run(&d.vol);
                 const total = d.blk.requests - r0;
                 var n: u64 = 0;
-                while (n < total) : (n += 1) {
+                while (n < total) : (n = nextStop(n, total)) {
                     @memcpy(d.bytes, before);
                     try d.mount(cfg.cached);
                     d.blk.fault = .{ .at = d.blk.requests + n, .kind = kind, .then_fail = fault.then_fail };
@@ -1320,7 +1364,7 @@ test "a write that lands and answers failure as a cleanup gives back what a fail
             const before = try testing.allocator.dupe(u8, d.bytes);
             defer testing.allocator.free(before);
             var n: u64 = 0;
-            while (n < total) : (n += 1) {
+            while (n < total) : (n = nextStop(n, total)) {
                 var m: u64 = n + 1;
                 while (m < n + 8) : (m += 1) {
                     @memcpy(d.bytes, before);
@@ -1477,7 +1521,7 @@ test "a disk that lies to any one request of an upload-sized write on FAT32 neve
         }
         for ([_]@FieldType(virtio.Block.Fault, "kind"){ .lands_nothing, .torn, .torn_tail }) |lie| {
             var n: u64 = 0;
-            while (n < total) : (n += 1) {
+            while (n < total) : (n = nextStop(n, total)) {
                 const d = try Disk.makeUnkept("limit-upload-lies", test_disk.small32, true);
                 defer d.deinit();
                 if (over) try d.vol.writeFile("up.bin", old);

@@ -94,8 +94,6 @@ const status_check_condition: u8 = 2;
 /// The sense key a disk reports once after it is attached or reset: a fact to
 /// be told, not a failure. The command is simply sent again.
 const sense_unit_attention: u8 = 6;
-/// The sense key of a command the disk does not support.
-const sense_illegal_request: u8 = 5;
 
 /// The memory a SCSI disk needs on top of `virtio.BlockMemory`'s ring: the
 /// controller's two other queues, the header and response, and a sector of
@@ -106,7 +104,56 @@ pub const Memory = struct {
     request: Request align(16) = undefined,
     response: Response align(16) = undefined,
     scratch: [512]u8 align(16) = undefined,
+    /// **THE EVENT QUEUE'S BUFFERS** (virtio 1.2 §5.6.6.3; metal-vmm QUEUE
+    /// 198.4): with none waiting, the device drops every event (a transport
+    /// reset, a disk removed, a parameter change) and says nothing. Each is
+    /// offered at bring-up, read and offered again as the device uses it.
+    events: [event_buffers][16]u8 align(16) = undefined,
+    event_q: ?virtio.Block.Q = null,
 };
+
+/// The event queue's buffers: events come one at a time, and one dropped
+/// is counted (`EVENTS_MISSED`) rather than lost silently.
+const event_buffers = 4;
+comptime {
+    std.debug.assert(event_buffers <= virtio.Block.Q.RingType.len);
+}
+
+/// Offers every event buffer, once the device is running.
+fn offerEvents(mem: *Memory) void {
+    const q = if (mem.event_q) |*q| q else return;
+    for (0..event_buffers) |k| {
+        mem.events[k] = @splat(0);
+        q.ring.desc[k] = .{ .addr = @intFromPtr(&mem.events[k]), .len = 16, .flags = virtio.desc_flag_write, .next = 0 };
+        q.offer(@intCast(k));
+    }
+    q.notify();
+}
+
+/// **WHAT THE DEVICE SAID SINCE** (198.4): every used event buffer read,
+/// counted (disk_failures' `noteEvent`) and offered again. A reset or a
+/// parameter change asks for the write cache again, as a unit attention
+/// does. Polled at every command: the queue is not vectored.
+pub fn pollEvents(b: *virtio.Block) void {
+    const mem = b.scsi orelse return;
+    // The queue in place: `take` moves its `last_used`.
+    const q = if (mem.event_q) |*q| q else return;
+    var any = false;
+    while (q.take()) |e| {
+        if (e.id >= event_buffers) {
+            props.reachable(@src(), "scsi: the event queue answers a buffer never offered", null);
+            b.failures.event_other +%= 1;
+            continue;
+        }
+        const k: u16 = @intCast(e.id);
+        props.reachable(@src(), "scsi: the device says something on the event queue", null);
+        if (b.failures.noteEvent(mem.events[k])) b.cache_recheck = true;
+        mem.events[k] = @splat(0);
+        q.offer(k);
+        any = true;
+    }
+    if (any) q.notifyIfWanted();
+}
 
 /// How a command ended. `residual` is how many of the bytes asked for were
 /// not moved (virtio 1.2 §5.6.6): a command can end GOOD having moved fewer,
@@ -126,6 +173,7 @@ fn command(b: *virtio.Block, at: Address, cdb: []const u8, dir: Direction, addr:
     // writes are refused before they get here, a flush or a recheck here.
     if (b.refuseEnded()) return .{ .response = 0xFF, .status = 0xFF, .sense_key = 0, .asc = 0, .ascq = 0, .residual = 0 };
     const mem = b.scsi.?;
+    pollEvents(b);
     mem.request = .{ .lun = at.field(), .tag = 0, .task_attr = 0, .prio = 0, .crn = 0, .cdb = [_]u8{0} ** cdb_size };
     @memcpy(mem.request.cdb[0..cdb.len], cdb);
     mem.response.response = 0xFF; // so a device that writes nothing is not read as OK
@@ -186,8 +234,14 @@ fn commandSettled(b: *virtio.Block, at: Address, cdb: []const u8, dir: Direction
         // here, and the caller looks again once its own command is done.
         // Every unit attention is counted by what it says (193, gap 7).
         if (attention and b.failures.noteAttention(o.asc, o.ascq)) b.cache_recheck = true;
-        if (attention and tries == 2) b.failures.attentions_unsettled +%= 1;
-        if (!attention or tries == 2) return o;
+        switch (mode.retry(tries, attention)) {
+            .again => {},
+            .done => return o,
+            .gave_up => {
+                b.failures.attentions_unsettled +%= 1;
+                return o;
+            },
+        }
     }
 }
 
@@ -236,13 +290,15 @@ pub fn synchronize(b: *virtio.Block, at: Address) u8 {
     const cdb = [10]u8{ 0x35, 0, 0, 0, 0, 0, 0, 0, 0, 0 };
     const o = commandSettled(b, at, &cdb, .none, 0, 0);
     if (b.cache_recheck) recheckCache(b, at);
-    if (good(o)) return virtio.blk_s_ok;
-    if (o.response == response_ok and o.status == status_check_condition and o.sense_key == sense_illegal_request) {
-        b.write_cache = false;
-        b.synchronize_unknown = true;
-        return virtio.blk_s_ok;
+    switch (mode.synced(good(o), o.response == response_ok and o.status == status_check_condition, o.sense_key)) {
+        .ok => return virtio.blk_s_ok,
+        .write_through => {
+            b.write_cache = false;
+            b.synchronize_unknown = true;
+            return virtio.blk_s_ok;
+        },
+        .failed => return virtio.blk_s_ioerr,
     }
-    return virtio.blk_s_ioerr;
 }
 
 /// **DOES THE DISK CACHE WRITES?** MODE SENSE(10) for the caching mode page
@@ -262,14 +318,10 @@ fn writeCache(b: *virtio.Block, at: Address, scratch: u64, page: []const u8, got
     // Only what the disk sent is its answer: the bytes past it in `page` are
     // whatever was there before.
     got.* = want -| o.residual;
-    if (got.* < 8) return null;
-    const descriptors = (@as(usize, page[6]) << 8) | page[7];
-    const p = 8 + descriptors;
-    if (p + 3 > got.* or page[p] & 0x3F != 0x08) {
-        props.reachable(@src(), "scsi: a MODE SENSE answer without the caching page is taken to cache", null);
-        return null;
-    }
-    return page[p + 2] & 0x04 != 0;
+    // The page read: scsi_mode.wceOf, pure and tested (198.2).
+    const wce = mode.wceOf(page, got.*);
+    if (wce == null) props.reachable(@src(), "scsi: a MODE SENSE answer without the caching page is taken to cache", null);
+    return wce;
 }
 
 /// **THE WRITE CACHE TURNED OFF** (metal-vmm QUEUE 112, Steve's choice
@@ -311,26 +363,27 @@ fn recheckCache(b: *virtio.Block, at: Address) void {
     const mem = b.scsi.?;
     const scratch = @intFromPtr(&mem.scratch);
     var got: usize = 0;
+    // What the disk says at each step is asked here; what it leaves is
+    // scsi_mode.afterReset's, pure and tested (198.2).
     const on = writeCache(b, at, scratch, &mem.scratch, &got);
-    if (on != true) {
-        b.write_cache = on;
-        return;
+    var taken = false;
+    var after: ?bool = on;
+    if (on == true) {
+        props.reachable(@src(), "scsi: a reset turned the write cache back on, and it is turned off again", null);
+        taken = turnCacheOff(b, at, scratch, &mem.scratch, got);
+        after = writeCache(b, at, scratch, &mem.scratch, &got);
     }
-    props.reachable(@src(), "scsi: a reset turned the write cache back on, and it is turned off again", null);
-    const taken = turnCacheOff(b, at, scratch, &mem.scratch, got);
-    b.write_cache = writeCache(b, at, scratch, &mem.scratch, &got);
-    if (!taken or b.write_cache != false) {
-        // Still caching: what it holds waits for io.durable's flush.
-        b.unflushed = true;
-        return;
+    var r = mode.afterReset(on, taken, after);
+    if (r.synchronize) {
+        // What the cache took before it was turned off again.
+        const sync = [10]u8{ 0x35, 0, 0, 0, 0, 0, 0, 0, 0, 0 };
+        if (!good(commandSettled(b, at, &sync, .none, 0, 0))) {
+            props.reachable(@src(), "scsi: after a reset, the cache turned off again, its held writes fail to synchronize", null);
+            r = mode.after_failed_sync;
+        }
     }
-    // What the cache took before it was turned off again.
-    const sync = [10]u8{ 0x35, 0, 0, 0, 0, 0, 0, 0, 0, 0 };
-    if (!good(commandSettled(b, at, &sync, .none, 0, 0))) {
-        props.reachable(@src(), "scsi: after a reset, the cache turned off again, its held writes fail to synchronize", null);
-        b.write_cache = null; // flushed as if on, before every answer
-        b.unflushed = true;
-    }
+    b.write_cache = r.write_cache;
+    if (r.unflushed) b.unflushed = true;
 }
 
 fn be32(bytes: []const u8) u32 {
@@ -356,13 +409,14 @@ pub fn bring(device: virtio.Device, mem: *virtio.BlockMemory) Error!virtio.Block
         props.reachable(@src(), "scsi: a controller whose CDB or sense size is not the default", null);
         return Error.UnexpectedSizes;
     }
-    // The control and event queues are set up because the device has them;
-    // nothing is ever sent on either, and an event with no buffer waiting is
-    // simply dropped, which the spec allows.
+    // The control queue is set up because the device has it; nothing is
+    // ever sent on it. The event queue gets buffers once the device runs
+    // (`offerEvents`, 198.4).
     _ = try virtio.Block.Q.setup(device, control_queue, &mem.scsi.control_ring);
-    _ = try virtio.Block.Q.setup(device, event_queue, &mem.scsi.event_ring);
+    mem.scsi.event_q = try virtio.Block.Q.setup(device, event_queue, &mem.scsi.event_ring);
     const q = try virtio.Block.Q.setup(device, request_queue, &mem.ring);
     try virtio.driverOk(device, st);
+    offerEvents(&mem.scsi);
 
     var b = virtio.Block{
         .device = device,

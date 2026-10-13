@@ -44,7 +44,7 @@ import sys
 import time
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-GOPHER_ROOT = os.environ.get("GOPHER_ROOT", os.path.expanduser("~/showell_repos/angry-gopher"))
+GOPHER_ROOT = os.environ.get("GOPHER_ROOT", os.path.normpath(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "..", "angry-gopher")))
 SRC = os.path.join(GOPHER_ROOT, "zig-server", "src")
 # The webbox library's checkout (zig-webbox), which both applications and
 # the kernel build compile: its source and build files.

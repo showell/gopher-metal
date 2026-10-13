@@ -44,7 +44,7 @@ say "log: $LOG"
 say "building (kernels, the TCP table on Linux, and the Linux build of the app)"
 {
     ( cd "$HERE/.." && zig build kernels && zig build gopher && zig build native )
-    ( cd "$HOME/showell_repos/angry-gopher/zig-server" && zig build )
+    ( cd "${GOPHER_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)/angry-gopher}/zig-server" && zig build )
 } >> "$LOG" 2>&1
 if [ $? -ne 0 ]; then
     say "FAILED to build; nothing ran. See $LOG"

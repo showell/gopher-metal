@@ -194,6 +194,12 @@ pub fn fail(why: []const u8) noreturn {
     stop(.failure, "FAIL: ", why);
 }
 
+/// `fail`, for a reason of its own in the restart record (a disk that
+/// stopped answering, metal-vmm QUEUE 198.3).
+pub fn failFor(reason: restart.Reason, why: []const u8) noreturn {
+    stop(reason, "FAIL: ", why);
+}
+
 /// **EVERY KERNEL'S PANIC HANDLER**: a kernel's root says
 /// `pub const panic = metal.serial.panic;`, and boot.zig refuses one that
 /// does not. A panic ends as `fail` does: the console written out, the
@@ -286,6 +292,9 @@ test "the console's backlog: kept while deferred, drained in order, across its w
         const n = @min(left, filler.len);
         put(filler[0..n]);
         drain(n);
+        // The capture keeps its last 4 KiB a byte at a time: emptied as it
+        // goes, it never shifts (198.11).
+        clearCaptured();
         left -= n;
     }
     clearCaptured();
@@ -301,6 +310,8 @@ test "the console's backlog: kept while deferred, drained in order, across its w
     var queued: usize = 0;
     while (queued + filler.len <= backlog) : (queued += filler.len) put(&filler);
     try testing.expectEqualStrings("", captured());
+    // The backlog comes out here, 256 KiB through a 4 KiB capture: only
+    // its end is read, and that is all the capture keeps.
     put("NEXT");
     try testing.expectEqual(@as(usize, 0), pending());
     try testing.expect(std.mem.endsWith(u8, captured(), "!NEXT"));

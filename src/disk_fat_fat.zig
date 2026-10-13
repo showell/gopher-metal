@@ -222,11 +222,25 @@ fn cacheFatCheckedInner(self: *Volume, buf: []u8, seen: ?[]u8) Error!Mirrors {
             }
         } else {
             for (differ[0..n_differ], 0..) |at, i| fat[at * sector_size ..][0..sector_size].* = first[i];
-            // **A TIE WRITES NEITHER**: a first copy that reads wrong can
-            // check as well as the good second.
+            // **A TIE MERGES TOWARD ALLOCATED** (metal-vmm QUEUE 198.5,
+            // P124(f)): neither copy is the FAT, so each differing entry
+            // takes its nonzero side, and both copies are written at once.
+            // The worst it leaves is a cluster marked taken that nothing
+            // holds, which a check reports leaked and fsck reclaims; never
+            // a cluster a file holds marked free.
             if (m.health[0].problems == m.health[1].problems and m.health[0].leaked == m.health[1].leaked) {
-                props.reachable(@src(), "fat: FAT copies apart check alike, and neither is written over", null);
+                props.reachable(@src(), "fat: FAT copies apart check alike, and are merged toward allocated", null);
                 m.found = .tied;
+                for (differ[0..n_differ], 0..) |at, i| {
+                    const held = fat[at * sector_size ..][0..sector_size];
+                    self.mergeTowardAllocated(held, &second[i], at);
+                    m.repaired += writeMerged(self, at, held, &first[i], &second[i]) catch {
+                        repairRefused();
+                        m.repair = .refused;
+                        return m;
+                    };
+                }
+                m.repair = .written;
                 return m;
             }
         }
@@ -287,8 +301,15 @@ fn weighWhole(self: *Volume, fat: []u8, room: []u8, run: *[run_sectors * sector_
     } else {
         try self.readSectors(self.fat_start, self.sectors_per_fat, fat.ptr);
         if (m.health[0].problems == m.health[1].problems and m.health[0].leaked == m.health[1].leaked) {
-            props.reachable(@src(), "fat: FAT copies apart check alike, and neither is written over", null);
+            // Merged toward allocated, as in `cacheFatChecked` (198.5).
+            props.reachable(@src(), "fat: FAT copies apart, weighed whole, check alike, and are merged toward allocated", null);
             m.found = .tied;
+            m.repaired = mergeWhole(self, fat, run) catch {
+                repairRefused();
+                m.repair = .refused;
+                return m;
+            };
+            m.repair = .written;
             return m;
         }
     }
@@ -304,6 +325,42 @@ fn weighWhole(self: *Volume, fat: []u8, room: []u8, run: *[run_sectors * sector_
 /// Every other copy written from the first where they differ.
 pub fn mirrorFirst(self: *Volume, fat: []u8, run: *[run_sectors * sector_size]u8) Error!u32 {
     return mirrorHeld(self, fat, run, 0);
+}
+
+/// The second copy read run by run against the held first; each sector
+/// that differs merged toward allocated and written to both.
+fn mergeWhole(self: *Volume, fat: []u8, run: *[run_sectors * sector_size]u8) Error!u32 {
+    var repaired: u32 = 0;
+    var s: u32 = 0;
+    while (s < self.sectors_per_fat) {
+        const n = @min(run_sectors, self.sectors_per_fat - s);
+        try self.readSectors(self.fat_start + self.sectors_per_fat + s, n, run);
+        var k: u32 = 0;
+        while (k < n) : (k += 1) {
+            const held = fat[(s + k) * sector_size ..][0..sector_size];
+            const second = run[k * sector_size ..][0..sector_size];
+            if (std.mem.eql(u8, held, second)) continue;
+            const first = held.*;
+            self.mergeTowardAllocated(held, second, s + k);
+            repaired += try writeMerged(self, s + k, held, &first, second);
+        }
+        s += n;
+    }
+    return repaired;
+}
+
+/// FAT sector `at`, merged, written to each copy it differs from.
+fn writeMerged(self: *Volume, at: u32, merged: *[sector_size]u8, first: *const [sector_size]u8, second: *const [sector_size]u8) Error!u32 {
+    var n: u32 = 0;
+    if (!std.mem.eql(u8, merged, first)) {
+        try self.writeSector(self.fat_start + at, merged);
+        n += 1;
+    }
+    if (!std.mem.eql(u8, merged, second)) {
+        try self.writeSector(self.fat_start + self.sectors_per_fat + at, merged);
+        n += 1;
+    }
+    return n;
 }
 
 /// Every copy but `trusted` written from the held FAT where they differ.
