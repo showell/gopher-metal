@@ -73,6 +73,14 @@ zig build test "${ZIG_GOPHER[@]}" --summary all > "$VERDICTS/test-summary.txt" 2
 # `test`), and its reason is said here, not only in the summary file.
 grep -E "tests passed|error|NOT type-checked" "$VERDICTS/test-summary.txt"
 lap "zig build test"
+# **WHAT `test` NO LONGER REACHES** (metal-vmm QUEUE 197: tier 0 needs no
+# sibling): gopher.elf type-checked from angry-gopher's checkout, and the
+# unit tests' pinned copy of webbox's body rule against the checkout's.
+zig build check-apps "${ZIG_GOPHER[@]}" 2>&1 | grep -E "error|NOT type-checked"
+[ "${PIPESTATUS[0]}" = 0 ] || failed+=(check-apps)
+zig build pinned "${ZIG_GOPHER[@]}" 2>&1 | grep pinned
+[ "${PIPESTATUS[0]}" = 0 ] || failed+=(pinned)
+lap "check-apps and pinned"
 # The library's own tests, on its Linux host: the kernel builds its sources,
 # and no other step here runs them.
 (cd "$WEBBOX_ROOT" && zig build test 2>&1 | tail -5; exit "${PIPESTATUS[0]}") || failed+=(webbox-test)
