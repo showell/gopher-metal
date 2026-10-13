@@ -64,4 +64,5 @@ test {
     _ = @import("rest_count.zig");
     _ = @import("config_text.zig");
     _ = @import("virtio.zig");
+    _ = @import("serial.zig");
 }

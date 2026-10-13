@@ -6,7 +6,9 @@ the simulators, the probes and the judges. The tiers are `tier0.sh` to
 1 (sense in either format) is fixed, caee388; 3 (a volume serial with a sign
 or `_`) is fixed and the config's spelling is in `src/config_text.zig`,
 b6ebbe3; 9 (the queue indexes across their wrap) is pinned in virtio.zig's
-own test, and virtio.zig is a unit file now. The rest are open.
+own test, and virtio.zig is a unit file now; 6 (the window-reopen rule
+written three ways) is one rule, `Conn.consumeReopens`, 16a94dd; 7 (the
+console's backlog) is pinned and serial.zig is a unit file. The rest are open.
 
 Sources: `build.zig`'s `unit_files`,
 `tier0-3.sh`, `long.sh`, `COVERAGE.md`, `docs/probes.md`, `probe/judge_gopher.py`
