@@ -10,8 +10,8 @@
 #             this repo's kernels type-checked, lints, properties
 #   tier1.sh  + QEMU: the probe kernels booted and judged, the droplet's boots
 #   tier2.sh  + metal-vmm: its checks against this checkout's kernels
-#   tier3.sh  + zig-webbox and the applications: gopher.elf and dogpark.elf
-#             judged, the site volume, metal-vmm on gopher.elf
+#   tier3.sh  + zig-webbox and angry-gopher: gopher.elf judged, the site
+#             volume, metal-vmm on gopher.elf
 #
 # Each tier is a script of its own, and says what it needs and what it does
 # not check. long.sh stays the release tier.

@@ -8,9 +8,8 @@ So:
 - The applications are named by one **content id**: a hash of the content
   of every file a kernel reads from their checkouts (`served_files`):
   angry-gopher's server source, the assets its build.zig embeds, pages/ and
-  gallery/; and Dog Park's (its source, build files and `.site`
-  directories), which the gates judge on metal as on Linux
-  (probe/judge_dogpark.py). A verdict is keyed by that and by this repo's
+  gallery/; and zig-webbox's. Dog Park is not judged here (Steve,
+  2026-10-13: an application is not this repo's test of itself). A verdict is keyed by that and by this repo's
   and the SDK's commits (B16), so a README commit in either leaves a verdict
   standing and an SDK change does not.
 - `gates.sh` and `long.sh` call `pair`, which prints the two they are about
@@ -53,12 +52,6 @@ WEBBOX_ROOT = os.path.realpath(os.environ.get("WEBBOX_ROOT", os.path.join(ROOT, 
 WEBBOX_SRC = os.path.join(WEBBOX_ROOT, "src")
 WEBBOX_BUILT = ("src", "build.zig", "build.zig.zon")
 VERDICT_DIR = os.environ.get("GATES_VERDICT_DIR", os.path.expanduser("~/build/zig-metal-unikernel/verdicts"))
-# Dog Park's checkout, as probe/judge_dogpark.py finds it.
-DOGPARK_ROOT = os.path.realpath(os.environ.get("DOGPARK_ROOT", os.path.join(ROOT, "..", "dog-park")))
-# What Dog Park's two builds read besides its assets.zon's `.site`: its
-# source and its build files (webbox is zig-webbox's, counted on its own).
-DOGPARK_ASSETS = "assets.zon"
-DOGPARK_BUILT = ("src", "build.zig", "build.zig.zon")
 SDK = os.environ.get("COVERAGE_SDK", os.path.join(os.path.dirname(ROOT), "zig-coverage-sdk"))
 TIERS = ("gates", "long")
 
@@ -131,24 +124,12 @@ def served_files() -> list:
     return sorted(set(files))
 
 
-def dogpark_dirs() -> tuple:
-    return (*DOGPARK_BUILT, *served_by(DOGPARK_ROOT, DOGPARK_ASSETS)[1])
-
-
-def dogpark_files() -> list:
-    """Every Dog Park file its kernel or its Linux build reads, as paths from
-    its root."""
-    embedded, _ = served_by(DOGPARK_ROOT, DOGPARK_ASSETS)
-    return sorted(set(walk(DOGPARK_ROOT, dogpark_dirs()) + [DOGPARK_ASSETS] + [os.path.normpath(p) for p in embedded]))
-
-
 def content_id() -> str:
     """`content-` and a hash of every served file's repo, path and bytes, both
     applications' and the library's (a file named but not there counts as
     missing)."""
     h = hashlib.sha256()
     for repo, root, rels in (("angry-gopher", GOPHER_ROOT, served_files()),
-                             ("dog-park", DOGPARK_ROOT, dogpark_files()),
                              ("zig-webbox", WEBBOX_ROOT, sorted(walk(WEBBOX_ROOT, WEBBOX_BUILT)))):
         for rel in rels:
             h.update(f"{repo}/{rel}".encode() + b"\0")
@@ -173,14 +154,6 @@ def current_pair() -> tuple:
     why = freshness()
     if why != "fresh":
         return ours, None, why
-    # Dog Park is judged by the gates, so a verdict names its code too: no
-    # checkout, or one whose assets do not read, is no pair.
-    if not os.path.isdir(os.path.join(DOGPARK_ROOT, "src")):
-        return ours, None, f"no dog-park checkout at {DOGPARK_ROOT} (DOGPARK_ROOT)"
-    try:
-        served_by(DOGPARK_ROOT, DOGPARK_ASSETS)
-    except (OSError, ValueError) as e:
-        return ours, None, f"Dog Park's assets do not read: {e}"
     return ours, content_id(), None
 
 
@@ -198,7 +171,7 @@ def pair() -> int:
     if problem:
         print(f"REFUSING: {problem}")
         return 2
-    print(f"judging zig-metal-unikernel {short(ours)} with angry-gopher and dog-park {short(theirs)}")
+    print(f"judging zig-metal-unikernel {short(ours)} with angry-gopher and zig-webbox {short(theirs)}")
     return 0
 
 
@@ -230,7 +203,7 @@ def record(tier: str, outcome: str) -> int:
     os.makedirs(VERDICT_DIR, exist_ok=True)
     with open(verdict_path(tier, ours, theirs), "w") as f:
         f.write(f"{outcome} {time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())}\n")
-    print(f"verdict kept: {tier} {outcome} for zig-metal-unikernel {short(ours)} with angry-gopher and dog-park {short(theirs)}")
+    print(f"verdict kept: {tier} {outcome} for zig-metal-unikernel {short(ours)} with angry-gopher and zig-webbox {short(theirs)}")
     return 0
 
 
@@ -250,8 +223,6 @@ def require() -> list:
     # Generated assets are not in git, and are not asked to be.
     if git(GOPHER_ROOT, "status", "--porcelain", "--untracked-files=no", "--", *served_dirs(), ASSETS):
         why.append("angry-gopher's served files have uncommitted changes")
-    if git(DOGPARK_ROOT, "status", "--porcelain", "--untracked-files=no", "--", *dogpark_dirs(), DOGPARK_ASSETS):
-        why.append("dog-park's judged files have uncommitted changes")
     if git(WEBBOX_ROOT, "status", "--porcelain", "--untracked-files=no", "--", *WEBBOX_BUILT):
         why.append("zig-webbox has uncommitted changes")
     for tier in TIERS:

@@ -236,13 +236,13 @@ cheapest first, and stops at the first one that fails.
 | `./tier0.sh` | zig 0.16, Python 3, and the SDK beside this checkout | the unit tests and short simulator runs; this repo's kernels and host programs type-check; `zig fmt` and the lints. No QEMU, no other repo, no network, no root. Run it on every change | ~2-3 min (1m40s with everything compiled) |
 | `./tier1.sh` | + QEMU, dosfstools, gdisk, mtools, curl, binutils, `sudo -n` for loop mounts; KVM for the droplet boots (or `ACCEL=tcg`) | each test kernel ("probe") boots and works on virtual hardware; the judges' own tests; the droplet's boot loader and image | ~45 s of probes, then the droplet boots |
 | `./tier2.sh` | + metal-vmm beside this checkout, and /dev/kvm | metal-vmm runs this checkout's probe kernels the same as QEMU does, and the same twice | minutes |
-| `./tier3.sh` | + zig-webbox, angry-gopher and dog-park beside this checkout | the library's tests and the limits it copies; the unit tests' pinned body rule is still the library's; gopher.elf type-checks, builds and is judged against its Linux build on QEMU's microvm and the droplet-shaped machine; dogpark.elf likewise; the PC-shaped machine's rests and the timeouts on metal-vmm | ~20 min |
+| `./tier3.sh` | + zig-webbox and angry-gopher beside this checkout | the library's tests and the limits it copies; the unit tests' pinned body rule is still the library's; gopher.elf type-checks, builds and is judged against its Linux build on QEMU's microvm and the droplet-shaped machine; the PC-shaped machine's rests and the timeouts on metal-vmm | ~20 min |
 | `zig build properties` | as tier 0 | the simulators over many seeds, judged by their coverage properties: zig alone, but not in tier 0 for its time (20 min in Debug, 5 with `-Dsweep-optimize=ReleaseSafe`); long.sh runs it at 10,000 seeds | 5-20 min |
 | `./gates.sh quick` | as tier 3 | tiers 0 and 1, then gopher.elf and one chat-judge story | |
 | `./gates.sh` | as tier 3 | tiers 0 to 3, for a batch | |
 | `./long.sh` | as tier 3 | before every release: the simulators at 10,000 seeds; the FAT16 judge; the real kernel on metal-vmm losing each packet it sends in turn, facing a misbehaving client, and under 100 seeded fault schedules over the network and disks, every run still serving the right page | longest |
 
-A developer can defer every test against angry-gopher and dog-park (tier 3)
+A developer can defer every test against angry-gopher (tier 3)
 and still have reasonable confidence in a change that tier 0 passes.
 
 Each script's header says what it runs and why. The coverage properties and
@@ -303,7 +303,7 @@ what serves is always a tag, never a branch. The tag's message
 | FAT16 and FAT32, read and write | served | long names, folders, append, replace, delete; checked by `fsck` and by Linux reading what it wrote. Production's volume is FAT32 |
 | clocks and entropy | served | the CMOS real-time clock; the TSC's rate measured against the PIT; random bytes from virtio-rng where the machine has one, and RDRAND |
 | angry-gopher's whole site | served | every route, judged equal to the Linux build, including chat's live streams and uploads |
-| dog-park as a kernel | test only | judged equal to its Linux build in every gate; not deployed |
+| dog-park as a kernel | built only | `zig build dogpark` builds it; no gate judges it (an application is not this repo's test of itself); not deployed |
 | file contents kept in memory | served | after their first read, write-through (`page_cache_mib`, 64 MiB by default) |
 | large disk requests | served | a run of contiguous clusters is one request of up to 1 MiB (the least of the disk's, the controller's and our own limit) |
 | the FAT written a sector at a time | served | v29's measured disk requests for a 1.8 MB, 10 MB and 100 MB upload: 59, 26 and 115 (v28: 93, 218 and 2,017) |

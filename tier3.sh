@@ -3,11 +3,12 @@
 # 197). Everything that compiles or judges code outside this repo: the
 # library's own tests and the limits it copies; the unit tests' pinned body
 # rule against the library's; gopher.elf (angry-gopher's chat) type-checked,
-# built and judged against its Linux build on two machines; dogpark.elf
-# judged; the site volume, and metal-vmm on gopher.elf (the PC-shaped
-# machine's rests, the timeouts). Needs angry-gopher, zig-webbox and
-# dog-park beside this checkout (or GOPHER_ROOT, WEBBOX_ROOT, DOGPARK_ROOT),
-# and tier 2's metal-vmm and KVM.
+# built and judged against its Linux build on two machines; the site
+# volume, and metal-vmm on gopher.elf (the PC-shaped machine's rests, the
+# timeouts). Needs angry-gopher and zig-webbox beside this checkout (or
+# GOPHER_ROOT, WEBBOX_ROOT), and tier 2's metal-vmm and KVM. Dog Park is not
+# judged here (Steve, 2026-10-13): an application is not this repo's test of
+# itself.
 #
 #   ./tier3.sh          the whole tier
 #   ./tier3.sh quick    gopher.elf built and one chat-judge story (members,
@@ -66,10 +67,6 @@ zig build check-apps "${ZIG_SIBLINGS[@]}" 2>&1 | grep -E "error|NOT type-checked
 # The library's own tests, on its Linux host.
 (cd "$WEBBOX_ROOT" && zig build test 2>&1 | tail -5; exit "${PIPESTATUS[0]}") || failed+=(webbox-test)
 lap "limits, pinned, check-apps, zig-webbox's tests"
-
-# **DOG PARK, ON METAL AS ON LINUX** (probe/judge_dogpark.py).
-python3 probe/judge_dogpark.py || failed+=(dogpark)
-lap "the dogpark judge"
 
 # **THE SITE VOLUME, FROM THIS CHECKOUT** (tools/site_volume.py): what
 # metal-vmm's timeouts.sh and pc_vs_microvm.sh judge.
