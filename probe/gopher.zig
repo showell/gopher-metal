@@ -2162,6 +2162,9 @@ fn metalFacts(io: Io, alloc: std.mem.Allocator) anyerror![]const webbox.host_fac
         if (disks[1]) |d| if (d.disk_most_sectors) |m| try std.fmt.allocPrint(alloc, "{d} KiB", .{m / 2}) else "not said" else "no volume",
     });
     try add(&facts, alloc, "NMIs", "{d}", .{interrupts.nmis});
+    // **WAKES** (193, gap 11): a device that interrupts endlessly shows as
+    // wakes by a device far past the frames that came.
+    if (interrupts.armed()) try add(&facts, alloc, "rests", "{d}, {d} of them ended early by a device", .{ interrupts.rests.rests, interrupts.rests.woken_by_device });
     if (turning) |t| try add(&facts, alloc, "frames refused (too long to send)", "{d}", .{t.wire.nic.oversized});
     // **A CARD THAT STOPPED TAKING FRAMES** (193.2): sends that waited out
     // their budget, the card asking for a reset, and frames dropped since.

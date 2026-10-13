@@ -61,4 +61,5 @@ test {
     _ = @import("device_wait.zig");
     _ = @import("disk_failures.zig");
     _ = @import("boot_facts.zig");
+    _ = @import("rest_count.zig");
 }

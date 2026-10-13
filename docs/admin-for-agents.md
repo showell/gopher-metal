@@ -142,6 +142,11 @@ From the top:
      A damaged IP header should stay at zero (damage on the way in);
      fragments mean a sender's MTU is wrong somewhere; growing "not TCP"
      or "for another address or port" is misrouting or a scan.
+   - **Rests**: how often the processor slept between frames, and how
+     many of those sleeps a device ended early (a frame arrived, or a
+     buffer was taken back). Ended early far more often than frames
+     arrive is a device interrupting with nothing to say: an interrupt
+     storm, which looks like a busy processor otherwise.
    - **Network card stalls**: sends that waited a whole second for the card
      to take a frame back, the card asking for a reset, and frames dropped
      while it took none. Any above zero means the card stopped taking
