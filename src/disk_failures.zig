@@ -14,6 +14,17 @@ pub const sense_key_names = [16][]const u8{
     "(reserved 0Ch)", "VOLUME OVERFLOW", "MISCOMPARE",     "(reserved 0Fh)",
 };
 
+// virtio 1.2 §5.6.6.3: the event queue's kinds and a transport reset's
+// reasons.
+const event_none: u32 = 0;
+const event_transport_reset: u32 = 1;
+const event_async_notify: u32 = 2;
+const event_param_change: u32 = 3;
+const event_missed_flag: u32 = 0x8000_0000;
+const reset_hard: u32 = 0;
+const reset_rescan: u32 = 1;
+const reset_removed: u32 = 2;
+
 pub const Failures = struct {
     /// virtio-blk's statuses: an I/O error, a request the device does not
     /// support, and anything else that is not OK; and ours, a request
@@ -53,6 +64,19 @@ pub const Failures = struct {
     last_attention_asc: u8 = 0,
     last_attention_ascq: u8 = 0,
     attentions_unsettled: u64 = 0,
+    /// **WHAT THE DEVICE SAID ON ITS EVENT QUEUE** (virtio 1.2 §5.6.6.3;
+    /// metal-vmm QUEUE 198.4): transport resets by reason (a hard reset, a
+    /// rescan, a disk removed: hot unplug, any other), parameter changes,
+    /// asynchronous notifications, events the device had to drop for want
+    /// of a buffer, and kinds the spec does not name.
+    event_resets: u64 = 0,
+    event_rescans: u64 = 0,
+    event_removed: u64 = 0,
+    event_other_resets: u64 = 0,
+    event_param_changes: u64 = 0,
+    event_async: u64 = 0,
+    event_missed: u64 = 0,
+    event_other: u64 = 0,
 
     /// A virtio-blk (or the Block's) status a request ended with.
     pub fn noteStatus(self: *Failures, status: u8) void {
@@ -113,6 +137,39 @@ pub const Failures = struct {
         return asc == asc_reset or (asc == asc_parameters_changed and ascq == ascq_mode_parameters_changed);
     }
 
+    /// One event from the event queue, its 16 bytes as the device wrote
+    /// them. Answers whether the write cache must be looked at again: a
+    /// hard reset, or a parameter change, may have put the mode pages back.
+    pub fn noteEvent(self: *Failures, bytes: [16]u8) bool {
+        const event = std.mem.readInt(u32, bytes[0..4], .little);
+        const reason = std.mem.readInt(u32, bytes[12..16], .little);
+        if (event & event_missed_flag != 0) self.event_missed +%= 1;
+        switch (event & ~event_missed_flag) {
+            event_none => return false,
+            event_transport_reset => switch (reason) {
+                reset_hard => {
+                    self.event_resets +%= 1;
+                    return true;
+                },
+                reset_rescan => self.event_rescans +%= 1,
+                reset_removed => self.event_removed +%= 1,
+                else => self.event_other_resets +%= 1,
+            },
+            event_async_notify => self.event_async +%= 1,
+            event_param_change => {
+                self.event_param_changes +%= 1;
+                return true;
+            },
+            else => self.event_other +%= 1,
+        }
+        return false;
+    }
+
+    pub fn events(self: *const Failures) u64 {
+        return self.event_resets + self.event_rescans + self.event_removed + self.event_other_resets +
+            self.event_param_changes + self.event_async + self.event_missed + self.event_other;
+    }
+
     fn noteOtherAttention(self: *Failures, asc: u8, ascq: u8) void {
         self.attention_other +%= 1;
         self.last_attention_asc = asc;
@@ -126,7 +183,7 @@ pub const Failures = struct {
 
     pub fn any(self: *const Failures) bool {
         return self.ioerr + self.unsupported + self.ended + self.other_status +
-            self.scsi_responses + self.check_conditions + self.other_scsi_status + self.short_transfers + self.attentions() > 0;
+            self.scsi_responses + self.check_conditions + self.other_scsi_status + self.short_transfers + self.attentions() + self.events() > 0;
     }
 
     /// `none`, or each kind there was.
@@ -194,6 +251,14 @@ pub const Failures = struct {
             });
             if (self.attention_other > 0) try w.print(" (last {X:0>2}h/{X:0>2}h)", .{ self.last_attention_asc, self.last_attention_ascq });
             if (self.attentions_unsettled > 0) try w.print(", {d} lasted every try and failed their command", .{self.attentions_unsettled});
+        }
+        if (self.events() > 0) {
+            if (!first) try w.writeAll("; ");
+            first = false;
+            try w.print("device events: {d} resets, {d} rescans, {d} removed, {d} other resets, {d} parameter changes, {d} asynchronous notifications, {d} missed, {d} other", .{
+                self.event_resets,        self.event_rescans, self.event_removed, self.event_other_resets,
+                self.event_param_changes, self.event_async,   self.event_missed,  self.event_other,
+            });
         }
     }
 };
@@ -283,4 +348,31 @@ test "a capacity-changed unit attention is counted by its ASC; a reset's and mod
     var w: std.Io.Writer = .fixed(&buf);
     try f.write(&w);
     try testing.expect(std.mem.indexOf(u8, w.buffered(), "unit attentions: 2 resets, 1 mode parameters changed, 1 capacity changed, 1 LUNs changed, 1 thin-provisioning threshold, 1 other (last 2Ah/10h)") != null);
+}
+
+test "the SCSI event queue's events are counted by what they say, and a reset or a parameter change asks for the cache again (metal-vmm QUEUE 198.4)" {
+    var f: Failures = .{};
+    // virtio 1.2 §5.6.6.3: event, lun[8], reason; little-endian.
+    try testing.expect(f.noteEvent(eventBytes(1, 0))); // transport reset: hard reset
+    try testing.expect(!f.noteEvent(eventBytes(1, 1))); // rescan (a LUN added)
+    try testing.expect(!f.noteEvent(eventBytes(1, 2))); // removed (hot unplug)
+    try testing.expect(f.noteEvent(eventBytes(3, 0x2A01))); // parameter change: mode parameters
+    try testing.expect(!f.noteEvent(eventBytes(2, 0))); // asynchronous notification
+    try testing.expect(!f.noteEvent(eventBytes(0x8000_0000, 0))); // events missed
+    try testing.expect(!f.noteEvent(eventBytes(0, 0))); // no event: not counted
+    try testing.expect(!f.noteEvent(eventBytes(9, 0))); // not one of the spec's
+    try testing.expect(!f.noteEvent(eventBytes(1, 7))); // a reset of a reason not in the spec
+    try testing.expectEqual(@as(u64, 8), f.events());
+    try testing.expect(f.any());
+    var buf: [512]u8 = undefined;
+    var w: std.Io.Writer = .fixed(&buf);
+    try f.write(&w);
+    try testing.expect(std.mem.indexOf(u8, w.buffered(), "device events: 1 resets, 1 rescans, 1 removed, 1 other resets, 1 parameter changes, 1 asynchronous notifications, 1 missed, 1 other") != null);
+}
+
+fn eventBytes(event: u32, reason: u32) [16]u8 {
+    var b: [16]u8 = @splat(0);
+    std.mem.writeInt(u32, b[0..4], event, .little);
+    std.mem.writeInt(u32, b[12..16], reason, .little);
+    return b;
 }
