@@ -2010,11 +2010,7 @@ fn readConfig(io: Io, alloc: std.mem.Allocator) Config {
 
 /// A config number: decimal digits and nothing else. `std.fmt.parseInt` takes
 /// `+5` and `1_000` too, a spelling no setting means (the normalization hunt).
-fn configNumber(comptime T: type, value: []const u8) !T {
-    if (value.len == 0) return error.InvalidCharacter;
-    for (value) |c| if (!std.ascii.isDigit(c)) return error.InvalidCharacter;
-    return std.fmt.parseInt(T, value, 10);
-}
+const configNumber = metal.config_text.number;
 
 /// **THE LOG, FOR /admin/host**: the newest `page_log_bytes` of what the
 /// serial ring holds, from a whole line. Its secrets were taken out as it
@@ -2302,12 +2298,7 @@ fn ipText(buf: *[15]u8, ip: [4]u8) []const u8 {
 }
 
 /// `92DE-8831`: two halves of four hex digits, high half first.
-fn parseSerial(text: []const u8) ?u32 {
-    if (text.len != 9 or text[4] != '-') return null;
-    const high = std.fmt.parseInt(u16, text[0..4], 16) catch return null;
-    const low = std.fmt.parseInt(u16, text[5..9], 16) catch return null;
-    return (@as(u32, high) << 16) | low;
-}
+const parseSerial = metal.config_text.serial;
 
 fn putSerial(serial_number: ?u32) void {
     const n = serial_number orelse return serial.put("none");
@@ -2315,16 +2306,7 @@ fn putSerial(serial_number: ?u32) void {
     serial.put(serialText(&text, n));
 }
 
-/// `92DE-8831`, as `blkid` spells a FAT serial.
-fn serialText(text: *[9]u8, n: u32) []const u8 {
-    const digits = "0123456789ABCDEF";
-    for (0..8) |k| {
-        const at = if (k < 4) k else k + 1;
-        text[at] = digits[@as(u4, @truncate(n >> @intCast(28 - 4 * k)))];
-    }
-    text[4] = '-';
-    return text;
-}
+const serialText = metal.config_text.serialText;
 
 /// The wall clock in Unix seconds, or null before it is set: for the restart
 /// record, which must not panic asking.

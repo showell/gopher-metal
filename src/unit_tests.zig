@@ -62,4 +62,5 @@ test {
     _ = @import("disk_failures.zig");
     _ = @import("boot_facts.zig");
     _ = @import("rest_count.zig");
+    _ = @import("config_text.zig");
 }

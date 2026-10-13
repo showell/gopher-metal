@@ -16,6 +16,7 @@ pub const virtio = @import("virtio.zig");
 pub const scsi = @import("scsi.zig");
 pub const scsi_mode = @import("scsi_mode.zig");
 pub const boot_facts = @import("boot_facts.zig");
+pub const config_text = @import("config_text.zig");
 pub const net = @import("net.zig");
 pub const proto = @import("proto.zig");
 pub const dhcp = @import("dhcp.zig");
