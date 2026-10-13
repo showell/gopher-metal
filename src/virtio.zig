@@ -1210,3 +1210,46 @@ pub const BlockMemory = struct {
         return Block.init(device, self);
     }
 };
+
+fn wrapCase(comptime size: u16) !void {
+    const Q = Queue(size);
+    var ring: Q.RingType = undefined;
+    @memset(std.mem.asBytes(&ring), 0);
+    // Both indexes start just short of the wrap, as after 65,530 requests.
+    const start: u16 = 65530;
+    ring.avail_idx = start;
+    ring.used_idx = start;
+    var q: Q = .{ .device = .{ .mmio = 0 }, .index = 0, .ring = &ring, .last_used = start, .doorbell = 0 };
+    // Three rounds of a full ring, across the wrap: every head offered is
+    // in the slot its index names, and every completion comes back once, in
+    // order, then nothing.
+    var next_id: u32 = 0;
+    for (0..3) |_| {
+        for (0..size) |k| {
+            const at = ring.avail_idx;
+            q.offer(@intCast(k));
+            try std.testing.expectEqual(@as(u16, @intCast(k)), ring.avail_ring[at % size]);
+            try std.testing.expectEqual(at +% 1, ring.avail_idx);
+        }
+        // The device answers each, as it does: the entry, then the index.
+        for (0..size) |k| {
+            ring.used_ring[ring.used_idx % size] = .{ .id = next_id + @as(u32, @intCast(k)), .len = 1 };
+            ring.used_idx +%= 1;
+        }
+        for (0..size) |k| {
+            const e = q.take().?;
+            try std.testing.expectEqual(next_id + @as(u32, @intCast(k)), e.id);
+        }
+        try std.testing.expectEqual(@as(?UsedElem, null), q.take());
+        next_id += size;
+    }
+    try std.testing.expectEqual(start +% 3 *% size, ring.avail_idx);
+    try std.testing.expectEqual(ring.used_idx, q.last_used);
+}
+
+test "a queue's indexes run across their u16 wrap: every head in its slot, every completion once and in order (metal-vmm QUEUE 197.3)" {
+    // Every size this kernel uses: rng's, the Block's and net's.
+    try wrapCase(4);
+    try wrapCase(8);
+    try wrapCase(64);
+}

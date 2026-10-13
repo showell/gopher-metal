@@ -63,4 +63,5 @@ test {
     _ = @import("boot_facts.zig");
     _ = @import("rest_count.zig");
     _ = @import("config_text.zig");
+    _ = @import("virtio.zig");
 }
