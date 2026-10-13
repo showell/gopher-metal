@@ -66,4 +66,5 @@ test {
     _ = @import("virtio.zig");
     _ = @import("serial.zig");
     _ = @import("after_turn.zig");
+    _ = @import("spill_rule.zig");
 }

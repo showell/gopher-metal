@@ -2179,6 +2179,9 @@ fn metalFacts(io: Io, alloc: std.mem.Allocator) anyerror![]const webbox.host_fac
     // wakes by a device far past the frames that came.
     if (interrupts.armed()) try add(&facts, alloc, "rests", "{d}, {d} of them ended early by a device", .{ interrupts.rests.rests, interrupts.rests.woken_by_device });
     if (turning) |t| try add(&facts, alloc, "frames refused (too long to send)", "{d}", .{t.wire.nic.oversized});
+    // **A RESPONSE CUT OFF BEHIND ITS SPILL** (198.1): the connection went
+    // while part of the response still waited to be sent.
+    try add(&facts, alloc, "responses cut off (connection gone, rest unsent)", "{d}", .{stream.gone_behind_spill});
     // **A CARD THAT STOPPED TAKING FRAMES** (193.2): sends that waited out
     // their budget, the card asking for a reset, and frames dropped since.
     if (turning) |t| try add(&facts, alloc, "network card stalls", "{d} sends waited out their second, {d} times the card asked for a reset, {d} frames dropped while it took none back{s}", .{

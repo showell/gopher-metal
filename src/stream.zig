@@ -50,6 +50,7 @@
 //!   peer sends. Bounded by: the table's window news (tcp.zig).
 
 const std = @import("std");
+const spill_rule = @import("spill_rule.zig");
 const props = @import("coverage");
 const io = @import("io.zig");
 const net = @import("net.zig");
@@ -230,6 +231,10 @@ pub const Spill = struct {
 pub var spilled_bytes: usize = 0;
 /// The most every spill together may hold.
 pub var spill_limit: usize = 128 * 1024 * 1024;
+/// **WRITES REFUSED BEHIND A SPILL** (metal-vmm QUEUE 198.1): a response
+/// still waiting in its spill when the connection went. They were kept and
+/// called sent; now they fail, and /admin/host counts them.
+pub var gone_behind_spill: u64 = 0;
 
 /// One connection of the table, as a reader and a writer.
 pub const Stream = struct {
@@ -355,17 +360,20 @@ pub const Stream = struct {
         var at: usize = 0;
         if (self.spill) |sp| {
             // Bytes go straight to the send queue only while nothing waits
-            // ahead of them in the spill: order is the peer's to rely on.
-            if (sp.pending().len == 0) {
-                if (self.conn().state != .established) {
+            // ahead of them in the spill: order is the peer's to rely on
+            // (spill_rule.zig, the decision; 198.1).
+            switch (spill_rule.start(sp.pending().len, self.conn().state == .established)) {
+                .gone => {
                     props.reachable(@src(), "stream: a write finds the connection gone, with a spill", null);
+                    if (sp.pending().len > 0) gone_behind_spill += 1;
                     return error.WriteFailed;
-                }
-                at = self.table.queue(self.index, bytes);
+                },
+                .queue => at = self.table.queue(self.index, bytes),
+                .behind_spill => {},
             }
             const rest = bytes[at..];
             if (rest.len == 0) return;
-            if (sp.buf.items.len + rest.len <= sp.cap and spilled_bytes + rest.len <= spill_limit) {
+            if (spill_rule.keeps(sp.buf.items.len, sp.cap, spilled_bytes, spill_limit, rest.len)) {
                 if (sp.buf.appendSlice(sp.gpa, rest)) |_| {
                     spilled_bytes += rest.len;
                     return;

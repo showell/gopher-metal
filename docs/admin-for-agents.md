@@ -147,6 +147,11 @@ From the top:
      buffer was taken back). Ended early far more often than frames
      arrive is a device interrupting with nothing to say: an interrupt
      storm, which looks like a busy processor otherwise.
+   - **Responses cut off (connection gone, rest unsent)**: a response
+     whose end still waited in memory to be sent when its connection went
+     (the client closed or reset it, or TCP gave up). Each is also a
+     request logged as failed, not "ok". A few are clients going away;
+     many, with no matching rise in let-go clients, is worth a look.
    - **Network card stalls**: sends that waited a whole second for the card
      to take a frame back, the card asking for a reset, and frames dropped
      while it took none. Any above zero means the card stopped taking
