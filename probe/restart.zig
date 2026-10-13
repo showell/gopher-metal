@@ -100,7 +100,7 @@ pub fn kmain() noreturn {
     const kept = c.valid();
     const boots: u64 = if (kept) c.boots + 1 else 1;
 
-    serial.put("gopher-metal restart probe: boot ");
+    serial.put("zig-metal-unikernel restart probe: boot ");
     serial.putDec(boots);
     serial.put(", kernel ends at 0x");
     serial.putHex(@intFromPtr(&_kernel_end), 8);

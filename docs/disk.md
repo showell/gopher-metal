@@ -125,7 +125,7 @@ wrong: **Linux writes and we read**. The check has the kernel create a
 directory and a long-named file, unmounts, and boots the machine again:
 
 ```
-gopher-metal restore probe
+zig-metal-unikernel restore probe
   restored/written-by-linux.txt: 46 bytes
   contents: linux wrote this, with a name 8.3 cannot hold
   auth/damian/_session_secret still reads: sixteen bytes!!!

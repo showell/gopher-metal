@@ -3,7 +3,7 @@
 
     judge_replace.py <volume image> <read-only mount of it>
 
-Nothing here reads the volume through gopher-metal's code. The expected final
+Nothing here reads the volume through zig-metal-unikernel's code. The expected final
 state is computed from the same formulas the probe used (restated below, not
 imported); the files are read through the Linux VFAT driver via the mount; and
 the COVERAGE — that the sessions directory really is fragmented, and that a

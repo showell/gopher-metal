@@ -1,7 +1,7 @@
-# **THE BOOT LOADER: FROM A BIOS TO gopher-metal'S PVH ENTRY.**
+# **THE BOOT LOADER: FROM A BIOS TO zig-metal-unikernel'S PVH ENTRY.**
 #
 # A droplet starts the way a 1990s PC did: the BIOS reads the disk's first
-# sector to 0x7C00 and runs it in 16-bit real mode. gopher-metal's kernels
+# sector to 0x7C00 and runs it in 16-bit real mode. zig-metal-unikernel's kernels
 # expect what QEMU's PVH loader and metal-vmm give them instead: their
 # segments already in memory, a memory map, and a jump to the 32-bit entry
 # with %ebx pointing at a `hvm_start_info`. This file is the bridge, and it
@@ -140,7 +140,7 @@ dap_offset:  .word 0
 dap_segment: .word 0
 dap_lba:     .quad 0
 
-msg_hello: .asciz "gopher-metal loader\r\n"
+msg_hello: .asciz "zig-metal-unikernel loader\r\n"
 msg_disk:  .asciz "FAIL: the disk would not read\r\n"
 
     .org 432                        # stage 1 must end before this field

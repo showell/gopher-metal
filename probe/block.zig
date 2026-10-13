@@ -22,7 +22,7 @@ var scratch: [512]u8 align(4096) = undefined;
 
 pub fn kmain() noreturn {
     serial.init();
-    serial.put("gopher-metal block probe\n");
+    serial.put("zig-metal-unikernel block probe\n");
 
     var slot: usize = 0;
     while (slot < virtio.mmio_slots) : (slot += 1) {

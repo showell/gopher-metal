@@ -44,7 +44,7 @@ def main(argv) -> int:
     with tempfile.TemporaryDirectory() as d:
         site = os.path.join(d, "site")
         G.stage(site, GOPHER_ROOT)
-        with open(os.path.join(site, "gopher-metal.conf"), "w") as f:
+        with open(os.path.join(site, "zig-metal-unikernel.conf"), "w") as f:
             f.write("idle_timeout_ms = 10000\n")
         img = os.path.join(d, "disk.img")
         build_volume.build(site, img, fat=16, size=64 << 20, check=False)

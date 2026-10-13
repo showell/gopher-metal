@@ -40,7 +40,7 @@ def request(port, method, path, cookie, body=None):
 def boot(elf, image, scratch, conf_extra, n):
     mnt = os.path.join(scratch, "mnt")
     text = j.request_limit_text(image, n, idle_timeout_ms=60000) + conf_extra
-    j.disk_write(image, mnt, "gopher-metal.conf", text)
+    j.disk_write(image, mnt, "zig-metal-unikernel.conf", text)
     return j.start_kernel(elf, image, scratch, kvm=j.kvm_usable())
 
 

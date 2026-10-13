@@ -142,7 +142,7 @@ fn serveOne(card: *Card, now: i96) void {
 
 pub fn kmain() noreturn {
     serial.init();
-    serial.put("gopher-metal, on a droplet, with no Linux\n");
+    serial.put("zig-metal-unikernel, on a droplet, with no Linux\n");
 
     const hz = metal.pit.calibrate() catch serial.fail("the PIT would not calibrate the TSC");
     metal.io.startClock(hz);

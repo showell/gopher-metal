@@ -48,7 +48,7 @@ pub const std_options: std.Options = .{
 
 pub fn kmain() noreturn {
     serial.init();
-    serial.put("gopher-metal memory probe\n");
+    serial.put("zig-metal-unikernel memory probe\n");
 
     const entries = boot.memoryMap() catch |e| {
         serial.put("  memory map: ");

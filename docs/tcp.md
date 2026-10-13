@@ -11,7 +11,7 @@ judged. The plan for finding the table's bugs systematically is
 A client that connects and then says nothing is a server's worst case. Every
 wait in `src/stream.zig` is a duration of the calibrated timestamp counter,
 not a spin count, and the one that matters is host configuration in
-`gopher-metal.conf` on the boot disk:
+`zig-metal-unikernel.conf` on the boot disk:
 
     requests = N            serve N and stop; absent, serve until stopped
     idle_timeout_ms = N     how long a connection may make no progress
@@ -131,7 +131,7 @@ ping too — the mutant sent 15,339 in 28 seconds — so the gate also requires
 that none came before the 25-second keepalive was due.
 
 **Streams cannot starve requests.** A held stream occupies a connection slot
-for as long as its tab is open, so `gopher-metal.conf` has a key for it,
+for as long as its tab is open, so `zig-metal-unikernel.conf` has a key for it,
 `streams = N` (by default all but 64 of the 256 slots). When the budget is
 full, a new stream ends the OLDEST: its browser reconnects, and a
 conversation stream resumes from its last event. With a budget of two, the

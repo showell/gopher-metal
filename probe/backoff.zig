@@ -39,7 +39,7 @@ const restarts_before_waiting = 4;
 
 pub fn kmain() noreturn {
     serial.init();
-    serial.put("gopher-metal backoff probe\n");
+    serial.put("zig-metal-unikernel backoff probe\n");
     _ = metal.wallclock.start() catch serial.fail("the clocks would not come up");
     const entries = metal.boot.memoryMap() catch serial.fail("the loader described no memory");
     if (metal.pages.bring(metal.pvh.largestFree(entries, restarting.reserved())).pages_total == 0)

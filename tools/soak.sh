@@ -7,7 +7,7 @@
 #   tools/soak.sh -Dsoak-sims=tcp      any `zig build soak` option passes through to the build
 #
 # It runs from a worktree of its own at this checkout's commit
-# (../gopher-metal-soak), so this checkout stays free to edit, and logs to
+# (../zig-metal-unikernel-soak), so this checkout stays free to edit, and logs to
 # ~/soak-logs/, outside every repo. Both trees must be clean: the log's first
 # line names the two commits, and with the run's explorer seed and number
 # they are all a failure needs to be reproduced.
@@ -22,7 +22,7 @@ for repo in "$here" "$sdk"; do
 done
 commit=$(git -C "$here" rev-parse --short HEAD)
 sdk_commit=$(git -C "$sdk" rev-parse --short HEAD)
-tree=$(dirname "$here")/gopher-metal-soak
+tree=$(dirname "$here")/zig-metal-unikernel-soak
 if [ -d "$tree" ]; then
     git -C "$tree" checkout -q --detach "$commit"
 else
@@ -30,7 +30,7 @@ else
 fi
 mkdir -p "$HOME/soak-logs"
 log=$HOME/soak-logs/soak-$(date +%Y-%m-%d-%H%M).log
-echo "gopher-metal $commit, zig-coverage-sdk $sdk_commit, started $(date '+%F %T'), options: ${*:-the defaults}" > "$log"
+echo "zig-metal-unikernel $commit, zig-coverage-sdk $sdk_commit, started $(date '+%F %T'), options: ${*:-the defaults}" > "$log"
 cd "$tree"
 # Built first, then run directly and detached: the soak is an ordinary
 # program (metal-vmm QUEUE 106), so its lines reach the log as they are

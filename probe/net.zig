@@ -31,7 +31,7 @@ var reply: [1024]u8 align(16) = undefined;
 
 pub fn kmain() noreturn {
     serial.init();
-    serial.put("gopher-metal net probe\n");
+    serial.put("zig-metal-unikernel net probe\n");
 
     rng.attach(&rng_mem);
     const base = virtio.find(virtio.device_id_net) orelse

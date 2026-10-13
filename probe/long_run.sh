@@ -22,7 +22,7 @@
 # any stage failed.
 set -u
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-LOGS="$HOME/build/gopher-metal/long_run"
+LOGS="$HOME/build/zig-metal-unikernel/long_run"
 mkdir -p "$LOGS"
 LOG="$LOGS/$(date +%Y%m%dT%H%M%S).log"
 ln -sfn "$LOG" "$LOGS/latest.log"

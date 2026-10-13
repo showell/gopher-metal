@@ -33,7 +33,7 @@ live, so an edit mid-run changes the content id and the verdict is refused.
 `RELEASE_UNGATED=1` lets `require` pass anyway, for an emergency fix, and
 says so loudly; nothing else bypasses it.
 
-Verdicts live in `~/build/gopher-metal/verdicts/` (GATES_VERDICT_DIR), one
+Verdicts live in `~/build/zig-metal-unikernel/verdicts/` (GATES_VERDICT_DIR), one
 file per tier and pair, so a run in another worktree of the same commit
 counts.
 """
@@ -52,7 +52,7 @@ SRC = os.path.join(GOPHER_ROOT, "zig-server", "src")
 WEBBOX_ROOT = os.path.realpath(os.environ.get("WEBBOX_ROOT", os.path.join(ROOT, "..", "zig-webbox")))
 WEBBOX_SRC = os.path.join(WEBBOX_ROOT, "src")
 WEBBOX_BUILT = ("src", "build.zig", "build.zig.zon")
-VERDICT_DIR = os.environ.get("GATES_VERDICT_DIR", os.path.expanduser("~/build/gopher-metal/verdicts"))
+VERDICT_DIR = os.environ.get("GATES_VERDICT_DIR", os.path.expanduser("~/build/zig-metal-unikernel/verdicts"))
 # Dog Park's checkout, as probe/judge_dogpark.py finds it.
 DOGPARK_ROOT = os.path.realpath(os.environ.get("DOGPARK_ROOT", os.path.join(ROOT, "..", "dog-park")))
 # What Dog Park's two builds read besides its assets.zon's `.site`: its
@@ -198,7 +198,7 @@ def pair() -> int:
     if problem:
         print(f"REFUSING: {problem}")
         return 2
-    print(f"judging gopher-metal {short(ours)} with angry-gopher and dog-park {short(theirs)}")
+    print(f"judging zig-metal-unikernel {short(ours)} with angry-gopher and dog-park {short(theirs)}")
     return 0
 
 
@@ -230,7 +230,7 @@ def record(tier: str, outcome: str) -> int:
     os.makedirs(VERDICT_DIR, exist_ok=True)
     with open(verdict_path(tier, ours, theirs), "w") as f:
         f.write(f"{outcome} {time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())}\n")
-    print(f"verdict kept: {tier} {outcome} for gopher-metal {short(ours)} with angry-gopher and dog-park {short(theirs)}")
+    print(f"verdict kept: {tier} {outcome} for zig-metal-unikernel {short(ours)} with angry-gopher and dog-park {short(theirs)}")
     return 0
 
 
@@ -242,7 +242,7 @@ def require() -> list:
     why = []
     here, sdk = ours.split(".sdk-", 1)
     if here.endswith("-dirty"):
-        why.append("gopher-metal has uncommitted changes")
+        why.append("zig-metal-unikernel has uncommitted changes")
     if sdk.endswith("-dirty"):
         why.append("zig-coverage-sdk has uncommitted changes")
     # An image is built from committed code: what it serves from angry-gopher

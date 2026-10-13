@@ -123,8 +123,8 @@ export fn kmain_trampoline() callconv(.c) noreturn {
 /// **WHICH BUILD THIS IS, READABLE FROM THE FILE.** `run.sh` prints it, so a
 /// verdict says whether it judged the Debug kernels `-Ddev` makes for
 /// iterating or the ReleaseSafe ones a commit is judged on.
-export const gopher_metal_build linksection(".rodata.gopher_metal_build") =
-    ("gopher-metal-build=" ++ @tagName(@import("builtin").mode)).*;
+export const zig_metal_unikernel_build linksection(".rodata.zig_metal_unikernel_build") =
+    ("zig-metal-unikernel-build=" ++ @tagName(@import("builtin").mode)).*;
 
 /// **THE STACK IS PAINTED BEFORE IT IS USED**, in long mode and before %rsp
 /// points anywhere: `rep stosq` over the whole region, which nothing is running

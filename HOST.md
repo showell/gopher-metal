@@ -44,7 +44,7 @@ application's locks then guard nothing and go, and what's left is one
 machine, judged the same way on both hosts.
 
 **A small body arrives before the turn, on both hosts** (2026-10-07):
-gopher-metal starts a handler only once a small body (one that fits the
+zig-metal-unikernel starts a handler only once a small body (one that fits the
 connection's 16 KiB buffer) has arrived (`ready.zig`), and Linux's
 `server.zig` reads such a body before taking the turn. A large, chunked or
 `Expect: 100-continue` body is read by the handler as it arrives on both

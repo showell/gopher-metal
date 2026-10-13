@@ -75,7 +75,7 @@ LATENCY_US="${LATENCY_US:-5000}"
 VOLUME_SEEDS="${VOLUME_SEEDS:-100}"
 # A page, a large one (many frames), and a form.
 ROUTES="${ROUTES:-/ /steve-resume.pdf /login/full}"
-OUT="${LONG_OUT:-$HOME/build/gopher-metal/long}"
+OUT="${LONG_OUT:-$HOME/build/zig-metal-unikernel/long}"
 want="${1:-all}"
 case "$want" in all | sim | metal) ;; *) echo "usage: ./long.sh [sim|metal]"; exit 2 ;; esac
 
@@ -112,7 +112,7 @@ if [ "$want" != sim ]; then
     mkdir -p "$OUT"
     rm -f "$OUT/sdk.jsonl"
     if [ -z "$SITE" ]; then
-        SITE="$HOME/build/gopher-metal/site/pristine.img"
+        SITE="$HOME/build/zig-metal-unikernel/site/pristine.img"
         python3 tools/site_volume.py "$SITE" "$GOPHER_ROOT" || { echo "the site volume does not build"; exit 2; }
     fi
     [ -f "$SITE" ] || { echo "no site volume at $SITE"; exit 2; }
@@ -197,7 +197,7 @@ if [ "$want" != sim ]; then
     # only a request limit causes (the site has none).
     cp "$SITE" "$OUT/two.img"
     printf 'requests = 2\nidle_timeout_ms = 10000\n' > "$OUT/two.conf"
-    mcopy -o -i "$OUT/two.img@@1M" "$OUT/two.conf" ::/gopher-metal.conf || { echo "mcopy (mtools) could not write the two-request volume"; exit 2; }
+    mcopy -o -i "$OUT/two.img@@1M" "$OUT/two.conf" ::/zig-metal-unikernel.conf || { echo "mcopy (mtools) could not write the two-request volume"; exit 2; }
     printf 'GET / HTTP/1.1\r\nHost: lynrummy.com\r\nX-Pad: %s\r\nConnection: close\r\n\r\n' "$(head -c 900 /dev/zero | tr '\0' a)" > "$OUT/req1k"
     for route in / /steve-resume.pdf; do
         run 9999 "$route"
@@ -264,7 +264,7 @@ EOF
     # build above put back.
     echo "── the chat judge on FAT16 (microvm)"
     zig build gopher -Dgopher-root="$GOPHER_ROOT" -Dwebbox-root="$WEBBOX_ROOT" > "$OUT.fat16-build" 2>&1 || { echo "gopher.elf does not build: $OUT.fat16-build"; exit 2; }
-    env JUDGE_DROPLET=0 FAT=16 PROBE_WORK="$HOME/build/gopher-metal/probe-microvm-fat16" probe/run.sh gopher \
+    env JUDGE_DROPLET=0 FAT=16 PROBE_WORK="$HOME/build/zig-metal-unikernel/probe-microvm-fat16" probe/run.sh gopher \
         > "$OUT.fat16" 2>&1
     code=$?
     sed -n '/^\(PASS\|FAIL\|    \) *gopher/,$p' "$OUT.fat16"

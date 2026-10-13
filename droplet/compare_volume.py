@@ -20,7 +20,7 @@ Each finding is one of:
   size           the sizes differ
   content        the sizes match and the SHA-256s do not
   time           the modification times are more than 2 seconds apart (FAT
-                 keeps even seconds; times are read as UTC, as gopher-metal
+                 keeps even seconds; times are read as UTC, as zig-metal-unikernel
                  reads them, so a volume written without `tz=UTC` shows here)
   extra          something on the volume is not in the copy
   check          the volume itself is inconsistent (fat16_read.py check)

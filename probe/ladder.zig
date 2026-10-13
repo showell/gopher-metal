@@ -344,7 +344,7 @@ fn replace(io: Io, k: usize) void {
 
 pub fn kmain() noreturn {
     serial.init();
-    serial.put("gopher-metal ladder\n");
+    serial.put("zig-metal-unikernel ladder\n");
 
     const scale = fromCommandLine("scale", 1);
     const echo_port = fromCommandLine("echo_port", 0);

@@ -8,7 +8,7 @@ If you are a Claude Code **cloud** session ("CC"): you work here on the
 strict Linux implementations, and `store_sim`, all new files, none of them
 in the image). Your charter, the
 branch map and the one shared queue live in metal-vmm, not here: read
-metal-vmm's `CLOUD_WORK.md` ("gopher-metal: the simulators") and its
+metal-vmm's `CLOUD_WORK.md` ("zig-metal-unikernel: the simulators") and its
 `QUEUE.md` on `master` (github.com/showell/metal-vmm). Branch from
 `master`, push only `claude/*` branches, and never push to `master` or a
 `vN` tag: the box merges. What serves lynrummy.com is a tag (`v18` today),

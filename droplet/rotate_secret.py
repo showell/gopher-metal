@@ -151,7 +151,7 @@ def self_test(binary: str) -> int:
             server.stop()
         metal_site = os.path.join(d, "metal-site")
         G.stage(metal_site, gopher_root)
-        with open(os.path.join(metal_site, "gopher-metal.conf"), "w") as f:
+        with open(os.path.join(metal_site, "zig-metal-unikernel.conf"), "w") as f:
             f.write("idle_timeout_ms = 10000\n")
         img = os.path.join(d, "disk.img")
         build_volume.build(metal_site, img, fat=16, size=64 << 20, check=False)

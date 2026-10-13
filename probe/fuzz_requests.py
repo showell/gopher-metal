@@ -260,7 +260,7 @@ def main() -> int:
         mnt = os.path.join(work, "mnt")
         os.makedirs(mnt)
         j.build_disk(image, content, mnt)
-        j.disk_write(image, mnt, "gopher-metal.conf", "idle_timeout_ms = 2000\n")
+        j.disk_write(image, mnt, "zig-metal-unikernel.conf", "idle_timeout_ms = 2000\n")
         qemu, mport, serial = j.start_kernel(elf, image, work)
         linux_root = os.path.join(work, "linux")
         os.makedirs(linux_root)

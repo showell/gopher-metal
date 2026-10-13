@@ -3,7 +3,7 @@
 `always` and `sometimes` properties of a whole run, from
 [zig-coverage-sdk](https://github.com/showell/zig-coverage-sdk). Its README
 covers the API, the catalog, and where it differs from Antithesis. This file
-covers what gopher-metal does with it. Started 2026-10-05.
+covers what zig-metal-unikernel does with it. Started 2026-10-05.
 
 **The SDK is a path dependency** (`build.zig.zon`) on a sibling checkout,
 `../zig-coverage-sdk`. Its scanner reads every file in `src/` that imports

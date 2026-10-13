@@ -20,7 +20,7 @@ ported, not vendored, not adapted, the same code from the same standard
 library, on a machine with no operating system:
 
 ```
-gopher-metal std.http probe
+zig-metal-unikernel std.http probe
   address: 10.0.2.15
   listening on port 80, with zig's own HTTP
   connected
@@ -73,7 +73,7 @@ table:
 clocks from its own hardware. Then it calls `app.site.route`: the application's
 real dispatch, every page — a table of up to 256 connections, one request
 served at a time, each request with its own heap that is reset afterwards.
-`gopher-metal.conf` on the boot disk says how many requests to serve
+`zig-metal-unikernel.conf` on the boot disk says how many requests to serve
 (`requests = N`); without it, forever. A request that fails is logged and
 survived, as it is on Linux.
 
@@ -136,7 +136,7 @@ the build, and a `Dir` answering the operations the application actually
 asks for.
 
 ```
-gopher-metal std.Io probe
+zig-metal-unikernel std.Io probe
   readFileAlloc("HELLO.TXT") -> 12 bytes: Hello, disk!
   statFile -> 12 bytes, kind file
   clock advanced 1008639 ns over a spin

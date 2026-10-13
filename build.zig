@@ -1,4 +1,4 @@
-// gopher-metal's kernels. Everything here targets x86_64-freestanding: no OS,
+// zig-metal-unikernel's kernels. Everything here targets x86_64-freestanding: no OS,
 // no libc, no syscalls. A kernel is one root file over src/, linked with
 // probe/link.ld and booted by QEMU through the PVH note it carries.
 //
@@ -466,7 +466,7 @@ pub fn build(b: *std.Build) void {
     // host_io, over this repo's io.zig, against the model. Needs the
     // sibling angry-gopher checkout, so it is a step of its own,
     // not part of `test`, and not yet in gates.sh: its model is still
-    // gopher-metal's Store, not the seam's (STORE.md).
+    // zig-metal-unikernel's Store, not the seam's (STORE.md).
     const judge_world = b.createModule(.{
         .root_source_file = b.path("src/judge_world.zig"),
         .target = b.graph.host,

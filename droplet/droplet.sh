@@ -21,7 +21,7 @@
 # halts with its screen intact, and the run ends when it is told to),
 # MACHINE (QEMU's machine type, default `pc`; a real droplet reports
 # pc-i440fx-6.1), BIOS (a SeaBIOS image to boot instead of QEMU's own), and
-# NO_SCREEN=1 (no display card in slot 02, so gopher-metal finds no screen and
+# NO_SCREEN=1 (no display card in slot 02, so zig-metal-unikernel finds no screen and
 # writes only to the serial port: not a droplet, a way to measure the screen),
 # and VOLUME=path (a raw disk image attached as a DigitalOcean volume is, on
 # the SCSI controller; VOLUME_TARGET and VOLUME_LUN place it), and ACCEL=tcg

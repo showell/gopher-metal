@@ -180,7 +180,7 @@ class Volume:
         """(name, attr, first cluster, size, mtime) for each entry, long names
         joined and checked against their short entries. `mtime` is the
         entry's modification time as Unix seconds, reading the DOS fields as
-        UTC (as gopher-metal does); None for a date the fields cannot be."""
+        UTC (as zig-metal-unikernel does); None for a date the fields cannot be."""
         parts, expect, checksum = {}, None, None
         for e in self.raw_entries(first):
             if e[0] == 0xE5:

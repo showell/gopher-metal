@@ -1,4 +1,4 @@
-# gopher-metal
+# zig-metal-unikernel
 
 angry-gopher's server (chat, and the apps it serves: Lyn Rummy, Seattle
 Delivery, Safari and the rest) on a machine with no operating system under it.
@@ -11,7 +11,7 @@ droplet through our own BIOS loader.
 
 ## Start here
 
-**Serving (2026-10-10, 12:10 UTC): the tag `v22`** — gopher-metal `bc459b3`
+**Serving (2026-10-10, 12:10 UTC): the tag `v22`** — zig-metal-unikernel `bc459b3`
 with angry-gopher `51713cd6` — at **https://lynrummy.com**, the whole site, on
 a droplet with no Linux on it, with prod's real data, since the cutover of
 2026-10-04 ([`CUTOVER.md`](CUTOVER.md)). `v21` (`81d7a35`) is the way back.
@@ -38,7 +38,7 @@ on `master`: one queue for all four repos, with the cloud session's charter
 beside it in `CLOUD_WORK.md`. This repo's own queue is retired
 (`git show 3cd662c:QUEUE.md`) and its item numbers collide with metal-vmm's,
 so this README says "metal-vmm QUEUE item N" for a live item and "the retired
-gopher-metal queue, item N" for an old one. In code comments and commits, a
+zig-metal-unikernel queue, item N" for an old one. In code comments and commits, a
 live item says "metal-vmm"; a bare "QUEUE.md item N" is the retired queue's.
 
 **What needs what:**
@@ -54,7 +54,7 @@ live item says "metal-vmm"; a bare "QUEUE.md item N" is the retired queue's.
   ([`COVERAGE.md`](COVERAGE.md)); a required sibling checkout.
 - **metal-vmm** — test-only: our own deterministic KVM hypervisor, which
   `gates.sh` and `long.sh` run (`METAL_VMM`); and the live queue.
-- **gopher-metal** (this repo) — the machine: the kernel, drivers, FAT,
+- **zig-metal-unikernel** (this repo) — the machine: the kernel, drivers, FAT,
   TCP, the boot loader, the droplet tools, and the gates that judge metal
   against angry-gopher's Linux build.
 - **angry-gopher** — the program: every route and app, written and tested
@@ -129,18 +129,18 @@ work).
 - **Its data is on a DigitalOcean volume** (FAT32, 16 GiB, nyc2): chat's
   data (`data/`, `auth/`) on the volume, which a new image does not touch
   (`src/scsi.zig`), and the site's own files (`pages/`, `gallery/`,
-  `gopher-metal.conf`) on the boot disk, where each new image updates them.
+  `zig-metal-unikernel.conf`) on the boot disk, where each new image updates them.
   The kernel mounts both and sends each path to one by its first directory
   (`src/io.zig`); it refuses, and logs, any write outside `data/` and
   `auth/`. **It serves one volume by name:** the boot image's
-  `gopher-metal.conf` names the FAT serial `blkid` shows
+  `zig-metal-unikernel.conf` names the FAT serial `blkid` shows
   (`droplet/volume-serial`), and the machine stops rather than serve with
   that volume missing or another one attached, either of which would answer
   as an empty site and lose what was written. A path with `.` or `..` is
   refused. The volume was built from prod's data at the cutover
   (`droplet/build_volume.py`) and written from DigitalOcean's recovery
   console; a new image leaves it as it is.
-- **Each boot checks both disks** before serving (the retired gopher-metal
+- **Each boot checks both disks** before serving (the retired zig-metal-unikernel
   queue, item 13): files, folders, clusters in use, leaked clusters and
   problems, one line per disk in the log. A damaged disk is served from and
   reported, not refused.
@@ -153,7 +153,7 @@ work).
   - memory, both disks' serials, free space and write caches;
   - disk work and NMIs;
   - **the log:** the newest 60 lines of the serial ring, with secrets taken
-    out as they were written (the retired gopher-metal queue, item 32).
+    out as they were written (the retired zig-metal-unikernel queue, item 32).
     Linux's page says it keeps no log to show yet.
 
   Each host hands its half over through angry-gopher's `host_facts.provide`.
@@ -182,13 +182,13 @@ By hand, in this order:
 
 0. **Both gates pass for the pair.** `./gates.sh` and
    `./long.sh` on the dev box; each records its verdict for the exact
-   gopher-metal / angry-gopher commit pair it judged (`tools/verdicts.py`).
+   zig-metal-unikernel / angry-gopher commit pair it judged (`tools/verdicts.py`).
    `droplet/chat.py` refuses to build unless both trees are clean and both
    verdicts are PASS for that pair. `RELEASE_UNGATED=1` overrides it, for an
    emergency fix, and says so loudly.
 1. `droplet/chat.py <out.img>` builds the boot disk: the loader,
    `probe/gopher.elf`, and the site's own files in partition 2, with a
-   `gopher-metal.conf` naming the volume in `droplet/volume-serial`.
+   `zig-metal-unikernel.conf` naming the volume in `droplet/volume-serial`.
 2. gzip it, and serve it somewhere DigitalOcean can fetch it.
 3. Steve imports it as a custom image and rebuilds the droplet from it. The
    volume stays attached and is not touched.
@@ -373,7 +373,7 @@ PID) before a morning's gates.
 | `src/tcp.zig` | a table of connections: handshake, windows, retransmission, close |
 | `src/stream.zig` | that connection as a `std.Io.Reader` and a `std.Io.Writer` |
 | `src/io.zig` | `Io.Dir`, `Io.Clock`, `Io.Mutex`, `Io.Group` — the surface the application calls |
-| `src/page_cache.zig` | the data's files kept whole in memory after their first read, write-through, below the application (the retired gopher-metal queue, item 87); `page_cache_mib` in `gopher-metal.conf`, 64 by default |
+| `src/page_cache.zig` | the data's files kept whole in memory after their first read, write-through, below the application (the retired zig-metal-unikernel queue, item 87); `page_cache_mib` in `zig-metal-unikernel.conf`, 64 by default |
 | `src/interrupts.zig` | the IDT, the local APIC timer, and resting until a frame or the timer |
 | `src/port.zig`, `src/tsc.zig` | x86 port I/O, and the timestamp counter |
 | `src/pit.zig` | the interval timer, used once: to measure the TSC's rate |

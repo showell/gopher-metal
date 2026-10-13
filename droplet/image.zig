@@ -1,5 +1,5 @@
 //! **A DISK A DROPLET CAN BOOT.** Takes the boot loader (`loader.S`,
-//! assembled) and a gopher-metal kernel (a PVH ELF), and writes a raw disk
+//! assembled) and a zig-metal-unikernel kernel (a PVH ELF), and writes a raw disk
 //! image DigitalOcean can import as a custom image:
 //!
 //!   LBA 0          protective MBR: the loader's first stage, the kernel
@@ -48,7 +48,7 @@ const kernel_lba_field: usize = 432;
 /// The MBR's own bytes start at 440: a disk signature, then the table.
 const loader_stage1_bytes: usize = 440;
 
-/// gopher-metal's kernel partition, shared with gpt.zig, which skips it.
+/// zig-metal-unikernel's kernel partition, shared with gpt.zig, which skips it.
 pub const kernel_type = kernel_partition.type_guid;
 /// Fixed rather than random, so an image is a function of its inputs. Two
 /// droplets with the same disk GUID never meet: each is its own machine.
@@ -273,7 +273,7 @@ pub fn build(disk: []u8, loader: []const u8, kernel: *const Kernel, volume: []co
     put64(e[32..], kernel_first_lba);
     put64(e[40..], kernel_last);
     put64(e[48..], 1); // "required by the platform": leave it alone
-    for ("gopher-metal kernel", 0..) |c, i| e[56 + i * 2] = c;
+    for ("zig-metal-unikernel kernel", 0..) |c, i| e[56 + i * 2] = c;
     if (volume.len > 0) {
         const first = dataFirstLba(kernel);
         @memcpy(disk[first * sector ..][0..volume.len], volume);
@@ -282,7 +282,7 @@ pub fn build(disk: []u8, loader: []const u8, kernel: *const Kernel, volume: []co
         @memcpy(d[16..32], &data_unique);
         put64(d[32..], first);
         put64(d[40..], first + volume.len / sector - 1);
-        for ("gopher-metal data", 0..) |c, i| d[56 + i * 2] = c;
+        for ("zig-metal-unikernel data", 0..) |c, i| d[56 + i * 2] = c;
     }
     const entries_crc = std.hash.Crc32.hash(&entries);
 

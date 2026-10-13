@@ -44,7 +44,7 @@ fn isn() u32 {
 
 pub fn kmain() noreturn {
     serial.init();
-    serial.put("gopher-metal std.http probe\n");
+    serial.put("zig-metal-unikernel std.http probe\n");
 
     // **A CONNECTION IS READ AGAINST A CLOCK.** stream.zig bounds every wait by
     // a measured duration rather than a spin count, so the timestamp counter's

@@ -6,7 +6,7 @@
 #   droplet/image.sh <kernel.elf> <out.img> [site.fat]
 #
 # The site, when given, is a FAT16 filesystem image of the site's own files
-# (pages, pictures, gopher-metal.conf) that becomes partition 2. Chat's data is
+# (pages, pictures, zig-metal-unikernel.conf) that becomes partition 2. Chat's data is
 # not here: it is on a DigitalOcean volume, a separate disk.
 set -u
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"

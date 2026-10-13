@@ -1,6 +1,6 @@
 # Does a reset restart a droplet? A test for Steve, at the console
 
-RESTART.md's open question, and QUEUE.md item 16's condition. gopher-metal
+RESTART.md's open question, and QUEUE.md item 16's condition. zig-metal-unikernel
 can restart itself after a crash (`-Drestart=true`), but only if resetting
 a DigitalOcean droplet's machine starts it again. If a reset **powers the
 droplet off** instead, a restart is worse than halting with the log on the
@@ -20,7 +20,7 @@ can reach. The commands below are short because the console cannot paste.
 
 ## 1. Put the probe on the droplet's disk
 
-In DigitalOcean's control panel, for the gopher-metal droplet:
+In DigitalOcean's control panel, for the zig-metal-unikernel droplet:
 1. **Recovery**: choose "Boot from Recovery ISO".
 2. **Power cycle** (DigitalOcean's panel has no separate power-off for this;
    setting Recovery and restarting is the way in).
@@ -52,7 +52,7 @@ under a minute.
 
 **Reset restarts (what we hope).** The last screen reads:
 
-    gopher-metal restart probe: boot 4, kernel ends at 0x..., carry at 0x04000000
+    zig-metal-unikernel restart probe: boot 4, kernel ends at 0x..., carry at 0x04000000
       .bss on arrival: zero
       restarted by a triple fault: CMOS kept (stage 3); RAM past the kernel kept
       every method has been tried
@@ -79,7 +79,7 @@ which is fine, as long as one way did. **Write down the boot number and any
 
 ## 4. Put the site back
 
-Rebuild the droplet from the gopher-metal image it had (README, "A deploy",
+Rebuild the droplet from the zig-metal-unikernel image it had (README, "A deploy",
 steps 2-3), or ask the box for the image again. The volume was not
 touched.
 

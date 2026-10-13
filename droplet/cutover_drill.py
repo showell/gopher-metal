@@ -33,7 +33,7 @@ extracted tree on Linux again, and confirm metal's writes came back.
 Like rehearse.sh it prints counts and anonymised labels only; nothing from
 the copy is named. It stops everything it started — the servers, the QEMU, the
 proxy, the namespace and its veth — and removes its scratch, whatever happens.
-A run killed outright leaves them under `~/build/gopher-metal/cutover-drill/`
+A run killed outright leaves them under `~/build/zig-metal-unikernel/cutover-drill/`
 (or `$DRILL_SCRATCH`) and its namespace `gm-drill-<pid>`; the next run removes
 both and says so.
 
@@ -80,7 +80,7 @@ VETH_N = f"dn{PID}"           # prod's end, inside the namespace
 HOST_IP = "10.123.0.1"       # this host, as prod's Caddy host would be
 NS_IP = "10.123.0.2"         # prod, on the private network
 PROD_PORT = 9101             # prod listens here inside its namespace
-SCRATCH = os.environ.get("DRILL_SCRATCH", os.path.expanduser("~/build/gopher-metal/cutover-drill"))
+SCRATCH = os.environ.get("DRILL_SCRATCH", os.path.expanduser("~/build/zig-metal-unikernel/cutover-drill"))
 ADMIN_PASSWORD = os.environ.get("DRILL_ADMIN_PASSWORD", G.MEMBER_PASSWORD)
 
 NoGo = R.NoGo
@@ -394,9 +394,9 @@ def drill(src, fat, gib, keep_writes):
         vcode = proxy_code(proxy.port, "/version")
         _, host_body, _ = through_proxy(proxy.port, "GET", "/admin/host",
                                         {"Cookie": mint("1", int(time.time()), secret)})
-        is_metal = b"gopher-metal" in host_body
+        is_metal = b"zig-metal-unikernel, with no operating system" in host_body
         say("12. switch the proxy to metal", "GO" if vcode == 200 and is_metal else "NO-GO",
-            f"/version is {vcode}, /admin/host names " + ("gopher-metal" if is_metal else "NOT gopher-metal"))
+            f"/version is {vcode}, /admin/host names " + ("zig-metal-unikernel" if is_metal else "NOT zig-metal-unikernel"))
         if vcode != 200 or not is_metal:
             raise NoGo("the switch")
         # login, post a message, and see it (CUTOVER step 12's third GO).
@@ -444,7 +444,7 @@ def first_day(port, scratch):
     _, b1, _ = through_proxy(port, "GET", "/admin/host", secret_cookie)
     time.sleep(1.5)  # more than one of the host clock's whole seconds
     _, b2, _ = through_proxy(port, "GET", "/admin/host", secret_cookie)
-    is_metal = b"gopher-metal" in b2
+    is_metal = b"zig-metal-unikernel, with no operating system" in b2
     u1, u2 = _uptime(b1), _uptime(b2)
     # **IT MUST GROW, not merely not-shrink** (QUEUE.md item 99): a stuck clock
     # that showed the same uptime twice passed the old `>=`. `>` with a 1.5 s
@@ -452,7 +452,7 @@ def first_day(port, scratch):
     grew = u1 is not None and u2 is not None and u2 > u1
     free = b"free" in b2.lower()  # the volume's free space, informational
     say("first day: /admin/host, identity and uptime", "GO" if is_metal and grew else "NO-GO",
-        f"gopher-metal, up for {u2} s (was {u1}, so it grew)" + (", free space shown" if free else "")
+        f"zig-metal-unikernel, up for {u2} s (was {u1}, so it grew)" + (", free space shown" if free else "")
         if is_metal and grew else f"not metal's page, or uptime did not grow (was {u1}, now {u2})")
     if not (is_metal and grew):
         raise NoGo("the first-day checks")

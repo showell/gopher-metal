@@ -21,7 +21,7 @@
 //! rest wait in the table meanwhile, and the network keeps moving for all of
 //! them. Each request gets its own heap, reset afterwards, the
 //! way server.zig gives each request an arena it frees wholesale. How many
-//! requests to serve is host configuration, read from `gopher-metal.conf` on
+//! requests to serve is host configuration, read from `zig-metal-unikernel.conf` on
 //! the boot disk (`requests = N`); without it, forever.
 //!
 //! **A FAILED REQUEST IS NOT A FAILED MACHINE.** On Linux, an error from the
@@ -324,7 +324,12 @@ var page_cache: metal.page_cache.PageCache = undefined;
 /// method and the budget cost.
 const page_cache_largest_kib_default = app.hosting.whole_read_max >> 10;
 
-const config_path = "gopher-metal.conf";
+const config_path = "zig-metal-unikernel.conf";
+/// The file's name before the repo's rename (2026-10-13). A disk that has it
+/// was written by an older tool, and the defaults a missing file means would
+/// silently replace what it says (the public card, no volume check): its
+/// presence stops the boot.
+const old_config_path = "gopher-metal.conf";
 
 /// **THE APPLICATION'S DATA**: the two directories `app.site.start` points the
 /// stores at (`Host.roots`), and the only ones this machine writes. On a droplet they are on the
@@ -375,7 +380,7 @@ fn coverageLine(line: []const u8) void {
 pub fn kmain() noreturn {
     serial.init();
     interrupts.install();
-    serial.put("gopher-metal: angry-gopher's route table, with no Linux under it\n");
+    serial.put("zig-metal-unikernel: angry-gopher's route table, with no Linux under it\n");
     if (gm_build.coverage) {
         coverage_door_found = metal.port.inb(coverage_door) == coverage_door_answer;
         metal.coverage.sink = coverageLine;
@@ -1796,7 +1801,7 @@ fn logRequest(number: u64, what: []const u8, outcome: []const u8, status: u16, t
 }
 
 /// **HOST CONFIGURATION, FROM THE BOOT DISK.** What a Linux host would read from
-/// a config file or the environment, this reads from `gopher-metal.conf` on the
+/// a config file or the environment, this reads from `zig-metal-unikernel.conf` on the
 /// boot disk, which comes with each image — the things that are about this
 /// machine rather than about the site:
 ///
@@ -1878,6 +1883,13 @@ const reserved_for_requests = 64;
 
 fn readConfig(io: Io, alloc: std.mem.Allocator) Config {
     var conf = Config{};
+    if (Io.Dir.cwd().readFileAlloc(io, old_config_path, alloc, .limited(4096))) |old| {
+        alloc.free(old);
+        serial.fail(old_config_path ++ " is on the disk: it is " ++ config_path ++ " now, and an older tool wrote this disk");
+    } else |e| switch (e) {
+        error.FileNotFound => {},
+        else => serial.fail(old_config_path ++ " is on the disk but could not be read: it is " ++ config_path ++ " now"),
+    }
     // **A MISSING FILE IS THE DEFAULTS; ANY OTHER FAILURE STOPS THE BOOT**
     // (metal-vmm QUEUE B21). A refused read once meant "serve with the
     // defaults", which on a droplet is serving without the settings it was
@@ -2057,8 +2069,8 @@ fn metalFacts(io: Io, alloc: std.mem.Allocator) anyerror![]const webbox.host_fac
             try list.append(a, .{ .label = label, .value = try std.fmt.allocPrint(a, fmt, args) });
         }
     }.f;
-    try add(&facts, alloc, "host", "gopher-metal, with no operating system", .{});
-    try add(&facts, alloc, "gopher-metal commit", "{s}", .{gm_build.commit});
+    try add(&facts, alloc, "host", "zig-metal-unikernel, with no operating system", .{});
+    try add(&facts, alloc, "zig-metal-unikernel commit", "{s}", .{gm_build.commit});
     try add(&facts, alloc, "booted", "{s}", .{try hs.utc(alloc, booted_unix)});
     try add(&facts, alloc, "up for", "{s}", .{try hs.duration(alloc, now - booted_unix)});
     try add(&facts, alloc, "its clock now", "{s} (set from the hardware clock at boot, never corrected)", .{try hs.utc(alloc, now)});

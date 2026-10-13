@@ -35,7 +35,7 @@ halt:
     jmp halt
 
 message:
-    .asciz "gopher-metal droplet: booted from the disk's first sector\r\n"
+    .asciz "zig-metal-unikernel droplet: booted from the disk's first sector\r\n"
 
     .org 510
     .word 0xAA55

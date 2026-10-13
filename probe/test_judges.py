@@ -246,7 +246,7 @@ class Differences(unittest.TestCase):
         app = b"<h2>The application</h2><table><tr><td>version</td><td>0.1</td></tr></table><h2>The host</h2>"
         # A whole volume row, as metalFacts writes one: the judge now reads
         # the free-space figure (REVIEW-admin-host.md finding 1).
-        m = app + (b"<tr><td>host</td><td>gopher-metal, with no operating system</td></tr>"
+        m = app + (b"<tr><td>host</td><td>zig-metal-unikernel, with no operating system</td></tr>"
                    b"<tr><td>the boot disk (the site)</td><td>FAT16, serial 92DE-8831: 30 MB free of 62 MB</td></tr>"
                    + self.METAL_LOG)
         l = app + b"<tr><td>host</td><td>Linux, zig-server, pid 7</td></tr>" + self.LINUX_LOG
@@ -263,7 +263,7 @@ class Differences(unittest.TestCase):
 
     def metal_page(self, *rows, log=None):
         cells = b"".join(b"<tr><td>%s</td><td>%s</td></tr>" % r for r in rows)
-        return (self.HOST_APP + b"<table><tr><td>host</td><td>gopher-metal, with no operating system</td></tr>" + cells
+        return (self.HOST_APP + b"<table><tr><td>host</td><td>zig-metal-unikernel, with no operating system</td></tr>" + cells
                 + b"</table>" + (self.METAL_LOG if log is None else log))
 
     def test_the_log_section_is_checked_for_its_shape_and_for_secrets(self):
@@ -859,7 +859,7 @@ class DiskByMtools(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             content = os.path.join(d, "content")
             for rel, body in (("data/chat/1_2/sessions/General.md", b"hi"), ("auth/1/name", b"Steve"),
-                              ("pages/home.txt", b"home"), ("gopher-metal.conf", b"x")):
+                              ("pages/home.txt", b"home"), ("zig-metal-unikernel.conf", b"x")):
                 os.makedirs(os.path.dirname(os.path.join(content, rel)), exist_ok=True)
                 with open(os.path.join(content, rel), "wb") as f:
                     f.write(body)
@@ -867,10 +867,10 @@ class DiskByMtools(unittest.TestCase):
             image = os.path.join(d, "disk.img")
             G.build_disk(image, content, os.path.join(d, "mnt"), size=16 << 20, fat="16")
             G.set_request_limit(image, 3, os.path.join(d, "mnt"))
-            got = G.disk_read(image, "unused", ["data/chat/1_2/sessions/General.md", "gopher-metal.conf",
+            got = G.disk_read(image, "unused", ["data/chat/1_2/sessions/General.md", "zig-metal-unikernel.conf",
                                                 "data/missing"])
             self.assertEqual(got["data/chat/1_2/sessions/General.md"], b"hi")
-            self.assertEqual(got["gopher-metal.conf"], G.request_limit_text(image, 3).encode())
+            self.assertEqual(got["zig-metal-unikernel.conf"], G.request_limit_text(image, 3).encode())
             self.assertIsNone(got["data/missing"])
             taken = os.path.join(d, "taken")
             G.disk_take(image, "unused", taken, names=G.DATA_DIRS)
@@ -878,7 +878,7 @@ class DiskByMtools(unittest.TestCase):
             self.assertEqual(int(os.path.getmtime(os.path.join(taken, "auth/1/name"))), 1758000000)
             fat = G.split_site_off(image, os.path.join(d, "s"))
             self.assertEqual(sorted(G.disk_names(image)), ["auth", "data"])
-            self.assertEqual(sorted(G.disk_names(fat, partitioned=False)), ["gopher-metal.conf", "pages"])
+            self.assertEqual(sorted(G.disk_names(fat, partitioned=False)), ["pages", "zig-metal-unikernel.conf"])
 
 
 class TcpCounts(unittest.TestCase):
@@ -908,7 +908,7 @@ class Bulk(unittest.TestCase):
 
 
 class Ladder(unittest.TestCase):
-    LOG = ("gopher-metal ladder\n"
+    LOG = ("zig-metal-unikernel ladder\n"
            "rung cpu: 500 ops; ns per op by tenth: 900 500 500 510 500 500 505 500 520 530; "
            "disk requests by tenth: 0 0 0 0 0 0 0 0 0 0\n"
            "rung append: 1000 ops; ns per op by tenth: 100 100 100 120 140 160 180 200 220 240; "

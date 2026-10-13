@@ -52,7 +52,7 @@ const gpa = std.mem.Allocator{
 
 pub fn kmain() noreturn {
     serial.init();
-    serial.put("gopher-metal std.Io probe\n");
+    serial.put("zig-metal-unikernel std.Io probe\n");
 
     const base = virtio.find(virtio.device_id_block) orelse
         serial.fail("no virtio-blk device on the PCI bus or in any mmio slot");

@@ -58,7 +58,7 @@ ZIG_GOPHER=(-Dgopher-root="$GOPHER_ROOT" -Dwebbox-root="$WEBBOX_ROOT")
 VERDICT_PAIR="$(python3 tools/verdicts.py ids)" || exit 2
 export VERDICT_PAIR
 python3 tools/verdicts.py pair
-VERDICTS="${GATES_VERDICTS:-$HOME/build/gopher-metal/gates}"
+VERDICTS="${GATES_VERDICTS:-$HOME/build/zig-metal-unikernel/gates}"
 mkdir -p "$VERDICTS"
 
 # ── the kernels and host tests ───────────────────────────────────────────────
@@ -95,7 +95,7 @@ if [ "$mode" = quick ]; then
     echo "$r" | grep "^FAIL"
     lap "probes"
     (cd "$GOPHER_ROOT/zig-server" && zig build) > "$VERDICTS/linux-build.txt" 2>&1
-    JUDGE_ONLY=members PROBE_WORK="$HOME/build/gopher-metal/probe-quick" \
+    JUDGE_ONLY=members PROBE_WORK="$HOME/build/zig-metal-unikernel/probe-quick" \
         probe/run.sh gopher > "$VERDICTS/gopher-quick.run" 2>&1
     code=$?
     sed -n '/^\(PASS\|FAIL\|    \) *gopher/,$p' "$VERDICTS/gopher-quick.run"
@@ -114,7 +114,7 @@ fi
 # own stage and build_disk, no boot): what metal-vmm's timeouts.sh and
 # long.sh's sweeps judge, where they read whatever volume a chat judge had
 # last left at a default path.
-SITE_VOLUME="$HOME/build/gopher-metal/site/pristine.img"
+SITE_VOLUME="$HOME/build/zig-metal-unikernel/site/pristine.img"
 python3 tools/site_volume.py "$SITE_VOLUME" "$GOPHER_ROOT" || failed+=(site-volume)
 lap "the site volume"
 
@@ -153,7 +153,7 @@ judge() {  # judge MACHINE [FAT]: one chat judge, output to $VERDICTS/gopher-MAC
     # inherit it, as they did not before.
     # Through `env`: an expansion before the command ends bash's assignment
     # words, and an empty `${fat:+...}` made `PROBE_WORK=...` the command.
-    env JUDGE_DROPLET=$droplet ${fat:+FAT=$fat} PROBE_WORK="$HOME/build/gopher-metal/probe-$tag" probe/run.sh gopher \
+    env JUDGE_DROPLET=$droplet ${fat:+FAT=$fat} PROBE_WORK="$HOME/build/zig-metal-unikernel/probe-$tag" probe/run.sh gopher \
         > "$VERDICTS/gopher-$tag.run" 2>&1
     echo $? > "$VERDICTS/gopher-$tag.code"
 }
@@ -163,7 +163,7 @@ report() {  # report TAG: the verdict line and, on a failure, every line after i
     code=$(cat "$VERDICTS/gopher-$tag.code")
     echo "$v" | sed -n '/^\(PASS\|FAIL\|    \) *gopher/,$p'
     { [ "$code" = 0 ] && echo "$v" | grep -q "^PASS gopher"; } || failed+=("gopher-$tag")
-    cp "$HOME/build/gopher-metal/probe-$tag/gopher.verdict" "$VERDICTS/gopher-$tag.verdict" 2>/dev/null
+    cp "$HOME/build/zig-metal-unikernel/probe-$tag/gopher.verdict" "$VERDICTS/gopher-$tag.verdict" 2>/dev/null
 }
 
 # The two FAT32 judges, always.

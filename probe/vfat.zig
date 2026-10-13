@@ -51,7 +51,7 @@ const Names = struct {
 
 pub fn kmain() noreturn {
     serial.init();
-    serial.put("gopher-metal vfat probe\n");
+    serial.put("zig-metal-unikernel vfat probe\n");
 
     const base = virtio.find(virtio.device_id_block) orelse
         serial.fail("no virtio-blk device on the PCI bus or in any mmio slot");

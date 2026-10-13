@@ -24,7 +24,7 @@ guest's 80, `run.sh` fetches from it, and what curl got back is what is
 checked. The guest's console only says what it thought happened.
 
 ```
-gopher-metal http probe
+zig-metal-unikernel http probe
   address: 10.0.2.15
   listening on port 80
   request: GET / HTTP/1.1

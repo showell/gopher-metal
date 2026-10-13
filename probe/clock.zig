@@ -67,7 +67,7 @@ fn decodeOrFail(raw: rtc.Raw) rtc.Civil {
 
 pub fn kmain() noreturn {
     serial.init();
-    serial.put("gopher-metal clock probe\n");
+    serial.put("zig-metal-unikernel clock probe\n");
     const io = Io.io();
 
     if (Io.clockIsStarted()) serial.fail("the clock claims a rate before anyone measured one");

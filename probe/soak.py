@@ -291,7 +291,7 @@ def main():
         J.build_disk(image, content, mnt, size=VOLUME_MB << 20)
         # No `requests` line: it serves until stopped. A long idle timeout so a
         # held stream is not let go, and the cache set as asked.
-        J.disk_write(image, mnt, "gopher-metal.conf",
+        J.disk_write(image, mnt, "zig-metal-unikernel.conf",
                      f"idle_timeout_ms = 120000\npage_cache_mib = {PAGE_CACHE_MIB}\n")
         SESSION = J.mint_session("1", int(time.time()))
         ADMIN = SESSION

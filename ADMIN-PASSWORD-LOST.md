@@ -43,7 +43,7 @@ machine that builds images, with angry-gopher beside this checkout:
     droplet/chat.py chat.img --reset-admin-password Steve
 
 It asks for the new password twice, and hashes it here. The image then
-carries `admin_password_reset = Steve <hash>` in its gopher-metal.conf.
+carries `admin_password_reset = Steve <hash>` in its zig-metal-unikernel.conf.
 Only the hash is in the image, and nothing goes into the repository.
 
 **2. Deploy it** as any image (README.md, "A deploy").
@@ -80,7 +80,7 @@ The hash replaced is kept beside the new one, as
 
 - **angry-gopher:** `ops/test_reset_admin_password`, against a real
   server.
-- **gopher-metal:**
+- **zig-metal-unikernel:**
   - `src/io_test.zig`: once; another name; no admin; a reset stopped
     part-way and finished by the next boot;
   - the judge's `admin-reset` gate, on both hosts

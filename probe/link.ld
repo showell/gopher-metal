@@ -28,7 +28,7 @@ SECTIONS {
     .text     : { *(.text*) } :text
     /* Which build this is (boot.zig): KEPT for the same reason as the note,
        so that run.sh can read it from the file. */
-    .rodata   : { KEEP(*(.rodata.gopher_metal_build)) *(.rodata*) } :text
+    .rodata   : { KEEP(*(.rodata.zig_metal_unikernel_build)) *(.rodata*) } :text
     .data     : { *(.data*) } :text
     /* Every coverage property's site (zig-coverage-sdk), walked from
        __start_zig_coverage_catalog to __stop_. KEPT: nothing names a site

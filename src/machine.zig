@@ -16,7 +16,7 @@
 //! `machine tcp.Fin: nothing leaves acknowledged on timed_out`.
 //!
 //! **BUILT TO MOVE** (the box's vote: local first, promoted on its second
-//! user): it imports nothing of gopher-metal's, only the coverage SDK, and
+//! user): it imports nothing of zig-metal-unikernel's, only the coverage SDK, and
 //! makes its sites the way the SDK makes them. Moving it is a file and an
 //! import.
 //!

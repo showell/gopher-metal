@@ -54,7 +54,7 @@ be sent as is or as `%3A`.
 
 **The header.** Every line of it begins `# `, so `grep -v '^#'` gives the
 log alone. It holds:
-- the application's commit and gopher-metal's commit;
+- the application's commit and zig-metal-unikernel's commit;
 - when this boot began;
 - the requests since boot by status class and by part of the site;
 - one `# 5xx:` line for each of the last 20 answers of 500 or over;
@@ -100,7 +100,7 @@ From the top:
    requests since boot by status class and by part of the site (uploads,
    streams, docs, chat, games, admin, site), the 5 slowest, and the
    refusals counted at the edge.
-3. **The host**: gopher-metal's own facts.
+3. **The host**: zig-metal-unikernel's own facts.
    - The clock and the processor.
    - Connections and streams, open now and at most.
    - Memory.

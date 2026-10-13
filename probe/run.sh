@@ -41,7 +41,7 @@ set -u
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # PROBE_WORK gives a run its own scratch, so two can run at once (gates.sh's
 # GATES_PARALLEL=1, QUEUE.md item 72): every file a run writes is under it.
-WORK="${PROBE_WORK:-$HOME/build/gopher-metal/probe}"
+WORK="${PROBE_WORK:-$HOME/build/zig-metal-unikernel/probe}"
 mkdir -p "$WORK"
 
 # **FAT=32 FORMATS THE PROBES' OWN VOLUMES AS FAT32** (QUEUE.md item 17):
@@ -96,9 +96,9 @@ if [ "$want" = quick ]; then
     echo "PASS quick | the host tests, and every kernel built in Debug"
     want=all
 fi
-built="$(strings "$HERE/block.elf" 2>/dev/null | grep -o 'gopher-metal-build=[A-Za-z]*' | head -1)"
+built="$(strings "$HERE/block.elf" 2>/dev/null | grep -o 'zig-metal-unikernel-build=[A-Za-z]*' | head -1)"
 if [ -n "$built" ]; then
-    echo "     build | ${built#gopher-metal-build=} kernels"
+    echo "     build | ${built#zig-metal-unikernel-build=} kernels"
 else
     echo "     build | kernels of unknown build"
 fi
@@ -696,9 +696,9 @@ if [ "$want" = gopher ] || [ $quick = 1 ]; then
             "$GOPHER_ROOT/zig-server/zig-out/bin/zig-server" "$GOPHER_ROOT" "$WORK/gopher" \
             > "$WORK/gopher.verdict" 2>&1
         code=$?
-        gmode="$(strings "$HERE/gopher.elf" | grep -o 'gopher-metal-build=[A-Za-z]*' | head -1)"
+        gmode="$(strings "$HERE/gopher.elf" | grep -o 'zig-metal-unikernel-build=[A-Za-z]*' | head -1)"
         case $code in
-            0) echo "PASS gopher | (${gmode#gopher-metal-build=}) $(tail -1 "$WORK/gopher.verdict")" ;;
+            0) echo "PASS gopher | (${gmode#zig-metal-unikernel-build=}) $(tail -1 "$WORK/gopher.verdict")" ;;
             77) echo "     gopher | $(tail -1 "$WORK/gopher.verdict")" ;;
             2) echo "FAIL gopher | $(cat "$WORK/gopher.verdict")"; failed=1 ;;
             *) echo "FAIL gopher | $(tail -1 "$WORK/gopher.verdict")"

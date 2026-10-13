@@ -11,7 +11,7 @@ answers carry no randomness but a stranger's new cookie, which is compared by
 its shape and then used.
 
 Builds both (the build is timed apart from the judge) and runs from
-gopher-metal's root:
+zig-metal-unikernel's root:
 
     python3 probe/judge_dogpark.py
 

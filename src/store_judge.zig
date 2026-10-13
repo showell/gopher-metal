@@ -227,7 +227,7 @@ fn isFile(w: *World, rel: []const u8) bool {
 }
 
 /// **THE MODEL, SPEAKING THE SEAM'S CONTRACT** (STORE.md): it is
-/// gopher-metal's Store, whose answers differ from angry-gopher's store.zig
+/// zig-metal-unikernel's Store, whose answers differ from angry-gopher's store.zig
 /// where the contract is the seam's: a remove of what is absent is done, a
 /// folder that is absent lists nothing, and a name is checked only where a
 /// call would create it, so one looked up that FAT could not hold is simply

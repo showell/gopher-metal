@@ -25,7 +25,7 @@ var big: [4096]u8 = undefined;
 
 pub fn kmain() noreturn {
     serial.init();
-    serial.put("gopher-metal rng probe\n");
+    serial.put("zig-metal-unikernel rng probe\n");
 
     rng.attach(&rng_mem);
     const s = rng.sources();

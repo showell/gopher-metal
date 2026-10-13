@@ -27,7 +27,7 @@ const want = "linux wrote this, with a name 8.3 cannot hold\n";
 
 pub fn kmain() noreturn {
     serial.init();
-    serial.put("gopher-metal restore probe\n");
+    serial.put("zig-metal-unikernel restore probe\n");
 
     const base = virtio.find(virtio.device_id_block) orelse
         serial.fail("no virtio-blk device on the PCI bus or in any mmio slot");

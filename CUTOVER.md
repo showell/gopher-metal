@@ -1,4 +1,4 @@
-# The cutover: lynrummy.com from Linux to gopher-metal
+# The cutover: lynrummy.com from Linux to zig-metal-unikernel
 
 QUEUE.md item 33. **Steve runs this.** The box Claude helps from the dev
 box. Every step ends with a **GO** line: what must be true before the next
@@ -6,7 +6,7 @@ step. Anything else is **NO-GO**: stop, and take the way back (the last
 section).
 
 What moves: prod's `data/` and `auth/`, all of chat and every app, onto a
-FAT32 DigitalOcean volume that gopher-metal serves. lynrummy.com's Caddy
+FAT32 DigitalOcean volume that zig-metal-unikernel serves. lynrummy.com's Caddy
 then sends the site to it. Linux keeps the old data, untouched, until the
 first day is over.
 
@@ -26,7 +26,7 @@ The others explain a step, or are for another day:
 | [README.md](README.md), "A deploy" | building and deploying a new boot image | step 9, and every deploy after |
 
 Placeholders, not real addresses: `<prod>` is the lynrummy.com droplet,
-`<metal>` the gopher-metal droplet's private address, `<box>` the dev
+`<metal>` the zig-metal-unikernel droplet's private address, `<box>` the dev
 box, `N` the volume's size in GiB, and `/dev/sdX` whatever `lsblk` shows.
 
 ## Before the day
@@ -73,13 +73,13 @@ Each of these is done, and checked, at least a day before.
    - GO: the boot image is built without `-Drestart=true` (the default),
      or the measurement is written up.
 5. **The volume for prod's data is the test site's own**: the 16 GiB
-   volume in nyc2 already attached to the gopher-metal droplet (FAT32,
+   volume in nyc2 already attached to the zig-metal-unikernel droplet (FAT32,
    serial `5C8C-BFBD`, holding a copy of prod's data from 2026-10-03).
    Step 8 overwrites all of it, so what is on it does not matter, and the
    stale copy of prod's data (password hashes among it) goes with it. 16 GiB
    is room for every user's 1 GiB cap many times over. (Decided 2026-10-04:
    reusing it takes the attach and detach out of step 8.)
-   - GO: the console lists one 16 GiB volume, attached to the gopher-metal
+   - GO: the console lists one 16 GiB volume, attached to the zig-metal-unikernel
      droplet.
 6. **The way back is tried once**, on the rehearsal's volume:
    `droplet/extract_volume.py VOLUME.img OUT/` gives back a tree that
@@ -185,13 +185,13 @@ whole site's. Then:
 Serve `boot.img.gz` and `prod-volume.img.gz` (`gzip -k prod-volume.img`)
 where `<metal>`'s recovery console can fetch them.
 
-- GO: both files are there, `boot.img`'s `gopher-metal.conf` names the
+- GO: both files are there, `boot.img`'s `zig-metal-unikernel.conf` names the
   serial from step 4, and chat.py's last line says which address's
   X-Forwarded-For it believes, not "believing no X-Forwarded-For".
 
 ### 8. Write the volume, from the recovery console
 
-In the DigitalOcean console, boot the gopher-metal droplet into the
+In the DigitalOcean console, boot the zig-metal-unikernel droplet into the
 recovery console. The volume stays attached as it is. Then type:
 
     lsblk
@@ -210,7 +210,7 @@ replaced). That is `/dev/sdX`. It is not the boot disk, which is smaller.
 
 ### 9. Rebuild the droplet from the new image
 
-Import `boot.img.gz` as a custom image, and rebuild the gopher-metal
+Import `boot.img.gz` as a custom image, and rebuild the zig-metal-unikernel
 droplet from it (README, "A deploy", steps 2-3). The volume stays attached
 and is not touched.
 
@@ -272,7 +272,7 @@ restarts the stopped Linux server:
 
 - GO:
   - `https://lynrummy.com/version` names the same commit as step 2;
-  - `/admin/host` says `gopher-metal, with no operating system`;
+  - `/admin/host` says `zig-metal-unikernel, with no operating system`;
   - you can log in, post a message, and see it.
 
 **The site is up, on metal.**

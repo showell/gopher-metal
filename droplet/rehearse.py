@@ -30,7 +30,7 @@ It prints counts and anonymised labels only, as the tools it runs do:
 nothing from the copy is named. It stops every process it started and
 removes the namespace and every file it made, whatever happens. A run that
 is killed outright (the OOM killer, SIGKILL) cannot; its scratch is under
-`~/build/gopher-metal/rehearse/` (or `$REHEARSE_SCRATCH`), and the next run
+`~/build/zig-metal-unikernel/rehearse/` (or `$REHEARSE_SCRATCH`), and the next run
 removes it, and its namespace, and says so.
 
 **Run it as yourself.** It uses root only through `sudo -n`: for `ip
@@ -70,7 +70,7 @@ LINUX_PORT = 9101
 # **ONE FOLDER FOR EVERY RUN'S SCRATCH** (QUEUE.md item 75), so a run killed
 # before its `finally` (the OOM killer, a SIGKILL) leaves its volume, built
 # from prod's data, where the next run finds it and removes it.
-SCRATCH = os.environ.get("REHEARSE_SCRATCH", os.path.expanduser("~/build/gopher-metal/rehearse"))
+SCRATCH = os.environ.get("REHEARSE_SCRATCH", os.path.expanduser("~/build/zig-metal-unikernel/rehearse"))
 
 
 # **AS THE USER, WITH ROOT ONLY FOR THE NAMESPACE** (QUEUE.md item 75). Run as
@@ -133,7 +133,7 @@ def say(step: str, verdict: str, detail: str = "") -> None:
 def site_partition(scratch: str, serial: str) -> str:
     """The boot disk's site partition, as chat.py makes it but with mtools:
     the site's own files (the judge's staged pages, and gallery/) and a
-    gopher-metal.conf serving the private card and naming the volume."""
+    zig-metal-unikernel.conf serving the private card and naming the volume."""
     content = os.path.join(scratch, "site")
     G.stage(content, GOPHER_ROOT)
     for d in G.DATA_DIRS:
@@ -141,7 +141,7 @@ def site_partition(scratch: str, serial: str) -> str:
     gallery = os.path.join(GOPHER_ROOT, "gallery")
     if os.path.isdir(gallery):
         shutil.copytree(gallery, os.path.join(content, "gallery"))
-    with open(os.path.join(content, "gopher-metal.conf"), "w") as f:
+    with open(os.path.join(content, "zig-metal-unikernel.conf"), "w") as f:
         f.write(f"idle_timeout_ms = 10000\ncard = private\nvolume = {serial}\n")
     fat = os.path.join(scratch, "site.fat")
     subprocess.run(["mkfs.vfat", "-F", "16", "-S", "512", "-n", "SITE", "-C", fat, str(64 * 1024)],

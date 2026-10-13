@@ -108,19 +108,19 @@ test "a port that stays full is given up on, then tried again, and the gap is sa
     var f = Fake{ .full_reads = 1_000_000 };
     defer f.sent.deinit(testing.allocator);
     var g = Gate{};
-    g.send("gopher-metal: the first line\n", &f, 100);
+    g.send("zig-metal-unikernel: the first line\n", &f, 100);
     try testing.expect(g.dead);
     try testing.expectEqual(@as(u64, 1), g.stalls);
     // While it stays full, each write costs one status read and is counted.
     const reads_before = f.full_reads;
     g.send("  ram: 1 bytes\n", &f, 100);
     try testing.expectEqual(reads_before - 1, f.full_reads);
-    try testing.expectEqual(@as(u64, 29 + 15), g.dropped);
+    try testing.expectEqual(@as(u64, 36 + 15), g.dropped);
     // It drains: the note comes first, then what is being written now.
     f.full_reads = 0;
     g.send("  listening on port 80\n", &f, 100);
     try testing.expect(!g.dead);
-    try testing.expectEqualStrings("\n[serial: the port was full; 44 bytes of the log were dropped here]\n  listening on port 80\n", f.sent.items);
+    try testing.expectEqualStrings("\n[serial: the port was full; 51 bytes of the log were dropped here]\n  listening on port 80\n", f.sent.items);
     try testing.expectEqual(@as(u64, 0), g.dropped);
 }
 

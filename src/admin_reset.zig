@@ -3,7 +3,7 @@
 //! no shell, keeps the password only as a hash, and asks for it before a
 //! backup; with the browser gone there was no way back in.
 //!
-//! The way back: a line in the boot disk's `gopher-metal.conf`,
+//! The way back: a line in the boot disk's `zig-metal-unikernel.conf`,
 //!
 //!     admin_password_reset = Steve $2b$10$…
 //!

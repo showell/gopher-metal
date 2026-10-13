@@ -2,10 +2,10 @@
 """**CHAT'S BOOT DISK, FOR A DROPLET.** The real server (gopher.elf) in
 partition 1, and in partition 2 the site's own files, which come with every
 image: what angry-gopher's routes read at request time (its assets.zon's
-`.site`: pages/, gallery/) and gopher-metal.conf. Chat's data is not here: it is on a DigitalOcean volume,
+`.site`: pages/, gallery/) and zig-metal-unikernel.conf. Chat's data is not here: it is on a DigitalOcean volume,
 built once by `droplet/new_volume.py` and never touched by a new boot image.
 
-gopher-metal.conf says nothing about `requests`, so the server serves until
+zig-metal-unikernel.conf says nothing about `requests`, so the server serves until
 the machine is turned off. It says `card = private`: nothing on the internet
 can reach it, only machines on the droplet's private network, prod among them.
 And it says `volume = <serial>`, from `droplet/volume-serial`: the volume the
@@ -23,7 +23,7 @@ of game writes an hour) apply to the whole site at once; this says so.
 with `--reset-admin-password NAME` this asks for a new password twice,
 hashes it here with angry-gopher's `hash-password` (the server's own bcrypt),
 and puts `admin_password_reset = NAME <hash>` in this image's
-gopher-metal.conf. The machine applies it at its next boot, once, and only if
+zig-metal-unikernel.conf. The machine applies it at its next boot, once, and only if
 uid 1 on the volume is NAME. Only the hash is in the image, and nothing goes
 in the repository; the next deploy without the flag leaves the line out.
 Off a terminal, the password is the first line of stdin.
@@ -127,7 +127,7 @@ def main() -> int:
         # A connection that makes no progress for ten seconds is let go, as in
         # the judge; no `requests` line, so the machine never stops on its own;
         # only the private card, where prod's Caddy reaches it; and the volume.
-        with open(os.path.join(content, "gopher-metal.conf"), "w") as f:
+        with open(os.path.join(content, "zig-metal-unikernel.conf"), "w") as f:
             f.write(f"idle_timeout_ms = 10000\ncard = private\nvolume = {serial}\n"
                     + f"trusted_proxy = {proxy}\n"
                     + (admin_reset_line(reset) if reset else ""))

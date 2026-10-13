@@ -37,7 +37,7 @@
 //! through a file names nothing (`NotFound`).
 //!
 //! **ERRORS** (`Error`), and which of the floor's refusals answer each
-//! (gopher-metal COVERAGE.md, "Errors under the Store"):
+//! (zig-metal-unikernel COVERAGE.md, "Errors under the Store"):
 //!
 //! - `NotFound`: no such file or directory (disk_fat `NotFound`, and a path
 //!   whose parent is a file, `NotFat16`, where a read or remove meets it).

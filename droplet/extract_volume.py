@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""The way back (QUEUE.md item 34): a volume gopher-metal wrote, as a Linux
+"""The way back (QUEUE.md item 34): a volume zig-metal-unikernel wrote, as a Linux
 tree again, without root.
 
     droplet/extract_volume.py VOLUME.img OUT/ [--anyway]

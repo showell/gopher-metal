@@ -9,7 +9,7 @@
 //! uselessly, that the volume is not FAT16.
 //!
 //! Only what is needed to answer "where does the data partition start?": the
-//! first partition that is not gopher-metal's own kernel partition (a droplet's
+//! first partition that is not zig-metal-unikernel's own kernel partition (a droplet's
 //! disk has both; Cobblestone's fixtures and the judge's volumes have only the
 //! data). That one type GUID is the only one interpreted; no CRCs are
 //! checked, and nothing is written.

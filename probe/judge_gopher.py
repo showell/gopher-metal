@@ -71,7 +71,7 @@ STAGED_TIME = 1758000000
 # angry-gopher's old server — so logging in also exercises the `$2a$` path.
 MEMBER_PASSWORD = "correct horse battery staple"
 MEMBER_HASH = "$2a$10$TC9LJ0KU0TIrFl9Hk8FCAeU1bThg2GoSYXAqsjQLdIBSHIxGVfDza"
-SESSION_SECRET = b"gopher-metal judge secret, 32+ bytes of it"
+SESSION_SECRET = b"gopher-metal judge secret, 32+ bytes of it"  # bytes the pinned MACs were checked with
 P1 = "gopher_uid=1"
 GAME1 = "data/lynrummy/1"
 
@@ -518,7 +518,7 @@ def fat_serial(image: str) -> str:
 
 
 def mount(image: str, mnt: str, writable: bool) -> None:
-    """**tz=UTC**: vfat stores local times, and gopher-metal reads FAT times as
+    """**tz=UTC**: vfat stores local times, and zig-metal-unikernel reads FAT times as
     UTC. Without it, on a host whose zone is not UTC every file written or read
     through this mount would be off by the host's offset, and chat's "recent",
     which is ordered by modification time, with it (MIGRATION.md)."""
@@ -714,7 +714,7 @@ def ask(port: int, c: dict, scratch: str, patience: int = 400) -> dict:
     pass one."""
     if c.get("raw") is not None:
         return ask_raw(port, c["raw"])
-    headers = {"Host": f"127.0.0.1:{port}", "User-Agent": "gopher-metal-judge", "Accept": "*/*"}
+    headers = {"Host": f"127.0.0.1:{port}", "User-Agent": "zig-metal-unikernel-judge", "Accept": "*/*"}
     if c["cookie"]:
         headers["Cookie"] = c["cookie"]
     body = None
@@ -757,7 +757,7 @@ def ask(port: int, c: dict, scratch: str, patience: int = 400) -> dict:
 
 def request_limit_text(image: str, n: int, idle_timeout_ms: int = 10000, streams: int = None,
                        lose_one_sent_in: int = None, keepalive_ms: int = None) -> str:
-    """gopher-metal.conf for a boot that serves `n` requests."""
+    """zig-metal-unikernel.conf for a boot that serves `n` requests."""
     text = f"requests = {n}\nidle_timeout_ms = {idle_timeout_ms}\n"
     # On the droplet machine, the card chat will really serve on, and
     # the volume it must find: the judge's own disk, by its serial.
@@ -773,7 +773,7 @@ def request_limit_text(image: str, n: int, idle_timeout_ms: int = 10000, streams
 
 
 def set_request_limit(image: str, n: int, mnt: str, **conf) -> None:
-    disk_write(image, mnt, "gopher-metal.conf", request_limit_text(image, n, **conf))
+    disk_write(image, mnt, "zig-metal-unikernel.conf", request_limit_text(image, n, **conf))
 
 
 # **THE QUICK TIER.** With JUDGE_QUICK set, the machine's waits are
@@ -1031,7 +1031,7 @@ def finish_kernel(qemu, serial: str, damaged: bool = False):
         droplet_boots.pop(qemu.pid)
         global loader_boots
         said = open(serial, "rb").read()
-        if b"gopher-metal loader" not in said:
+        if b"zig-metal-unikernel loader" not in said:
             raise RuntimeError(f"a droplet boot that never printed the loader's line: {serial}")
         if b"chat's data: the volume" not in said:
             raise RuntimeError(f"a droplet boot that did not serve from the volume: {serial}")
@@ -1234,7 +1234,7 @@ def version_differences(metal: bytes, linux: bytes) -> list:
 
 
 # The angry-gopher commit metal must name, set in main from the checkout being
-# judged: what gopher-metal's build.zig bakes in (`commitOf`). The Linux side
+# judged: what zig-metal-unikernel's build.zig bakes in (`commitOf`). The Linux side
 # is built without -Dcommit and says "dev", so its commit is not compared.
 EXPECTED_COMMIT = None
 
@@ -1448,8 +1448,8 @@ def host_page_differences(metal: bytes, linux: bytes, image: str = None, boot_di
     app = lambda body: rows(body.split(b"<h2>The host</h2>")[0])
     if app(metal) != app(linux):
         out.append(f"/admin/host's application rows differ: {app(metal)} vs {app(linux)}")
-    if b"gopher-metal, with no operating system" not in metal:
-        out.append("/admin/host on metal does not say it is gopher-metal")
+    if b"zig-metal-unikernel, with no operating system" not in metal:
+        out.append("/admin/host on metal does not say it is zig-metal-unikernel")
     if b"Linux, zig-server" not in linux:
         out.append("/admin/host on Linux does not say it is Linux")
     if b"serial " not in metal:
@@ -2170,7 +2170,7 @@ def upload_story(port: int, session: str) -> dict:
 
 # ── the admin's lost password (QUEUE.md item 89) ─────────────────────────────
 #
-# **THE WAY BACK IN, ON BOTH HOSTS.** Metal: the boot disk's gopher-metal.conf
+# **THE WAY BACK IN, ON BOTH HOSTS.** Metal: the boot disk's zig-metal-unikernel.conf
 # carries `admin_password_reset = Steve <hash>`; the boot applies it once,
 # only to a uid 1 named Steve. Linux: angry-gopher's ops/reset_admin_password
 # --local, with the server stopped. Either way the new password logs in and
@@ -2212,7 +2212,7 @@ def admin_reset_failures(elf, linux_bin, content, pristine, work, mnt, gopher_ro
         bscratch = tempfile.mkdtemp(dir=scratch)
         if DROPLET and after is not None:
             restore_site(image, os.path.join(after, "site"), mnt)
-        disk_write(image, mnt, "gopher-metal.conf", request_limit_text(image, n) + reset_line)
+        disk_write(image, mnt, "zig-metal-unikernel.conf", request_limit_text(image, n) + reset_line)
         qemu, port, serial = start_kernel(elf, image, bscratch)
         return qemu, port, serial, bscratch
 
@@ -2339,7 +2339,7 @@ def login_throttle_failures(elf, linux_bin, content, pristine, work, mnt, report
         scratch = tempfile.mkdtemp(dir=work)
         image = os.path.join(scratch, "disk.img")
         shutil.copy(pristine, image)
-        disk_write(image, mnt, "gopher-metal.conf", request_limit_text(image, 30))
+        disk_write(image, mnt, "zig-metal-unikernel.conf", request_limit_text(image, 30))
         qemu, port, serial = start_kernel(elf, image, scratch)
         try:
             fn("metal", port)

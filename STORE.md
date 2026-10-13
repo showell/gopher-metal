@@ -15,7 +15,7 @@ Store". The census of what the application calls: STORE-CENSUS.md.*
 | **the model** | the oracle: plain, in memory | `src/store_model.zig` |
 | **the judge** | all three, the same seeded operations, the same answers | `src/store_judge.zig`, `zig build store-judge`: all eleven operations, 200 seeds; no power cuts or full volumes yet |
 
-gopher-metal's own `store.zig`, `store_fat.zig` and `store_linux.zig` are
+zig-metal-unikernel's own `store.zig`, `store_fat.zig` and `store_linux.zig` are
 where this contract was first written and proven against `fat16`
 (`store_sim`). They stay until the judge covers what they cover, power cuts
 included; then the model is what remains of them.
@@ -75,7 +75,7 @@ angry-gopher's `write` on Linux empties the file and then fills it.
 
 `replace` is the one to use where losing the old file would matter; `write`
 is the cheap one. That is the whole difference. **Today `store_sim` holds
-each of the first four rows, against gopher-metal's own FAT store**; the
+each of the first four rows, against zig-metal-unikernel's own FAT store**; the
 judge of production's store holds none of them yet (no cuts, no full
 volume), and that is its next step.
 
@@ -96,7 +96,7 @@ FAT's, so a laptop refuses what the droplet would (Steve, 2026-10-02):
 
 ## Open questions
 
-1. **The model's name rule is 80 bytes; the seam's is 96.** gopher-metal's
+1. **The model's name rule is 80 bytes; the seam's is 96.** zig-metal-unikernel's
    `store.zig` chose 80, angry-gopher's 96 (FAT's own limit as `fat16` keeps
    it). The model should keep the seam's 96. Until it does, the judge's
    names stay under 80.
