@@ -60,6 +60,11 @@ test "the request log keeps the path and drops the query, secret or not" {
     try testing.expectEqualStrings("", withoutQuery("")); // nothing at all
 }
 
+/// **THE LOG'S SIZE, THE LIVE RING'S AND EACH KEPT SLOT'S** (metal-vmm QUEUE
+/// 189.1): 1.25 MiB, twenty times the 64 KiB that a few minutes of traffic
+/// rotated away. One number, so a restart moves the whole ring into a slot.
+pub const capacity = 1280 * 1024;
+
 /// A ring over a buffer it is given. The buffer is separate so that the ring
 /// itself, a few words, can live in `.data` where the loader writes it,
 /// while the buffer lives in `.bss` (see `serial.ring`).
@@ -107,6 +112,17 @@ pub const Ring = struct {
     pub fn parts(self: *const Ring) [2][]const u8 {
         const p = ring_pieces.pieces(self.buf.len, self.total - self.len(), self.len());
         return .{ p[0].of(self.buf), p[1].of(self.buf) };
+    }
+
+    /// **THE RING, MOVED** (`serial.keepIn`, to the region a restart keeps):
+    /// what it holds, read into `buf` as `read` answers it, and a ring over
+    /// `buf` that goes on from there, its redactor's state and all, so a
+    /// secret it was in the middle of is still taken out. No copy on the
+    /// way: the ring is 1.25 MiB, and the kernel's stack is not (189.1).
+    /// `buf` must not overlap the ring's own buffer.
+    pub fn moveTo(self: *const Ring, buf: []u8) Ring {
+        const text = self.read(buf);
+        return .{ .buf = buf, .total = text.len, .redactor = self.redactor };
     }
 
     /// What is held, oldest first, copied into `out`: everything, unless
@@ -539,4 +555,22 @@ test "redaction happens before the ring, so no secret is stored, even in part" {
     r.write("word=hunter2 -> 200\n");
     try testing.expectEqualStrings("GET /login?password=[redacted] -> 200\n", r.read(&out));
     try testing.expect(std.mem.indexOf(u8, r.buf, "hunter") == null);
+}
+
+test "a ring moved to another buffer keeps what it held, its count from there, and a secret it was in the middle of (metal-vmm QUEUE 189.1)" {
+    var a: [64]u8 = undefined;
+    var b: [64]u8 = undefined;
+    var ring = Ring.init(&a);
+    ring.write("first line\nsecond line\n");
+    ring.write("password=hun");
+    const moved = ring.moveTo(&b);
+    var out: [64]u8 = undefined;
+    try testing.expectEqualStrings("first line\nsecond line\npassword=[redacted]", moved.read(&out));
+    var after = moved;
+    after.write("ter2 and on\n");
+    try testing.expectEqualStrings("first line\nsecond line\npassword=[redacted] and on\n", after.read(&out));
+    // A ring that had lost bytes moves from its first whole line.
+    var small = Ring.init(a[0..16]);
+    small.write("aaaaaaaaaa\nbbbbbbbbbb\ncc");
+    try testing.expectEqualStrings("bbbbbbbbbb\ncc", small.moveTo(&b).read(&out));
 }

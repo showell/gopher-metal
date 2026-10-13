@@ -1921,13 +1921,20 @@ fn configNumber(comptime T: type, value: []const u8) !T {
     return std.fmt.parseInt(T, value, 10);
 }
 
-/// **THE LOG, FOR /admin/host**: what the serial ring holds (its last 64 KiB),
-/// oldest first from its first whole line. Its secrets were taken out as it
-/// was written (log_ring.zig's Redactor), so it is shown as it is.
+/// **THE LOG, FOR /admin/host**: the newest `page_log_bytes` of what the
+/// serial ring holds, from a whole line. Its secrets were taken out as it
+/// was written (log_ring.zig's Redactor), so it is shown as it is. **THE
+/// PAGE STAYS SHORT** (metal-vmm QUEUE 189.1): the ring holds 1.25 MiB, and
+/// the page shows what it did before, 64 KiB; the whole ring is the text
+/// view's.
+const page_log_bytes = 64 * 1024;
 fn metalLog(io: Io, alloc: std.mem.Allocator) anyerror!?[]const u8 {
     _ = io;
-    const buf = try alloc.alloc(u8, serial.ring.len());
-    return serial.ring.read(buf);
+    const buf = try alloc.alloc(u8, @min(serial.ring.len(), page_log_bytes));
+    const text = serial.ring.read(buf);
+    // Cut short: the newest bytes begin part way through a line.
+    if (text.len < serial.ring.len()) if (std.mem.indexOfScalar(u8, text, '\n')) |i| return text[i + 1 ..];
+    return text;
 }
 
 /// **WHAT THIS MACHINE SAYS ABOUT ITSELF**, for /admin/host: what a Linux

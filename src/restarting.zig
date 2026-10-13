@@ -82,7 +82,7 @@ pub fn begin(now: *const fn () ?i64) Boot {
     serial.put("  restart: this is boot ");
     serial.putDec(k.boot);
     serial.put(" of the kept log; the boot before it ");
-    var line: [kept_log.slot_bytes]u8 = undefined;
+    var line: [4096]u8 = undefined; // its newest bytes: the last line (`Previous.lastLine`)
     if (k.previous) |p| {
         serial.put("(");
         serial.putDec(p.boot);

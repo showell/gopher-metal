@@ -37,7 +37,7 @@ fn here() std.builtin.SourceLocation {
 }
 const log_ring = @import("log_ring.zig");
 
-pub const slot_bytes = 64 * 1024;
+pub const slot_bytes = log_ring.capacity;
 const header_bytes = 4096;
 const slot_stride = header_bytes + slot_bytes;
 pub const region_bytes = 2 * slot_stride;
@@ -266,4 +266,32 @@ test "a header that does not check is no log: its checksum, its head, its count"
     h.magic +%= 1; // not our header, though its checksum is fixed up
     h.check = h.sum();
     try testing.expectEqual(@as(?Previous, null), open(r).previous);
+}
+
+test "a slot keeps 1.25 MiB of log, twenty times 64 KiB: a busy hour, not a few minutes (metal-vmm QUEUE 189.1)" {
+    try testing.expect(slot_bytes >= 1280 * 1024);
+    const r = try newRegion(0);
+    defer testing.allocator.free(r);
+    const k = open(r);
+    var ring = log_ring.Ring.init(k.bytes());
+    // 1.2 MiB of request lines, about 12,000 of them.
+    var line: [128]u8 = undefined;
+    var written: usize = 0;
+    var i: usize = 0;
+    while (written < 1200 * 1024) : (i += 1) {
+        const l = try std.fmt.bufPrint(&line, "#{d} GET /gopher/chat/stream 200 3 ms, nothing else to say here\n", .{i});
+        ring.write(l);
+        written += l.len;
+    }
+    k.seal(&ring);
+    const p = open(r).previous.?;
+    const out = try testing.allocator.alloc(u8, slot_bytes);
+    defer testing.allocator.free(out);
+    const text = p.read(out);
+    try testing.expectEqual(written, text.len);
+    try testing.expect(std.mem.startsWith(u8, text, "#0 GET"));
+    // The last line, read with a small buffer: what a restart's boot line
+    // reads, off the stack.
+    var small: [256]u8 = undefined;
+    try testing.expect(std.mem.startsWith(u8, p.lastLine(&small), try std.fmt.bufPrint(&line, "#{d} GET", .{i - 1})));
 }
