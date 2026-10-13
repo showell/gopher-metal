@@ -167,6 +167,7 @@ fn command(b: *virtio.Block, at: Address, cdb: []const u8, dir: Direction, addr:
     const sense_key: u8 = if (mem.response.sense_len >= 3) mem.response.sense[2] & 0x0F else 0;
     const asc: u8 = if (mem.response.sense_len >= 14) mem.response.sense[12] else 0;
     const ascq: u8 = if (mem.response.sense_len >= 14) mem.response.sense[13] else 0;
+    b.failures.noteScsi(mem.response.response, mem.response.status, sense_key, asc, ascq);
     return .{ .response = mem.response.response, .status = mem.response.status, .sense_key = sense_key, .asc = asc, .ascq = ascq, .residual = mem.response.residual };
 }
 
@@ -218,6 +219,7 @@ pub fn transfer(b: *virtio.Block, at: Address, from_disk: bool, lba: u64, addr: 
     // than asked leaves the rest of the buffer as it was; a write that did
     // has not put them on the disk. Neither is answered as done.
     if (good(o) and o.residual != 0) {
+        b.failures.short_transfers +%= 1;
         props.reachable(@src(), "scsi: a read or write ends GOOD having moved fewer bytes than asked, and fails", .{ .residual = o.residual, .len = len });
         return virtio.blk_s_ioerr;
     }

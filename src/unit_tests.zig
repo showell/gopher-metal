@@ -59,4 +59,5 @@ test {
     _ = @import("request_line.zig");
     _ = @import("uploads_seen.zig");
     _ = @import("device_wait.zig");
+    _ = @import("disk_failures.zig");
 }

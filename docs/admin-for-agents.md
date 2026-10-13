@@ -127,12 +127,23 @@ From the top:
      busy, taken over by a newer upload, the client gone, failed, and
      refused.
    - Each volume:
-     - free space;
+     - free space, and its **failed sector reads and writes**: requests
+       the disk did not answer OK. Any above zero is a read or write a
+       request could not finish; its error went to that request;
      - its write cache, and whether the disk is still answering.
        "STOPPED ANSWERING" means a request went 30 s with no answer, or
        the disk asked for a reset. Nothing more is sent to it: every read
        and write after that fails, counted, and the requests that needed
        it are answered with an error. Only a restart brings it back;
+     - **what its failed requests ended with**: "none", or each kind with
+       its count. On the boot disk (virtio-blk): I/O errors, unsupported
+       requests, and requests refused after the disk stopped answering. On
+       the volume (SCSI): CHECK CONDITION by sense key (MEDIUM ERROR is the
+       disk's surface; UNIT ATTENTION is the disk saying it was reset or
+       changed, and is normal once after attaching), with the last ASC/ASCQ
+       to look up in SPC-4; a virtio-scsi response other than OK (the
+       hypervisor's transport failed); another SCSI status (BUSY, ...); and
+       short transfers (GOOD, but fewer bytes moved than asked);
      - its idle check, with what it last found;
      - whether it takes writes. "writes: REFUSED" means its FAT copies
        could not be weighed at mount; it is weighed again once a minute.

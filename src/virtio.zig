@@ -26,6 +26,7 @@ const pci = @import("pci.zig");
 const scsi = @import("scsi.zig");
 const durable = @import("durable.zig");
 const device_wait = @import("device_wait.zig");
+const disk_failures = @import("disk_failures.zig");
 
 /// **HOW LONG A REQUEST MAY GO UNANSWERED**, in TSC ticks (metal-vmm QUEUE
 /// 193.2). 30 seconds, as Linux's SCSI layer gives a command. Until the
@@ -764,6 +765,10 @@ pub const Block = struct {
     ended: enum { serving, timed_out, needs_reset } = .serving,
     /// Requests refused because the disk had stopped answering.
     refused_after_end: u64 = 0,
+    /// **WHAT ITS FAILED REQUESTS ENDED WITH** (metal-vmm QUEUE 193.3): on
+    /// virtio-blk each status but OK; on SCSI each command's response,
+    /// CHECK CONDITION by sense key, and short transfers.
+    failures: disk_failures.Failures = .{},
 
     /// **ON A SCSI CONTROLLER, THE DISK THIS BLOCK IS** (`scsi.zig`), and the
     /// memory its commands are built in. Null on virtio-blk.
@@ -1029,7 +1034,16 @@ pub const Block = struct {
     /// **`addr` IS A PHYSICAL ADDRESS AND THE DEVICE WRITES IT DIRECTLY.**
     /// That is the whole reason the door takes an address: the 512 bytes never
     /// pass through this function.
+    /// One request, its status noted (193.3). On SCSI the command's own
+    /// outcome is noted where it ends (`scsi.command`), so a CHECK CONDITION
+    /// is not also an I/O error here; only what never reached a command is.
     fn transfer(self: *Block, kind: u32, lba: u64, addr: u64, len: u32) u8 {
+        const status = self.transferOnce(kind, lba, addr, len);
+        if (self.address == null or status == blk_s_ended or status == blk_s_unsupp) self.failures.noteStatus(status);
+        return status;
+    }
+
+    fn transferOnce(self: *Block, kind: u32, lba: u64, addr: u64, len: u32) u8 {
         if (self.memory) |disk| return self.memoryTransfer(disk, kind, lba, addr, len);
         if (self.refuseEnded()) return blk_s_ended;
         if (self.address) |at| {

@@ -1037,3 +1037,21 @@ test "a name of max_name is written and renamed to, one of max_name + 1 is refus
         try r.expect(&.{});
     }
 }
+
+test "a failed sector read and a failed write are counted on the volume, and the disk's I/O errors on its Block (metal-vmm QUEUE 193.3)" {
+    const d = try test_disk.Disk.make("damaged-counted-failures", small, false);
+    defer d.deinit();
+    try d.vol.writeFile("a.txt", "hello");
+    try testing.expectEqual(@as(u64, 0), d.vol.read_failures);
+    try testing.expectEqual(@as(u64, 0), d.vol.write_failures);
+    try testing.expect(!d.blk.failures.any());
+    // Every request from here fails.
+    d.blk.fail_after = d.blk.requests;
+    var sector: [disk_fat.sector_size]u8 = undefined;
+    try testing.expectError(disk_fat.Error.ReadFailed, d.vol.readSector(d.vol.data_start, &sector));
+    try testing.expectError(disk_fat.Error.WriteFailed, d.vol.writeSector(d.vol.data_start, &sector));
+    d.blk.fail_after = null;
+    try testing.expectEqual(@as(u64, 1), d.vol.read_failures);
+    try testing.expectEqual(@as(u64, 1), d.vol.write_failures);
+    try testing.expectEqual(@as(u64, 2), d.blk.failures.ioerr);
+}

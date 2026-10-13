@@ -2194,10 +2194,11 @@ fn addVolume(facts: *std.ArrayList(webbox.host_facts.Fact), alloc: std.mem.Alloc
     var serial_text: [9]u8 = undefined;
     const named = if (v.serial) |n| serialText(&serial_text, n) else "no serial";
     const value = if (v.space()) |sp|
-        try std.fmt.allocPrint(alloc, "{s}, serial {s}: {d} MB free of {d} MB, {d} MB of it kept for small writes; {d} cleanups after a commit failed (leaks, {d} clusters counted, {d} more may be live; {d} long names left orphaned, {d} more may be), {d} FAT copy writes failed (copies apart)", .{
+        try std.fmt.allocPrint(alloc, "{s}, serial {s}: {d} MB free of {d} MB, {d} MB of it kept for small writes; {d} cleanups after a commit failed (leaks, {d} clusters counted, {d} more may be live; {d} long names left orphaned, {d} more may be), {d} FAT copy writes failed (copies apart); {d} sector reads failed, {d} sector writes failed", .{
             kindName(v),                                                      named,             sp.free >> 20,       sp.total >> 20,
             @as(u64, v.reserve_clusters) * v.sectors_per_cluster * 512 >> 20, v.cleanups_failed, v.leaked_clusters,   v.unsure_clusters,
-            v.orphaned_runs,                                                  v.unsure_runs,     v.fat_copies_failed,
+            v.orphaned_runs,                                                  v.unsure_runs,     v.fat_copies_failed, v.read_failures,
+            v.write_failures,
         })
     else |e|
         try std.fmt.allocPrint(alloc, "{s}, serial {s}: free space unreadable ({s})", .{ kindName(v), named, @errorName(e) });
@@ -2222,13 +2223,18 @@ fn addVolume(facts: *std.ArrayList(webbox.host_facts.Fact), alloc: std.mem.Alloc
     };
     try facts.append(alloc, .{
         .label = cache_label,
-        .value = try std.fmt.allocPrint(alloc, "{s}; {d} flushes, {d} failed; looked at again after {d} resets; {s}", .{
+        .value = try std.fmt.allocPrint(alloc, "{s}; {d} flushes, {d} failed; looked at again after {d} resets; {s}; what its failed requests ended with (193.3): {s}", .{
             cache, v.blk.flushes, v.blk.flush_failures, v.blk.cache_rechecks,
             // **A DISK THAT STOPPED ANSWERING** (193.2).
             switch (v.blk.ended) {
                 .serving => "answering",
                 .timed_out => try std.fmt.allocPrint(alloc, "STOPPED ANSWERING: a request went 30 s unanswered; {d} requests refused since", .{v.blk.refused_after_end}),
                 .needs_reset => try std.fmt.allocPrint(alloc, "STOPPED ANSWERING: it asked for a reset; {d} requests refused since", .{v.blk.refused_after_end}),
+            },
+            blk: {
+                var failed: std.Io.Writer.Allocating = .init(alloc);
+                try v.blk.failures.write(&failed.writer);
+                break :blk failed.written();
             },
         }),
     });
