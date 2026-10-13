@@ -81,7 +81,15 @@ fn fromHost(out: []u8) usize {
     };
     d.q.offer(0);
     d.q.notify();
-    const used = d.q.wait();
+    // A device that never answers gives nothing, rather than hang the boot
+    // (193.2): RDRAND and the rest of the mix still stand.
+    const used = switch (d.q.waitFor(virtio.wait_budget_ticks)) {
+        .done => |e| e,
+        .timed_out, .needs_reset => {
+            virtio.ack(d.device);
+            return 0;
+        },
+    };
     virtio.ack(d.device);
 
     const got = @min(@as(usize, used.len), want);

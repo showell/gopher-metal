@@ -27,6 +27,9 @@ pub const Line = struct {
 
 /// `2026-10-13T14:02:07.123Z`: Unix milliseconds as UTC, ISO 8601.
 pub fn writeTime(w: *std.Io.Writer, ms: i64) std.Io.Writer.Error!void {
+    // Years 0 to 9999 only (189's minor 11): a clock past them is said as
+    // its raw count, never a panic.
+    if (ms < year0_ms or ms > year9999_end_ms) return w.print("(unix ms {d})", .{ms});
     const c = civil.fromUnix(@divFloor(ms, std.time.ms_per_s));
     try w.print("{d:0>4}-{d:0>2}-{d:0>2}T{d:0>2}:{d:0>2}:{d:0>2}.{d:0>3}Z", .{
         @as(u32, @intCast(c.year)), c.month, c.day, c.hour, c.minute, c.second, @as(u32, @intCast(@mod(ms, std.time.ms_per_s))),
@@ -46,6 +49,22 @@ pub fn write(w: *std.Io.Writer, l: Line) std.Io.Writer.Error!void {
         try w.print(" in {d}.{d} ms", .{ tenths / 10, tenths % 10 });
     }
 }
+
+/// **WHAT A REQUEST WAS: ITS METHOD AND PATH** (metal-vmm QUEUE 194.5),
+/// for the route's line and a refusal's alike, so /admin/log's `path=`
+/// finds a request refused at its head too. `path` is without its query;
+/// past 256 bytes it is cut.
+pub fn what(buf: []u8, method: []const u8, path: []const u8, refused_at_head: bool) []const u8 {
+    return std.fmt.bufPrint(buf, "{s} {s}{s}", .{
+        method,
+        path[0..@min(path.len, 256)],
+        if (refused_at_head) " (refused at its head)" else "",
+    }) catch "(unprintable)";
+}
+
+/// 0000-01-01T00:00:00.000Z and 9999-12-31T23:59:59.999Z, in Unix ms.
+const year0_ms: i64 = -62_167_219_200_000;
+const year9999_end_ms: i64 = 253_402_300_799_999;
 
 const testing = std.testing;
 
@@ -148,4 +167,30 @@ test "the plants (metal-vmm QUEUE 189.6): a line of each kind the log writes, ca
     // And the lines are still there to read: each request, and the upload.
     try testing.expect(std.mem.indexOf(u8, held, "request 8: /chat/c/1_2/T/send -> ok, 200") != null);
     try testing.expect(std.mem.indexOf(u8, held, "/uploads/[redacted].jpg, image/jpeg, 9 bytes") != null);
+}
+
+test "a request refused at its head says its method and path, as the route's line does (metal-vmm QUEUE 194.5)" {
+    var buf: [300]u8 = undefined;
+    try testing.expectEqualStrings("POST /chat/c/1_2/T/upload (refused at its head)", what(&buf, "POST", "/chat/c/1_2/T/upload", true));
+    try testing.expectEqualStrings("GET /docs", what(&buf, "GET", "/docs", false));
+    var long: [400]u8 = @splat('a');
+    long[0] = '/';
+    try testing.expectEqual(@as(usize, 4 + 256), what(&buf, "GET", &long, false).len);
+}
+
+test "writeTime of any i64 does not panic: years 0 to 9999 as a time, past them the raw count (189's minor 11)" {
+    var buf: [64]u8 = undefined;
+    for ([_]i64{ std.math.minInt(i64), year0_ms - 1, year0_ms, -1, 0, year9999_end_ms, year9999_end_ms + 1, std.math.maxInt(i64) }) |ms| {
+        var w: std.Io.Writer = .fixed(&buf);
+        try writeTime(&w, ms);
+    }
+    var w: std.Io.Writer = .fixed(&buf);
+    try writeTime(&w, year0_ms);
+    try testing.expectEqualStrings("0000-01-01T00:00:00.000Z", w.buffered());
+    w = .fixed(&buf);
+    try writeTime(&w, year9999_end_ms);
+    try testing.expectEqualStrings("9999-12-31T23:59:59.999Z", w.buffered());
+    w = .fixed(&buf);
+    try writeTime(&w, -1);
+    try testing.expectEqualStrings("1969-12-31T23:59:59.999Z", w.buffered());
 }

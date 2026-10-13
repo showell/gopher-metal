@@ -254,3 +254,54 @@ pub fn captured() []const u8 {
 pub fn clearCaptured() void {
     captured_len = 0;
 }
+
+test "the console's backlog: kept while deferred, drained in order, across its wrap, and written first when it fills (metal-vmm QUEUE 197.3)" {
+    const testing = std.testing;
+    defer {
+        deferred = false;
+        flushPending();
+        clearCaptured();
+    }
+    flushPending();
+    clearCaptured();
+    deferred = true;
+    put("abcdef");
+    try testing.expectEqualStrings("", captured());
+    try testing.expectEqual(@as(usize, 6), pending());
+    drain(3);
+    try testing.expectEqualStrings("abc", captured());
+    put("gh");
+    immediate();
+    try testing.expectEqualStrings("abcdefgh", captured());
+    try testing.expectEqual(@as(usize, 0), pending());
+
+    // Near the end of the backlog's buffer, a put that crosses its wrap
+    // comes out whole and in order.
+    clearCaptured();
+    deferred = true;
+    const to_edge = backlog - @as(usize, @intCast(pend_written % backlog)) - 2;
+    var filler: [4096]u8 = @splat('.');
+    var left = to_edge;
+    while (left > 0) {
+        const n = @min(left, filler.len);
+        put(filler[0..n]);
+        drain(n);
+        left -= n;
+    }
+    clearCaptured();
+    put("WRAPPED");
+    try testing.expectEqualStrings("", captured());
+    drain(100);
+    try testing.expectEqualStrings("WRAPPED", captured());
+
+    // A backlog that fills is written out first, then the put that did not
+    // fit: nothing lost, nothing out of order.
+    clearCaptured();
+    filler[filler.len - 1] = '!';
+    var queued: usize = 0;
+    while (queued + filler.len <= backlog) : (queued += filler.len) put(&filler);
+    try testing.expectEqualStrings("", captured());
+    put("NEXT");
+    try testing.expectEqual(@as(usize, 0), pending());
+    try testing.expect(std.mem.endsWith(u8, captured(), "!NEXT"));
+}

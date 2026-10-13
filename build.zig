@@ -259,17 +259,23 @@ pub fn build(b: *std.Build) void {
     // gopher.elf needs angry-gopher's checkout, its sources and its
     // assets.zon; without them it is not checked, and the step says so rather than
     // pass in silence.
-    const check_step = b.step("check", "type-check every kernel (analysis only, not codegen or link), and build native and droplet (part of `test`)");
+    const check_step = b.step("check", "type-check this repo's own kernels (analysis only, not codegen or link), and build native and droplet (part of `test`)");
+    // **THE APPLICATIONS' KERNELS, A TIER OF THEIR OWN** (metal-vmm QUEUE
+    // 197): gopher.elf needs angry-gopher's and zig-webbox's checkouts, so
+    // its check is tier 3's (tier3.sh), never `test`'s: a missing sibling
+    // must not fail tier 0.
+    const check_apps = b.step("check-apps", "type-check the applications' kernels (gopher.elf), from their checkouts (tier 3)");
     // **EVERY PLANT TYPE-CHECKED** (src/plant.zig): a plant's code is
     // analysed only when it is on, so each is checked by a `check` of its
-    // own, with -Dcoverage as gopher.elf requires. Run it after touching a
+    // own (and with check-apps, gopher.elf too: `check` is this repo's
+    // kernels alone since 197), with -Dcoverage as gopher.elf requires. Run it after touching a
     // plant's lines, and before plants.sh, which does not run it itself.
     const check_plants = b.step("check-plants", "type-check every kernel once with each plant on (src/plant.zig)");
     for (std.enums.values(Plant)) |p| {
         if (p == .none) continue;
         // The same port and checkout as this build's, or gopher.elf is
         // checked against the defaults' (or not at all) for every plant.
-        const one = b.addSystemCommand(&.{ b.graph.zig_exe, "build", "check", "-Dcoverage", b.fmt("-Dplant={s}", .{@tagName(p)}), b.fmt("-Dgopher-root={s}", .{gopher_root}) });
+        const one = b.addSystemCommand(&.{ b.graph.zig_exe, "build", "check", "check-apps", "-Dcoverage", b.fmt("-Dplant={s}", .{@tagName(p)}), b.fmt("-Dgopher-root={s}", .{gopher_root}), b.fmt("-Dwebbox-root={s}", .{webbox_root}) });
         one.setCwd(b.path("."));
         check_plants.dependOn(&one.step);
     }
@@ -293,13 +299,13 @@ pub fn build(b: *std.Build) void {
     };
     if (std.mem.eql(u8, port_state, "fresh")) {
         const exe = b.addExecutable(.{ .name = "gopher.elf", .root_module = kernelModule(b, b.path("probe/gopher.zig"), .Debug, &gopher_imports) });
-        check_step.dependOn(&exe.step);
+        check_apps.dependOn(&exe.step);
     } else {
         // **A KERNEL NOT CHECKED FAILS THE CHECK** (Steve, 2026-10-10: fail,
         // never warn). It printed and passed; a stale port then hid a kernel
         // that did not build (48a167f).
         const fail = b.addFail(b.fmt("check: gopher.elf NOT type-checked: {s} (checkout {s}): -Dgopher-root=<dir> for another checkout", .{ port_state, gopher_root }));
-        check_step.dependOn(&fail.step);
+        check_apps.dependOn(&fail.step);
         // **NOR BUILT** (the protocols-in-prose hunt, K10), with
         // probe/gopher.elf left as it was: a kernel of a port that is not
         // the checkout's would be judged as if it were.
@@ -399,7 +405,7 @@ pub fn build(b: *std.Build) void {
     // QUEUE 142): one compile of the runner, std and the shared imports,
     // and each file's tests run once, not in every binary that imports it.
     // This list is the authority; unit_tests.zig must import exactly it.
-    const unit_files = [_][]const u8{ "src/rtc.zig", "src/pit.zig", "src/gpt.zig", "src/stack.zig", "src/civil.zig", "src/disk_fat.zig", "src/disk_fat_dirent.zig", "src/machine.zig", "src/seq.zig", "src/ring_pieces.zig", "src/pvh.zig", "src/pages.zig", "src/tcp.zig", "src/tcp_check.zig", "src/tcp_sim.zig", "src/fat_sim.zig", "src/page_sim.zig", "src/pure_sim.zig", "src/ready_sim.zig", "src/durable_sim.zig", "src/durable.zig", "src/scsi_mode.zig", "src/floor_sim.zig", "src/store.zig", "src/store_model.zig", "src/store_test.zig", "src/store_linux.zig", "src/store_sim.zig", "src/scratch_dir.zig", "src/io_test.zig", "src/log_ring.zig", "src/restart.zig", "src/kept_log.zig", "src/ready.zig", "src/drain.zig", "src/drain_sim.zig", "src/request_heap.zig", "src/page_cache.zig", "src/admin_reset.zig", "src/dhcp.zig", "src/screen.zig", "src/serial_gate.zig", "src/net.zig", "src/idle.zig", "src/idle_check.zig", "src/request_line.zig", "src/uploads_seen.zig" };
+    const unit_files = [_][]const u8{ "src/rtc.zig", "src/pit.zig", "src/gpt.zig", "src/stack.zig", "src/civil.zig", "src/disk_fat.zig", "src/disk_fat_dirent.zig", "src/machine.zig", "src/seq.zig", "src/ring_pieces.zig", "src/pvh.zig", "src/pages.zig", "src/tcp.zig", "src/tcp_check.zig", "src/tcp_sim.zig", "src/fat_sim.zig", "src/page_sim.zig", "src/pure_sim.zig", "src/ready_sim.zig", "src/durable_sim.zig", "src/durable.zig", "src/scsi_mode.zig", "src/floor_sim.zig", "src/store.zig", "src/store_model.zig", "src/store_test.zig", "src/store_linux.zig", "src/store_sim.zig", "src/scratch_dir.zig", "src/io_test.zig", "src/log_ring.zig", "src/restart.zig", "src/kept_log.zig", "src/ready.zig", "src/drain.zig", "src/drain_sim.zig", "src/request_heap.zig", "src/page_cache.zig", "src/admin_reset.zig", "src/dhcp.zig", "src/screen.zig", "src/serial_gate.zig", "src/net.zig", "src/idle.zig", "src/idle_check.zig", "src/request_line.zig", "src/uploads_seen.zig", "src/device_wait.zig", "src/disk_failures.zig", "src/boot_facts.zig", "src/rest_count.zig", "src/config_text.zig", "src/virtio.zig", "src/serial.zig", "src/after_turn.zig" };
     comptime {
         @setEvalBranchQuota(1_000_000);
         const root = @embedFile("src/unit_tests.zig");
@@ -414,8 +420,13 @@ pub fn build(b: *std.Build) void {
     const own_binary = [_][]const u8{"droplet/image.zig"};
     // **THE ONE BODY RULE** (zig-webbox's body.zig, metal-vmm QUEUE
     // 166): ready.zig takes it as a parameter, which the kernel passes as
-    // `webbox.body` and the unit tests as zig-webbox's file itself.
-    const body_rule = b.createModule(.{ .root_source_file = .{ .cwd_relative = b.fmt("{s}/body.zig", .{webbox_src}) } });
+    // `webbox.body`. The unit tests take src/pinned/webbox_body.zig, that
+    // file byte for byte, so tier 0 needs no zig-webbox checkout (metal-vmm
+    // QUEUE 197); `zig build pinned` (tier 3) fails when the two differ.
+    const body_rule = b.createModule(.{ .root_source_file = b.path("src/pinned/webbox_body.zig") });
+    const pinned = b.addSystemCommand(&.{ "python3", "tools/pinned.py", webbox_src });
+    pinned.has_side_effects = true;
+    b.step("pinned", "src/pinned/ against the zig-webbox checkout it was copied from (tier 3)").dependOn(&pinned.step);
     const unit_imports = [_]std.Build.Module.Import{
         .{ .name = "body_rule", .module = body_rule },
         .{ .name = "kernel_partition", .module = kernel_partition },

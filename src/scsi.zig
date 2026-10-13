@@ -113,17 +113,18 @@ pub const Memory = struct {
 /// an underrun, which is not the whole transfer it was asked for.
 const Outcome = struct { response: u8, status: u8, sense_key: u8, asc: u8 = 0, ascq: u8 = 0, residual: u32 = 0 };
 
-/// The additional sense codes of a UNIT ATTENTION that can mean the mode
-/// pages are not what this driver set (SPC-4 §4.5.6, table 47): a power on
-/// or reset (29h, any qualifier), or mode parameters changed (2Ah/01h).
-const asc_reset: u8 = 0x29;
-const asc_parameters_changed: u8 = 0x2A;
-const ascq_mode_parameters_changed: u8 = 0x01;
+// The additional sense codes of a UNIT ATTENTION that can mean the mode
+// pages are not what this driver set (a power on or reset, 29h with any
+// qualifier, or mode parameters changed, 2Ah/01h) are told apart, with the
+// others, in disk_failures.zig's `noteAttention`.
 
 const Direction = enum { none, from_disk, to_disk };
 
 /// One command, start to finish, polled to completion.
 fn command(b: *virtio.Block, at: Address, cdb: []const u8, dir: Direction, addr: u64, len: u32) Outcome {
+    // A disk that stopped answering is sent nothing more (193.2): reads and
+    // writes are refused before they get here, a flush or a recheck here.
+    if (b.refuseEnded()) return .{ .response = 0xFF, .status = 0xFF, .sense_key = 0, .asc = 0, .ascq = 0, .residual = 0 };
     const mem = b.scsi.?;
     mem.request = .{ .lun = at.field(), .tag = 0, .task_attr = 0, .prio = 0, .crn = 0, .cdb = [_]u8{0} ** cdb_size };
     @memcpy(mem.request.cdb[0..cdb.len], cdb);
@@ -154,14 +155,19 @@ fn command(b: *virtio.Block, at: Address, cdb: []const u8, dir: Direction, addr:
     const began = tsc.read();
     b.q.offer(0);
     b.q.notify();
-    _ = b.q.wait();
+    const ended = b.q.waitFor(virtio.wait_budget_ticks);
     virtio.ack(b.device);
     b.busy_ticks +%= tsc.read() -% began;
     b.requests +%= 1;
+    // No answer: a response no command reads as good (193.2).
+    if (!b.answered(ended)) return .{ .response = 0xFF, .status = 0xFF, .sense_key = 0, .asc = 0, .ascq = 0, .residual = 0 };
 
-    const sense_key: u8 = if (mem.response.sense_len >= 3) mem.response.sense[2] & 0x0F else 0;
-    const asc: u8 = if (mem.response.sense_len >= 14) mem.response.sense[12] else 0;
-    const ascq: u8 = if (mem.response.sense_len >= 14) mem.response.sense[13] else 0;
+    // Fixed or descriptor format (mode.senseOf, 197.3).
+    const got = mode.senseOf(mem.response.sense[0..@min(mem.response.sense_len, mem.response.sense.len)]);
+    const sense_key = got.key;
+    const asc = got.asc;
+    const ascq = got.ascq;
+    b.failures.noteScsi(mem.response.response, mem.response.status, sense_key, asc, ascq);
     return .{ .response = mem.response.response, .status = mem.response.status, .sense_key = sense_key, .asc = asc, .ascq = ascq, .residual = mem.response.residual };
 }
 
@@ -178,8 +184,9 @@ fn commandSettled(b: *virtio.Block, at: Address, cdb: []const u8, dir: Direction
         // MODE SELECT with SP clear saves nothing, so after a power on or a
         // reset the write cache this driver turned off is on again. Marked
         // here, and the caller looks again once its own command is done.
-        if (attention and (o.asc == asc_reset or (o.asc == asc_parameters_changed and o.ascq == ascq_mode_parameters_changed)))
-            b.cache_recheck = true;
+        // Every unit attention is counted by what it says (193, gap 7).
+        if (attention and b.failures.noteAttention(o.asc, o.ascq)) b.cache_recheck = true;
+        if (attention and tries == 2) b.failures.attentions_unsettled +%= 1;
         if (!attention or tries == 2) return o;
     }
 }
@@ -213,6 +220,7 @@ pub fn transfer(b: *virtio.Block, at: Address, from_disk: bool, lba: u64, addr: 
     // than asked leaves the rest of the buffer as it was; a write that did
     // has not put them on the disk. Neither is answered as done.
     if (good(o) and o.residual != 0) {
+        b.failures.short_transfers +%= 1;
         props.reachable(@src(), "scsi: a read or write ends GOOD having moved fewer bytes than asked, and fails", .{ .residual = o.residual, .len = len });
         return virtio.blk_s_ioerr;
     }
@@ -231,6 +239,7 @@ pub fn synchronize(b: *virtio.Block, at: Address) u8 {
     if (good(o)) return virtio.blk_s_ok;
     if (o.response == response_ok and o.status == status_check_condition and o.sense_key == sense_illegal_request) {
         b.write_cache = false;
+        b.synchronize_unknown = true;
         return virtio.blk_s_ok;
     }
     return virtio.blk_s_ioerr;

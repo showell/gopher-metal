@@ -44,7 +44,8 @@ pub const Outcome = enum {
 };
 
 /// What an upload's answer is named from: its status (0: none went out),
-/// whether its body came whole, and how the route ended (an error's name).
+/// whether its body came whole (all of it, not cut short by its client:
+/// the drain's `cameWhole`), and how the route ended (an error's name).
 pub fn classify(status: u16, whole: bool, ended: []const u8) Outcome {
     // Refused at its head, before the body was waited for: whole or not,
     // the refusal is the answer.
@@ -89,6 +90,9 @@ pub const Upload = struct {
     turn_ms: ?u64,
     disk_requests: u64,
     status: u16,
+    /// Its body all in (194.2's `cameWhole`); a body that never arrived
+    /// is said "not whole after", not "arrived in" (189's minor 9).
+    came_whole: bool = true,
     outcome: Outcome,
 
     pub fn write(u: *const Upload, w: *std.Io.Writer) std.Io.Writer.Error!void {
@@ -96,14 +100,26 @@ pub const Upload = struct {
             try request_line.writeTime(w, ms);
             try w.writeByte(' ');
         }
-        try w.print("request {d}: {s}", .{ u.number, u.path.slice() });
-        if (u.kind.len > 0) try w.print(", {s}", .{u.kind.slice()});
-        try w.print(", {d} bytes, arrived in {d} ms", .{ u.bytes, u.arrival_ms });
+        try w.print("request {d}: ", .{u.number});
+        try writeClean(w, u.path.slice());
+        if (u.kind.len > 0) {
+            try w.writeAll(", ");
+            try writeClean(w, u.kind.slice());
+        }
+        try w.print(", {d} bytes, {s} {d} ms", .{ u.bytes, if (u.came_whole) "arrived in" else "not whole after", u.arrival_ms });
         if (u.turn_ms) |t| try w.print(", its turn {d} ms", .{t});
         try w.print(", {d} disk requests: {s}", .{ u.disk_requests, u.outcome.text() });
         if (u.status != 0) try w.print(" ({d})", .{u.status});
     }
 };
+
+/// **ONE LINE OF PRINTABLE TEXT** (metal-vmm QUEUE 194.4): what the client
+/// said (its part's Content-Type, its path) with every control byte, a bare
+/// LF or ESC among them, written as `?`, so it cannot start a log line of
+/// its own or move the console's cursor.
+fn writeClean(w: *std.Io.Writer, s: []const u8) std.Io.Writer.Error!void {
+    for (s) |b| try w.writeByte(if (b < 0x20 or b == 0x7F) '?' else b);
+}
 
 /// A short text kept by value (a record outlives the request it came from).
 pub fn Text(comptime n: usize) type {
@@ -171,7 +187,9 @@ test "uploads: each answer named from its status, its body and how it ended" {
     try testing.expectEqual(Outcome.taken_over, classify(409, false, "a newer upload"));
     try testing.expectEqual(Outcome.client_gone, classify(408, false, "too slow"));
     try testing.expectEqual(Outcome.client_gone, classify(0, false, "EndOfStream"));
-    try testing.expectEqual(Outcome.client_gone, classify(500, false, "ReadFailed")); // not whole: the client's going came first
+    // A body its client stopped short of (a tab closed mid-upload) is the
+    // client gone, whatever its route then answered (194.2).
+    try testing.expectEqual(Outcome.client_gone, classify(400, false, "ok"));
     try testing.expectEqual(Outcome.failed, classify(500, true, "OutOfMemory"));
     try testing.expectEqual(Outcome.refused, classify(400, true, "MalformedForm"));
 }
@@ -236,4 +254,15 @@ test "uploads: one upload's line says all of it, and leaves out what is not know
     w = .fixed(&buf);
     try u.write(&w);
     try testing.expectEqualStrings("request 12: /gopher/chat/c/1_2/ChitChat/upload, 9000 bytes, arrived in 40 ms, 7 disk requests: the client gone", w.buffered());
+}
+
+test "a part's kind cannot forge a log line: a bare LF, ESC and other control bytes are replaced (metal-vmm QUEUE 194.4)" {
+    const body = "--b\r\nContent-Type: x\n  request 7: GET /admin/x -> ok\x1b[2J\r\n\r\ndata";
+    const kind = kindOf(body).?;
+    const u: Upload = .{ .number = 9, .unix_ms = null, .path = .of("/chat/c/1_2/T/upload"), .kind = .of(kind), .bytes = 4, .arrival_ms = 1, .turn_ms = null, .disk_requests = 0, .status = 200, .outcome = .ok };
+    var buf: [512]u8 = undefined;
+    var w: std.Io.Writer = .fixed(&buf);
+    try u.write(&w);
+    for (w.buffered()) |b| try testing.expect(b >= 0x20 and b != 0x7F);
+    try testing.expect(std.mem.indexOf(u8, w.buffered(), "x?  request 7: GET /admin/x -> ok?[2J") != null);
 }

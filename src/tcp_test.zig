@@ -301,7 +301,7 @@ test "a full table drops the SYN and counts it, and a freed slot is used again" 
     try testing.expectEqual(sent, f.wire.count); // nothing answered
     try testing.expectEqual(@as(u64, 1), f.table.refused);
 
-    f.table.abandon(&f.wire, slots[2]);
+    f.table.abandon(&f.wire, slots[2], .slow_client);
     const again = try peers[4].connect(&f.table, &f.wire, 3);
     try testing.expectEqual(slots[2], again);
 }
@@ -1009,7 +1009,7 @@ test "abandoning a connection tells the peer" {
     f.init();
     var p = Peer{ .ip = .{ 10, 0, 2, 2 }, .port = 40000 };
     const i = try p.connect(&f.table, &f.wire, 0);
-    f.table.abandon(&f.wire, i);
+    f.table.abandon(&f.wire, i, .slow_client);
     try testing.expectEqual(flag_rst | flag_ack, f.wire.last().flags);
     try testing.expectEqual(p.ack, f.wire.last().seq);
     try testing.expectEqual(State.closed, f.table.conns[i].state);
@@ -1943,7 +1943,7 @@ test "a SYN flood does not keep a real client out: the oldest half-open connecti
                 f.table.claim(slot);
                 kept[kept_len] = slot;
                 kept_len += 1;
-            } else f.table.abandon(&f.wire, slot);
+            } else f.table.abandon(&f.wire, slot, .slow_client);
         }
         const p = Peer{ .ip = .{ 203, 0, 113, 7 }, .port = 50000 + flood };
         flood += 1;
@@ -2119,4 +2119,102 @@ test "the first FIN's ACK arriving after a go-back acknowledges the FIN still ow
     _ = p.ackUpTo(&f.table, &f.wire, p.ack +% @as(u32, body.len) +% 1, 2 * ms + rto + ms);
     try testing.expectEqual(tcp.Fin.acknowledged, f.table.conns[i].fin.get());
     try testing.expectEqual(Event.closed, p.fin(&f.table, &f.wire, 2 * ms + rto + 2 * ms).event);
+}
+
+test "resets are counted by who and why: the peer's exact and inexact ones, ours for a bad ACK, the host's by reason (metal-vmm QUEUE 193, gap 6)" {
+    var f: Fixture = .{};
+    f.init();
+    var buf: [1600]u8 = undefined;
+
+    // An inexact reset inside the window draws a challenge ACK; an exact one
+    // ends the connection.
+    var a = Peer{ .ip = .{ 10, 0, 2, 2 }, .port = 40000 };
+    _ = try a.connect(&f.table, &f.wire, 1);
+    _ = handle(&f.table, &f.wire, a.frame(&buf, flag_rst, a.seq +% 10, ""), 2);
+    try testing.expectEqual(@as(u64, 1), f.table.challenge_acks);
+    try testing.expectEqual(@as(u64, 0), f.table.resets_received);
+    try testing.expectEqual(Event.closed, handle(&f.table, &f.wire, a.frame(&buf, flag_rst, a.seq, ""), 3).event);
+    try testing.expectEqual(@as(u64, 1), f.table.resets_received);
+
+    // A SYN-RECEIVED peer whose ACK names the wrong number is reset.
+    var b = Peer{ .ip = .{ 10, 0, 2, 2 }, .port = 40001 };
+    _ = handle(&f.table, &f.wire, b.frame(&buf, flag_syn, b.seq, ""), 4);
+    b.seq +%= 1;
+    b.ack = f.wire.last().seq +% 7;
+    _ = handle(&f.table, &f.wire, b.frame(&buf, flag_ack, b.seq, ""), 5);
+    try testing.expectEqual(flag_rst, f.wire.last().flags);
+    try testing.expectEqual(@as(u64, 1), f.table.bad_ack_resets);
+
+    // The host's abandons, each by its reason.
+    var c = Peer{ .ip = .{ 10, 0, 2, 3 }, .port = 40002 };
+    f.table.abandon(&f.wire, try c.connect(&f.table, &f.wire, 6), .slow_client);
+    var d = Peer{ .ip = .{ 10, 0, 2, 3 }, .port = 40003 };
+    f.table.abandon(&f.wire, try d.connect(&f.table, &f.wire, 7), .stream_behind);
+    var e = Peer{ .ip = .{ 10, 0, 2, 3 }, .port = 40004 };
+    f.table.abandon(&f.wire, try e.connect(&f.table, &f.wire, 8), .unfinished);
+    try testing.expectEqual(@as(u64, 1), f.table.abandoned_slow_client);
+    try testing.expectEqual(@as(u64, 1), f.table.abandoned_stream_behind);
+    try testing.expectEqual(@as(u64, 1), f.table.abandoned_unfinished);
+}
+
+/// A copy of `frame` with its IP header changed by `change` and its
+/// checksum made right again (unless `keep_sum`).
+fn retouched(out: []u8, frame: []const u8, change: *const fn ([]u8) void, keep_sum: bool) []const u8 {
+    @memcpy(out[0..frame.len], frame);
+    const ip = out[proto.eth_header_len..][0..20];
+    change(ip);
+    if (!keep_sum) {
+        ip[10] = 0;
+        ip[11] = 0;
+        @memcpy(ip[10..12], &proto.be16(proto.checksum(ip)));
+    }
+    return out[0..frame.len];
+}
+
+test "frames passed over are counted by why: damaged IP header, fragment, not TCP, not for us, another ethertype (metal-vmm QUEUE 193, gap 8)" {
+    var f: Fixture = .{};
+    f.init();
+    var p = Peer{ .ip = .{ 10, 0, 2, 2 }, .port = 40000 };
+    var buf: [1600]u8 = undefined;
+    var out: [1600]u8 = undefined;
+    const frame = p.frame(&buf, flag_syn, 1, "");
+    const ttl = struct {
+        fn change(ip: []u8) void {
+            ip[8] -%= 1;
+        }
+    }.change;
+    const fragment = struct {
+        fn change(ip: []u8) void {
+            ip[6] |= 0x20;
+        }
+    }.change;
+    const udp = struct {
+        fn change(ip: []u8) void {
+            ip[9] = proto.proto_udp;
+        }
+    }.change;
+    const elsewhere = struct {
+        fn change(ip: []u8) void {
+            ip[19] +%= 1;
+        }
+    }.change;
+    _ = handle(&f.table, &f.wire, retouched(&out, frame, ttl, true), 1);
+    try testing.expectEqual(@as(u64, 1), f.table.passed.bad_ip_checksum);
+    _ = handle(&f.table, &f.wire, retouched(&out, frame, fragment, false), 1);
+    try testing.expectEqual(@as(u64, 1), f.table.passed.fragments);
+    _ = handle(&f.table, &f.wire, retouched(&out, frame, udp, false), 1);
+    try testing.expectEqual(@as(u64, 1), f.table.passed.not_tcp);
+    _ = handle(&f.table, &f.wire, retouched(&out, frame, elsewhere, false), 1);
+    @memcpy(out[0..frame.len], frame);
+    @memcpy(out[segment_at + 2 .. segment_at + 4], &proto.be16(8080));
+    _ = handle(&f.table, &f.wire, out[0..frame.len], 1);
+    try testing.expectEqual(@as(u64, 2), f.table.passed.not_for_us);
+    @memcpy(out[0..frame.len], frame);
+    out[12] = 0x86;
+    out[13] = 0xDD;
+    _ = handle(&f.table, &f.wire, out[0..frame.len], 1);
+    try testing.expectEqual(@as(u64, 1), f.table.passed.other_ethertype);
+    _ = handle(&f.table, &f.wire, "not a frame", 1);
+    try testing.expectEqual(@as(u64, 1), f.table.passed.malformed_ip);
+    try testing.expectEqual(@as(usize, 0), f.table.inUse());
 }

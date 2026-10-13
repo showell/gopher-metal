@@ -331,6 +331,17 @@ pub const Conn = struct {
         }
     }
 
+    /// **`consume`, AND WHETHER THE WINDOW REOPENED** (metal-vmm QUEUE
+    /// 197.3): true when the window was `tight` before and is not after, so
+    /// the caller announces it (`Table.ack`) and a peer that filled it does
+    /// not sit waiting for its own probe. The one rule: the host's stream,
+    /// its drain and tcp_sim's host each wrote it, and the sim another way.
+    pub fn consumeReopens(self: *Conn, n: usize) bool {
+        const was_tight = self.tight(self.window());
+        self.consume(n);
+        return was_tight and !self.tight(self.window());
+    }
+
     /// Free space at the end of the receive buffer: what arriving bytes go
     /// into and what the window advertises. Space freed at the front counts
     /// only once `consume` compacts.
@@ -505,6 +516,30 @@ pub const Table = struct {
     strays: u64 = 0,
     /// Segments dropped for a bad checksum.
     damaged: u64 = 0,
+    /// **WHAT ARRIVES OUT OF ORDER** (metal-vmm QUEUE 193.4): a segment
+    /// ahead of the next byte expected (one before it was lost, or is late:
+    /// the card or the network dropped it), one from behind (a resend of what
+    /// was already taken), and one carrying more than the window holds.
+    arrived_ahead: u64 = 0,
+    arrived_behind: u64 = 0,
+    past_window: u64 = 0,
+    /// **RESETS, BY WHO AND WHY** (metal-vmm QUEUE 193, gap 6): exact
+    /// resets from the peer (each one a connection it ended), inexact ones
+    /// answered with a challenge ACK, and our resets of a SYN-RECEIVED
+    /// peer whose ACK named the wrong number.
+    resets_received: u64 = 0,
+    /// Frames that were not a TCP segment for us, by why (gap 8).
+    passed: proto.Passed = .{},
+    challenge_acks: u64 = 0,
+    bad_ack_resets: u64 = 0,
+    /// Connections the host gave up on, by its reason (`abandon`): a client
+    /// that stopped taking its response, a stream that fell too far behind,
+    /// and a close of a connection that never finished its handshake. A
+    /// silent peer and an unanswered FIN are `given_up` and
+    /// `fin_waits_expired`.
+    abandoned_slow_client: u64 = 0,
+    abandoned_stream_behind: u64 = 0,
+    abandoned_unfinished: u64 = 0,
     /// Reopened windows said again.
     window_updates: u64 = 0,
     /// Round trips measured, and the newest SRTT.
@@ -731,9 +766,18 @@ pub const Table = struct {
         c.state = .closing;
     }
 
+    /// Why a connection is given up on, for its count.
+    pub const Abandon = enum { silent_peer, fin_wait, slow_client, stream_behind, unfinished };
+
     /// Gives up on connection `i` with a reset, so a peer waiting for the
     /// rest of an answer, or for its handshake, does not wait out its timer.
-    pub fn abandon(self: *Table, wire: anytype, i: usize) void {
+    pub fn abandon(self: *Table, wire: anytype, i: usize, why: Abandon) void {
+        switch (why) {
+            .silent_peer, .fin_wait => {}, // `given_up`, `fin_waits_expired`
+            .slow_client => self.abandoned_slow_client +%= 1,
+            .stream_behind => self.abandoned_stream_behind +%= 1,
+            .unfinished => self.abandoned_unfinished +%= 1,
+        }
         const c = &self.conns[i];
         if (c.state != .closed) {
             self.emit(wire, i, flag_rst | flag_ack, c.highest(), "");
@@ -783,7 +827,7 @@ pub const Table = struct {
             // FIN-WAIT-2: nothing of ours in flight.
             if (c.fin_wait_until) |until| if (now >= until) {
                 self.fin_waits_expired += 1;
-                self.abandon(wire, i);
+                self.abandon(wire, i, .fin_wait);
             };
             return;
         }
@@ -947,7 +991,7 @@ pub const Table = struct {
     fn giveUp(self: *Table, wire: anytype, i: usize) void {
         self.given_up += 1;
         props.reachable(@src(), "tcp: a silent peer is given up on", .{ .conn = i });
-        self.abandon(wire, i);
+        self.abandon(wire, i, .silent_peer);
     }
 
     /// Takes the peer's ACK and window as RFC 9293 §3.10.7.4 does in
@@ -1004,13 +1048,31 @@ pub const Table = struct {
 
     /// Feeds one received frame in. `now` is the caller's clock.
     pub fn handle(self: *Table, wire: anytype, frame: []const u8, now: i96) Result {
-        const pkt = proto.parseIpv4(frame) orelse return .{ .event = .nothing };
-        if (pkt.protocol != proto.proto_tcp) return .{ .event = .nothing };
-        if (!eql(&pkt.dst_ip, &self.local_ip)) return .{ .event = .nothing };
-        if (pkt.payload.len < header_len) return .{ .event = .nothing };
+        const pkt = switch (proto.readIpv4(frame)) {
+            .packet => |p| p,
+            .not => |why| {
+                self.passed.note(why);
+                return .{ .event = .nothing };
+            },
+        };
+        if (pkt.protocol != proto.proto_tcp) {
+            self.passed.not_tcp +%= 1;
+            return .{ .event = .nothing };
+        }
+        if (!eql(&pkt.dst_ip, &self.local_ip)) {
+            self.passed.not_for_us +%= 1;
+            return .{ .event = .nothing };
+        }
+        if (pkt.payload.len < header_len) {
+            self.passed.malformed_ip +%= 1;
+            return .{ .event = .nothing };
+        }
 
         const t = pkt.payload;
-        if (proto.readBe16(t[2..4]) != self.port) return .{ .event = .nothing };
+        if (proto.readBe16(t[2..4]) != self.port) {
+            self.passed.not_for_us +%= 1;
+            return .{ .event = .nothing };
+        }
         if (proto.pseudoChecksum(pkt.src_ip, pkt.dst_ip, proto.proto_tcp, t) != 0) {
             self.damaged += 1;
             props.reachable(@src(), "tcp: a damaged segment is dropped", null);
@@ -1036,8 +1098,14 @@ pub const Table = struct {
             const c = &self.conns[i];
             props.sometimes(@src(), seq == c.rcv_nxt, "tcp: an exact reset closes a connection", null);
             props.sometimes(@src(), seq != c.rcv_nxt and c.ahead(seq), "tcp: an inexact reset in the window draws a challenge ACK", null);
-            if (seq == c.rcv_nxt) return self.close(i);
-            if (c.ahead(seq)) self.emit(wire, i, flag_ack, c.highest(), "");
+            if (seq == c.rcv_nxt) {
+                self.resets_received +%= 1;
+                return self.close(i);
+            }
+            if (c.ahead(seq)) {
+                self.challenge_acks +%= 1;
+                self.emit(wire, i, flag_ack, c.highest(), "");
+            }
             return .{ .event = .nothing };
         }
 
@@ -1137,6 +1205,8 @@ pub const Table = struct {
         const early = c.ahead(seq);
         props.sometimes(@src(), early, "tcp: a segment arrives ahead of the next expected byte", null);
         if (seq != c.rcv_nxt and !early) {
+            // A resend of what was taken (a bare ACK carries nothing to count).
+            if (data.len > 0 or flags & flag_fin != 0) self.arrived_behind +%= 1;
             props.reachable(@src(), "tcp: a segment from behind is answered, not taken", .{ .conn = i });
             // **ONLY FROM BEHIND, NOT BEYOND.** The peer cannot yet have
             // sent a segment past our window; taking its ACK would let a
@@ -1162,6 +1232,7 @@ pub const Table = struct {
             if (number != c.una +% 1) {
                 // An unacceptable ACK draws <SEQ=SEG.ACK><CTL=RST> (RFC 9293
                 // §3.10.7.4, SYN-RECEIVED).
+                self.bad_ack_resets +%= 1;
                 self.segment(wire, .{ .mac = c.peer_mac, .ip = c.peer_ip, .port = c.peer_port }, flag_rst, number, 0, 0, "");
                 return .{ .event = .nothing };
             }
@@ -1205,7 +1276,10 @@ pub const Table = struct {
 
         if (early) {
             // Ahead: re-acknowledge, asking for the next byte.
-            if (data.len > 0 or flags & flag_fin != 0) self.emit(wire, i, flag_ack, c.highest(), "");
+            if (data.len > 0 or flags & flag_fin != 0) {
+                self.arrived_ahead +%= 1;
+                self.emit(wire, i, flag_ack, c.highest(), "");
+            }
             return self.settle(i, event, fin_acknowledged, now);
         }
 
@@ -1219,6 +1293,7 @@ pub const Table = struct {
             // untaken part waits for it.
             const n = @min(c.room(), data.len);
             props.sometimes(@src(), n < data.len, "tcp: a peer sends past the window and only what fits is taken", .{ .room = c.room(), .len = data.len });
+            if (n < data.len) self.past_window +%= 1;
             @memcpy(c.rx[c.end..][0..n], data[0..n]);
             c.end += n;
             c.rcv_nxt +%= @intCast(n);
@@ -1281,4 +1356,80 @@ fn eql(a: []const u8, b: []const u8) bool {
     if (a.len != b.len) return false;
     for (a, b) |x, y| if (x != y) return false;
     return true;
+}
+
+/// **EVERY COUNT THE TABLE KEEPS, IN ONE LINE** (metal-vmm QUEUE 193.1), for
+/// /admin/host: they were said only by the run's closing log, which a
+/// server that serves until stopped never writes.
+pub fn writeCounts(t: *const Table, w: *std.Io.Writer) std.Io.Writer.Error!void {
+    try w.print("{d} connections arrived, {d} turned away for want of a slot, {d} half-open gave way to a new one ({d} revived, {d} found no room); ", .{
+        t.arrivals, t.refused, t.half_open_given_way, t.revived, t.revival_no_room,
+    });
+    try w.print("{d} segments sent again ({d} of them asked for by duplicate ACKs), {d} window probes, {d} reopened windows said again; ", .{
+        t.retransmits, t.fast_retransmits, t.probes, t.window_updates,
+    });
+    try w.print("{d} peers given up on, {d} closes never finished, {d} strays reset, {d} segments dropped for a bad checksum; ", .{
+        t.given_up, t.fin_waits_expired, t.strays, t.damaged,
+    });
+    try w.print("{d} segments arrived ahead of the next byte (one before them lost or late), {d} from behind (resends), {d} past the window; ", .{
+        t.arrived_ahead, t.arrived_behind, t.past_window,
+    });
+    try w.print("{d} resets from peers ({d} inexact ones challenged), {d} bad handshake ACKs reset; given up by the host: {d} clients that stopped taking a response, {d} streams too far behind, {d} closes of an unfinished handshake; ", .{
+        t.resets_received, t.challenge_acks, t.bad_ack_resets, t.abandoned_slow_client, t.abandoned_stream_behind, t.abandoned_unfinished,
+    });
+    try w.print("{d} round trips measured, the newest {d} ns", .{ t.samples, t.measured_ns });
+}
+
+test "tcp: the host page's line says every count the table keeps, each by its own value" {
+    var conns: [1]Conn = undefined;
+    var out: [64]u8 = undefined;
+    const isn = struct {
+        fn f() u32 {
+            return 1;
+        }
+    }.f;
+    var t = Table.init(.{ 10, 0, 0, 1 }, .{0} ** 6, 80, &conns, &out, isn);
+    // Each counter a value of its own, from the table's own fields, so a
+    // counter added later and left off the line fails here.
+    comptime var n: u64 = 1001;
+    inline for (@typeInfo(Table).@"struct".fields) |f| {
+        if (f.type == u64) {
+            @field(t, f.name) = n;
+            n += 1;
+        }
+    }
+    var buf: [1024]u8 = undefined;
+    var w: std.Io.Writer = .fixed(&buf);
+    try writeCounts(&t, &w);
+    const line = w.buffered();
+    var k: u64 = 1001;
+    while (k < n) : (k += 1) {
+        var num: [24]u8 = undefined;
+        const want = std.fmt.bufPrint(&num, "{d}", .{k}) catch unreachable;
+        if (std.mem.indexOf(u8, line, want) == null) {
+            std.debug.print("the line leaves out the counter set to {d}: {s}\n", .{ k, line });
+            return error.TestExpectedEqual;
+        }
+    }
+}
+
+test "tcp: a consume that reopens a tight window says so, by `tight`'s rule, a segment or half the buffer (metal-vmm QUEUE 197.3)" {
+    var rx: [2048]u8 = undefined;
+    var tx: [16]u8 = undefined;
+    var c: Conn = .{ .rx = &rx, .tx = &tx };
+    // 49 bytes of room: tight. Consuming 51 compacts 948 pending to the
+    // front: 1100 of room, past half the buffer (1024) though under a
+    // segment (1460). It reopened, as `tight` has it.
+    c.start = 1000;
+    c.end = 1999;
+    try std.testing.expect(c.tight(c.window()));
+    try std.testing.expect(c.consumeReopens(51));
+    try std.testing.expectEqual(@as(usize, 1100), c.room());
+    // Not tight before: nothing to say.
+    try std.testing.expect(!c.consumeReopens(10));
+    // Tight before and still tight after (no compaction): nothing to say.
+    c.start = 0;
+    c.end = 2040;
+    try std.testing.expect(!c.consumeReopens(10));
+    try std.testing.expect(c.tight(c.window()));
 }

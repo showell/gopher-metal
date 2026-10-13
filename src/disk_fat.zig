@@ -446,6 +446,17 @@ pub const Volume = struct {
     /// `writeSector` and `writeSectors`, which every write goes through,
     /// refuse.
     writes: Writes = .taken,
+    /// **FAILED SECTOR READS AND WRITES** (metal-vmm QUEUE 193.3): requests
+    /// the disk did not answer OK, as this volume met them (a read tried
+    /// again and failed is one). The Block says why (`blk.failures`).
+    /// How the FAT's copies stood at mount (`cacheFatChecked`), kept for
+    /// /admin/host (metal-vmm QUEUE 193, gap 10); null before.
+    mounted: ?Mirrors = null,
+    /// Writes turned away because writes are refused (`refuseWrite`):
+    /// each one a save that did not happen (metal-vmm QUEUE 193, gap 9).
+    writes_turned_away: u64 = 0,
+    read_failures: u64 = 0,
+    write_failures: u64 = 0,
     /// Weighings tried again (`reweigh`), and those that failed.
     reweighs: u64 = 0,
     reweighs_failed: u64 = 0,
@@ -768,6 +779,7 @@ pub const Volume = struct {
             return;
         };
         if (self.blk.read(self.start_lba + lba, @intFromPtr(into)) != virtio.blk_s_ok) {
+            self.read_failures +%= 1;
             props.reachable(@src(), "fat: a sector read fails", null);
             return Error.ReadFailed;
         }
@@ -781,6 +793,7 @@ pub const Volume = struct {
             const n = @min(count - done, self.blk.most_sectors);
             const status = self.blk.readMany(self.start_lba + lba + done, @intFromPtr(into + done * sector_size), n);
             if (status != virtio.blk_s_ok) {
+                self.read_failures +%= 1;
                 props.reachable(@src(), "fat: a run of sectors fails to read", null);
                 return Error.ReadFailed;
             }
@@ -836,9 +849,13 @@ pub const Volume = struct {
     pub const aliasTaken = disk_fat_dir.aliasTaken;
 
     pub fn writeSector(self: *Volume, lba: u32, from: *[sector_size]u8) Error!void {
-        if (self.writes == .refused) return refuseWrite();
+        if (self.writes == .refused) {
+            self.writes_turned_away +%= 1;
+            return refuseWrite();
+        }
         self.changes +%= 1;
         if (self.blk.write(self.start_lba + lba, @intFromPtr(from)) != virtio.blk_s_ok) {
+            self.write_failures +%= 1;
             if (self.dirs) |*c| c.drop(lba, 1);
             props.reachable(@src(), "fat: a sector write fails", null);
             // PLANT (src/plant.zig): a write the disk refused is taken as
@@ -861,9 +878,13 @@ pub const Volume = struct {
             props.@"unreachable"(@src(), "fat: a write of more sectors than one request", null);
             return Error.TooBig;
         }
-        if (self.writes == .refused) return refuseWrite();
+        if (self.writes == .refused) {
+            self.writes_turned_away +%= 1;
+            return refuseWrite();
+        }
         self.changes +%= 1;
         if (self.blk.writeMany(self.start_lba + lba, @intFromPtr(from), count) != virtio.blk_s_ok) {
+            self.write_failures +%= 1;
             if (self.dirs) |*c| c.drop(lba, count);
             props.reachable(@src(), "fat: a run of sectors fails to write", null);
             return Error.WriteFailed;

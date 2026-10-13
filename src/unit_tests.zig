@@ -58,4 +58,12 @@ test {
     _ = @import("idle_check.zig");
     _ = @import("request_line.zig");
     _ = @import("uploads_seen.zig");
+    _ = @import("device_wait.zig");
+    _ = @import("disk_failures.zig");
+    _ = @import("boot_facts.zig");
+    _ = @import("rest_count.zig");
+    _ = @import("config_text.zig");
+    _ = @import("virtio.zig");
+    _ = @import("serial.zig");
+    _ = @import("after_turn.zig");
 }

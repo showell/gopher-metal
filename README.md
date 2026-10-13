@@ -50,6 +50,22 @@ What it is not:
   DigitalOcean's private network.
 - **Not general purpose.** It runs Zig applications written against one
   library, zig-webbox (below), and nothing else.
+- **Not for arbitrary hardware.** It has been made to work on one kind of
+  machine: a DigitalOcean droplet, and QEMU set up the same way. It does
+  not claim to run anywhere else. Virtio is a fairly common standard among
+  hypervisors, so other virtual machines are a plausible next step. The
+  kernel can be extended gradually as we get access to other kinds of
+  hardware. There are no promises beyond that.
+
+**Battle tested, and what that honestly means.** It has served
+lynrummy.com since 2026-10-04 for about three regular daily users, who
+upload from their phones. That is all the battle there has been. It has
+never been under real load or stress. Caddy sits in front of it on a
+private network, so production only exercises a well-behaved, happy-path
+setup: one polite client and no hostile or lossy traffic. The harder cases
+are tested elsewhere. The judges and metal-vmm's faults and sweeps drop,
+delay and damage frames, stall and reset clients, fail and cut disks, and
+check what the machine did about it.
 
 ## How it is used now
 
@@ -150,15 +166,16 @@ Six repos, kept separate, checked out side by side:
 - **The sibling checkouts**, in one folder beside this one: `zig-webbox`,
   `angry-gopher`, `dog-park`, `zig-coverage-sdk`, and, for the full checks,
   `metal-vmm`. `build.zig` finds them as `../<name>` (`-Dgopher-root`,
-  `-Dwebbox-root`, `-Ddogpark-root` name another place). The shell scripts
-  default to `~/showell_repos/<name>`; set `GOPHER_ROOT`, `WEBBOX_ROOT`,
-  `METAL_VMM` and `COVERAGE_SDK` if yours are elsewhere.
+  `-Dwebbox-root`, `-Ddogpark-root` name another place), and so do the
+  tier scripts below. `long.sh` still defaults to `~/showell_repos/<name>`.
+  Set `GOPHER_ROOT`, `WEBBOX_ROOT`, `DOGPARK_ROOT`, `METAL_VMM` and
+  `COVERAGE_SDK` if yours are elsewhere.
 - **The pinned zig-coverage-sdk commit.** `build.zig` names the SDK commit it
   was written against and refuses another, printing the `git checkout` that
   fixes it. `-Dcoverage-sdk-unpinned` builds anyway.
 
-Without QEMU or KVM (a laptop, a cloud container) you can still run
-`zig build test`, `zig build properties` and `zig build kernels`.
+Without QEMU, KVM or any sibling but the SDK (a laptop, a cloud container)
+you can still run `./tier0.sh`, which is most of what catches a bug.
 
 ### Building a kernel for an application
 
@@ -208,14 +225,25 @@ pure part of the kernel (the TCP table, the FAT, the cache, the store) on
 Linux, with no devices, over many random seeds; a seed that fails replays
 exactly.
 
-| command | about | needs | what it proves |
+**The checks come in tiers** (`tier0.sh` to `tier3.sh`). Each tier adds
+exactly one kind of dependency to the one before, and each says, when it
+starts, anything it needs that is missing. Tier 0 also lists what it did not
+check and which tier does. `./gates.sh` runs the four tiers in order,
+cheapest first, and stops at the first one that fails.
+
+| tier | install | what it proves | about |
 |---|---|---|---|
-| `zig build test` | minutes | zig | unit tests of the pure parts, short simulator runs, and that every kernel type-checks |
-| `probe/run.sh` | ~45 s | QEMU | each driver and subsystem boots and works on virtual hardware |
-| `zig build properties` | ~1 min | zig | the simulators over many seeds, judged by their coverage properties |
-| `./gates.sh quick` | ~2 min | QEMU, KVM | for one commit: the unit tests, the kernels, the test kernels, the dog-park judge, and one story of the angry-gopher judge |
-| `./gates.sh` | ~20 min | QEMU, KVM, metal-vmm | for a batch: also both angry-gopher judges on FAT32 (QEMU's microvm, and the droplet-shaped machine with data on a volume), metal-vmm's checks (the same run twice is the same; timeouts measured in the machine's own time), and the droplet boot checks |
-| `./long.sh` | longest | QEMU, KVM, metal-vmm | before every release: the simulators at 10,000 seeds; the FAT16 judge; the real kernel on metal-vmm losing each packet it sends in turn, facing a misbehaving client, and under 100 seeded fault schedules over the network and disks, every run still serving the right page |
+| `./tier0.sh` | zig 0.16, Python 3, and the SDK beside this checkout | the unit tests and short simulator runs; this repo's kernels and host programs type-check; `zig fmt` and the lints. No QEMU, no other repo, no network, no root. Run it on every change | ~2-3 min (1m40s with everything compiled) |
+| `./tier1.sh` | + QEMU, dosfstools, gdisk, mtools, curl, binutils, `sudo -n` for loop mounts; KVM for the droplet boots (or `ACCEL=tcg`) | each test kernel ("probe") boots and works on virtual hardware; the judges' own tests; the droplet's boot loader and image | ~45 s of probes, then the droplet boots |
+| `./tier2.sh` | + metal-vmm beside this checkout, and /dev/kvm | metal-vmm runs this checkout's probe kernels the same as QEMU does, and the same twice | minutes |
+| `./tier3.sh` | + zig-webbox, angry-gopher and dog-park beside this checkout | the library's tests and the limits it copies; the unit tests' pinned body rule is still the library's; gopher.elf type-checks, builds and is judged against its Linux build on QEMU's microvm and the droplet-shaped machine; dogpark.elf likewise; the PC-shaped machine's rests and the timeouts on metal-vmm | ~20 min |
+| `zig build properties` | as tier 0 | the simulators over many seeds, judged by their coverage properties: zig alone, but not in tier 0 for its time (20 min in Debug, 5 with `-Dsweep-optimize=ReleaseSafe`); long.sh runs it at 10,000 seeds | 5-20 min |
+| `./gates.sh quick` | as tier 3 | tiers 0 and 1, then gopher.elf and one chat-judge story | |
+| `./gates.sh` | as tier 3 | tiers 0 to 3, for a batch | |
+| `./long.sh` | as tier 3 | before every release: the simulators at 10,000 seeds; the FAT16 judge; the real kernel on metal-vmm losing each packet it sends in turn, facing a misbehaving client, and under 100 seeded fault schedules over the network and disks, every run still serving the right page | longest |
+
+A developer can defer every test against angry-gopher and dog-park (tier 3)
+and still have reasonable confidence in a change that tier 0 passes.
 
 Each script's header says what it runs and why. The coverage properties and
 the floors a long run must reach are in [`COVERAGE.md`](COVERAGE.md).

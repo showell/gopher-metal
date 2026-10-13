@@ -23,7 +23,8 @@
 //! What it does NOT do: renew, rebind, decline, or try again after a NAK: a
 //! NAK ends the exchange as `Refused` (metal-vmm QUEUE 172: it read as no
 //! reply at all, `NoOffer` or `NoAck`). A lease here is taken once and kept
-//! until the machine stops.
+//! until the machine stops; its length is read (`Lease.seconds`) so
+//! /admin/host can say when the machine has run past it.
 
 const proto = @import("proto.zig");
 const net = @import("net.zig");
@@ -44,6 +45,7 @@ const opt_subnet_mask: u8 = 1;
 const opt_router: u8 = 3;
 const opt_dns: u8 = 6;
 const opt_requested_ip: u8 = 50;
+const opt_lease_time: u8 = 51;
 const opt_message_type: u8 = 53;
 const opt_server_id: u8 = 54;
 const opt_param_list: u8 = 55;
@@ -67,6 +69,11 @@ pub const Lease = struct {
     /// The hardware address the lease came from: on QEMU's user network, the
     /// gateway's, which is where a datagram for the host goes.
     server_mac: [6]u8 = proto.mac_broadcast,
+    /// **HOW LONG THE SERVER LENT THE ADDRESS** (option 51), in seconds, or
+    /// null when the ACK did not say (metal-vmm QUEUE 193, gap 12). Never
+    /// renewed: /admin/host says it, and says when the machine has run past
+    /// it.
+    seconds: ?u32 = null,
 };
 
 pub const Error = error{ NoOffer, NoAck, Refused };
@@ -256,18 +263,50 @@ pub fn acquire(nic: *net.Net, frame: []u8, reply: []u8) Error!Lease {
 
     len = proto.writeUdp(frame, nic.mac, proto.mac_broadcast, proto.ip_any, proto.ip_broadcast, port_client, port_server, at);
     const ack_len = (try exchange(nic, frame, len, xid, msg_ack, reply, &from_mac)) orelse return Error.NoAck;
-    const ack = reply[0..ack_len];
+    takeAck(&lease, reply[0..ack_len]);
+    lease.server_mac = from_mac;
 
-    // The ACK is the authority, not the offer: a server may hand over
-    // something other than what it offered.
+    return lease;
+}
+
+/// The ACK is the authority, not the offer: a server may hand over
+/// something other than what it offered.
+fn takeAck(lease: *Lease, ack: []const u8) void {
     lease.address = ack[16..20].*;
     if (findOption(ack, opt_subnet_mask) != null) lease.mask = ipOption(ack, opt_subnet_mask);
     if (findOption(ack, opt_router) != null) lease.router = ipOption(ack, opt_router);
     if (findOption(ack, opt_dns) != null) lease.dns = ipOption(ack, opt_dns);
     if (findOption(ack, opt_server_id) != null) lease.server = ipOption(ack, opt_server_id);
-    lease.server_mac = from_mac;
+    if (findOption(ack, opt_lease_time)) |v| {
+        if (v.len == 4) lease.seconds = proto.readBe32(v[0..4]);
+    }
+}
 
-    return lease;
+test "acquire reports the lease time the ACK names (metal-vmm QUEUE 193, gap 12)" {
+    const mac = [6]u8{ 2, 0, 0, 0, 0, 7 };
+    var p: [300]u8 = undefined;
+    var at = writeBootp(&p, 0x1234, mac, true);
+    p[0] = op_reply;
+    at = option(&p, at, opt_message_type, &.{msg_ack});
+    at = option(&p, at, opt_lease_time, &proto.be32(86400));
+    p[at] = opt_end;
+    var lease: Lease = .{};
+    takeAck(&lease, p[0 .. at + 1]);
+    if (lease.seconds != 86400) return error.TestUnexpectedResult;
+    // An ACK that does not say leaves it unsaid; a malformed one too.
+    var q: [300]u8 = undefined;
+    at = writeBootp(&q, 0x1234, mac, true);
+    q[0] = op_reply;
+    at = option(&q, at, opt_message_type, &.{msg_ack});
+    const short = at;
+    q[at] = opt_end;
+    lease = .{};
+    takeAck(&lease, q[0 .. at + 1]);
+    if (lease.seconds != null) return error.TestUnexpectedResult;
+    at = option(&q, short, opt_lease_time, &.{ 1, 2 });
+    q[at] = opt_end;
+    takeAck(&lease, q[0 .. at + 1]);
+    if (lease.seconds != null) return error.TestUnexpectedResult;
 }
 
 test "a NAK is the server's refusal, never a reply that did not come (metal-vmm QUEUE 172)" {

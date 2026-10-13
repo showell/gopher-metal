@@ -290,6 +290,11 @@ var streams_ended: u64 = 0;
 var served: u64 = 0;
 var open_now: usize = 0;
 var busiest: usize = 0;
+/// The serving loop's TCP table, for /admin/host's counts (metal-vmm QUEUE
+/// 193.1): set once the table is made.
+var serving_table: ?*const tcp.Table = null;
+/// The DHCP lease taken at boot, for /admin/host (193, gap 12).
+var lease_held: ?dhcp.Lease = null;
 /// When this boot's wall clock started, and the TSC's measured rate.
 var booted_unix: i64 = 0;
 var tsc_hz_seen: u64 = 0;
@@ -530,6 +535,12 @@ pub fn kmain() noreturn {
     serial.put("\n");
     booted_unix = @intCast(clock.unix);
     tsc_hz_seen = clock.tsc_hz;
+    // **A DEVICE WAIT ENDS** (metal-vmm QUEUE 193.2): 30 s for a disk
+    // request, as Linux's SCSI layer gives one, and 1 s for a send buffer,
+    // now that the TSC's rate is known. Before this, the defaults assume
+    // 3 GHz (longer on a slower clock).
+    metal.virtio.wait_budget_ticks = clock.tsc_hz * 30;
+    metal.net.send_budget_ticks = clock.tsc_hz;
 
     // ── the restart (RESTART.md), only with -Drestart ───────────────────────
     if (gm_build.restart) {
@@ -568,6 +579,7 @@ pub fn kmain() noreturn {
     var nic = net.Net.init(nic_base, &nic_mem) catch serial.fail("the NIC would not come up");
     const lease = dhcp.acquire(&nic, &dhcp_frame, &dhcp_reply) catch
         serial.fail("no DHCP lease, so there is no address to listen on");
+    lease_held = lease;
     restBetweenFrames(&nic, clock.tsc_hz);
     serial.put("  address: ");
     serial.putIp(lease.address);
@@ -592,6 +604,7 @@ pub fn kmain() noreturn {
         .tx = tx_all[k * tx_bytes ..][0..tx_bytes],
     };
     var table = tcp.Table.init(lease.address, nic.mac, 80, &conn_slots, &tcp_out, isn);
+    serving_table = &table;
     var wire = stream.Wire{ .nic = &nic, .lose_one_sent_in = conf.lose_one_sent_in };
     if (conf.lose_one_sent_in != 0) {
         serial.put("  losing one TCP frame in ");
@@ -748,7 +761,7 @@ pub fn kmain() noreturn {
     }
     for (&draining, 0..) |*slot, i| {
         if (slot.*) |*d| {
-            table.abandon(&wire, i);
+            table.abandon(&wire, i, .slow_client);
             serial.put("  let go at the end: the client stopped taking the response\n");
             d.spill.deinit();
             table.release(i);
@@ -870,9 +883,7 @@ fn readyNow(io: Io, wire: *stream.Wire, table: *tcp.Table, i: usize, now: i96) b
         const next = drains.step(i, .{ .serial = c.serial, .pending = c.pending(), .peer_done = c.peerDone(), .capacity = c.rx.len }, now);
         if (next.consumed > 0) {
             // Drained into memory: the window reopens.
-            const was_tight = c.tight(c.window());
-            c.consume(next.consumed);
-            if (was_tight and !c.tight(c.window())) table.ack(wire, i);
+            if (c.consumeReopens(next.consumed)) table.ack(wire, i);
         }
         switch (next.then) {
             .wait => return false,
@@ -908,7 +919,7 @@ fn quiet(table: *tcp.Table, now: i96, idle_ns: u64) ?usize {
 /// **A CLIENT THAT STOPPED TALKING IS NOT A BROKEN NIC.** It is logged as a
 /// request that never came, the way it always has been, and closed.
 fn letGo(wire: *stream.Wire, table: *tcp.Table, i: usize, number: u64) void {
-    logRequest(number, "(no request)", "the client stopped sending, and was let go", 0, null);
+    logRequest(number, wallMs(), "(no request)", "the client stopped sending, and was let go", 0, null);
     close(wire, table, i);
 }
 
@@ -969,7 +980,7 @@ fn serveOne(
             s.writer().writeAll("HTTP/1.1 431 Request Header Fields Too Large\r\n" ++
                 "connection: close\r\ncontent-length: 0\r\n\r\n") catch {};
             s.writer().flush() catch {};
-            logRequest(number, "(no request)", "a head that filled the buffer unended: 431", 431, null);
+            logRequest(number, wallMs(), "(no request)", "a head that filled the buffer unended: 431", 431, null);
             close(wire, table, i);
             return;
         }
@@ -995,7 +1006,7 @@ fn serveOne(
                 "connection: close\r\ncontent-length: 0\r\n\r\n") catch {};
             s.writer().flush() catch {};
         }
-        logRequest(number, "(no request)", if (s.timed_out)
+        logRequest(number, wallMs(), "(no request)", if (s.timed_out)
             "the client stopped sending, and was let go"
         else
             @errorName(e), if (e == error.HttpHeadersInvalid) 400 else 0, null);
@@ -1038,12 +1049,17 @@ fn serveOne(
         webbox.edge.reject(&req, r.kind, r.msg) catch {};
         s.writer().flush() catch {};
         const refused_status: u16 = @intFromEnum(webbox.edge.statusFor(r.kind));
-        logRequest(number, "(refused at its head)", r.msg[0 .. r.msg.len - 1], refused_status, null);
+        // Its method and path, so /admin/log's `path=` finds it (194.5).
+        var refused_buf: [300]u8 = undefined;
+        logRequest(number, wallMs(), metal.request_line.what(&refused_buf, @tagName(req.head.method), metal.log_ring.withoutQuery(req.head.target), true), r.msg[0 .. r.msg.len - 1], refused_status, null);
         // A drained body refused (late, past what is kept): what came of it.
-        if (wait.drain) |d| {
-            if (d.upload) {
-                noteUpload(number, d, metal.log_ring.withoutQuery(req.head.target), metal.uploads_seen.kindOf(d.body()) orelse "", refused_status, r.msg, null, 0, Io.awakeNs() orelse 0);
-            } else if (d.len > d.head_len) logBody(d, Io.awakeNs() orelse 0);
+        // **AN UPLOAD REFUSED FROM ITS HEAD IS AN UPLOAD** (194.1), with
+        // or without a drain: busy, no memory, an asker unknown, an older
+        // retry's 409, a stranger.
+        if (wait.wasUpload()) {
+            noteUpload(number, wait.drain, metal.log_ring.withoutQuery(req.head.target), if (wait.drain) |d| metal.uploads_seen.kindOf(d.body()) orelse "" else "", refused_status, r.msg, null, 0, Io.awakeNs() orelse 0);
+        } else if (wait.drain) |d| {
+            if (d.len > d.head_len) logBody(d, Io.awakeNs() orelse 0);
         }
         close(wire, table, i);
         return;
@@ -1054,10 +1070,7 @@ fn serveOne(
     // is not the log's to keep (serial.log_ring.withoutQuery; QUEUE.md item 95).
     var what_buf: [300]u8 = undefined;
     const path = metal.log_ring.withoutQuery(req.head.target);
-    const what = std.fmt.bufPrint(&what_buf, "{s} {s}", .{
-        @tagName(req.head.method),
-        path[0..@min(path.len, 256)],
-    }) catch "(unprintable)";
+    const what = metal.request_line.what(&what_buf, @tagName(req.head.method), path, false);
 
     const head_at = Io.awakeNs() orelse 0;
     const disk_before = diskWork();
@@ -1081,7 +1094,7 @@ fn serveOne(
         .network, .memory => {},
     }
     defer webbox.http.held_body = null;
-    var kept_stream = app.site.route(&req, io, request_alloc, &bus) catch |e| blk: {
+    const kept_stream = app.site.route(&req, io, request_alloc, &bus) catch |e| blk: {
         outcome = @errorName(e);
         break :blk null;
     };
@@ -1091,50 +1104,61 @@ fn serveOne(
     // the held streams, and this flush takes turns: a stream registered before
     // it would have its live frames queued ahead of its own head.
     const flushed = if (s.writer().flush()) |_| true else |_| false;
-    if (!flushed) outcome = "the response would not flush";
-    if (kept_stream) |kept| if (!flushed) {
-        streams.drop(hub, kept);
-        kept_stream = null;
-    };
-    if (kept_stream) |kept| {
-        // The handler wrote the stream's head and backlog; the live part is
-        // this machine's now.
-        // **THE BUDGET IS KEPT BY ENDING THE OLDEST.** A browser whose stream
-        // ends reconnects, and a conversation stream resumes from its last
-        // event; a new tab that could not open at all would not.
-        if (held_now >= max_streams) {
-            if (oldestHeld(table)) |slot| endStream(slot, wire, table, hub, .displaced);
-        }
-        held[i] = .{ .conn = i, .kept = kept, .last_write = Io.awakeNs() orelse 0 };
-        // What the head and backlog left in the spill goes ahead of every live
-        // frame, as the carry the stream already drains first.
-        if (spill.pending().len > 0) {
-            if (hub.gpa.dupe(u8, spill.pending())) |rest| {
-                held[i].?.carry = rest;
-            } else |_| {}
-        }
-        held_now += 1;
-        held_most = @max(held_most, held_now);
-        kept_open = true;
-        outcome = "ok, and its stream is kept";
+    // What the head and backlog left in the spill goes ahead of every live
+    // frame, as the carry the stream already drains first: copied here, and
+    // a stream whose copy fails is not kept (metal-vmm QUEUE 198.1).
+    var carry: ?[]u8 = null;
+    if (kept_stream != null and flushed and spill.pending().len > 0) {
+        carry = hub.gpa.dupe(u8, spill.pending()) catch null;
     }
-    // A write that timed out fails wherever it happened — inside the route or
-    // in this flush — and is the same event either way.
-    if (s.timed_out) outcome = "the client stopped taking the response";
+    // **WHAT BECOMES OF THE CONNECTION** (src/after_turn.zig: the decision,
+    // pure and tested; here, its I/O).
+    const after = metal.after_turn.decide(.{
+        .kept = kept_stream != null,
+        .flushed = flushed,
+        .timed_out = s.timed_out,
+        .spill_pending = spill.pending().len,
+        .carry_copied = carry != null,
+        .established = table.conns[i].state == .established,
+        .held_now = held_now,
+        .max_streams = max_streams,
+    });
+    if (after.outcome) |o| outcome = o;
+    switch (after.stream) {
+        .none => {},
+        .drop => {
+            streams.drop(hub, kept_stream.?);
+            if (carry) |c| hub.gpa.free(c);
+        },
+        .keep, .keep_displacing_oldest => {
+            // The handler wrote the stream's head and backlog; the live part
+            // is this machine's now.
+            // **THE BUDGET IS KEPT BY ENDING THE OLDEST.** A browser whose
+            // stream ends reconnects, and a conversation stream resumes from
+            // its last event; a new tab that could not open at all would not.
+            if (after.stream == .keep_displacing_oldest) {
+                if (oldestHeld(table)) |slot| endStream(slot, wire, table, hub, .displaced);
+            }
+            held[i] = .{ .conn = i, .kept = kept_stream.?, .last_write = Io.awakeNs() orelse 0, .carry = carry orelse &.{} };
+            held_now += 1;
+            held_most = @max(held_most, held_now);
+        },
+    }
     const done_at = Io.awakeNs() orelse 0;
     // **THE CONNECTION IS LET GO BEFORE ITS LOG IS WRITTEN**, so the client is
     // done when the response is, not when the console has caught up.
-    if (!kept_open) {
-        if (s.timed_out) {
-            table.abandon(wire, i);
-        } else if (spill.pending().len > 0 and table.conns[i].state == .established) {
+    switch (after.conn) {
+        .stream => kept_open = true,
+        .abandon => table.abandon(wire, i, .slow_client),
+        .drain => {
             draining[i] = .{ .spill = spill, .since = Io.awakeNs() orelse 0, .una = table.conns[i].una };
             draining_now += 1;
             spill_kept = true;
             kept_open = true;
-        } else close(wire, table, i);
+        },
+        .close => close(wire, table, i),
     }
-    logRequest(number, what, outcome, bus.status, if (done_at >= head_at) @intCast(done_at - head_at) else null);
+    logRequest(number, bus.at_unix_ms, what, outcome, bus.status, if (done_at >= head_at) @intCast(done_at - head_at) else null);
     // **THE LOG SAYS A BODY'S SIZE AND HOW LONG IT TOOK TO ARRIVE** (169), so
     // a slow link is read, not inferred.
     const disk_after = diskWork();
@@ -1176,7 +1200,7 @@ fn serviceDraining(wire: *stream.Wire, table: *tcp.Table, now: i96, idle_ns: u64
                 close(wire, table, i);
                 done = true;
             } else if (now - d.since >= idle_ns) {
-                table.abandon(wire, i);
+                table.abandon(wire, i, .slow_client);
                 serial.put("  let go: the client stopped taking the response\n");
                 done = true;
             }
@@ -1329,7 +1353,7 @@ fn endStream(slot: *?Held, wire: *stream.Wire, table: *tcp.Table, hub: *Hub, end
     streams.drop(hub, h.kept);
     if (h.carry.len > 0) hub.gpa.free(h.carry);
     switch (ending) {
-        .lagging, .missed_events => table.abandon(wire, h.conn),
+        .lagging, .missed_events => table.abandon(wire, h.conn, .stream_behind),
         else => table.finish(h.conn),
     }
     table.release(h.conn);
@@ -1385,7 +1409,7 @@ fn reportStack(deepest: usize) usize {
 /// which comes after the request's log is written.
 fn close(wire: *stream.Wire, table: *tcp.Table, i: usize) void {
     table.finish(i);
-    if (table.conns[i].state != .closing) return table.abandon(wire, i);
+    if (table.conns[i].state != .closing) return table.abandon(wire, i, .unfinished);
     const now = Io.awakeNs() orelse 0;
     table.transmit(wire, now);
     if (coverage_checks) stream.checkTable(table, now, .after_transmit);
@@ -1541,6 +1565,7 @@ fn mountFat(blk: *virtio.Block, scratch: *[disk_fat.sector_size]u8, what: []cons
         serial.put("\n");
         serial.fail("the FAT could not be held in memory");
     };
+    vol.mounted = mirrors;
     // Lookups read a directory up to a cluster per request (disk_fat's
     // `dir_burst`), within the most one request carries.
     const burst_sectors = @min(vol.sectors_per_cluster, vol.blk.most_sectors);
@@ -1752,18 +1777,21 @@ fn wallMs() ?i64 {
 }
 
 /// An upload's answer, recorded and said under its request's line.
-fn noteUpload(number: u64, d: Drains.Drain, path: []const u8, kind: []const u8, status: u16, ended: []const u8, turn_ns: ?u64, disk_requests: u64, now: i96) void {
+fn noteUpload(number: u64, drained: ?Drains.Drain, path: []const u8, kind: []const u8, status: u16, ended: []const u8, turn_ns: ?u64, disk_requests: u64, now: i96) void {
+    // Refused at its head before a drain was begun: no body, no time.
+    const d: Drains.Drain = drained orelse .{ .bytes = &.{}, .head_len = 0, .framing = .length, .want = 0, .most = 0, .began = now, .deadline_at = now, .last_progress = now, .whole = true, .whole_at = now, .upload = true, .charged = false };
     const u: metal.uploads_seen.Upload = .{
         .number = number,
         .unix_ms = wallMs(),
         .path = .of(path),
         .kind = .of(kind),
         .bytes = d.len - d.head_len,
-        .arrival_ms = @intCast(@divTrunc(@max((if (d.whole) d.whole_at else now) - d.began, 0), std.time.ns_per_ms)),
+        .arrival_ms = @intCast(@divTrunc(@max((if (d.cameWhole()) d.whole_at else now) - d.began, 0), std.time.ns_per_ms)),
         .turn_ms = if (turn_ns) |t| t / std.time.ns_per_ms else null,
         .disk_requests = disk_requests,
         .status = status,
-        .outcome = metal.uploads_seen.classify(status, d.whole, ended),
+        .came_whole = d.cameWhole(),
+        .outcome = metal.uploads_seen.classify(status, d.cameWhole(), ended),
     };
     uploads.record(u);
     var line: [512]u8 = undefined;
@@ -1777,13 +1805,16 @@ fn noteUpload(number: u64, d: Drains.Drain, path: []const u8, kind: []const u8, 
 /// A request's line (src/request_line.zig): its UTC time, what it was, how it
 /// ended, its status and how long it took; then what memory held after it.
 /// `status` 0 and `took_ns` null where no request came.
-fn logRequest(number: u64, what: []const u8, outcome: []const u8, status: u16, took_ns: ?u64) void {
+/// `at_unix_ms`: when the request came (189's minor 7: a 40-second upload
+/// was stamped when it ended, and the 5xx list's time, which is when it
+/// came, did not match its line).
+fn logRequest(number: u64, at_unix_ms: ?i64, what: []const u8, outcome: []const u8, status: u16, took_ns: ?u64) void {
     const mem = webbox.mem_meter.snapshot();
     var line: [512]u8 = undefined;
     var w: std.Io.Writer = .fixed(&line);
     metal.request_line.write(&w, .{
         .number = number,
-        .unix_ms = wallMs(),
+        .unix_ms = at_unix_ms,
         .what = what,
         .outcome = outcome,
         .status = status,
@@ -1988,11 +2019,7 @@ fn readConfig(io: Io, alloc: std.mem.Allocator) Config {
 
 /// A config number: decimal digits and nothing else. `std.fmt.parseInt` takes
 /// `+5` and `1_000` too, a spelling no setting means (the normalization hunt).
-fn configNumber(comptime T: type, value: []const u8) !T {
-    if (value.len == 0) return error.InvalidCharacter;
-    for (value) |c| if (!std.ascii.isDigit(c)) return error.InvalidCharacter;
-    return std.fmt.parseInt(T, value, 10);
-}
+const configNumber = metal.config_text.number;
 
 /// **THE LOG, FOR /admin/host**: the newest `page_log_bytes` of what the
 /// serial ring holds, from a whole line. Its secrets were taken out as it
@@ -2078,8 +2105,29 @@ fn metalFacts(io: Io, alloc: std.mem.Allocator) anyerror![]const webbox.host_fac
         tsc_hz_seen / 1_000_000,
         if (interrupts.armed()) "rests between frames" else "never rests (polls)",
     });
+    // **THE LEASE IS NEVER RENEWED** (193, gap 12): its length, and
+    // whether the machine has run past it.
+    if (lease_held) |l| try add(&facts, alloc, "address", "{d}.{d}.{d}.{d} from DHCP, never renewed; {s}", .{
+        l.address[0], l.address[1], l.address[2], l.address[3],
+        if (l.seconds) |lent|
+            if (now - booted_unix > lent)
+                try std.fmt.allocPrint(alloc, "lent for {s}, and the machine has run PAST ITS LEASE", .{try hs.duration(alloc, lent)})
+            else
+                try std.fmt.allocPrint(alloc, "lent for {s}", .{try hs.duration(alloc, lent)})
+        else
+            "the server did not say for how long",
+    });
     try add(&facts, alloc, "requests served", "{d}", .{served});
     try add(&facts, alloc, "connections", "{d} open now, {d} at most, of {d}", .{ open_now, busiest, max_connections });
+    if (serving_table) |t| {
+        var counts: std.Io.Writer.Allocating = .init(alloc);
+        try tcp.writeCounts(t, &counts.writer);
+        try facts.append(alloc, .{ .label = "tcp since boot", .value = counts.written() });
+        // **FRAMES PASSED OVER** (193, gap 8), by why.
+        var passed: std.Io.Writer.Allocating = .init(alloc);
+        try t.passed.write(&passed.writer);
+        try facts.append(alloc, .{ .label = "frames passed over", .value = passed.written() });
+    }
     try add(&facts, alloc, "streams", "{d} held now, {d} at most, {d} ended", .{ held_now, held_most, streams_ended });
     const p = pages.stats();
     try add(&facts, alloc, "memory (pages)", "{d} MB taken now, {d} MB at most, of {d} MB", .{
@@ -2098,9 +2146,9 @@ fn metalFacts(io: Io, alloc: std.mem.Allocator) anyerror![]const webbox.host_fac
             try facts.append(alloc, .{ .label = if (k == 0) "an upload, the newest first" else "", .value = one.written() });
         }
     }
-    if (Io.siteVolume()) |v| try addVolume(&facts, alloc, "the boot disk (the site)", "the boot disk's write cache", "the boot disk's folders in memory", v);
+    if (Io.siteVolume()) |v| try addVolume(&facts, alloc, "the boot disk (the site)", "the boot disk's write cache", "the boot disk's folders in memory", "the boot disk at boot", v);
     if (Io.dataVolume()) |v| {
-        try addVolume(&facts, alloc, "the volume (" ++ app.hosting.data_name ++ ")", "the volume's write cache", "the volume's folders in memory", v);
+        try addVolume(&facts, alloc, "the volume (" ++ app.hosting.data_name ++ ")", "the volume's write cache", "the volume's folders in memory", "the volume at boot", v);
     } else try add(&facts, alloc, "the volume (" ++ app.hosting.data_name ++ ")", "none attached: the data is on the boot disk", .{});
     const kept = Io.siteCache();
     try add(&facts, alloc, "site files in memory", "{d} kept, {d} KB of {d} KB; {d} reads answered from them", .{
@@ -2127,7 +2175,19 @@ fn metalFacts(io: Io, alloc: std.mem.Allocator) anyerror![]const webbox.host_fac
         if (disks[1]) |d| if (d.disk_most_sectors) |m| try std.fmt.allocPrint(alloc, "{d} KiB", .{m / 2}) else "not said" else "no volume",
     });
     try add(&facts, alloc, "NMIs", "{d}", .{interrupts.nmis});
+    // **WAKES** (193, gap 11): a device that interrupts endlessly shows as
+    // wakes by a device far past the frames that came.
+    if (interrupts.armed()) try add(&facts, alloc, "rests", "{d}, {d} of them ended early by a device", .{ interrupts.rests.rests, interrupts.rests.woken_by_device });
     if (turning) |t| try add(&facts, alloc, "frames refused (too long to send)", "{d}", .{t.wire.nic.oversized});
+    // **A CARD THAT STOPPED TAKING FRAMES** (193.2): sends that waited out
+    // their budget, the card asking for a reset, and frames dropped since.
+    if (turning) |t| try add(&facts, alloc, "network card stalls", "{d} sends waited out their second, {d} times the card asked for a reset, {d} frames dropped while it took none back{s}", .{
+        t.wire.nic.send_stalls, t.wire.nic.reset_asked, t.wire.nic.dropped_stalled, if (t.wire.nic.stalled) "; STALLED NOW" else "",
+    });
+    // **THE CARD'S RING** (193.5): entries no sound card makes.
+    if (turning) |t| try add(&facts, alloc, "network card ring", "{d} received into a buffer never offered, {d} with a length no frame has, {d} send completions for a buffer not lent", .{
+        t.wire.nic.rx_strange_ids, t.wire.nic.rx_bad_lengths, t.wire.nic.tx_strange_completions,
+    });
     return facts.items;
 }
 
@@ -2170,25 +2230,33 @@ fn kindName(v: *const disk_fat.Volume) []const u8 {
     return if (v.kind == .fat32) "FAT32" else "FAT16";
 }
 
-fn addVolume(facts: *std.ArrayList(webbox.host_facts.Fact), alloc: std.mem.Allocator, label: []const u8, cache_label: []const u8, dirs_label: []const u8, v: *disk_fat.Volume) !void {
+fn addVolume(facts: *std.ArrayList(webbox.host_facts.Fact), alloc: std.mem.Allocator, label: []const u8, cache_label: []const u8, dirs_label: []const u8, boot_label: []const u8, v: *disk_fat.Volume) !void {
     var serial_text: [9]u8 = undefined;
     const named = if (v.serial) |n| serialText(&serial_text, n) else "no serial";
     const value = if (v.space()) |sp|
-        try std.fmt.allocPrint(alloc, "{s}, serial {s}: {d} MB free of {d} MB, {d} MB of it kept for small writes; {d} cleanups after a commit failed (leaks, {d} clusters counted, {d} more may be live; {d} long names left orphaned, {d} more may be), {d} FAT copy writes failed (copies apart)", .{
+        try std.fmt.allocPrint(alloc, "{s}, serial {s}: {d} MB free of {d} MB, {d} MB of it kept for small writes; {d} cleanups after a commit failed (leaks, {d} clusters counted, {d} more may be live; {d} long names left orphaned, {d} more may be), {d} FAT copy writes failed (copies apart); {d} sector reads failed, {d} sector writes failed", .{
             kindName(v),                                                      named,             sp.free >> 20,       sp.total >> 20,
             @as(u64, v.reserve_clusters) * v.sectors_per_cluster * 512 >> 20, v.cleanups_failed, v.leaked_clusters,   v.unsure_clusters,
-            v.orphaned_runs,                                                  v.unsure_runs,     v.fat_copies_failed,
+            v.orphaned_runs,                                                  v.unsure_runs,     v.fat_copies_failed, v.read_failures,
+            v.write_failures,
         })
     else |e|
         try std.fmt.allocPrint(alloc, "{s}, serial {s}: free space unreadable ({s})", .{ kindName(v), named, @errorName(e) });
     try facts.append(alloc, .{ .label = label, .value = value });
+    // **WHAT THE BOOT FOUND** (193, gap 10): once only boot log lines.
+    {
+        var boot: std.Io.Writer.Allocating = .init(alloc);
+        try metal.boot_facts.write(&boot.writer, v.blk.reads_retried, v.mounted);
+        try facts.append(alloc, .{ .label = boot_label, .value = boot.written() });
+    }
     // **A VOLUME THAT REFUSES WRITES SAYS SO** (metal-vmm QUEUE 188.2).
     if (v.writes == .refused or v.reweighs > 0) try facts.append(alloc, .{
         .label = "writes",
-        .value = try std.fmt.allocPrint(alloc, "{s}; the FAT's copies weighed again {d} times, {d} failed", .{
+        .value = try std.fmt.allocPrint(alloc, "{s}; the FAT's copies weighed again {d} times, {d} failed; {d} sector writes turned away while refused", .{
             if (v.writes == .refused) "REFUSED: the FAT's copies differ and could not be weighed; reads are served, and the weighing is tried again once a minute" else "taken: a weighing succeeded",
             v.reweighs,
             v.reweighs_failed,
+            v.writes_turned_away,
         }),
     });
     // **WHETHER A SAVE IS DURABLE BEFORE IT IS ANSWERED** (io.durable): what
@@ -2202,7 +2270,20 @@ fn addVolume(facts: *std.ArrayList(webbox.host_facts.Fact), alloc: std.mem.Alloc
     };
     try facts.append(alloc, .{
         .label = cache_label,
-        .value = try std.fmt.allocPrint(alloc, "{s}; {d} flushes, {d} failed; looked at again after {d} resets", .{ cache, v.blk.flushes, v.blk.flush_failures, v.blk.cache_rechecks }),
+        .value = try std.fmt.allocPrint(alloc, "{s}; {d} flushes, {d} of them SYNCHRONIZE CACHE sent{s}, {d} failed; looked at again after {d} resets; {s}; what its failed requests ended with (193.3): {s}", .{
+            cache, v.blk.flushes, v.blk.synchronizes_sent, if (v.blk.synchronize_unknown) " (the disk did not know the command, and is treated as writing through)" else "", v.blk.flush_failures, v.blk.cache_rechecks,
+            // **A DISK THAT STOPPED ANSWERING** (193.2).
+            switch (v.blk.ended) {
+                .serving => "answering",
+                .timed_out => try std.fmt.allocPrint(alloc, "STOPPED ANSWERING: a request went 30 s unanswered; {d} requests refused since", .{v.blk.refused_after_end}),
+                .needs_reset => try std.fmt.allocPrint(alloc, "STOPPED ANSWERING: it asked for a reset; {d} requests refused since", .{v.blk.refused_after_end}),
+            },
+            blk: {
+                var failed: std.Io.Writer.Allocating = .init(alloc);
+                try v.blk.failures.write(&failed.writer);
+                break :blk failed.written();
+            },
+        }),
     });
     if (v.dirs) |d| try facts.append(alloc, .{
         .label = dirs_label,
@@ -2226,12 +2307,7 @@ fn ipText(buf: *[15]u8, ip: [4]u8) []const u8 {
 }
 
 /// `92DE-8831`: two halves of four hex digits, high half first.
-fn parseSerial(text: []const u8) ?u32 {
-    if (text.len != 9 or text[4] != '-') return null;
-    const high = std.fmt.parseInt(u16, text[0..4], 16) catch return null;
-    const low = std.fmt.parseInt(u16, text[5..9], 16) catch return null;
-    return (@as(u32, high) << 16) | low;
-}
+const parseSerial = metal.config_text.serial;
 
 fn putSerial(serial_number: ?u32) void {
     const n = serial_number orelse return serial.put("none");
@@ -2239,16 +2315,7 @@ fn putSerial(serial_number: ?u32) void {
     serial.put(serialText(&text, n));
 }
 
-/// `92DE-8831`, as `blkid` spells a FAT serial.
-fn serialText(text: *[9]u8, n: u32) []const u8 {
-    const digits = "0123456789ABCDEF";
-    for (0..8) |k| {
-        const at = if (k < 4) k else k + 1;
-        text[at] = digits[@as(u4, @truncate(n >> @intCast(28 - 4 * k)))];
-    }
-    text[4] = '-';
-    return text;
-}
+const serialText = metal.config_text.serialText;
 
 /// The wall clock in Unix seconds, or null before it is set: for the restart
 /// record, which must not panic asking.

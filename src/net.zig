@@ -39,6 +39,15 @@
 
 const virtio = @import("virtio.zig");
 const interrupts = @import("interrupts.zig");
+const tsc = @import("tsc.zig");
+const device_wait = @import("device_wait.zig");
+const props = @import("coverage");
+
+/// **HOW LONG A SEND MAY WAIT FOR A BUFFER**, in TSC ticks (193.2): one
+/// second at 3 GHz until the kernel sets it from the measured rate. A card
+/// that takes no frame back in a second is stalled; TCP resends what it
+/// drops.
+pub var send_budget_ticks: u64 = 3_000_000_000;
 
 /// The header on every buffer in both directions. With VIRTIO_F_VERSION_1 it
 /// always carries `num_buffers`, so it is 12 bytes and not the legacy 10.
@@ -103,6 +112,20 @@ pub const Net = struct {
     /// doing — so it is counted and shown on /admin/host, loud, rather than
     /// overrunning the buffer into the next frame's. See `send`.
     oversized: u64 = 0,
+    /// **WAITS FOR A SEND BUFFER THAT ENDED** (metal-vmm QUEUE 193.2): the
+    /// card took no frame back in `send_budget_ticks`, or asked for a
+    /// reset; and the frames dropped since, while it had taken none back.
+    send_stalls: u64 = 0,
+    reset_asked: u64 = 0,
+    dropped_stalled: u64 = 0,
+    stalled: bool = false,
+    /// **THE CARD'S RING, MISBEHAVING** (metal-vmm QUEUE 193.5): receive
+    /// entries naming a buffer we never offered (each one a buffer lost to
+    /// the ring for good), receive entries with a length no frame has, and
+    /// send completions for a buffer we had not lent. Zero on a sound card.
+    rx_strange_ids: u64 = 0,
+    rx_bad_lengths: u64 = 0,
+    tx_strange_completions: u64 = 0,
 
     pub fn init(found: virtio.Device, mem: *Memory) virtio.Error!Net {
         const st = try virtio.negotiate(found, feature_mac);
@@ -164,11 +187,33 @@ pub const Net = struct {
         // The device's thread takes the frames; on a droplet it needs this
         // processor to do it, so the wait rests rather than spins.
         if (self.free_len == 0) {
+            // **A CARD THAT TAKES NO FRAMES ENDS THE WAIT** (metal-vmm QUEUE
+            // 193.2): it hung the machine. After `send_budget_ticks` with no
+            // buffer back, or the card asking for a reset, the frame is
+            // dropped and counted, and TCP sends it again later; while the
+            // card has taken none back since, the next frames drop at once
+            // rather than each waiting out its own budget.
+            if (self.stalled) {
+                self.dropped_stalled +%= 1;
+                return;
+            }
             // Now a completion is worth an interrupt: it ends the wait. One
             // that landed before the flag changed is found by `reclaim`.
             self.tx.interruptOnCompletion(true);
             self.reclaim();
+            const began = tsc.read();
             while (self.free_len == 0) {
+                switch (device_wait.verdict(began, tsc.read(), send_budget_ticks, virtio.deviceStatus(self.device))) {
+                    .wait => {},
+                    .timed_out, .needs_reset => |why| {
+                        self.tx.interruptOnCompletion(false);
+                        self.stalled = true;
+                        if (why == .needs_reset) self.reset_asked +%= 1 else self.send_stalls +%= 1;
+                        self.dropped_stalled +%= 1;
+                        props.reachable(@src(), "net: a card that takes no frames back ends the wait, and the frame is dropped", null);
+                        return;
+                    },
+                }
                 interrupts.rest();
                 self.reclaim();
             }
@@ -196,10 +241,15 @@ pub const Net = struct {
     fn reclaim(self: *Net) void {
         while (self.tx.take()) |e| {
             virtio.ack(self.device);
-            if (e.id >= tx_buffers or !self.lent[e.id]) continue;
+            if (!txEntryOurs(e.id, &self.lent)) {
+                self.tx_strange_completions +%= 1;
+                continue;
+            }
             self.lent[e.id] = false;
             self.free[self.free_len] = @intCast(e.id);
             self.free_len += 1;
+            // A buffer back: the card is taking frames again.
+            self.stalled = false;
         }
     }
 
@@ -222,12 +272,19 @@ pub const Net = struct {
     pub fn poll(self: *Net) ?struct { id: u16, frame: []const u8 } {
         while (self.rx.take()) |e| {
             virtio.ack(self.device);
-            if (e.id >= rx_buffers) continue;
-            const id: u16 = @intCast(e.id);
-            if (e.len <= @sizeOf(Header) or e.len > buffer_size) {
-                self.recycle(id);
-                continue;
+            switch (rxEntry(e.id, e.len)) {
+                .strange_id => {
+                    self.rx_strange_ids +%= 1;
+                    continue;
+                },
+                .bad_length => {
+                    self.rx_bad_lengths +%= 1;
+                    self.recycle(@intCast(e.id));
+                    continue;
+                },
+                .frame => {},
             }
+            const id: u16 = @intCast(e.id);
             return .{
                 .id = id,
                 .frame = self.mem.rx_bufs[id][@sizeOf(Header)..e.len],
@@ -250,6 +307,25 @@ pub const Net = struct {
         self.rx.notifyIfWanted();
     }
 };
+
+/// **WHAT A USED-RING ENTRY IS** (metal-vmm QUEUE 193.5), decided apart
+/// from the device so it is tested: a frame in one of our buffers; an entry
+/// naming no buffer we offered (the buffer the device really used is lost to
+/// the ring for good, one fewer each time); or a length no frame has (too
+/// short for the header, or past the buffer), whose buffer goes straight back.
+pub const RxEntry = enum { frame, strange_id, bad_length };
+
+pub fn rxEntry(id: u32, len: u32) RxEntry {
+    if (id >= rx_buffers) return .strange_id;
+    if (len <= @sizeOf(Header) or len > buffer_size) return .bad_length;
+    return .frame;
+}
+
+/// A send completion: one of ours, given back; or one naming a buffer we
+/// did not lend, passed over.
+pub fn txEntryOurs(id: u32, lent: []const bool) bool {
+    return id < tx_buffers and id < lent.len and lent[id];
+}
 
 const testing = @import("std").testing;
 
@@ -275,4 +351,18 @@ test "send refuses a frame too long for its buffer: counted, nothing sent, the r
     try testing.expectEqual(@as(u64, 0), n.sent); // it was not sent
     try testing.expectEqual(tx_buffers, n.free_len); // no buffer taken
     try testing.expectEqual(@as(u16, 7), mem.tx_ring.avail_idx); // the ring did not move
+}
+
+test "a used-ring entry: a frame, a buffer we never offered, a length no frame has; a send completion we did not lend (metal-vmm QUEUE 193.5)" {
+    try testing.expectEqual(RxEntry.frame, rxEntry(0, @sizeOf(Header) + 60));
+    try testing.expectEqual(RxEntry.frame, rxEntry(rx_buffers - 1, buffer_size));
+    try testing.expectEqual(RxEntry.strange_id, rxEntry(rx_buffers, 100));
+    try testing.expectEqual(RxEntry.strange_id, rxEntry(0xFFFF_FFFF, 100));
+    try testing.expectEqual(RxEntry.bad_length, rxEntry(0, @sizeOf(Header)));
+    try testing.expectEqual(RxEntry.bad_length, rxEntry(0, buffer_size + 1));
+    var lent = [_]bool{false} ** tx_buffers;
+    lent[2] = true;
+    try testing.expect(txEntryOurs(2, &lent));
+    try testing.expect(!txEntryOurs(3, &lent));
+    try testing.expect(!txEntryOurs(tx_buffers, &lent));
 }

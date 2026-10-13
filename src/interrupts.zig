@@ -49,6 +49,7 @@
 //! Intel SDM vol. 3A: §6.10-6.14 (the IDT), §11.4-11.5 (the local APIC and its
 //! timer), §10.11 (MSI message format).
 
+const rest_count = @import("rest_count.zig");
 const std = @import("std");
 const port = @import("port.zig");
 const serial = @import("serial.zig");
@@ -412,10 +413,15 @@ pub fn rest() void {
         asm volatile ("pause");
         return;
     }
-    wrmsrDeadline(tsc.read() +% slice_ticks);
+    const deadline = tsc.read() +% slice_ticks;
+    wrmsrDeadline(deadline);
     asm volatile (
         \\sti
         \\hlt
         \\cli
         ::: .{ .memory = true });
+    rests.note(deadline, tsc.read());
 }
+
+/// Every rest, and those a device ended before the slice did (193, gap 11).
+pub var rests: rest_count.Rests = .{};

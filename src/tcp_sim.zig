@@ -958,13 +958,12 @@ const Host = struct {
                         return;
                     }
                 }
-                // As streamFn: a window that had shrunk below a segment is
-                // announced when it reopens.
-                const was_tight = c.room() < tcp.our_mss;
-                c.consume(n);
+                // As streamFn, by the same rule (Conn.consumeReopens): a
+                // tight window is announced when it reopens.
+                const reopened = c.consumeReopens(n);
                 self.consumed += n;
                 self.last_progress = sim.now;
-                if (sim.sc.host_announces and was_tight and c.room() >= tcp.our_mss) table.ack(&wire, i);
+                if (sim.sc.host_announces and reopened) table.ack(&wire, i);
             } else if (c.peerDone() or !c.open()) {
                 // The request will never be whole: answered and closed, as
                 // the host does a request that ends early.
@@ -997,14 +996,14 @@ const Host = struct {
     fn close(self: *Host, sim: *Sim, i: usize) void {
         var wire = TableWire{ .sim = sim };
         sim.table.finish(i);
-        if (sim.table.conns[i].state != .closing) sim.table.abandon(&wire, i);
+        if (sim.table.conns[i].state != .closing) sim.table.abandon(&wire, i, .unfinished);
         sim.table.release(i);
         self.finished = true;
     }
 
     fn giveUp(self: *Host, sim: *Sim, i: usize) void {
         var wire = TableWire{ .sim = sim };
-        sim.table.abandon(&wire, i);
+        sim.table.abandon(&wire, i, .slow_client);
         sim.table.release(i);
         self.let_go = true;
     }
@@ -1213,7 +1212,7 @@ const Server = struct {
             const slot = h.slot;
             self.held = null;
             var wire = TableWire{ .sim = sim };
-            sim.table.abandon(&wire, slot);
+            sim.table.abandon(&wire, slot, .stream_behind);
             sim.table.release(slot);
             self.let_go[w] = true;
         }
@@ -1232,7 +1231,7 @@ const Server = struct {
 
     fn giveUp(self: *Server, sim: *Sim, k: usize, w: usize) void {
         var wire = TableWire{ .sim = sim };
-        sim.table.abandon(&wire, k);
+        sim.table.abandon(&wire, k, .slow_client);
         sim.table.release(k);
         self.let_go[w] = true;
         self.current = null;
@@ -1242,7 +1241,7 @@ const Server = struct {
     fn close(sim: *Sim, k: usize) void {
         var wire = TableWire{ .sim = sim };
         sim.table.finish(k);
-        if (sim.table.conns[k].state != .closing) sim.table.abandon(&wire, k);
+        if (sim.table.conns[k].state != .closing) sim.table.abandon(&wire, k, .unfinished);
         sim.table.release(k);
     }
 };
@@ -1921,4 +1920,21 @@ test "item 96: one lost frame to the client, swept over the first 20, always rec
             }
         }
     }
+}
+
+test "what arrives out of order is counted: ahead of the next byte, and from behind (metal-vmm QUEUE 193.4)" {
+    var ahead: u64 = 0;
+    var behind: u64 = 0;
+    for (1..41) |seed| {
+        const sim = try std.testing.allocator.create(Sim);
+        defer std.testing.allocator.destroy(sim);
+        sim.init(seed);
+        try sim.run();
+        ahead += sim.table.arrived_ahead;
+        behind += sim.table.arrived_behind;
+    }
+    // The simulated network loses, reorders and duplicates: over forty
+    // seeds a segment arrives ahead of a lost one, and a resend from behind.
+    try std.testing.expect(ahead > 0);
+    try std.testing.expect(behind > 0);
 }

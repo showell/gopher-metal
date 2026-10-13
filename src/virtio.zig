@@ -25,6 +25,19 @@ const tsc = @import("tsc.zig");
 const pci = @import("pci.zig");
 const scsi = @import("scsi.zig");
 const durable = @import("durable.zig");
+const device_wait = @import("device_wait.zig");
+const disk_failures = @import("disk_failures.zig");
+
+/// **HOW LONG A REQUEST MAY GO UNANSWERED**, in TSC ticks (metal-vmm QUEUE
+/// 193.2). 30 seconds, as Linux's SCSI layer gives a command. Until the
+/// kernel has measured the TSC's rate it is 30 s at 3 GHz (longer on a
+/// slower clock, never shorter); the kernel sets it from the rate.
+pub var wait_budget_ticks: u64 = 30 * 3_000_000_000;
+
+/// The device's status byte, for `device_wait`.
+pub fn deviceStatus(d: Device) u32 {
+    return getStatus(d);
+}
 
 /// A device, found on whichever transport this machine has.
 pub const Device = union(enum) {
@@ -539,11 +552,25 @@ pub fn Queue(comptime size: u16) type {
             return e;
         }
 
-        /// Spins until a completion arrives. Nothing here has interrupts yet.
-        pub fn wait(self: *Self) UsedElem {
+        /// How a wait ended: a completion, or `device_wait`'s verdict.
+        pub const Ended = union(enum) { done: UsedElem, needs_reset, timed_out };
+
+        /// **SPINS UNTIL A COMPLETION ARRIVES, OR IT NEVER WILL** (193.2): every
+        /// `device_wait.look_every` spins it asks the clock and the device's
+        /// status whether to go on (a status read is a trip to the hypervisor).
+        pub fn waitFor(self: *Self, budget_ticks: u64) Ended {
+            const began = tsc.read();
+            var spins: u32 = 0;
             while (true) {
-                if (self.take()) |e| return e;
+                if (self.take()) |e| return .{ .done = e };
                 asm volatile ("pause");
+                spins +%= 1;
+                if (spins % device_wait.look_every != 0) continue;
+                switch (device_wait.verdict(began, tsc.read(), budget_ticks, getStatus(self.device))) {
+                    .wait => {},
+                    .needs_reset => return .needs_reset,
+                    .timed_out => return .timed_out,
+                }
             }
         }
     };
@@ -689,6 +716,9 @@ const blk_t_out: u32 = 1; // write to the device
 pub const blk_s_ok: u8 = 0;
 pub const blk_s_ioerr: u8 = 1;
 pub const blk_s_unsupp: u8 = 2;
+/// Ours, not virtio's: the disk stopped answering (a request it never ended,
+/// or it asked for a reset), so no request goes to it any more (193.2).
+pub const blk_s_ended: u8 = 0xEE;
 
 const BlkReqHeader = extern struct {
     type: u32,
@@ -727,6 +757,18 @@ pub const Block = struct {
     /// soak could only see the whole machine slowing down; these split it.
     requests: u64 = 0,
     busy_ticks: u64 = 0,
+    /// **A DISK THAT STOPPED ANSWERING** (metal-vmm QUEUE 193.2): a request
+    /// it never ended in `wait_budget_ticks`, or it set DEVICE_NEEDS_RESET.
+    /// The abandoned request's buffers are still the device's, which may
+    /// yet write into them, so nothing more goes to it: every later request
+    /// is `blk_s_ended`, counted. Only a reset (or a restart) brings it back.
+    ended: enum { serving, timed_out, needs_reset } = .serving,
+    /// Requests refused because the disk had stopped answering.
+    refused_after_end: u64 = 0,
+    /// **WHAT ITS FAILED REQUESTS ENDED WITH** (metal-vmm QUEUE 193.3): on
+    /// virtio-blk each status but OK; on SCSI each command's response,
+    /// CHECK CONDITION by sense key, and short transfers.
+    failures: disk_failures.Failures = .{},
 
     /// **ON A SCSI CONTROLLER, THE DISK THIS BLOCK IS** (`scsi.zig`), and the
     /// memory its commands are built in. Null on virtio-blk.
@@ -764,9 +806,16 @@ pub const Block = struct {
     read_tries: u8 = 1,
     /// Reads that failed and answered on a later try.
     reads_retried: u64 = 0,
-    /// Flushes sent, and those the disk answered with an error.
+    /// Flush points (every flush with something written before it, on any
+    /// disk), and those the disk answered with an error.
     flushes: u64 = 0,
     flush_failures: u64 = 0,
+    /// **WHAT REACHED THE DISK** (metal-vmm QUEUE 193, gap 9): flush points
+    /// that sent SYNCHRONIZE CACHE; a write-through disk's are cleared with
+    /// no command. And whether a SYNCHRONIZE was refused as unknown
+    /// (ILLEGAL REQUEST), which turned the disk write-through.
+    synchronizes_sent: u64 = 0,
+    synchronize_unknown: bool = false,
 
     /// **A DISK IN MEMORY, FOR HOST TESTS** (`inMemory`): every transfer is a
     /// copy to or from these bytes, and no device is touched. Null on a real
@@ -992,8 +1041,18 @@ pub const Block = struct {
     /// **`addr` IS A PHYSICAL ADDRESS AND THE DEVICE WRITES IT DIRECTLY.**
     /// That is the whole reason the door takes an address: the 512 bytes never
     /// pass through this function.
+    /// One request, its status noted (193.3). On SCSI the command's own
+    /// outcome is noted where it ends (`scsi.command`), so a CHECK CONDITION
+    /// is not also an I/O error here; only what never reached a command is.
     fn transfer(self: *Block, kind: u32, lba: u64, addr: u64, len: u32) u8 {
+        const status = self.transferOnce(kind, lba, addr, len);
+        if (self.address == null or status == blk_s_ended or status == blk_s_unsupp) self.failures.noteStatus(status);
+        return status;
+    }
+
+    fn transferOnce(self: *Block, kind: u32, lba: u64, addr: u64, len: u32) u8 {
         if (self.memory) |disk| return self.memoryTransfer(disk, kind, lba, addr, len);
+        if (self.refuseEnded()) return blk_s_ended;
         if (self.address) |at| {
             // Set before the command: a write that fails may still have
             // landed in part, in the cache.
@@ -1030,11 +1089,30 @@ pub const Block = struct {
         const began = tsc.read();
         self.q.offer(0);
         self.q.notify();
-        _ = self.q.wait();
+        const ended = self.q.waitFor(wait_budget_ticks);
         ack(self.device);
         self.busy_ticks +%= tsc.read() -% began;
         self.requests +%= 1;
+        if (!self.answered(ended)) return blk_s_ended;
         return self.status.*;
+    }
+
+    /// Whether a disk that stopped answering refuses this request, counted.
+    pub fn refuseEnded(self: *Block) bool {
+        if (self.ended == .serving) return false;
+        self.refused_after_end +%= 1;
+        return true;
+    }
+
+    /// Whether a wait ended in a completion; if not, the disk is ended.
+    pub fn answered(self: *Block, how: Q.Ended) bool {
+        switch (how) {
+            .done => return true,
+            .timed_out => self.ended = .timed_out,
+            .needs_reset => self.ended = .needs_reset,
+        }
+        props.reachable(@src(), "virtio: a disk stops answering, and is ended", null);
+        return false;
     }
 
     /// The sector at `lba` into the 512 bytes at `addr`.
@@ -1107,6 +1185,7 @@ pub const Block = struct {
         self.flushes +%= 1;
         // `synchronize` may learn the disk has no cache (ILLEGAL REQUEST),
         // and says so in `write_cache` and an ok.
+        if (s == .synchronize) self.synchronizes_sent +%= 1;
         const status = if (s == .synchronize) scsi.synchronize(self, self.address.?) else blk_s_ok;
         if (durable.settle(&d, s, status == blk_s_ok)) {
             self.flush_failures +%= 1;
@@ -1131,3 +1210,46 @@ pub const BlockMemory = struct {
         return Block.init(device, self);
     }
 };
+
+fn wrapCase(comptime size: u16) !void {
+    const Q = Queue(size);
+    var ring: Q.RingType = undefined;
+    @memset(std.mem.asBytes(&ring), 0);
+    // Both indexes start just short of the wrap, as after 65,530 requests.
+    const start: u16 = 65530;
+    ring.avail_idx = start;
+    ring.used_idx = start;
+    var q: Q = .{ .device = .{ .mmio = 0 }, .index = 0, .ring = &ring, .last_used = start, .doorbell = 0 };
+    // Three rounds of a full ring, across the wrap: every head offered is
+    // in the slot its index names, and every completion comes back once, in
+    // order, then nothing.
+    var next_id: u32 = 0;
+    for (0..3) |_| {
+        for (0..size) |k| {
+            const at = ring.avail_idx;
+            q.offer(@intCast(k));
+            try std.testing.expectEqual(@as(u16, @intCast(k)), ring.avail_ring[at % size]);
+            try std.testing.expectEqual(at +% 1, ring.avail_idx);
+        }
+        // The device answers each, as it does: the entry, then the index.
+        for (0..size) |k| {
+            ring.used_ring[ring.used_idx % size] = .{ .id = next_id + @as(u32, @intCast(k)), .len = 1 };
+            ring.used_idx +%= 1;
+        }
+        for (0..size) |k| {
+            const e = q.take().?;
+            try std.testing.expectEqual(next_id + @as(u32, @intCast(k)), e.id);
+        }
+        try std.testing.expectEqual(@as(?UsedElem, null), q.take());
+        next_id += size;
+    }
+    try std.testing.expectEqual(start +% 3 *% size, ring.avail_idx);
+    try std.testing.expectEqual(ring.used_idx, q.last_used);
+}
+
+test "a queue's indexes run across their u16 wrap: every head in its slot, every completion once and in order (metal-vmm QUEUE 197.3)" {
+    // Every size this kernel uses: rng's, the Block's and net's.
+    try wrapCase(4);
+    try wrapCase(8);
+    try wrapCase(64);
+}
