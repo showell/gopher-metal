@@ -1,31 +1,25 @@
 #!/bin/bash
-# **EVERY GATE, ON WHAT IS IN THIS TREE NOW.** Run before merging anything that
-# touches the kernel:
+# **EVERY GATE, ON WHAT IS IN THIS TREE NOW: THE FOUR TIERS IN ORDER**
+# (metal-vmm QUEUE 197), cheapest first, stopping at the first that fails:
 #
-#   ./gates.sh            the full run, for a batch
-#   ./gates.sh quick      the two-minute tier, for a single commit: host tests,
-#                         the kernels, the probes, and one chat-judge story
+#   ./gates.sh            tiers 0, 1, 2 and 3, for a batch
+#   ./gates.sh quick      tiers 0 and 1, then gopher.elf built and one
+#                         chat-judge story (./tier3.sh quick), for a commit
 #
-# Host tests, the probes, the chat judge on QEMU's microvm and on the
-# droplet-shaped machine (chat's data on a SCSI volume), the droplet boot
-# checks, and metal-vmm's three checks (the microvm-shaped machine against
-# QEMU, its repeatability, and the PC-shaped machine's rests).
+#   tier0.sh  zig, Python and the coverage SDK: unit tests, simulators,
+#             this repo's kernels type-checked, lints, properties
+#   tier1.sh  + QEMU: the probe kernels booted and judged, the droplet's boots
+#   tier2.sh  + metal-vmm: its checks against this checkout's kernels
+#   tier3.sh  + zig-webbox and the applications: gopher.elf and dogpark.elf
+#             judged, the site volume, metal-vmm on gopher.elf
 #
-# **gopher.elf IS REBUILT HERE.** `probe/run.sh gopher` judges whatever
-# gopher.elf is on disk, and `zig build kernels` does not build it, so a gate
-# that skipped this judged yesterday's kernel and passed. It compiles
-# angry-gopher's checkout as it is (no copy), its sources and the assets its
-# zig-server/assets.zon names.
+# Each tier is a script of its own, and says what it needs and what it does
+# not check. long.sh stays the release tier.
 #
-# **THE CHAT JUDGE RUNS FAT32 HERE, FAT16 IN long.sh** (QUEUE.md item 88; the
-# gates essay, item 6): prod's data is a FAT32 volume. The FAT16 judge was
-# nine of this run's twenty-five minutes; it now runs on every long.sh, which
-# every release needs, and FAT16 is still covered here by `zig build test`
-# and `tools/check_fat16_images.sh`.
-#
-# **ITS EXIT CODE IS THE VERDICT.** Every step's own status is kept, through
-# the pipes that trim its output, and the last line names the steps that
-# failed. A chat judge that skips (77) has not passed, so it fails here.
+# **ITS EXIT CODE IS THE VERDICT**, as each tier's is: a tier that could not
+# run (2: something it needs is missing) has not passed, so it fails here.
+# A full run that passes records its verdict for exactly the checkouts it
+# judged (tools/verdicts.py), which droplet/chat.py requires.
 set -u
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$HERE"
@@ -36,192 +30,37 @@ case "$mode" in
     *) echo "usage: ./gates.sh [quick]"; exit 2 ;;
 esac
 
-failed=()
-# Each step's time, printed as "time: <step> <seconds> s", so where a run's
-# minutes go is read off the output rather than guessed.
-t=$SECONDS
-lap() { echo "time: $1 $((SECONDS - t)) s"; t=$SECONDS; }
-
-GOPHER_ROOT="${GOPHER_ROOT:-$HOME/showell_repos/angry-gopher}"
-export GOPHER_ROOT
-WEBBOX_ROOT="${WEBBOX_ROOT:-$HOME/showell_repos/zig-webbox}"
-export WEBBOX_ROOT
-# **ONE CHECKOUT FOR EVERY JUDGE** (metal-vmm 147(d)): verdicts.py reads it
-# from the environment, build.zig from its option, whose defaults are the same
-# place only while neither is set elsewhere.
-ZIG_GOPHER=(-Dgopher-root="$GOPHER_ROOT" -Dwebbox-root="$WEBBOX_ROOT")
-# **WHICH CODE THIS RUN JUDGES** (tools/verdicts.py): both, printed, and a
-# checkout the build cannot take refused. The build reads the checkout live:
-# an edit to it during the run changes its content id, and `record` keeps no
-# verdict. A full run keeps its
-# verdict for exactly this pair, which droplet/chat.py requires.
+source tools/tier_lib.sh
+# **WHICH CODE THIS RUN JUDGES**, before any tier: the checkouts, printed,
+# and one the build cannot take refused. The build reads them live: an edit
+# during the run changes its content id, and `record` keeps no verdict.
 VERDICT_PAIR="$(python3 tools/verdicts.py ids)" || exit 2
 export VERDICT_PAIR
 python3 tools/verdicts.py pair
-VERDICTS="${GATES_VERDICTS:-$HOME/build/zig-metal-unikernel/gates}"
-mkdir -p "$VERDICTS"
 
-# ── the kernels and host tests ───────────────────────────────────────────────
-# The limits angry-gopher's store copies from disk_fat.zig and io.zig: a
-# second, so first (tools/check_limits.py).
-python3 tools/check_limits.py "$WEBBOX_ROOT/src" || failed+=(limits)
-# The whole summary is kept: each test binary's time is in it, and this step
-# is the gates' longest.
-zig build test "${ZIG_GOPHER[@]}" --summary all > "$VERDICTS/test-summary.txt" 2>&1
-[ $? = 0 ] || failed+=(test)
-# The check's "NOT type-checked" line too: a checkout the build cannot take fails `check` (and so
-# `test`), and its reason is said here, not only in the summary file.
-grep -E "tests passed|error|NOT type-checked" "$VERDICTS/test-summary.txt"
-lap "zig build test"
-# **WHAT `test` NO LONGER REACHES** (metal-vmm QUEUE 197: tier 0 needs no
-# sibling): gopher.elf type-checked from angry-gopher's checkout, and the
-# unit tests' pinned copy of webbox's body rule against the checkout's.
-zig build check-apps "${ZIG_GOPHER[@]}" 2>&1 | grep -E "error|NOT type-checked"
-[ "${PIPESTATUS[0]}" = 0 ] || failed+=(check-apps)
-zig build pinned "${ZIG_GOPHER[@]}" 2>&1 | grep pinned
-[ "${PIPESTATUS[0]}" = 0 ] || failed+=(pinned)
-lap "check-apps and pinned"
-# The library's own tests, on its Linux host: the kernel builds its sources,
-# and no other step here runs them.
-(cd "$WEBBOX_ROOT" && zig build test 2>&1 | tail -5; exit "${PIPESTATUS[0]}") || failed+=(webbox-test)
-lap "zig-webbox's zig build test"
-zig build kernels "${ZIG_GOPHER[@]}" 2>&1 | grep error
-[ "${PIPESTATUS[0]}" = 0 ] || failed+=(kernels)
-zig build gopher "${ZIG_GOPHER[@]}" 2>&1 | grep error
-[ "${PIPESTATUS[0]}" = 0 ] || failed+=(gopher-build)
-lap "kernels and gopher.elf"
+start=$SECONDS
+label=""; [ "$mode" = quick ] && label=" quick"
+run_tier() {
+    local script=$1; shift
+    echo "── $script $* ──"
+    "./$script" "$@"
+    local code=$?
+    echo "time: $script $((SECONDS - start)) s since the gates began"
+    if [ "$code" != 0 ]; then
+        [ "$mode" = full ] && python3 tools/verdicts.py record gates FAIL
+        echo "GATES${label}: FAIL (${script%.sh}${*:+ $*})"
+        exit 1
+    fi
+}
 
-# **DOG PARK, ON METAL AS ON LINUX** (probe/judge_dogpark.py): the same
-# requests to its play server on Linux and to dogpark.elf, over two boots,
-# and the data each left. Seconds, so both tiers run it, before the long ones.
-python3 probe/judge_dogpark.py || failed+=(dogpark)
-lap "the dogpark judge"
-
-# ── one chat-judge story, for the quick tier ─────────────────────────────────
-# A single story (the member story: login, chat, topics, admin, logout) on one
-# machine, FAT32, so a single commit is answered in two minutes instead of the
-# full run's twenty. The full run below is what a batch is gated on.
+run_tier tier0.sh
+run_tier tier1.sh
 if [ "$mode" = quick ]; then
-    r=$(probe/run.sh 2>&1) || failed+=(probes)
-    echo "probes: $(echo "$r" | grep -c "^PASS") PASS"
-    echo "$r" | grep "^FAIL"
-    lap "probes"
-    (cd "$GOPHER_ROOT/zig-server" && zig build) > "$VERDICTS/linux-build.txt" 2>&1
-    JUDGE_ONLY=members PROBE_WORK="$HOME/build/zig-metal-unikernel/probe-quick" \
-        probe/run.sh gopher > "$VERDICTS/gopher-quick.run" 2>&1
-    code=$?
-    sed -n '/^\(PASS\|FAIL\|    \) *gopher/,$p' "$VERDICTS/gopher-quick.run"
-    { [ "$code" = 0 ] && grep -q "^PASS gopher" "$VERDICTS/gopher-quick.run"; } || failed+=(gopher-quick)
-    lap "one chat-judge story (members, FAT32)"
-    if [ ${#failed[@]} = 0 ]; then echo "GATES quick: PASS"; else echo "GATES quick: FAIL (${failed[*]})"; exit 1; fi
+    run_tier tier3.sh quick
+    echo "GATES quick: PASS"
     exit 0
 fi
-
-# **THE QUICK CHECKS FIRST, QEMU LAST** (Steve, 2026-10-11: find things
-# quickly). Above: the limits, the unit tests, the kernels. Then this
-# checkout's site volume and metal-vmm's checks, which need no QEMU; then the
-# probes, the two chat judges and the droplet's boots, which do.
-
-# **THE SITE VOLUME, FROM THIS CHECKOUT** (tools/site_volume.py: the judge's
-# own stage and build_disk, no boot): what metal-vmm's timeouts.sh, pc_vs_microvm.sh and
-# long.sh's sweeps judge, where they read whatever volume a chat judge had
-# last left at a default path.
-SITE_VOLUME="$HOME/build/zig-metal-unikernel/site/pristine.img"
-python3 tools/site_volume.py "$SITE_VOLUME" "$GOPHER_ROOT" || failed+=(site-volume)
-lap "the site volume"
-
-# ── metal-vmm's checks (no QEMU) ─────────────────────────────────────────────
-# **metal-vmm IS BUILT HERE**, for the reason gopher.elf is above: its scripts
-# run whatever binary is on disk. `pc_vs_microvm.sh all` is the PC-shaped machine
-# (TRANSPORT=pci): every route with the server halting between frames and
-# woken by MSI-X and the APIC timer, the path a droplet runs.
-VMM="${METAL_VMM:-$HOME/showell_repos/metal-vmm}"
-(cd "$VMM" && zig build 2>&1 | tail -5; exit "${PIPESTATUS[0]}") || failed+=(vmm-build)
-(cd "$VMM" && ./check.sh 2>&1 | tail -2; exit "${PIPESTATUS[0]}") || failed+=(vmm-check)
-(cd "$VMM" && ./same.sh 2>&1 | tail -2; exit "${PIPESTATUS[0]}") || failed+=(vmm-same)
-(cd "$VMM" && SITE="$SITE_VOLUME" ./pc_vs_microvm.sh all 2>&1 | tail -2; exit "${PIPESTATUS[0]}") || failed+=(vmm-pc)
-# **TIMEOUTS, IN THE MACHINE'S TIME**: what a setting governs, proved by
-# moving it, read off metal-vmm's clock rather than waited out on the box's.
-(cd "$VMM" && SITE="$SITE_VOLUME" ./timeouts.sh 2>&1 | tail -3; exit "${PIPESTATUS[0]}") || failed+=(vmm-timeouts)
-lap "metal-vmm check, same, rest and timeouts"
-
-# ── the full run ─────────────────────────────────────────────────────────────
-r=$(probe/run.sh 2>&1) || failed+=(probes)
-echo "probes: $(echo "$r" | grep -c "^PASS") PASS"
-echo "$r" | grep "^FAIL"
-lap "probes"
-
-# **GATES_PARALLEL=1 RUNS THE TWO SIDE BY SIDE** (QUEUE.md item 72), now the
-# default (item 85c; the box saw it green from batch 16 on): each in its own
-# scratch (PROBE_WORK), on ports each judge asks the host for, with its own
-# verdict file. The Linux build they share is made once, first, so the build
-# each run.sh makes finds nothing to do. `GATES_PARALLEL=0` runs them one after
-# the other. The output is the same either way, in the same order.
-judge() {  # judge MACHINE [FAT]: one chat judge, output to $VERDICTS/gopher-MACHINE[-fatN].run
-    local machine=$1 fat="${2:-}" droplet=0 tag=$1
-    [ "$machine" = droplet ] && droplet=1
-    [ -n "$fat" ] && tag="$machine-fat$fat"
-    # Set for this one command only: the steps after the judges must not
-    # inherit it, as they did not before.
-    # Through `env`: an expansion before the command ends bash's assignment
-    # words, and an empty `${fat:+...}` made `PROBE_WORK=...` the command.
-    env JUDGE_DROPLET=$droplet ${fat:+FAT=$fat} PROBE_WORK="$HOME/build/zig-metal-unikernel/probe-$tag" probe/run.sh gopher \
-        > "$VERDICTS/gopher-$tag.run" 2>&1
-    echo $? > "$VERDICTS/gopher-$tag.code"
-}
-report() {  # report TAG: the verdict line and, on a failure, every line after it
-    local tag=$1 v code
-    v=$(cat "$VERDICTS/gopher-$tag.run")
-    code=$(cat "$VERDICTS/gopher-$tag.code")
-    echo "$v" | sed -n '/^\(PASS\|FAIL\|    \) *gopher/,$p'
-    { [ "$code" = 0 ] && echo "$v" | grep -q "^PASS gopher"; } || failed+=("gopher-$tag")
-    cp "$HOME/build/zig-metal-unikernel/probe-$tag/gopher.verdict" "$VERDICTS/gopher-$tag.verdict" 2>/dev/null
-}
-
-# The two FAT32 judges, always.
-if [ "${GATES_PARALLEL:-1}" = 1 ]; then
-    (cd "$GOPHER_ROOT/zig-server" && zig build) > "$VERDICTS/linux-build.txt" 2>&1
-    judge microvm & judge droplet & wait
-    for machine in microvm droplet; do report $machine; done
-    lap "gopher judges, microvm and droplet side by side (FAT32)"
-else
-    for machine in microvm droplet; do
-        judge $machine
-        report $machine
-        lap "gopher judge, $machine (FAT32)"
-    done
-fi
-
-# **THE FAT16 JUDGE IS long.sh's** (the gates essay, item 6): prod's data is
-# FAT32, and FAT16 stays covered here by zig build test, the FAT simulator
-# and tools/check_fat16_images.sh. long.sh runs the judge on every release.
-echo "FAT16 chat judge: in long.sh, before every release"
-
-# ── the droplet's boots (QEMU) ───────────────────────────────────────────────
-b=$(droplet/boot.sh 2>&1) || failed+=(droplet-boot)
-echo "droplet boot: $(echo "$b" | grep -c PASS) PASS"
-echo "$b" | grep "^FAIL"
-lap "droplet boot"
-h=$(droplet/hello.sh 2>&1) || failed+=(droplet-hello)
-echo "droplet hello: $(echo "$h" | grep -c PASS) PASS"
-echo "$h" | grep "^FAIL"
-lap "droplet hello"
-droplet/screen.sh 2>&1 | tail -1
-[ "${PIPESTATUS[0]}" = 0 ] || failed+=(screen)
-lap "screen"
-
-# **A CHECK SKIPPED IS NO PASS** (the normalization hunt, 2026-10-10; Steve:
-# fail, never warn): a probe or chat judge that could not run a check (a loop
-# mount without passwordless sudo, the soak's tools missing) says SKIPPED,
-# and the full run fails, naming each, where it said PASS.
-skipped=$( { echo "$r"; cat "$VERDICTS"/gopher-*.run 2>/dev/null; } | grep "SKIPPED" || true)
-if [ -n "$skipped" ]; then echo "$skipped"; failed+=(skipped); fi
-
-if [ ${#failed[@]} = 0 ]; then
-    [ "$mode" = full ] && python3 tools/verdicts.py record gates PASS
-    echo "GATES: PASS"
-else
-    [ "$mode" = full ] && python3 tools/verdicts.py record gates FAIL
-    echo "GATES: FAIL (${failed[*]})"
-    exit 1
-fi
+run_tier tier2.sh
+run_tier tier3.sh
+python3 tools/verdicts.py record gates PASS
+echo "GATES: PASS"
