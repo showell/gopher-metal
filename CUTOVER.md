@@ -29,6 +29,46 @@ Placeholders, not real addresses: `<prod>` is the lynrummy.com droplet,
 `<metal>` the zig-metal-unikernel droplet's private address, `<box>` the dev
 box, `N` the volume's size in GiB, and `/dev/sdX` whatever `lsblk` shows.
 
+**The machine as it stands after the cutover** (moved from the README):
+
+- **What:** angry-gopher's whole route table, so chat and every app
+  (Lyn Rummy, Seattle Delivery, Safari, puzzles, chess). Steve's decision,
+  2026-10-01: the apps are served from metal along with chat, not split off.
+- **Where:** a droplet in nyc2, booted from a custom image, with
+  no Linux on it. It listens on its **private** network card only.
+  prod's Caddy (the old Linux droplet) proxies lynrummy.com to
+  it (angry-gopher's `deploy/Caddyfile`), so TLS, certificates and HTTP/2
+  stay on Linux; metal speaks plain HTTP/1.1 and does not answer on its
+  public address.
+- **Its data is on a DigitalOcean volume** (FAT32, 16 GiB, nyc2): chat's
+  data (`data/`, `auth/`) on the volume, which a new image does not touch
+  (`src/scsi.zig`), and the site's own files (`pages/`, `gallery/`,
+  `zig-metal-unikernel.conf`) on the boot disk, where each new image updates them.
+  The kernel mounts both and sends each path to one by its first directory
+  (`src/io.zig`); it refuses, and logs, any write outside `data/` and
+  `auth/`. **It serves one volume by name:** the boot image's
+  `zig-metal-unikernel.conf` names the FAT serial `blkid` shows
+  (`droplet/volume-serial`), and the machine stops rather than serve with
+  that volume missing or another one attached, either of which would answer
+  as an empty site and lose what was written. A path with `.` or `..` is
+  refused. The volume was built from prod's data at the cutover
+  (`droplet/build_volume.py`) and written from DigitalOcean's recovery
+  console; a new image leaves it as it is.
+- **Each boot checks both disks** before serving (the retired zig-metal-unikernel
+  queue, item 13): files, folders, clusters in use, leaked clusters and
+  problems, one line per disk in the log. A damaged disk is served from and
+  reported, not refused.
+
+**The cutover's tools**, all without root (the papers above say when each
+page is needed):
+- `droplet/check_volume_tree.py` checks a copy of the data, and
+  `build_volume.py` builds the volume;
+- `compare_volume.py` compares a volume with its copy;
+- `compare_hosts.py` compares two hosts page by page, with `--writes`;
+- `extract_volume.py` turns a volume back into a Linux tree;
+- `drift.py` compares two hosts' clocks, and `load.py` measures uploads
+  while others browse.
+
 ## Before the day
 
 Each of these is done, and checked, at least a day before.

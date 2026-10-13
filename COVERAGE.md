@@ -81,6 +81,17 @@ any serial log, such as a droplet's.
 
 A floor line naming no property fails too: a floor goes stale loudly.
 
+**The seed explorer** (zig-coverage-sdk's `explore.zig`) runs fat_sim,
+store_sim and tcp_sim from a recorded tape instead of a seed (`runWith`), so
+it can return to a run and steer it. Two tools, neither a gate:
+
+    zig build explore      # the explorer against blind seeds on one simulator (~15 min)
+    tools/soak.sh          # OVERNIGHT, detached: explorer and blind columns on all three, 7 hours, log in ~/soak-logs/
+
+The soak prints, round by round, what only some columns reached and every
+failure with its recipe (simulator, column, explorer seed); stop it (its
+PID) before a morning's gates.
+
 ## What the runs have said
 
 There are 18 properties in `tcp.zig` (retransmission, probing, window

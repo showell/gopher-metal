@@ -66,6 +66,21 @@ PASS http | curl got "hello from no Linux"
 PASS stdhttp | curl got "hello from std.http.Server, with no Linux under it"
 ```
 
+**One gate of the judge at a time.** `probe/run.sh gopher <gate>` runs one;
+a name it does not know is an error that lists them all (the judge's `GATES`
+in `probe/judge_gopher.py`), not a silently complete run. The single requests
+go to one boot by default; `probe/run.sh gopher isolated` gives each its own
+boot, which proves an answer owes nothing to an earlier one. Neither gate
+script runs `isolated`; it is there to ask by hand.
+
+**Two builds.** `-Ddev` builds the kernels in Debug — a rebuild of the real
+server in seconds instead of ReleaseSafe's tens — and `run.sh quick` builds
+that way and runs the judge with test-sized waits (a 3-second stream
+keepalive), one boot for the single
+requests, and without the boots that exist to be long. Shipping kernels are
+ReleaseSafe, and every run says which build it judged, read from a marker
+each kernel carries.
+
 ## Things that cost time
 
 Written down because each one looks like something else.
