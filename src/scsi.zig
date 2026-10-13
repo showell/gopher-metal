@@ -238,6 +238,7 @@ pub fn synchronize(b: *virtio.Block, at: Address) u8 {
     if (good(o)) return virtio.blk_s_ok;
     if (o.response == response_ok and o.status == status_check_condition and o.sense_key == sense_illegal_request) {
         b.write_cache = false;
+        b.synchronize_unknown = true;
         return virtio.blk_s_ok;
     }
     return virtio.blk_s_ioerr;

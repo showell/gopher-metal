@@ -2214,10 +2214,11 @@ fn addVolume(facts: *std.ArrayList(webbox.host_facts.Fact), alloc: std.mem.Alloc
     // **A VOLUME THAT REFUSES WRITES SAYS SO** (metal-vmm QUEUE 188.2).
     if (v.writes == .refused or v.reweighs > 0) try facts.append(alloc, .{
         .label = "writes",
-        .value = try std.fmt.allocPrint(alloc, "{s}; the FAT's copies weighed again {d} times, {d} failed", .{
+        .value = try std.fmt.allocPrint(alloc, "{s}; the FAT's copies weighed again {d} times, {d} failed; {d} sector writes turned away while refused", .{
             if (v.writes == .refused) "REFUSED: the FAT's copies differ and could not be weighed; reads are served, and the weighing is tried again once a minute" else "taken: a weighing succeeded",
             v.reweighs,
             v.reweighs_failed,
+            v.writes_turned_away,
         }),
     });
     // **WHETHER A SAVE IS DURABLE BEFORE IT IS ANSWERED** (io.durable): what
@@ -2231,8 +2232,8 @@ fn addVolume(facts: *std.ArrayList(webbox.host_facts.Fact), alloc: std.mem.Alloc
     };
     try facts.append(alloc, .{
         .label = cache_label,
-        .value = try std.fmt.allocPrint(alloc, "{s}; {d} flushes, {d} failed; looked at again after {d} resets; {s}; what its failed requests ended with (193.3): {s}", .{
-            cache, v.blk.flushes, v.blk.flush_failures, v.blk.cache_rechecks,
+        .value = try std.fmt.allocPrint(alloc, "{s}; {d} flushes, {d} of them SYNCHRONIZE CACHE sent{s}, {d} failed; looked at again after {d} resets; {s}; what its failed requests ended with (193.3): {s}", .{
+            cache, v.blk.flushes, v.blk.synchronizes_sent, if (v.blk.synchronize_unknown) " (the disk did not know the command, and is treated as writing through)" else "", v.blk.flush_failures, v.blk.cache_rechecks,
             // **A DISK THAT STOPPED ANSWERING** (193.2).
             switch (v.blk.ended) {
                 .serving => "answering",

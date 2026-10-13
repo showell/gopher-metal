@@ -806,9 +806,16 @@ pub const Block = struct {
     read_tries: u8 = 1,
     /// Reads that failed and answered on a later try.
     reads_retried: u64 = 0,
-    /// Flushes sent, and those the disk answered with an error.
+    /// Flush points (every flush with something written before it, on any
+    /// disk), and those the disk answered with an error.
     flushes: u64 = 0,
     flush_failures: u64 = 0,
+    /// **WHAT REACHED THE DISK** (metal-vmm QUEUE 193, gap 9): flush points
+    /// that sent SYNCHRONIZE CACHE; a write-through disk's are cleared with
+    /// no command. And whether a SYNCHRONIZE was refused as unknown
+    /// (ILLEGAL REQUEST), which turned the disk write-through.
+    synchronizes_sent: u64 = 0,
+    synchronize_unknown: bool = false,
 
     /// **A DISK IN MEMORY, FOR HOST TESTS** (`inMemory`): every transfer is a
     /// copy to or from these bytes, and no device is touched. Null on a real
@@ -1178,6 +1185,7 @@ pub const Block = struct {
         self.flushes +%= 1;
         // `synchronize` may learn the disk has no cache (ILLEGAL REQUEST),
         // and says so in `write_cache` and an ok.
+        if (s == .synchronize) self.synchronizes_sent +%= 1;
         const status = if (s == .synchronize) scsi.synchronize(self, self.address.?) else blk_s_ok;
         if (durable.settle(&d, s, status == blk_s_ok)) {
             self.flush_failures +%= 1;

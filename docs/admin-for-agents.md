@@ -156,7 +156,13 @@ From the top:
      - free space, and its **failed sector reads and writes**: requests
        the disk did not answer OK. Any above zero is a read or write a
        request could not finish; its error went to that request;
-     - its write cache, and whether the disk is still answering.
+     - its write cache, its flushes (each point a save was made durable)
+       and how many of them sent SYNCHRONIZE CACHE to the disk. A disk
+       that writes through needs no command, so on it that count stays at
+       zero and is no fault. "Did not know the command" means the disk
+       refused SYNCHRONIZE once and is treated as writing through from
+       then on; on a disk that says it caches, that is worth a look;
+     - whether the disk is still answering.
        "STOPPED ANSWERING" means a request went 30 s with no answer, or
        the disk asked for a reset. Nothing more is sent to it: every read
        and write after that fails, counted, and the requests that needed
@@ -173,6 +179,8 @@ From the top:
      - its idle check, with what it last found;
      - whether it takes writes. "writes: REFUSED" means its FAT copies
        could not be weighed at mount; it is weighed again once a minute.
+       "Sector writes turned away" counts the writes not made meanwhile:
+       above zero, saves were answered with an error.
 4. **The log**: its newest 60 lines.
 
 ## Five questions, answered

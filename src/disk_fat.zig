@@ -449,6 +449,9 @@ pub const Volume = struct {
     /// **FAILED SECTOR READS AND WRITES** (metal-vmm QUEUE 193.3): requests
     /// the disk did not answer OK, as this volume met them (a read tried
     /// again and failed is one). The Block says why (`blk.failures`).
+    /// Writes turned away because writes are refused (`refuseWrite`):
+    /// each one a save that did not happen (metal-vmm QUEUE 193, gap 9).
+    writes_turned_away: u64 = 0,
     read_failures: u64 = 0,
     write_failures: u64 = 0,
     /// Weighings tried again (`reweigh`), and those that failed.
@@ -843,7 +846,10 @@ pub const Volume = struct {
     pub const aliasTaken = disk_fat_dir.aliasTaken;
 
     pub fn writeSector(self: *Volume, lba: u32, from: *[sector_size]u8) Error!void {
-        if (self.writes == .refused) return refuseWrite();
+        if (self.writes == .refused) {
+            self.writes_turned_away +%= 1;
+            return refuseWrite();
+        }
         self.changes +%= 1;
         if (self.blk.write(self.start_lba + lba, @intFromPtr(from)) != virtio.blk_s_ok) {
             self.write_failures +%= 1;
@@ -869,7 +875,10 @@ pub const Volume = struct {
             props.@"unreachable"(@src(), "fat: a write of more sectors than one request", null);
             return Error.TooBig;
         }
-        if (self.writes == .refused) return refuseWrite();
+        if (self.writes == .refused) {
+            self.writes_turned_away +%= 1;
+            return refuseWrite();
+        }
         self.changes +%= 1;
         if (self.blk.writeMany(self.start_lba + lba, @intFromPtr(from), count) != virtio.blk_s_ok) {
             self.write_failures +%= 1;
