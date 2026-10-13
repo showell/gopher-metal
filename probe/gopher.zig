@@ -2071,10 +2071,10 @@ fn addVolume(facts: *std.ArrayList(webbox.host_facts.Fact), alloc: std.mem.Alloc
         try std.fmt.allocPrint(alloc, "{s}, serial {s}: free space unreadable ({s})", .{ kindName(v), named, @errorName(e) });
     try facts.append(alloc, .{ .label = label, .value = value });
     // **A VOLUME THAT REFUSES WRITES SAYS SO** (metal-vmm QUEUE 188.2).
-    if (v.writes_refused or v.reweighs > 0) try facts.append(alloc, .{
+    if (v.writes == .refused or v.reweighs > 0) try facts.append(alloc, .{
         .label = "writes",
         .value = try std.fmt.allocPrint(alloc, "{s}; the FAT's copies weighed again {d} times, {d} failed", .{
-            if (v.writes_refused) "REFUSED: the FAT's copies differ and could not be weighed; reads are served, and the weighing is tried again once a minute" else "taken: a weighing succeeded",
+            if (v.writes == .refused) "REFUSED: the FAT's copies differ and could not be weighed; reads are served, and the weighing is tried again once a minute" else "taken: a weighing succeeded",
             v.reweighs,
             v.reweighs_failed,
         }),

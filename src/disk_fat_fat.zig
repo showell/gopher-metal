@@ -110,10 +110,10 @@ pub fn cacheFat(self: *Volume, buf: []u8) Error!u32 {
 /// the first copy then lost a file the second held whole.
 pub fn cacheFatChecked(self: *Volume, buf: []u8, seen: ?[]u8) Error!Mirrors {
     // Allowed to write its own repair: the refusal is the weighing's answer.
-    self.writes_refused = false;
+    self.writes = .taken;
     const m = try cacheFatCheckedInner(self, buf, seen);
-    self.writes_refused = m.found == .unweighed;
-    if (self.writes_refused) props.reachable(@src(), "fat: a mount whose weighing failed refuses writes", null);
+    self.writes = if (m.found == .unweighed) .refused else .taken;
+    if (self.writes == .refused) props.reachable(@src(), "fat: a mount whose weighing failed refuses writes", null);
     return m;
 }
 
@@ -126,7 +126,7 @@ pub fn reweigh(self: *Volume, seen: []u8) Error!Mirrors {
     self.reweighs +%= 1;
     const m = self.cacheFatChecked(fat, seen) catch |e| {
         self.reweighs_failed +%= 1;
-        self.writes_refused = true;
+        self.writes = .refused;
         return e;
     };
     if (m.found == .unweighed) self.reweighs_failed +%= 1;

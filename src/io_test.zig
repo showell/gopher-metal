@@ -866,8 +866,8 @@ test "a volume whose FAT copies are unweighed refuses every write as a read-only
     try cwd.writeFile(io, .{ .sub_path = "data/chat/plan.md", .data = "saved" });
     // io holds its own copy of the volume (see `Two.deinit`): the flag goes on that one.
     const v = io_mod.dataVolume().?;
-    v.writes_refused = true;
-    defer v.writes_refused = false;
+    v.writes = .refused;
+    defer v.writes = .taken;
     const writes = t.volume.blk.writes;
     try testing.expectError(error.ReadOnlyFileSystem, cwd.writeFile(io, .{ .sub_path = "data/chat/plan.md", .data = "again" }));
     try testing.expectError(error.ReadOnlyFileSystem, cwd.createDirPath(io, "data/chat/new"));
@@ -875,6 +875,6 @@ test "a volume whose FAT copies are unweighed refuses every write as a read-only
     try testing.expectEqual(writes, t.volume.blk.writes);
     try testing.expectEqualStrings("saved", try cwd.readFileAlloc(io, "data/chat/plan.md", arena.allocator(), .unlimited));
     // Weighed: writable again.
-    v.writes_refused = false;
+    v.writes = .taken;
     try cwd.writeFile(io, .{ .sub_path = "data/chat/plan.md", .data = "again" });
 }

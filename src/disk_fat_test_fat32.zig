@@ -1007,7 +1007,7 @@ test "a mount whose weighing of apart copies fails refuses every write, writes n
         d.blk.fault = .{ .at = weigh_read_at, .kind = .fails };
         try d.mount(true);
         d.blk.fault = null;
-        try testing.expect(d.vol.writes_refused);
+        try testing.expect(d.vol.writes == .refused);
         // Every write refused, and nothing written.
         const writes = d.blk.writes;
         try testing.expectError(disk_fat.Error.WritesRefused, d.vol.writeFile("next.bin", bytes[0..4096]));
@@ -1020,7 +1020,7 @@ test "a mount whose weighing of apart copies fails refuses every write, writes n
         // the volume writable.
         const m = try d.vol.reweigh(d.check_room.?);
         try testing.expectEqual(.weighed, m.found);
-        try testing.expect(!d.vol.writes_refused);
+        try testing.expect(d.vol.writes == .taken);
         try d.expectFile("up.bin", bytes);
         try d.vol.writeFile("next.bin", bytes[0..4096]);
         try d.expectFile("next.bin", bytes[0..4096]);

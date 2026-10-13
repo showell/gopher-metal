@@ -368,7 +368,7 @@ fn writing(path: []const u8) Error!*disk_fat.Volume {
     const v = try volumeAt(place);
     // **THE ONE REFUSAL** (188.2): before anything of the write is done.
     // disk_fat's own writes refuse too; this answers it as what it is.
-    if (v.writes_refused) return Error.ReadOnlyFileSystem;
+    if (v.writes == .refused) return Error.ReadOnlyFileSystem;
     return v;
 }
 

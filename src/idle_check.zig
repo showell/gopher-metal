@@ -31,7 +31,7 @@ pub const VolumeCheck = struct {
     next_at: i96 = 0,
     /// **A VOLUME REFUSING WRITES IS WEIGHED AGAIN** (metal-vmm QUEUE 188.2):
     /// one whose FAT copies the mount could not weigh serves reads and
-    /// refuses writes (`disk_fat.Volume.writes_refused`). Each quiet moment
+    /// refuses writes (`disk_fat.Volume.writes`). Each quiet moment
     /// at least `reweigh_ns` after the last try weighs it again
     /// (`disk_fat.Volume.reweigh`), whole in one step: the FAT read afresh
     /// and checked once or twice, as at mount. Before any check, which can
@@ -55,7 +55,7 @@ pub const VolumeCheck = struct {
 
     fn step(ctx: *anyopaque, now: i96) idle.Outcome {
         const self: *VolumeCheck = @ptrCast(@alignCast(ctx));
-        if (self.vol.writes_refused) {
+        if (self.vol.writes == .refused) {
             if (now < self.reweigh_at) return .resting;
             self.reweigh_at = now + self.reweigh_ns;
             if (self.vol.reweigh(self.seen)) |m| {
@@ -189,13 +189,13 @@ test "idle check: a volume refusing writes is weighed again once a minute, stays
     var q: idle.Idle = .{};
     try q.add(check.init("the volume's check"));
     // As a mount leaves it whose weighing failed.
-    d.vol.writes_refused = true;
+    d.vol.writes = .refused;
     var now: i96 = std.time.ns_per_s;
     clock_now = now;
     // The disk answers nothing: the weighing fails, the volume stays refused.
     d.blk.fail_after = d.blk.requests;
     try testing.expect(q.turn(now, clock));
-    try testing.expect(d.vol.writes_refused);
+    try testing.expect(d.vol.writes == .refused);
     try testing.expectEqual(@as(u64, 1), d.vol.reweighs);
     try testing.expectEqual(@as(u64, 1), d.vol.reweighs_failed);
     try testing.expectError(disk_fat.Error.WritesRefused, d.vol.writeFile("data/b.md", "no"));
@@ -213,7 +213,7 @@ test "idle check: a volume refusing writes is weighed again once a minute, stays
     try testing.expect(q.turn(now, clock));
     try testing.expectEqual(@as(u64, 2), d.vol.reweighs);
     try testing.expectEqual(@as(u64, 1), d.vol.reweighs_failed);
-    try testing.expect(!d.vol.writes_refused);
+    try testing.expect(d.vol.writes == .taken);
     try d.vol.writeFile("data/b.md", "yes");
 }
 

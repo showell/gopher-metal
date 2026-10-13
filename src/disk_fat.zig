@@ -310,6 +310,9 @@ pub fn hasEmptyPart(path: []const u8) bool {
     return path[0] == '/' or path[path.len - 1] == '/' or std.mem.indexOf(u8, path, "//") != null;
 }
 
+/// Whether a volume takes writes (`Volume.writes`).
+pub const Writes = enum { taken, refused };
+
 pub const Volume = struct {
     blk: *virtio.Block,
     /// **EVERY SECTOR WRITE TRIED**, landed or not: a check made a slice at a
@@ -438,10 +441,11 @@ pub const Volume = struct {
     /// **WRITES REFUSED, THE COPIES UNWEIGHED** (metal-vmm QUEUE 188.2): a
     /// mount whose weighing of apart copies failed part way holds the first
     /// copy, and a write made from it would allocate a lost file's clusters
-    /// and write over the second copy, the good one. Set by such a mount,
-    /// cleared by a weighing that succeeds; while set, `writeSector` and
-    /// `writeSectors`, which every write goes through, refuse.
-    writes_refused: bool = false,
+    /// and write over the second copy, the good one. Refused by such a
+    /// mount, taken again after a weighing that succeeds; while refused,
+    /// `writeSector` and `writeSectors`, which every write goes through,
+    /// refuse.
+    writes: Writes = .taken,
     /// Weighings tried again (`reweigh`), and those that failed.
     reweighs: u64 = 0,
     reweighs_failed: u64 = 0,
@@ -832,7 +836,7 @@ pub const Volume = struct {
     pub const aliasTaken = disk_fat_dir.aliasTaken;
 
     pub fn writeSector(self: *Volume, lba: u32, from: *[sector_size]u8) Error!void {
-        if (self.writes_refused) return refuseWrite();
+        if (self.writes == .refused) return refuseWrite();
         self.changes +%= 1;
         if (self.blk.write(self.start_lba + lba, @intFromPtr(from)) != virtio.blk_s_ok) {
             if (self.dirs) |*c| c.drop(lba, 1);
@@ -857,7 +861,7 @@ pub const Volume = struct {
             props.@"unreachable"(@src(), "fat: a write of more sectors than one request", null);
             return Error.TooBig;
         }
-        if (self.writes_refused) return refuseWrite();
+        if (self.writes == .refused) return refuseWrite();
         self.changes +%= 1;
         if (self.blk.writeMany(self.start_lba + lba, @intFromPtr(from), count) != virtio.blk_s_ok) {
             if (self.dirs) |*c| c.drop(lba, count);

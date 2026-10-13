@@ -95,7 +95,7 @@ pub fn undoUnlink(self: *Volume, held: *const Unlinked, clusters: u32) void {
 /// `IsDirectory`, as `from` `BadName`.
 pub fn rename(self: *Volume, from: []const u8, to: []const u8) Error!void {
     defer self.balanced();
-    if (self.writes_refused) return Error.WritesRefused;
+    if (self.writes == .refused) return Error.WritesRefused;
     const a = try self.parentOf(from);
     const b = try self.parentOf(to);
     if (a.cluster != b.cluster) {
@@ -227,7 +227,7 @@ pub fn rename(self: *Volume, from: []const u8, to: []const u8) Error!void {
 /// `removeTree` is how a directory goes.
 pub fn remove(self: *Volume, path: []const u8) Error!void {
     defer self.balanced();
-    if (self.writes_refused) return Error.WritesRefused;
+    if (self.writes == .refused) return Error.WritesRefused;
     const p = try self.parentOf(path);
     const e = (try self.find(p.cluster, p.name)) orelse {
         props.reachable(@src(), "fat: a remove of a file that is not there is refused", null);
@@ -261,7 +261,7 @@ pub fn walkFound(gone: Landing) Error!void {
 /// error is the caller's.
 pub fn removeTree(self: *Volume, path: []const u8) Error!void {
     defer self.balanced();
-    if (self.writes_refused) return Error.WritesRefused;
+    if (self.writes == .refused) return Error.WritesRefused;
     // A path with an empty part names nothing to `open`, which is
     // absence, which is done: refused first, as every path operation
     // refuses it (metal-vmm QUEUE 172).

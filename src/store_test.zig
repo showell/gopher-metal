@@ -434,7 +434,7 @@ test "a volume refusing writes is the Store's Io on every write, never Damaged, 
     var f = FatStore{ .vol = &d.vol };
     const s = f.store_();
     try s.write("data/a", "a file");
-    d.vol.writes_refused = true;
+    d.vol.writes = .refused;
     try testing.expectError(Error.Io, s.write("data/b", "x"));
     try testing.expectError(Error.Io, s.append("data/a", "x"));
     try testing.expectError(Error.Io, s.replace("data/a", "x"));
@@ -442,6 +442,6 @@ test "a volume refusing writes is the Store's Io on every write, never Damaged, 
     var buf: [16]u8 = undefined;
     const n = try s.read("data/a", &buf);
     try testing.expectEqualStrings("a file", buf[0..n]);
-    d.vol.writes_refused = false;
+    d.vol.writes = .taken;
     try s.replace("data/a", "taken");
 }

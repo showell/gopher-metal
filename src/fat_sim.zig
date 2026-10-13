@@ -808,7 +808,7 @@ const Sim = struct {
         const E = disk_fat.Error;
         var buf: [300]u8 = undefined;
         var buf2: [300]u8 = undefined;
-        vol.writes_refused = true;
+        vol.writes = .refused;
         const writes = s.disk.blk.writes;
         const dir = s.someDir(r);
         const fresh = join(dir orelse "", "refused", &buf);
@@ -833,9 +833,9 @@ const Sim = struct {
         props.reachable(@src(), "fat_sim: a volume refusing writes refuses each kind, and writes nothing", null);
         if (s.disk.check_room) |room| {
             const m = vol.reweigh(room) catch |e| return s.fault(@errorName(e));
-            if (m.found == .unweighed or vol.writes_refused) return s.fault("a weighing on a disk that answers left the volume refusing writes");
+            if (m.found == .unweighed or vol.writes == .refused) return s.fault("a weighing on a disk that answers left the volume refusing writes");
             props.reachable(@src(), "fat_sim: a volume refusing writes is weighed again, and takes writes", null);
-        } else vol.writes_refused = false; // a FAT on disk is never weighed, so never refused
+        } else vol.writes = .taken; // a FAT on disk is never weighed, so never refused
     }
 
     /// A file the model holds, by the probe's dice, or none.
