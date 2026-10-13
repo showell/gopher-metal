@@ -10,8 +10,9 @@ longest any GET / waited.
 QEMU's disk here answers a request in ~0.1 ms, prod's network volume (write
 cache off) in ~2 ms (a 1.8 MB upload's 93 requests took 0.18 s there,
 2026-10-11). On v28: 93, 218 and 2,017 requests (64 KiB each at most), so
-a 100 MB upload's turn is ~4-8 s on prod. The transfer is not the cost
-(~60 MB/s here, drained before the turn).
+a 100 MB upload's turn is ~4-8 s on prod. On v29 (1 MiB requests, the FAT
+written as runs, 2026-10-13): 59, 26 and 115, the 100 MB turn ~0.23 s on
+prod. The transfer is not the cost (~60 MB/s here, drained before the turn).
 """
 import os, sys, time, threading, http.client, re, shutil
 
