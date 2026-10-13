@@ -614,6 +614,7 @@ pub fn kmain() noreturn {
         .trusted_proxy = trusted_proxy,
         .facts = metalFacts,
         .log = metalLog,
+        .logs = metalLogs,
     }) catch |e| {
         serial.put("  ");
         serial.put(@errorName(e));
@@ -1944,6 +1945,25 @@ fn metalLog(io: Io, alloc: std.mem.Allocator) anyerror!?[]const u8 {
     // Cut short: the newest bytes begin part way through a line.
     if (text.len < serial.ring.len()) if (std.mem.indexOfScalar(u8, text, '\n')) |i| return text[i + 1 ..];
     return text;
+}
+
+/// **THE WHOLE LOG, FOR /admin/log** (metal-vmm QUEUE 189.3): the ring, all
+/// 1.25 MiB of it, and the boot before this one's where the restart kept it.
+fn metalLogs(io: Io, alloc: std.mem.Allocator) anyerror!?webbox.host_facts.Logs {
+    _ = io;
+    const now = try alloc.alloc(u8, serial.ring.len());
+    var logs: webbox.host_facts.Logs = .{
+        .this_boot = serial.ring.read(now),
+        .capacity = serial.ring.buf.len,
+        .lost = serial.ring.lost(),
+        .booted_unix = if (booted_unix != 0) booted_unix else null,
+        .host_commit = gm_build.commit,
+    };
+    if (gm_build.restart) if (metal.restarting.keptBefore()) |p| {
+        const before = try alloc.alloc(u8, p.ring.len());
+        logs.before = .{ .boot = p.boot, .text = p.read(before) };
+    };
+    return logs;
 }
 
 /// **WHAT THIS MACHINE SAYS ABOUT ITSELF**, for /admin/host: what a Linux

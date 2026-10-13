@@ -111,6 +111,13 @@ pub fn begin(now: *const fn () ?i64) Boot {
 }
 
 /// From here on, a fatal error restarts the machine.
+/// The boot before this one's log, as the kept log found it, if it did
+/// (for /admin/log, metal-vmm QUEUE 189.3).
+pub fn keptBefore() ?kept_log.Previous {
+    const k = kept orelse return null;
+    return k.previous;
+}
+
 pub fn serving() void {
     heapClear(keptRegion());
     serial.on_fatal = fatal;
