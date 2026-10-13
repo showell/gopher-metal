@@ -115,12 +115,21 @@ From the top:
        answering in the middle of a connection;
      - strays reset: segments for a connection the machine no longer has;
      - dropped for a bad checksum: frames damaged on the way in. On a
-       droplet's private network this should stay at zero.
+       droplet's private network this should stay at zero;
+     - arrived ahead of the next byte: a segment before them was lost or
+       late on the way in (incoming loss); from behind: the peer sent
+       again what had already come; past the window: the peer sent more
+       than there was room for. Growing "ahead" is loss toward the machine.
    - **Network card stalls**: sends that waited a whole second for the card
      to take a frame back, the card asking for a reset, and frames dropped
      while it took none. Any above zero means the card stopped taking
      frames for a while; TCP sends dropped frames again. "STALLED NOW"
      means it has not taken one back since.
+   - **Network card ring**: entries from the card naming a buffer never
+     offered (each one a receive buffer lost for good), with a length no
+     frame has, and send completions for a buffer not lent. A sound card
+     never does these: any above zero is the card or its emulation
+     misbehaving.
    - Memory.
    - **Uploads**: a count since boot by answer, and the newest 10. The
      answers are ok, too big, over quota, a kind not taken, writes refused,

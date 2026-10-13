@@ -119,6 +119,13 @@ pub const Net = struct {
     reset_asked: u64 = 0,
     dropped_stalled: u64 = 0,
     stalled: bool = false,
+    /// **THE CARD'S RING, MISBEHAVING** (metal-vmm QUEUE 193.5): receive
+    /// entries naming a buffer we never offered (each one a buffer lost to
+    /// the ring for good), receive entries with a length no frame has, and
+    /// send completions for a buffer we had not lent. Zero on a sound card.
+    rx_strange_ids: u64 = 0,
+    rx_bad_lengths: u64 = 0,
+    tx_strange_completions: u64 = 0,
 
     pub fn init(found: virtio.Device, mem: *Memory) virtio.Error!Net {
         const st = try virtio.negotiate(found, feature_mac);
@@ -234,7 +241,10 @@ pub const Net = struct {
     fn reclaim(self: *Net) void {
         while (self.tx.take()) |e| {
             virtio.ack(self.device);
-            if (e.id >= tx_buffers or !self.lent[e.id]) continue;
+            if (!txEntryOurs(e.id, &self.lent)) {
+                self.tx_strange_completions +%= 1;
+                continue;
+            }
             self.lent[e.id] = false;
             self.free[self.free_len] = @intCast(e.id);
             self.free_len += 1;
@@ -262,12 +272,19 @@ pub const Net = struct {
     pub fn poll(self: *Net) ?struct { id: u16, frame: []const u8 } {
         while (self.rx.take()) |e| {
             virtio.ack(self.device);
-            if (e.id >= rx_buffers) continue;
-            const id: u16 = @intCast(e.id);
-            if (e.len <= @sizeOf(Header) or e.len > buffer_size) {
-                self.recycle(id);
-                continue;
+            switch (rxEntry(e.id, e.len)) {
+                .strange_id => {
+                    self.rx_strange_ids +%= 1;
+                    continue;
+                },
+                .bad_length => {
+                    self.rx_bad_lengths +%= 1;
+                    self.recycle(@intCast(e.id));
+                    continue;
+                },
+                .frame => {},
             }
+            const id: u16 = @intCast(e.id);
             return .{
                 .id = id,
                 .frame = self.mem.rx_bufs[id][@sizeOf(Header)..e.len],
@@ -290,6 +307,25 @@ pub const Net = struct {
         self.rx.notifyIfWanted();
     }
 };
+
+/// **WHAT A USED-RING ENTRY IS** (metal-vmm QUEUE 193.5), decided apart
+/// from the device so it is tested: a frame in one of our buffers; an entry
+/// naming no buffer we offered (the buffer the device really used is lost to
+/// the ring for good, one fewer each time); or a length no frame has (too
+/// short for the header, or past the buffer), whose buffer goes straight back.
+pub const RxEntry = enum { frame, strange_id, bad_length };
+
+pub fn rxEntry(id: u32, len: u32) RxEntry {
+    if (id >= rx_buffers) return .strange_id;
+    if (len <= @sizeOf(Header) or len > buffer_size) return .bad_length;
+    return .frame;
+}
+
+/// A send completion: one of ours, given back; or one naming a buffer we
+/// did not lend, passed over.
+pub fn txEntryOurs(id: u32, lent: []const bool) bool {
+    return id < tx_buffers and id < lent.len and lent[id];
+}
 
 const testing = @import("std").testing;
 
@@ -315,4 +351,18 @@ test "send refuses a frame too long for its buffer: counted, nothing sent, the r
     try testing.expectEqual(@as(u64, 0), n.sent); // it was not sent
     try testing.expectEqual(tx_buffers, n.free_len); // no buffer taken
     try testing.expectEqual(@as(u16, 7), mem.tx_ring.avail_idx); // the ring did not move
+}
+
+test "a used-ring entry: a frame, a buffer we never offered, a length no frame has; a send completion we did not lend (metal-vmm QUEUE 193.5)" {
+    try testing.expectEqual(RxEntry.frame, rxEntry(0, @sizeOf(Header) + 60));
+    try testing.expectEqual(RxEntry.frame, rxEntry(rx_buffers - 1, buffer_size));
+    try testing.expectEqual(RxEntry.strange_id, rxEntry(rx_buffers, 100));
+    try testing.expectEqual(RxEntry.strange_id, rxEntry(0xFFFF_FFFF, 100));
+    try testing.expectEqual(RxEntry.bad_length, rxEntry(0, @sizeOf(Header)));
+    try testing.expectEqual(RxEntry.bad_length, rxEntry(0, buffer_size + 1));
+    var lent = [_]bool{false} ** tx_buffers;
+    lent[2] = true;
+    try testing.expect(txEntryOurs(2, &lent));
+    try testing.expect(!txEntryOurs(3, &lent));
+    try testing.expect(!txEntryOurs(tx_buffers, &lent));
 }

@@ -1922,3 +1922,20 @@ test "item 96: one lost frame to the client, swept over the first 20, always rec
         }
     }
 }
+
+test "what arrives out of order is counted: ahead of the next byte, and from behind (metal-vmm QUEUE 193.4)" {
+    var ahead: u64 = 0;
+    var behind: u64 = 0;
+    for (1..41) |seed| {
+        const sim = try std.testing.allocator.create(Sim);
+        defer std.testing.allocator.destroy(sim);
+        sim.init(seed);
+        try sim.run();
+        ahead += sim.table.arrived_ahead;
+        behind += sim.table.arrived_behind;
+    }
+    // The simulated network loses, reorders and duplicates: over forty
+    // seeds a segment arrives ahead of a lost one, and a resend from behind.
+    try std.testing.expect(ahead > 0);
+    try std.testing.expect(behind > 0);
+}

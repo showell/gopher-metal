@@ -2148,6 +2148,10 @@ fn metalFacts(io: Io, alloc: std.mem.Allocator) anyerror![]const webbox.host_fac
     if (turning) |t| try add(&facts, alloc, "network card stalls", "{d} sends waited out their second, {d} times the card asked for a reset, {d} frames dropped while it took none back{s}", .{
         t.wire.nic.send_stalls, t.wire.nic.reset_asked, t.wire.nic.dropped_stalled, if (t.wire.nic.stalled) "; STALLED NOW" else "",
     });
+    // **THE CARD'S RING** (193.5): entries no sound card makes.
+    if (turning) |t| try add(&facts, alloc, "network card ring", "{d} received into a buffer never offered, {d} with a length no frame has, {d} send completions for a buffer not lent", .{
+        t.wire.nic.rx_strange_ids, t.wire.nic.rx_bad_lengths, t.wire.nic.tx_strange_completions,
+    });
     return facts.items;
 }
 

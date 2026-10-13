@@ -505,6 +505,13 @@ pub const Table = struct {
     strays: u64 = 0,
     /// Segments dropped for a bad checksum.
     damaged: u64 = 0,
+    /// **WHAT ARRIVES OUT OF ORDER** (metal-vmm QUEUE 193.4): a segment
+    /// ahead of the next byte expected (one before it was lost, or is late:
+    /// the card or the network dropped it), one from behind (a resend of what
+    /// was already taken), and one carrying more than the window holds.
+    arrived_ahead: u64 = 0,
+    arrived_behind: u64 = 0,
+    past_window: u64 = 0,
     /// Reopened windows said again.
     window_updates: u64 = 0,
     /// Round trips measured, and the newest SRTT.
@@ -1137,6 +1144,8 @@ pub const Table = struct {
         const early = c.ahead(seq);
         props.sometimes(@src(), early, "tcp: a segment arrives ahead of the next expected byte", null);
         if (seq != c.rcv_nxt and !early) {
+            // A resend of what was taken (a bare ACK carries nothing to count).
+            if (data.len > 0 or flags & flag_fin != 0) self.arrived_behind +%= 1;
             props.reachable(@src(), "tcp: a segment from behind is answered, not taken", .{ .conn = i });
             // **ONLY FROM BEHIND, NOT BEYOND.** The peer cannot yet have
             // sent a segment past our window; taking its ACK would let a
@@ -1205,7 +1214,10 @@ pub const Table = struct {
 
         if (early) {
             // Ahead: re-acknowledge, asking for the next byte.
-            if (data.len > 0 or flags & flag_fin != 0) self.emit(wire, i, flag_ack, c.highest(), "");
+            if (data.len > 0 or flags & flag_fin != 0) {
+                self.arrived_ahead +%= 1;
+                self.emit(wire, i, flag_ack, c.highest(), "");
+            }
             return self.settle(i, event, fin_acknowledged, now);
         }
 
@@ -1219,6 +1231,7 @@ pub const Table = struct {
             // untaken part waits for it.
             const n = @min(c.room(), data.len);
             props.sometimes(@src(), n < data.len, "tcp: a peer sends past the window and only what fits is taken", .{ .room = c.room(), .len = data.len });
+            if (n < data.len) self.past_window +%= 1;
             @memcpy(c.rx[c.end..][0..n], data[0..n]);
             c.end += n;
             c.rcv_nxt +%= @intCast(n);
@@ -1295,6 +1308,9 @@ pub fn writeCounts(t: *const Table, w: *std.Io.Writer) std.Io.Writer.Error!void 
     });
     try w.print("{d} peers given up on, {d} closes never finished, {d} strays reset, {d} segments dropped for a bad checksum; ", .{
         t.given_up, t.fin_waits_expired, t.strays, t.damaged,
+    });
+    try w.print("{d} segments arrived ahead of the next byte (one before them lost or late), {d} from behind (resends), {d} past the window; ", .{
+        t.arrived_ahead, t.arrived_behind, t.past_window,
     });
     try w.print("{d} round trips measured, the newest {d} ns", .{ t.samples, t.measured_ns });
 }
