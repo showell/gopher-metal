@@ -1061,6 +1061,7 @@ fn serveOne(
     var bus = Bus.of(hub);
     var peer_text: [15]u8 = undefined;
     bus.peer = ipText(&peer_text, table.conns[i].peer_ip);
+    bus.at_unix_ms = wallMs();
     // The stream the handler kept is route's answer (angry-gopher 157(a)):
     // on an error, route has already dropped it.
     // A drained body handed to the handler's read as it is (170.5): only a
