@@ -56,4 +56,5 @@ test {
     _ = @import("net.zig");
     _ = @import("idle.zig");
     _ = @import("idle_check.zig");
+    _ = @import("request_line.zig");
 }
