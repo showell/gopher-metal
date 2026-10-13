@@ -111,7 +111,7 @@ fi
 # probes, the two chat judges and the droplet's boots, which do.
 
 # **THE SITE VOLUME, FROM THIS CHECKOUT** (tools/site_volume.py: the judge's
-# own stage and build_disk, no boot): what metal-vmm's timeouts.sh and
+# own stage and build_disk, no boot): what metal-vmm's timeouts.sh, pc_vs_microvm.sh and
 # long.sh's sweeps judge, where they read whatever volume a chat judge had
 # last left at a default path.
 SITE_VOLUME="$HOME/build/zig-metal-unikernel/site/pristine.img"
@@ -127,7 +127,7 @@ VMM="${METAL_VMM:-$HOME/showell_repos/metal-vmm}"
 (cd "$VMM" && zig build 2>&1 | tail -5; exit "${PIPESTATUS[0]}") || failed+=(vmm-build)
 (cd "$VMM" && ./check.sh 2>&1 | tail -2; exit "${PIPESTATUS[0]}") || failed+=(vmm-check)
 (cd "$VMM" && ./same.sh 2>&1 | tail -2; exit "${PIPESTATUS[0]}") || failed+=(vmm-same)
-(cd "$VMM" && ./pc_vs_microvm.sh all 2>&1 | tail -2; exit "${PIPESTATUS[0]}") || failed+=(vmm-pc)
+(cd "$VMM" && SITE="$SITE_VOLUME" ./pc_vs_microvm.sh all 2>&1 | tail -2; exit "${PIPESTATUS[0]}") || failed+=(vmm-pc)
 # **TIMEOUTS, IN THE MACHINE'S TIME**: what a setting governs, proved by
 # moving it, read off metal-vmm's clock rather than waited out on the box's.
 (cd "$VMM" && SITE="$SITE_VOLUME" ./timeouts.sh 2>&1 | tail -3; exit "${PIPESTATUS[0]}") || failed+=(vmm-timeouts)
