@@ -1,416 +1,351 @@
 # zig-metal-unikernel
 
-angry-gopher's server (chat, and the apps it serves: Lyn Rummy, Seattle
-Delivery, Safari and the rest) on a machine with no operating system under it.
+A small operating-system kernel, written in Zig, that runs one web
+application on a cloud machine with nothing else under it. No Linux, no libc,
+no system calls: the kernel boots the machine, drives the network card and the
+disks, and serves HTTP itself. It has served
+[lynrummy.com](https://lynrummy.com) since 2026-10-04.
 
-Everything here targets `x86_64-freestanding`: no kernel, no libc, no syscalls.
-A kernel is one root file over `src/`, linked with a script that puts a PVH
-note at the front. Tests boot it on QEMU's `microvm` machine, on metal-vmm,
-and on a QEMU laid out like a DigitalOcean droplet; for real, it boots on a
-droplet through our own BIOS loader.
+This repo was called **gopher-metal** until 2026-10-13. GitHub redirects the
+old links, and dated documents here still use the old name.
 
-## Start here
+## What it is
 
-**Serving (2026-10-10, 12:10 UTC): the tag `v22`** — zig-metal-unikernel `bc459b3`
-with angry-gopher `51713cd6` — at **https://lynrummy.com**, the whole site, on
-a droplet with no Linux on it, with prod's real data, since the cutover of
-2026-10-04 ([`CUTOVER.md`](CUTOVER.md)). `v21` (`81d7a35`) is the way back.
-v22 over v21, served code only (the whole note is the tag's message): a
-peer repeating one ACK can no longer panic the kernel, and a resent SYN-ACK
-is not timed (Karn); a write the disk refuses gives back what it took or
-counts what it could not, a failed rename keeps the old file where it can,
-and a name that is another file's 8.3 alias is refused; 64 MiB of the
-volume is kept for small writes; failed cleanups, leaked clusters and
-orphaned long-name parts are counted on /admin/host; angry-gopher answers an
-error before any byte with a 500, and a failed delete is an error, never
-reported as done.
-What serves is a tag, not a branch: `master` may be ahead of it.
+A **unikernel** is one program compiled together with just enough kernel to
+run it, booted directly on a machine (real or virtual), with no general
+operating system in between. This one is written in Zig 0.16 and targets
+`x86_64-freestanding`, Zig's name for "no operating system".
 
-**Branches and tags:**
-- `master` — everything.
-- `v17`, `v18`, `v20`, `v21`, … — released images, one tag per release; the newest serves. `antithesis-sdk`
-  and `box/v18` are merged and retired.
-- `claude/*` — a cloud session's work; the box merges it into `master`, and a
-  cloud session never pushes `master` or a tag.
+What it does by itself, with no borrowed code below the application:
 
-**Live work is in metal-vmm's [`QUEUE.md`](https://github.com/showell/metal-vmm/blob/master/QUEUE.md)**
-on `master`: one queue for all four repos, with the cloud session's charter
-beside it in `CLOUD_WORK.md`. This repo's own queue is retired
-(`git show 3cd662c:QUEUE.md`) and its item numbers collide with metal-vmm's,
-so this README says "metal-vmm QUEUE item N" for a live item and "the retired
-zig-metal-unikernel queue, item N" for an old one. In code comments and commits, a
-live item says "metal-vmm"; a bare "QUEUE.md item N" is the retired queue's.
+- **Boots a real cloud machine.** In production that is a DigitalOcean
+  **droplet** (DigitalOcean's name for a virtual machine you rent). A droplet
+  starts like an old PC: its BIOS runs the first sector of the disk. This repo
+  has its own two-stage boot loader (`droplet/loader.S`) that takes it from
+  there to the kernel, and its own disk-image builder (`droplet/image.zig`).
+  Under QEMU the kernel is started directly through PVH, the entry point QEMU
+  and other virtual-machine monitors use for 64-bit kernels.
+- **Drives its own devices.** Virtio network cards and disks (virtio is the
+  standard family of virtual devices a hypervisor offers), over both the PCI
+  bus a droplet has and the simpler MMIO layout QEMU's small `microvm`
+  machine has; DigitalOcean's attachable volumes (virtio-SCSI); the serial
+  port; the VGA text screen DigitalOcean's web console shows; the CMOS clock;
+  the interrupt controller and timer.
+- **Speaks the network itself.** Its own DHCP, ARP, IPv4 and TCP. On top of
+  its TCP it runs Zig's standard-library HTTP server, `std.http.Server`,
+  unmodified.
+- **Keeps files itself.** Its own FAT16 and FAT32 (the filesystem a USB stick
+  uses), read and write, with long names and folders. FAT was chosen because
+  Linux can read and write the same volume, which makes it easy to judge and
+  to back up.
 
-**What needs what:**
-- **QEMU and KVM** (the dev box): `./gates.sh`, `./long.sh`, `probe/run.sh`,
-  every judge, `droplet/*.sh`, and metal-vmm.
-- **zig and python only** (anywhere, a cloud session included): `zig build
-  test`, `zig build properties`, `zig build kernels`, and the simulators.
-- **Every build** needs `zig-coverage-sdk` checked out beside this repo
-  (`build.zig.zon`: `.path = "../zig-coverage-sdk"`).
+What it is not:
 
-**The repos:** four, and they stay separate.
-- **zig-coverage-sdk** — `always`/`sometimes` coverage properties
-  ([`COVERAGE.md`](COVERAGE.md)); a required sibling checkout.
-- **metal-vmm** — test-only: our own deterministic KVM hypervisor, which
-  `gates.sh` and `long.sh` run (`METAL_VMM`); and the live queue.
-- **zig-metal-unikernel** (this repo) — the machine: the kernel, drivers, FAT,
-  TCP, the boot loader, the droplet tools, and the gates that judge metal
-  against angry-gopher's Linux build.
-- **angry-gopher** — the program: every route and app, written and tested
-  on Linux. The build compiles its `zig-server/src` from a sibling checkout
-  (`-Dgopher-root`, no copy), handing each file this repo's `host_io`.
-- **zig-webbox** — the library both applications are built on (`webbox`),
-  compiled the same way from its sibling checkout (`-Dwebbox-root`).
+- **No processes and no shell.** One program is compiled into the kernel. You
+  cannot log in to it or run anything else on it.
+- **One core, no threads.** One loop moves every connection along and serves
+  one request at a time, start to finish. There is no preemption.
+- **No TLS.** It speaks plain HTTP/1.1. In production a separate Linux machine
+  runs Caddy, which handles HTTPS and forwards requests to it over
+  DigitalOcean's private network.
+- **Not general purpose.** It runs Zig applications written against one
+  library, zig-webbox (below), and nothing else.
 
-A release is a new boot image from this repo carrying both repos' commits
-("A deploy", below). prod's old Linux droplet runs only Caddy, which
-proxies to metal, and the watchdog; its own server is stopped.
+## How it is used now
 
-**What `v20` changed** (after v18): folders held in memory (a chat send 466
-disk requests to 88); the flush decision pulled out and simulated
-(`durable.zig`); a config file that exists but can't be read stops the boot
-(B21); `remove` refuses a folder (B22); a path through a file answers
-`NotDir` as on Linux; the request-head buffer sized from angry-gopher's
-`limits.zig`; a short disk transfer is a failed one (the SCSI residual);
-boot tries a read three times (B25); FAT copies apart keep the one that
-checks cleaner (B26); a response cut by the machine's stop is said; and
-angry-gopher's store reads that served a failure as nothing, its topic
-downloads' names, and its `store.has`. Caddy's body cap became `1MiB`.
+### The applications
 
-**Open (2026-10-08):**
-- **On `master`, not yet released** (for the next one): the disk check reads
-  the FAT 64 sectors a request, the console in 16-byte bursts (both a faster
-  boot, on metal-vmm and on the droplet); FAT copies that cannot be weighed
-  are left as they are; and angry-gopher's work since `8b617f3c` (the
-  store-absence lint and its 67 sites, among them a counter that reissued
-  IDs; a home page that cannot render answers 500).
-- **Backups are not set up.** The plan, agreed with Steve, is in
-  `CUTOVER.md` "Backups, after the cutover": a DigitalOcean volume snapshot
-  every day at 20:00 UTC by a `doctl` cron on the dev box (it needs an API
-  token from Steve), and the encrypted tar by hand with `droplet/backup.sh`
-  on prod. Until then, chat's only copies are the live volume and prod's
-  frozen pre-cutover data.
+Both applications are built on **[zig-webbox](https://github.com/showell/zig-webbox)**,
+a small Zig library: the application supplies its routes, pages and data
+rules, and the library does the HTTP, cookies, live streams and storage. The
+library reaches the machine only through one module, `host_io`. On Linux that
+module is the standard library's; here it is this kernel's
+(`src/host_io_metal.zig`). No line of the application changes between the
+two.
 
-**The contracts, written down:** [`STORE.md`](STORE.md) (the data: eleven
-operations, their crash promises, judged by `zig build store-judge` on
-angry-gopher's own store over Linux and over this machine);
-[`HOST.md`](HOST.md) (what both hosts promise the application: one handler
-at a time, durability, one source of truth for limits); angry-gopher's
-`zig-server/src/limits.zig` (every bound on a request);
-[`MUTATION.md`](MUTATION.md) (which planted bugs the tests catch).
+- **[angry-gopher](https://github.com/showell/angry-gopher)**, Steve
+  Howell's personal site, lynrummy.com: a chat and a handful of small apps
+  (Lyn Rummy, a two-player rummy game, among them). **In production on this kernel.**
+- **[dog-park](https://github.com/showell/dog-park)**, a small multiplayer
+  toy. It is here to prove the kernel hosts *an* application, not just one.
+  Every full check builds it as a kernel and judges it against its Linux
+  build. Its own README (2026-10-11) says it does not serve the public yet.
 
-**Files to read, in order:**
-1. this README — what metal is, how it is built and tested, and where it
-   stands.
-2. [`CUTOVER.md`](CUTOVER.md) — the record of the cutover, and the
-   last-resort way back to Linux. Restarting prod's Linux server loses
-   everything written on metal since the cutover; the normal way back is the
-   previous image.
-3. `docs/` — the design, by topic ("The design", at the end).
+**The same source, the same answers.** Each application builds as an ordinary
+Linux program and as a kernel from this repo. The checks here send the same
+requests to both, built from the same source over the same files, and require
+the same answers: status, redirect, cookies, content type, and the body byte
+for byte (times stamped by the clock are compared to the window each side
+handled the request in). Files a request writes are read back from both sides
+and must match. Linux is the reference: if the kernel disagrees with Linux,
+the kernel is wrong.
 
-**Who works on it:** Claude on the dev box, with Steve. A cloud session
-works through metal-vmm's `QUEUE.md` and `CLOUD_WORK.md` (see
-[`CLAUDE.md`](CLAUDE.md)): it built the simulators, the properties and the
-first Store, and is now the adversary (planted bugs, reviews of the box's
-work).
+### The repos
 
-## Where it runs: https://lynrummy.com
+Six repos, kept separate, checked out side by side:
 
-- **What:** angry-gopher's whole route table, so chat and every app
-  (Lyn Rummy, Seattle Delivery, Safari, puzzles, chess). Steve's decision,
-  2026-10-01: the apps are served from metal along with chat, not split off.
-- **Where:** a droplet in nyc2, booted from a custom image, with
-  no Linux on it. It listens on its **private** network card only
-  (10.100.0.4). prod's Caddy (the old Linux droplet) proxies lynrummy.com to
-  it (angry-gopher's `deploy/Caddyfile`), so TLS, certificates and HTTP/2
-  stay on Linux; metal speaks plain HTTP/1.1 and does not answer on its
-  public address.
-- **Its data is on a DigitalOcean volume** (FAT32, 16 GiB, nyc2): chat's
-  data (`data/`, `auth/`) on the volume, which a new image does not touch
-  (`src/scsi.zig`), and the site's own files (`pages/`, `gallery/`,
-  `zig-metal-unikernel.conf`) on the boot disk, where each new image updates them.
-  The kernel mounts both and sends each path to one by its first directory
-  (`src/io.zig`); it refuses, and logs, any write outside `data/` and
-  `auth/`. **It serves one volume by name:** the boot image's
-  `zig-metal-unikernel.conf` names the FAT serial `blkid` shows
-  (`droplet/volume-serial`), and the machine stops rather than serve with
-  that volume missing or another one attached, either of which would answer
-  as an empty site and lose what was written. A path with `.` or `..` is
-  refused. The volume was built from prod's data at the cutover
-  (`droplet/build_volume.py`) and written from DigitalOcean's recovery
-  console; a new image leaves it as it is.
-- **Each boot checks both disks** before serving (the retired zig-metal-unikernel
-  queue, item 13): files, folders, clusters in use, leaked clusters and
-  problems, one line per disk in the log. A damaged disk is served from and
-  reported, not refused.
-- **How to see it:** `/admin/host` (admin login) shows the running server,
-  the same page on Linux and on metal. Its first half is the application's
-  (version, angry-gopher's commit, base heap, refused requests), and its
-  second half is the host's own account of itself. On metal that covers:
-  - this repo's commit, the boot time, uptime and clock;
-  - requests, connections and streams;
-  - memory, both disks' serials, free space and write caches;
-  - disk work and NMIs;
-  - **the log:** the newest 60 lines of the serial ring, with secrets taken
-    out as they were written (the retired zig-metal-unikernel queue, item 32).
-    Linux's page says it keeps no log to show yet.
+```
+                    zig-webbox  (the library)
+                    /          \
+       angry-gopher              dog-park
+     (lynrummy.com)              (a second app)
+                    \          /
+              zig-metal-unikernel  (this repo: the machine)
+                    /          \
+            metal-vmm            zig-coverage-sdk
+      (test hypervisor)          (coverage properties)
+```
 
-  Each host hands its half over through angry-gopher's `host_facts.provide`.
+- **zig-metal-unikernel** (this repo): the kernel, its drivers, TCP, FAT, the
+  boot loader, the release tools, and the checks that hold the kernel to the
+  Linux builds.
+- **[zig-webbox](https://github.com/showell/zig-webbox)**: the library both
+  applications are written against.
+- **[angry-gopher](https://github.com/showell/angry-gopher)** and
+  **[dog-park](https://github.com/showell/dog-park)**: the applications. The
+  kernel build compiles them from their checkouts as they are; nothing is
+  copied in.
+- **[metal-vmm](https://github.com/showell/metal-vmm)**: a deterministic
+  hypervisor of our own, on Linux's KVM, used only for testing. It runs the
+  real kernel with time, the network and the disks under the test's control,
+  so a run can lose a chosen packet or fail a chosen disk write, and the same
+  seed gives the same run every time. It also holds the one shared work queue
+  for all these repos (`QUEUE.md`).
+- **[zig-coverage-sdk](https://github.com/showell/zig-coverage-sdk)**:
+  **coverage properties**, assertions about a whole run rather than one
+  moment. `always(...)` must hold every time it is reached; `sometimes(...)`
+  must be true at least once, so a case the tests meant to exercise but never
+  did is a failure. The checks here read them. Every build needs it.
 
-How fast, measured before the cutover (the same pages from both sites,
-alternating, 40 rounds; first byte, median / 90th percentile; 2026-10-01, v4:
-interrupts and the idle halt):
+### Where lynrummy.com runs
 
-| | lynrummy.com | metal, through Caddy | Linux alone, on prod | metal alone, from prod |
-|---|---|---|---|---|
-| home page | 2.95 / 3.55 ms | 4.14 / 7.53 ms | 0.55 / 0.63 ms | 1.27 / 2.37 ms |
-| a gallery picture | 2.72 / 3.31 ms | 4.12 / 5.27 ms | 0.28 / 0.38 ms | 1.23 / 1.66 ms |
-| /delivery | 2.56 / 2.96 ms | 2.77 / 3.40 ms | 0.20 / 0.30 ms | 0.31 / 0.50 ms |
-| /game (a redirect) | 2.52 / 3.20 ms | 2.75 / 3.43 ms | 0.23 / 0.29 ms | 0.30 / 0.50 ms |
+- A droplet booted from a custom image this repo builds, with no Linux on it.
+  It listens only on its private network card. Caddy, on an older Linux
+  droplet, terminates HTTPS and forwards to it.
+- **Two disks.** The boot disk holds the kernel and the site's own files
+  (pages, pictures, and a config file), and a new release replaces it. The
+  application's data (chat, accounts) lives on a separate DigitalOcean volume,
+  FAT32, which a new release does not touch. The kernel refuses writes
+  outside the data folders, and refuses to serve at all if the volume it was
+  built for (named by its FAT serial number) is missing or another is
+  attached, rather than answer as an empty site.
+- **Each boot checks both disks** before serving, and reports what it finds.
+- **`/admin/host`** (behind the admin login) shows the running server: the
+  application's half (its version, commit, memory, refused requests) and the
+  kernel's (this repo's commit, uptime, clock, connections, memory, disks,
+  disk work, and the newest lines of the kernel's log). Linux shows the same
+  page with its own half.
 
-Pages that need no file were within about 0.1 ms of Linux, at the median and
-in the slow tenth. Pages read from files were about 1 ms slower. That run
-predates the page cache (`src/page_cache.zig`) and the site cache
-(`io.zig`'s `SiteCache`), which keep files in memory after their first read;
-it has not been repeated since, so whether the gap remains is not measured.
-One run, on one evening: DigitalOcean's neighbours vary.
+## Using it
 
-## A deploy
+### What you need
 
-By hand, in this order:
+- **Zig 0.16.0**, exactly.
+- **Python 3**, for the judges and the release tools.
+- **QEMU** (`qemu-system-x86_64`) and **KVM**, for anything that boots a
+  kernel. Without KVM, the droplet-shaped machine runs under software
+  emulation (`ACCEL=tcg`), slowly.
+- **Disk tools:** mtools, `mkfs.vfat` and `fsck.fat` (dosfstools), `sgdisk`,
+  and binutils' `as` and `ld` for the boot loader.
+- **The sibling checkouts**, in one folder beside this one: `zig-webbox`,
+  `angry-gopher`, `dog-park`, `zig-coverage-sdk`, and, for the full checks,
+  `metal-vmm`. `build.zig` finds them as `../<name>` (`-Dgopher-root`,
+  `-Dwebbox-root`, `-Ddogpark-root` name another place). The shell scripts
+  default to `~/showell_repos/<name>`; set `GOPHER_ROOT`, `WEBBOX_ROOT`,
+  `METAL_VMM` and `COVERAGE_SDK` if yours are elsewhere.
+- **The pinned zig-coverage-sdk commit.** `build.zig` names the SDK commit it
+  was written against and refuses another, printing the `git checkout` that
+  fixes it. `-Dcoverage-sdk-unpinned` builds anyway.
 
-0. **Both gates pass for the pair.** `./gates.sh` and
-   `./long.sh` on the dev box; each records its verdict for the exact
-   zig-metal-unikernel / angry-gopher commit pair it judged (`tools/verdicts.py`).
-   `droplet/chat.py` refuses to build unless both trees are clean and both
-   verdicts are PASS for that pair. `RELEASE_UNGATED=1` overrides it, for an
-   emergency fix, and says so loudly.
-1. `droplet/chat.py <out.img>` builds the boot disk: the loader,
-   `probe/gopher.elf`, and the site's own files in partition 2, with a
-   `zig-metal-unikernel.conf` naming the volume in `droplet/volume-serial`.
-2. gzip it, and serve it somewhere DigitalOcean can fetch it.
-3. Steve imports it as a custom image and rebuilds the droplet from it. The
-   volume stays attached and is not touched.
+Without QEMU or KVM (a laptop, a cloud container) you can still run
+`zig build test`, `zig build properties` and `zig build kernels`.
 
-A released commit is tagged `vN`; the way back is the previous tag's image.
+### Building a kernel for an application
 
-**A new, empty volume** is once, by hand (the cutover's volume was built
-from prod's data instead, CUTOVER.md step 4): `droplet/new_volume.py
-<out.img>` builds the image and prints its serial; write it onto the volume
-from the recovery console (the command is in the script); put the serial in
-`droplet/volume-serial`; then deploy as above.
+    zig build gopher       # angry-gopher as a kernel: probe/gopher.elf
+    zig build dogpark      # dog-park as a kernel: probe/dogpark.elf
+    zig build kernels      # every small test kernel ("probe"), into probe/
 
-**The cutover's tools**, all without root (the full list is in
-[`CUTOVER.md`](CUTOVER.md), with MIGRATION.md, FAT32.md, RESTART.md,
-SECRET-LEAK.md and ADMIN-PASSWORD-LOST.md and when each is needed):
-- `droplet/check_volume_tree.py` checks a copy of the data, and
-  `build_volume.py` builds the volume;
-- `compare_volume.py` compares a volume with its copy;
-- `compare_hosts.py` compares two hosts page by page, with `--writes`;
-- `extract_volume.py` turns a volume back into a Linux tree;
-- `drift.py` compares two hosts' clocks, and `load.py` measures uploads
-  while others browse.
+An application is a root Zig file that exports `site` (its routes) and
+`hosting` (what only it can say about its data), plus an `assets.zon` naming
+the files it serves. The kernel around it is the same file for every
+application, `probe/gopher.zig`, and `addAppKernel` in `build.zig` puts the
+two together. The contract between an application and its host is
+[`HOST.md`](HOST.md).
 
-**Known and open:**
+Useful options: `-Ddev` builds Debug kernels, which rebuild in seconds instead
+of tens of seconds (releases are ReleaseSafe, and every run says which it
+judged); `-Drestart=false` makes a crash halt the machine instead of
+restarting it; `-Dcoverage` makes the kernel print its coverage properties.
+`zig build --help` lists every step and option.
 
-- one boot here printed its first line and then nothing for a minute (1 of
-  27, not reproduced since). [`REVIEW-first-line.md`](docs/reviews/REVIEW-first-line.md)
-  finds nothing on that path that can wait. The likeliest cause was the
-  serial port being given up on for good, silently, after one slow drain.
-  A port given up on is now tried again on each write, and told how much
-  of the log it missed when it drains.
-- **The restart on failure is built but off** (`-Drestart`, RESTART.md).
-  It waits on one measurement on a real droplet: that a guest's reset
-  restarts it rather than powering it off (droplet/RESTART-TEST.md, the
-  console test). Until then, a failure while serving halts the machine with
-  its reason on the screen.
+### Running it locally
 
-## Where it stands
+There is no single "boot it and browse" command. A kernel is run by the
+script that judges it:
 
-| | |
-|---|---|
-| the boot | **works** — PVH, long mode, identity-mapped low 4 GB |
-| a droplet's boot | **works** — `droplet/loader.S`, our own BIOS loader, from a GPT disk (`droplet/image.zig`); checked on the droplet-shaped QEMU by `droplet/boot.sh` and on real droplets |
-| the screen | **works** — everything the console says is also in VGA text, which is what DigitalOcean's console shows (`droplet/screen.sh`) |
-| interrupts, and resting when idle | **works on PCI** — the card wakes the machine by MSI-X, the APIC timer at 1 ms otherwise: on a droplet, the droplet-shaped QEMU, and metal-vmm's `TRANSPORT=pci` machine (`pc_vs_microvm.sh` in gates.sh, the lossy sweep in long.sh). On virtio-mmio (microvm, metal-vmm's default machine) it spins. On the droplet it took the slow tenth of requests from 3-5 ms to 0.5 ms |
-| virtio-blk over MMIO | **works** — reads, writes, and reads back |
-| virtio-net over MMIO | **works** |
-| virtio over PCI | **works** — disk and network found on a PC's bus, as a droplet has them |
-| a DigitalOcean volume (virtio-SCSI) | **works** — found at any target and LUN; the chat judge keeps chat's data on one on the droplet-shaped QEMU and matches Linux; on a test droplet's real volume since v5 (FAT16), and prod's since the cutover (FAT32) |
-| DHCP | **works** — from QEMU's server and DigitalOcean's, asking again with RFC 2131's backoff |
-| ARP | **works** — answers, which is what makes the address reachable |
-| TCP | **works** — 256 connections; the peer's window and segment size respected, lost segments sent again, silent peers given up on; received in order only |
-| HTTP, ours | **works** — `curl` gets a 200 from it |
-| **`std.http.Server`, unmodified** | **works** — [docs/port.md](docs/port.md) |
-| GPT and FAT16, read side | **works** — volumes from `mkfs.vfat`, and from the FAT spec (`src/test_disk.zig`) |
-| FAT16 write | **works** — `fsck.vfat` and Linux read back what we wrote |
-| long names and subdirectories | **works** — `fsck.vfat` finds no error |
-| the backup story, both ways | **works** — Linux mounts it; we read what Linux wrote |
-| entropy | **works** — virtio-rng and RDRAND, mixed |
-| FAT16 append, replace, delete, delete-tree | **works** — `fsck.vfat` and Linux judge; fragmented directories forced on purpose |
-| `Io.Dir` | **works** — [docs/port.md](docs/port.md), "The seam we first got wrong" |
-| the TSC's rate | **works** — measured against the PIT, 0.001% from the host kernel's own figure |
-| the wall clock | **works** — the CMOS RTC, anchored at a seconds edge; pinned leap-day, noon and 4 PM boots |
-| **angry-gopher's whole route table** | **works** — single requests and stories (members 40 steps, uids 10, caps 71, Lyn Rummy 17), each answered the same as the Linux build over the same files |
-| many requests per boot | **works** — stories of up to 71 steps and 300 requests to one boot, judged against Linux; heaps steady |
-| many connections, one loop | **works** — a request is served once the whole of it has arrived |
-| chat's live streams | **works** — held by the loop, pinged, budgeted, and ended when their tab leaves or stops reading |
-| uploads | **works** — a picture stored on the volume and read back byte for byte, judged against Linux; the request heap grows past what it keeps |
-| the disk check at boot | **works** — both disks, every boot, judged by the oracle's count; a leaked cluster is reported and the disk still served |
-| FAT32 | **works** — mount, read, write, root chain, FSInfo; agrees with the oracle and fsck on 103 images and 19 mtools volumes; the chat judges in gates.sh run on it; prod's volume is FAT32 ([FAT32.md](FAT32.md)) |
-| a rewrite that survives a stop | **works on the host** — `fat16.rename` and the Store's `replace`: the disk stopped after every request in turn leaves the old record or the new, whole |
-| restarting on failure | **built, off** — CMOS record, back-off, the last boot's log kept past the kernel; measured on QEMU's pc and microvm. Waits on a real droplet |
-| the kept free count | **works** — `/admin/host`'s free space is a field read, equal to the oracle's count after every operation |
-| `/admin/backup` | **works against Linux** — everything the Store keeps as one streamed tar, after the admin's password again, ending with a manifest that `droplet/check_backup.py` holds it to; the judge compares both hosts' archives member by member. Taken from metal over the private network by `droplet/backup.sh` (CUTOVER.md); routine backups are not set up (above) |
-| the log on `/admin/host` | **built** — the serial ring's newest lines; the judge checks its shape |
-| a chain's FAT entries a sector at a time | **works, on master, not served** — taken (B42) and freed (batched frees) a FAT sector per write: a 1 MiB upload ~143 disk writes to ~15-20, a remove of one ~4,097 to a few on the host tests' small clusters. v22 serves the old path |
-| exact accounting of what a failure leaves | **works, on master** — leaked clusters, orphaned names (by run, as fsck counts them) and chains past a size, exact or "may be live", on the run's end line and `/admin/host`; the judge holds fsck's findings to them |
-| idle time | **built, on master, not served** — a quiet machine (200 ms with nothing arriving) runs a step of the next task, at most 200 ms ([HOST.md](HOST.md), "Idle time"); the one task checks each volume again, a slice a step. Seen on metal-vmm (steps ~9 ms); not yet on a droplet, so a full walk's cost on production's volume is unmeasured |
+    probe/run.sh                  # boot each test kernel under QEMU (~45 s)
+    probe/run.sh clock            # just one
+    probe/run.sh gopher           # boot the real server and judge it against Linux
+    probe/run.sh gopher uploads   # one part ("gate") of that judge, in seconds
+    droplet/boot.sh               # the test kernels, booted the way a droplet boots them
 
-## Running the gates
+`probe/run.sh gopher` needs angry-gopher's Linux build too; it builds it.
+A part name it does not know is an error that lists them all.
+`droplet/droplet.sh` is QEMU laid out like a droplet (the same chipset and
+devices in the same slots, recorded from a real one); its header lists its
+settings, among them forwarding a local port to the guest's port 80.
+`droplet/rehearse.sh` boots the release kernel on that machine against a copy
+of real data and compares it with Linux, page by page.
+[`docs/probes.md`](docs/probes.md) says what each test kernel checks.
 
-    ./gates.sh quick       # one commit: host tests, the kernels, the probes, one chat-judge story (~2 min)   [QEMU/KVM]
-    ./gates.sh             # a batch, and before merging anything that touches the kernel                  [QEMU/KVM]
-    ./long.sh              # bug hunting, and before every release (~10 min)                               [QEMU/KVM]
-    zig build test         # host unit tests for the pure parts of src/, and short simulator runs          [anywhere]
-    zig build properties   # the coverage properties over many simulator seeds (~1 min)                    [anywhere]
+### The checks, fastest to slowest
 
-**What each gate is for** (their headers say it in full):
-- `./gates.sh quick` is for a single commit. `./gates.sh` is the full run,
-  for a batch: host tests, every probe, the chat judge on FAT32 on microvm
-  and on the droplet-shaped machine side by side, the droplet boot checks,
-  and metal-vmm's `check.sh`, `same.sh` and `pc_vs_microvm.sh all`. It rebuilds
-  `gopher.elf` and metal-vmm from angry-gopher's checkout as it is.
-- `./long.sh` is the long tier: the simulators at 10,000 seeds against
-  `coverage/floor-sim.txt`, the chat judge on FAT16, and the real kernel on
-  metal-vmm losing each of its frames in turn, and facing a peer that
-  misbehaves, against `coverage/floor-metal.txt`.
-- **A release needs both:** the full `./gates.sh` and a whole `./long.sh`
-  each record a verdict for the commit pair (`tools/verdicts.py`), and
-  `droplet/chat.py` builds only a pair with both PASS. The quick tier and a
-  partial `long.sh` record nothing.
-- Every gate's exit code is its verdict, and its last line names what failed.
+A **judge** is a script that runs the kernel and the Linux build side by side
+and compares them. A **gate** is a script whose exit code is a verdict (0
+passes) and whose last line names what failed. A **simulator** drives one
+pure part of the kernel (the TCP table, the FAT, the cache, the store) on
+Linux, with no devices, over many random seeds; a seed that fails replays
+exactly.
 
-**The pieces, one at a time** (all QEMU):
+| command | about | needs | what it proves |
+|---|---|---|---|
+| `zig build test` | minutes | zig | unit tests of the pure parts, short simulator runs, and that every kernel type-checks |
+| `probe/run.sh` | ~45 s | QEMU | each driver and subsystem boots and works on virtual hardware |
+| `zig build properties` | ~1 min | zig | the simulators over many seeds, judged by their coverage properties |
+| `./gates.sh quick` | ~2 min | QEMU, KVM | for one commit: the unit tests, the kernels, the test kernels, the dog-park judge, and one story of the angry-gopher judge |
+| `./gates.sh` | ~20 min | QEMU, KVM, metal-vmm | for a batch: also both angry-gopher judges on FAT32 (QEMU's microvm, and the droplet-shaped machine with data on a volume), metal-vmm's checks (the same run twice is the same; timeouts measured in the machine's own time), and the droplet boot checks |
+| `./long.sh` | longest | QEMU, KVM, metal-vmm | before every release: the simulators at 10,000 seeds; the FAT16 judge; the real kernel on metal-vmm losing each packet it sends in turn, facing a misbehaving client, and under 100 seeded fault schedules over the network and disks, every run still serving the right page |
 
-    zig build kernels      # every kernel into probe/
-    probe/run.sh           # boot each one under microvm (~45 s)
-    probe/run.sh clock     # just one
-    zig build gopher && probe/run.sh gopher   # the real server, judged against Linux
-    probe/run.sh gopher uploads   # ONE gate of that judge, in seconds
-    probe/run.sh gopher isolated  # a boot per single request
-    probe/run.sh quick     # Debug kernels, every probe, the judge's quick tier
-    probe/run.sh native    # the TCP table on Linux, judged by Linux's own TCP (~1 min)
-    probe/run.sh ladder    # one operation many times, at a flat cost (LADDER_SCALE=10 for more)
-    probe/run.sh soak      # one boot serving for a long time (SOAK_ROUNDS)
+Each script's header says what it runs and why. The coverage properties and
+the floors a long run must reach are in [`COVERAGE.md`](COVERAGE.md).
 
-**One gate of the judge at a time.** `probe/run.sh gopher <gate>` runs one;
-a name it does not know is an error that lists them all (the judge's `GATES`
-in `probe/judge_gopher.py`), not a silently complete run. The single requests
-go to one boot by default; `probe/run.sh gopher isolated` gives each its own
-boot, which proves an answer owes nothing to an earlier one. Neither gate
-script runs `isolated`; it is there to ask by hand.
+**A verdict is for exact code.** A full `./gates.sh` and a whole `./long.sh`
+each record their verdict against what they judged: this repo's commit, the
+SDK's, and a hash of every application and library file the kernel compiles
+(`tools/verdicts.py` calls that hash the **content id**). The quick tier and a
+partial `long.sh` record nothing.
 
-**Two builds.** `-Ddev` builds the kernels in Debug — a rebuild of the real
-server in seconds instead of ReleaseSafe's tens — and `run.sh quick` builds
-that way and runs the judge with test-sized waits (a 3-second stream
-keepalive), one boot for the single
-requests, and without the boots that exist to be long. Shipping kernels are
-ReleaseSafe, and every run says which build it judged, read from a marker
-each kernel carries.
+### A deploy
 
-## Simulators and properties
+A **release** is one boot image, built from this repo and the applications'
+commits, tagged `vN` in this repo. By hand, in this order:
 
-The pure parts of the machine — the TCP table, the FAT, the page cache,
-`ready.zig` and the other pure modules — are driven by simulators on Linux,
-with no QEMU: `src/tcp_sim.zig`, `fat_sim.zig`, `page_sim.zig`,
-`ready_sim.zig` and `pure_sim.zig`. `src/properties.zig` runs them over many
-seeds and judges zig-coverage-sdk's `always`/`sometimes` properties across
-the whole run; `coverage/floor-sim.txt` and `coverage/floor-metal.txt` list
-the properties a long run must reach. A simulator drives only code that needs
-no I/O, which keeps those layers honest: code that reaches into a device
-gets a seam, not a mock ([`CLAUDE.md`](CLAUDE.md)).
-[`COVERAGE.md`](COVERAGE.md) has the decisions, the three tiers, and what the
-runs have found.
+1. **Both gates pass** for the exact code: `./gates.sh` and `./long.sh`.
+2. **`droplet/chat.py <out.img>`** builds the boot image: the boot loader, the
+   kernel, and the site's own files with a config naming the data volume
+   (`droplet/volume-serial`). It refuses unless both trees are clean and both
+   verdicts are PASS for exactly this code. `RELEASE_UNGATED=1` overrides
+   that, for an emergency, and says so loudly.
+3. **gzip it** and put it where DigitalOcean can fetch it.
+4. **Steve imports it as a custom image** and rebuilds the droplet from it.
+   The data volume stays attached and untouched.
+5. **Tag the commit** `vN`.
 
-**The seed explorer** (zig-coverage-sdk's `explore.zig`) runs fat_sim,
-store_sim and tcp_sim from a recorded tape instead of a seed (`runWith`), so
-it can return to a run and steer it. Two tools, neither a gate:
+**The way back** is the previous tag's image: rebuild the droplet from it. The
+last resort, moving the site back to Linux, is in [`CUTOVER.md`](CUTOVER.md),
+"The way back"; it needs the data copied off the volume first, or everything
+written since the cutover is lost.
 
-    zig build explore      # the explorer against blind seeds on one simulator (~15 min)
-    tools/soak.sh          # OVERNIGHT, detached: explorer and blind columns on all three, 7 hours, log in ~/soak-logs/
+[`CUTOVER.md`](CUTOVER.md) is the record of the move from Linux on 2026-10-04,
+with the tools it used, backups, and the way back.
+`droplet/new_volume.py` builds a new, empty data volume.
 
-The soak prints, round by round, what only some columns reached and every
-failure with its recipe (simulator, column, explorer seed); stop it (its
-PID) before a morning's gates.
+## Where it stands (2026-10-13)
 
-## How it works
+**Serving: tag `v29`**, deployed 2026-10-13: this repo at `0519d8c`,
+angry-gopher at `24e0b21a`. The way back is `v28`. `master` is ahead of `v29`;
+what serves is always a tag, never a branch. The tag's message
+(`git show v29 --no-patch`) has the image's checksum.
 
-- **`std.http.Server` runs unmodified.** It is built from a reader and a
-  writer, and `src/stream.zig` presents a TCP connection as both.
-- **The port is one file.** angry-gopher's filesystem calls are spelled
-  `Io.Dir.cwd().something(io, ...)`, and every file takes that `Io` from the
-  `host_io` module (`const Io = @import("host_io").Io;`). Its own build hands
-  them std's; this build hands them `src/host_io_metal.zig`, whose `Io` is this
-  repo's `io.zig`. No line is rewritten and no call site moves. `std.Io`
-  itself is not the seam: it does not compile on a freestanding target.
-- **One loop, no threads.** One core, no preemption: the loop talks to the
-  devices, moves every connection along, and serves whatever request has
-  wholly arrived. Chat's live streams are held by the loop.
+- **served**: in v29, on lynrummy.com.
+- **master**: on `master`, newer than v29, not served yet.
+- **test only**: exists for the checks, never deployed.
+- **unmeasured**: built, but the number a reader would want has not been taken.
+
+| | state | |
+|---|---|---|
+| booting a droplet | served | own BIOS boot loader, from a GPT disk; also tested on the droplet-shaped QEMU, on dirty memory |
+| booting under QEMU and metal-vmm | test only | PVH entry, QEMU's `microvm` and `pc` machines, metal-vmm |
+| the screen | served | everything the log says also goes to VGA text, which DigitalOcean's console shows |
+| interrupts, and resting when idle | served | on the PCI machine a droplet is, the card wakes it (MSI-X), else a 1 ms timer. On the MMIO test machines it polls instead |
+| virtio network, disk and SCSI volume drivers | served | over PCI on the droplet; over MMIO in tests |
+| DHCP, ARP, TCP | served | up to 256 connections; the peer's window and segment size respected, lost segments resent, silent peers given up on. Segments that arrive out of order are not kept |
+| HTTP | served | `std.http.Server`, unmodified |
+| FAT16 and FAT32, read and write | served | long names, folders, append, replace, delete; checked by `fsck` and by Linux reading what it wrote. Production's volume is FAT32 |
+| clocks and entropy | served | the CMOS real-time clock; the TSC's rate measured against the PIT; random bytes from virtio-rng where the machine has one, and RDRAND |
+| angry-gopher's whole site | served | every route, judged equal to the Linux build, including chat's live streams and uploads |
+| dog-park as a kernel | test only | judged equal to its Linux build in every gate; not deployed |
+| file contents kept in memory | served | after their first read, write-through (`page_cache_mib`, 64 MiB by default) |
+| large disk requests | served | a run of contiguous clusters is one request of up to 1 MiB (the least of the disk's, the controller's and our own limit) |
+| the FAT written a sector at a time | served | v29's measured disk requests for a 1.8 MB, 10 MB and 100 MB upload: 59, 26 and 115 (v28: 93, 218 and 2,017) |
+| the FAT's two copies weighed at mount | served | if they differ, the cleaner copy wins and the other is rewritten from it |
+| a mount whose FAT copies cannot be weighed | master | refuses writes until a weighing succeeds (a 503 with Retry-After). v29 serves such a volume as it is |
+| an overwrite read back before the old copy is freed | master | |
+| a disk check at every boot | served | both disks; a damaged disk is reported and still served |
+| a disk check in idle time | served | after 200 ms with nothing arriving, the kernel checks the volume a slice at a time ([HOST.md](HOST.md), "Idle time"). Its cost on production's full volume: unmeasured here |
+| exact accounting of what a failed write leaves | served | leaked clusters, orphaned name entries and long chains, counted on `/admin/host` |
+| restarting after a crash | served | on by default since a droplet's reset was measured to restart it (2026-10-03); the last boot's log is kept across the restart ([RESTART.md](RESTART.md) predates this) |
+| the log on `/admin/host` | served | the newest 60 lines of a 64 KiB ring, secrets removed as they are written |
+| a larger, timed log, and `/admin/log` | master | a 1.25 MiB ring; every request line with its time, status and duration; `/admin/log` as plain text for scripts; recent uploads and request counts ([docs/admin-for-agents.md](docs/admin-for-agents.md)) |
+| the new name, and zig-webbox as its own checkout | master | v29 still reads `gopher-metal.conf` and builds the library from angry-gopher's tree |
+| `/admin/backup` | served | the whole data set as one tar, checked by `droplet/check_backup.py`; taken by hand with `droplet/backup.sh`. Routine backups were not yet scheduled as of 2026-10-08 ([CUTOVER.md](CUTOVER.md), "Backups") |
+| speed against Linux | unmeasured | last measured 2026-10-01 on v4, before the caches ([docs/port.md](docs/port.md)) |
+
+## Where things are
 
 | where | what |
 |---|---|
-| `src/boot.zig` | the PVH note, the long-mode stub, and the page tables |
-| `src/serial.zig` | COM1 and QEMU's exit door: the whole console |
-| `src/virtio.zig` | the MMIO transport, the virtqueue, and the block device |
-| `src/net.zig` | virtio-net: frames out, frames in |
-| `src/proto.zig` | ethernet, IPv4 and UDP — enough to carry a datagram |
-| `src/dhcp.zig` | DISCOVER, OFFER, REQUEST, ACK |
-| `src/gpt.zig` | where the partition starts, because sector 0 is not the filesystem |
-| `src/disk_fat.zig` | FAT16 and FAT32: mount a volume, walk a directory, read a file, write one (the `Volume` and its mount here; the FAT, chains, directories, files, removes and the check in `disk_fat_fat`, `_chain`, `_dir`, `_file`, `_remove` and `_check.zig` beside it) |
-| `src/arp.zig` | answering "who has this address?", which is what makes one reachable |
-| `src/tcp.zig` | a table of connections: handshake, windows, retransmission, close |
-| `src/stream.zig` | that connection as a `std.Io.Reader` and a `std.Io.Writer` |
-| `src/io.zig` | `Io.Dir`, `Io.Clock`, `Io.Mutex`, `Io.Group` — the surface the application calls |
-| `src/page_cache.zig` | the data's files kept whole in memory after their first read, write-through, below the application (the retired zig-metal-unikernel queue, item 87); `page_cache_mib` in `zig-metal-unikernel.conf`, 64 by default |
-| `src/interrupts.zig` | the IDT, the local APIC timer, and resting until a frame or the timer |
-| `src/port.zig`, `src/tsc.zig` | x86 port I/O, and the timestamp counter |
-| `src/pit.zig` | the interval timer, used once: to measure the TSC's rate |
-| `src/rtc.zig` | the CMOS clock — the device half, and a pure half with host tests |
-| `src/wallclock.zig` | both of those, in the order a host needs them |
-| `src/*_sim.zig`, `src/properties.zig` | the simulators and the properties over them |
-| `probe/*.zig` | one kernel each; a root file with a `kmain` |
-| `probe/link.ld` | the layout — the note first, and `.bss` treated as unwritten |
-| `probe/run.sh` | boots each under `-M microvm`, maps QEMU's exit code back to the guest's |
-| `probe/judge_*.py` | the outside verdicts: the host's clock, a raw FAT16 parse, the Linux build of angry-gopher, and the ladder's, the replace probe's and the soak's |
-| `droplet/` | the loader, the image builder, the release and cutover tools |
-| `tools/verdicts.py` | which commit pair a gate judged, and the release rule |
+| `src/` | the kernel: boot, drivers, network, FAT, the `Io` the application calls (`io.zig`), the simulators (`*_sim.zig`) and `properties.zig` |
+| `src/host_io_metal.zig` | the one file that hands the application this kernel's `Io` |
+| `probe/gopher.zig` | the kernel around an application: one loop, the disks, `/admin/host`'s kernel half |
+| `probe/*.zig` | small test kernels, one subsystem each |
+| `probe/run.sh`, `probe/judge_*.py` | booting them under QEMU, and the judges |
+| `droplet/` | the boot loader, the image builder, the droplet-shaped QEMU, and the release, backup and cutover tools |
+| `tools/verdicts.py` | which code a gate judged, and the release rule |
+| `coverage/` | the coverage floors `long.sh` holds runs to |
+| `gates.sh`, `long.sh` | the gates |
 
-## The design
+## Documents
 
-The engineering behind the table above lives in `docs/`, by topic:
+**Contracts:**
+- [`HOST.md`](HOST.md): what Linux and this kernel both promise an
+  application (one handler at a time, durability, limits, idle time).
+- [`STORE.md`](STORE.md): the application's data, its operations and what
+  each promises across a crash.
 
-- [`docs/port.md`](docs/port.md) — `std.http.Server` unmodified, the real
-  server and its judge, the seam we first got wrong (`std.Io`), no threads,
-  the 16 MB measured stack, the memory seam (std's allocator on our pages).
-- [`docs/disk.md`](docs/disk.md) — why our own FAT, dates, long names, the
-  backup story both ways, the FAT in memory and reads by runs.
-- [`docs/tcp.md`](docs/tcp.md) — every wait a duration, many connections in
-  one loop, chat's live streams, the send side, the ladder, the TCP table
-  against Linux's TCP, and what the TCP does not do.
-- [`docs/probes.md`](docs/probes.md) — what each probe checks, and the
-  QEMU and clock traps that cost time.
+**Design**, in `docs/`:
+- [`docs/port.md`](docs/port.md): how the application runs here unchanged,
+  `std.http.Server`, one loop, the stack and the memory.
+- [`docs/disk.md`](docs/disk.md): why our own FAT, and how it is judged.
+- [`docs/tcp.md`](docs/tcp.md): the network loop, live streams, and what
+  the TCP does not do.
+- [`docs/probes.md`](docs/probes.md): the test kernels, and QEMU's traps.
+- [`docs/admin-for-agents.md`](docs/admin-for-agents.md): reading
+  `/admin/host` and `/admin/log` (describes `master`, not v29).
 - [`docs/designs/`](docs/designs/README.md) and
-  [`docs/reviews/`](docs/reviews/README.md) — design notes and reviews of
-  particular changes.
+  [`docs/reviews/`](docs/reviews/README.md): notes and adversarial reviews
+  of particular changes.
 - [`FAT32.md`](FAT32.md), [`RESTART.md`](RESTART.md),
-  [`TCP_TESTING.md`](TCP_TESTING.md) (finding the TCP table's bugs
-  systematically), [`COVERAGE.md`](COVERAGE.md).
+  [`TCP_TESTING.md`](TCP_TESTING.md), [`COVERAGE.md`](COVERAGE.md),
+  [`MUTATION.md`](MUTATION.md) (which deliberately planted bugs the tests
+  catch).
 
-The plan this all started from is
-[`notes/angry-gopher-without-linux.md`](http://143.244.172.148:9100/notes/angry-gopher-without-linux.md).
-Parked 2026-09-18 with everything green, for want of a machine we could run
-it on; unparked 2026-10-01 when the target became a DigitalOcean droplet,
-booted from a custom image
-([gopher chat on a droplet](http://143.244.172.148:9100/notes/gopher-chat-on-a-droplet.md)).
+**Operations:** [`CUTOVER.md`](CUTOVER.md) (the move from Linux, backups,
+the way back), [`MIGRATION.md`](MIGRATION.md),
+[`SECRET-LEAK.md`](SECRET-LEAK.md),
+[`ADMIN-PASSWORD-LOST.md`](ADMIN-PASSWORD-LOST.md).
+
+## Working on it
+
+The work is done by Claude, on Steve's development machine and in Claude Code
+cloud sessions, with Steve. [`CLAUDE.md`](CLAUDE.md) says who does what.
+
+- **`master`** has everything. **`vN`** tags are releases; the newest
+  serves. **`claude/*`** branches are cloud sessions' work, merged by the
+  development machine; nobody else pushes `master` or a tag.
+- **Live work** is in metal-vmm's
+  [`QUEUE.md`](https://github.com/showell/metal-vmm/blob/master/QUEUE.md).
+  Code comments and commits cite its items as "metal-vmm QUEUE N". A bare
+  "QUEUE.md item N" means this repo's old queue, now retired
+  (`git show 3cd662c:QUEUE.md`), whose numbers overlap.
