@@ -224,25 +224,6 @@ pub fn build(b: *std.Build) void {
     const gopher_step = b.step("gopher", "the real server, compiled from angry-gopher's checkout as it is now");
     gopher_step.dependOn(&gopher_copy.step);
 
-    // **DOG PARK ON METAL** (Phase B step 4): the second application, its play
-    // server (src/play/hosted.zig) on the same kernel and the same webbox.
-    // -Ddogpark-root=<dir> names another checkout.
-    const dogpark_root = b.option([]const u8, "dogpark-root", "the dog-park checkout") orelse
-        b.pathFromRoot("../dog-park");
-    const dogpark_step = b.step("dogpark", "Dog Park's play server as a kernel, from its checkout as it is now");
-    if (dirExists(b, dogpark_root)) {
-        const dogpark = addAppKernel(b, .{
-            .name = "dogpark.elf",
-            .root = b.fmt("{s}/src/play/hosted.zig", .{dogpark_root}),
-            .served = servedBy(b, b.fmt("{s}/assets.zon", .{dogpark_root})),
-            .embed_base = dogpark_root,
-            .imports = &.{},
-        }, .{ .metal = metal, .host_io = host_io, .webbox = webbox, .gm_build = gm_opts.createModule(), .optimize = optimize });
-        const dogpark_copy = b.addUpdateSourceFiles();
-        dogpark_copy.addCopyFileToSource(dogpark.getEmittedBin(), "probe/dogpark.elf");
-        dogpark_step.dependOn(&dogpark_copy.step);
-    } else dogpark_step.dependOn(&b.addFail(b.fmt("dogpark: NOT built: no dog-park checkout at {s} (-Ddogpark-root=<dir>)", .{dogpark_root})).step);
-
     // **EVERY KERNEL TYPE-CHECKED, ON EVERY `zig build test`** (metal-vmm
     // B34): a field renamed in src/ broke gopher.elf (b4463a9) and native
     // (140's Fin) with every unit test green, since no test compiles a

@@ -164,12 +164,12 @@ Six repos, kept separate, checked out side by side:
 - **Disk tools:** mtools, `mkfs.vfat` and `fsck.fat` (dosfstools), `sgdisk`,
   and binutils' `as` and `ld` for the boot loader.
 - **The sibling checkouts**, in one folder beside this one: `zig-webbox`,
-  `angry-gopher`, `dog-park`, `zig-coverage-sdk`, and, for the full checks,
+  `angry-gopher`, `zig-coverage-sdk`, and, for the full checks,
   `metal-vmm`. `build.zig` finds them as `../<name>` (`-Dgopher-root`,
-  `-Dwebbox-root`, `-Ddogpark-root` name another place). **One rule for
+  `-Dwebbox-root` name another place). **One rule for
   every script too:** a sibling is `../<name>` beside the checkout running
   it, in this repo and in metal-vmm; an environment variable names another
-  place (`GOPHER_ROOT`, `WEBBOX_ROOT`, `DOGPARK_ROOT`, `METAL_VMM`,
+  place (`GOPHER_ROOT`, `WEBBOX_ROOT`, `METAL_VMM`,
   `COVERAGE_SDK`, and metal-vmm's `GUESTS`, this repo's `probe/`).
 - **The pinned zig-coverage-sdk commit.** `build.zig` names the SDK commit it
   was written against and refuses another, printing the `git checkout` that
@@ -181,7 +181,6 @@ you can still run `./tier0.sh`, which is most of what catches a bug.
 ### Building a kernel for an application
 
     zig build gopher       # angry-gopher as a kernel: probe/gopher.elf
-    zig build dogpark      # dog-park as a kernel: probe/dogpark.elf
     zig build kernels      # every small test kernel ("probe"), into probe/
 
 An application is a root Zig file that exports `site` (its routes) and
@@ -304,7 +303,7 @@ what serves is always a tag, never a branch. The tag's message
 | FAT16 and FAT32, read and write | served | long names, folders, append, replace, delete; checked by `fsck` and by Linux reading what it wrote. Production's volume is FAT32 |
 | clocks and entropy | served | the CMOS real-time clock; the TSC's rate measured against the PIT; random bytes from virtio-rng where the machine has one, and RDRAND |
 | angry-gopher's whole site | served | every route, judged equal to the Linux build, including chat's live streams and uploads |
-| dog-park as a kernel | built only | `zig build dogpark` builds it; no gate judges it (an application is not this repo's test of itself); not deployed |
+| dog-park as a kernel | not here | dog-park builds on zig-webbox and may run on this kernel later; this repo neither builds nor judges it (an application is not this repo's test of itself) |
 | file contents kept in memory | served | after their first read, write-through (`page_cache_mib`, 64 MiB by default) |
 | large disk requests | served | a run of contiguous clusters is one request of up to 1 MiB (the least of the disk's, the controller's and our own limit) |
 | the FAT written a sector at a time | served | v29's measured disk requests for a 1.8 MB, 10 MB and 100 MB upload: 59, 26 and 115 (v28: 93, 218 and 2,017) |
