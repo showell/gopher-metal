@@ -267,14 +267,15 @@ pub fn build(b: *std.Build) void {
     const check_apps = b.step("check-apps", "type-check the applications' kernels (gopher.elf), from their checkouts (tier 3)");
     // **EVERY PLANT TYPE-CHECKED** (src/plant.zig): a plant's code is
     // analysed only when it is on, so each is checked by a `check` of its
-    // own, with -Dcoverage as gopher.elf requires. Run it after touching a
+    // own (and with check-apps, gopher.elf too: `check` is this repo's
+    // kernels alone since 197), with -Dcoverage as gopher.elf requires. Run it after touching a
     // plant's lines, and before plants.sh, which does not run it itself.
     const check_plants = b.step("check-plants", "type-check every kernel once with each plant on (src/plant.zig)");
     for (std.enums.values(Plant)) |p| {
         if (p == .none) continue;
         // The same port and checkout as this build's, or gopher.elf is
         // checked against the defaults' (or not at all) for every plant.
-        const one = b.addSystemCommand(&.{ b.graph.zig_exe, "build", "check", "-Dcoverage", b.fmt("-Dplant={s}", .{@tagName(p)}), b.fmt("-Dgopher-root={s}", .{gopher_root}) });
+        const one = b.addSystemCommand(&.{ b.graph.zig_exe, "build", "check", "check-apps", "-Dcoverage", b.fmt("-Dplant={s}", .{@tagName(p)}), b.fmt("-Dgopher-root={s}", .{gopher_root}), b.fmt("-Dwebbox-root={s}", .{webbox_root}) });
         one.setCwd(b.path("."));
         check_plants.dependOn(&one.step);
     }
