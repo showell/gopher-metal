@@ -65,4 +65,5 @@ test {
     _ = @import("config_text.zig");
     _ = @import("virtio.zig");
     _ = @import("serial.zig");
+    _ = @import("after_turn.zig");
 }

@@ -1094,7 +1094,7 @@ fn serveOne(
         .network, .memory => {},
     }
     defer webbox.http.held_body = null;
-    var kept_stream = app.site.route(&req, io, request_alloc, &bus) catch |e| blk: {
+    const kept_stream = app.site.route(&req, io, request_alloc, &bus) catch |e| blk: {
         outcome = @errorName(e);
         break :blk null;
     };
@@ -1104,48 +1104,59 @@ fn serveOne(
     // the held streams, and this flush takes turns: a stream registered before
     // it would have its live frames queued ahead of its own head.
     const flushed = if (s.writer().flush()) |_| true else |_| false;
-    if (!flushed) outcome = "the response would not flush";
-    if (kept_stream) |kept| if (!flushed) {
-        streams.drop(hub, kept);
-        kept_stream = null;
-    };
-    if (kept_stream) |kept| {
-        // The handler wrote the stream's head and backlog; the live part is
-        // this machine's now.
-        // **THE BUDGET IS KEPT BY ENDING THE OLDEST.** A browser whose stream
-        // ends reconnects, and a conversation stream resumes from its last
-        // event; a new tab that could not open at all would not.
-        if (held_now >= max_streams) {
-            if (oldestHeld(table)) |slot| endStream(slot, wire, table, hub, .displaced);
-        }
-        held[i] = .{ .conn = i, .kept = kept, .last_write = Io.awakeNs() orelse 0 };
-        // What the head and backlog left in the spill goes ahead of every live
-        // frame, as the carry the stream already drains first.
-        if (spill.pending().len > 0) {
-            if (hub.gpa.dupe(u8, spill.pending())) |rest| {
-                held[i].?.carry = rest;
-            } else |_| {}
-        }
-        held_now += 1;
-        held_most = @max(held_most, held_now);
-        kept_open = true;
-        outcome = "ok, and its stream is kept";
+    // What the head and backlog left in the spill goes ahead of every live
+    // frame, as the carry the stream already drains first: copied here, and
+    // a stream whose copy fails is not kept (metal-vmm QUEUE 198.1).
+    var carry: ?[]u8 = null;
+    if (kept_stream != null and flushed and spill.pending().len > 0) {
+        carry = hub.gpa.dupe(u8, spill.pending()) catch null;
     }
-    // A write that timed out fails wherever it happened — inside the route or
-    // in this flush — and is the same event either way.
-    if (s.timed_out) outcome = "the client stopped taking the response";
+    // **WHAT BECOMES OF THE CONNECTION** (src/after_turn.zig: the decision,
+    // pure and tested; here, its I/O).
+    const after = metal.after_turn.decide(.{
+        .kept = kept_stream != null,
+        .flushed = flushed,
+        .timed_out = s.timed_out,
+        .spill_pending = spill.pending().len,
+        .carry_copied = carry != null,
+        .established = table.conns[i].state == .established,
+        .held_now = held_now,
+        .max_streams = max_streams,
+    });
+    if (after.outcome) |o| outcome = o;
+    switch (after.stream) {
+        .none => {},
+        .drop => {
+            streams.drop(hub, kept_stream.?);
+            if (carry) |c| hub.gpa.free(c);
+        },
+        .keep, .keep_displacing_oldest => {
+            // The handler wrote the stream's head and backlog; the live part
+            // is this machine's now.
+            // **THE BUDGET IS KEPT BY ENDING THE OLDEST.** A browser whose
+            // stream ends reconnects, and a conversation stream resumes from
+            // its last event; a new tab that could not open at all would not.
+            if (after.stream == .keep_displacing_oldest) {
+                if (oldestHeld(table)) |slot| endStream(slot, wire, table, hub, .displaced);
+            }
+            held[i] = .{ .conn = i, .kept = kept_stream.?, .last_write = Io.awakeNs() orelse 0, .carry = carry orelse &.{} };
+            held_now += 1;
+            held_most = @max(held_most, held_now);
+        },
+    }
     const done_at = Io.awakeNs() orelse 0;
     // **THE CONNECTION IS LET GO BEFORE ITS LOG IS WRITTEN**, so the client is
     // done when the response is, not when the console has caught up.
-    if (!kept_open) {
-        if (s.timed_out) {
-            table.abandon(wire, i, .slow_client);
-        } else if (spill.pending().len > 0 and table.conns[i].state == .established) {
+    switch (after.conn) {
+        .stream => kept_open = true,
+        .abandon => table.abandon(wire, i, .slow_client),
+        .drain => {
             draining[i] = .{ .spill = spill, .since = Io.awakeNs() orelse 0, .una = table.conns[i].una };
             draining_now += 1;
             spill_kept = true;
             kept_open = true;
-        } else close(wire, table, i);
+        },
+        .close => close(wire, table, i),
     }
     logRequest(number, bus.at_unix_ms, what, outcome, bus.status, if (done_at >= head_at) @intCast(done_at - head_at) else null);
     // **THE LOG SAYS A BODY'S SIZE AND HOW LONG IT TOOK TO ARRIVE** (169), so
