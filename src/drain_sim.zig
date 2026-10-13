@@ -581,5 +581,7 @@ pub fn runSeed(seed: u64) !void {
 }
 
 test "drain.zig under a seed, a handful of seeds" {
-    for (1..25) |seed| try runSeed(seed);
+    // **FOUR IN TIER 0** (metal-vmm QUEUE 198.11): each is about a second
+    // in Debug; `zig build properties` sweeps 100 and long.sh 10,000.
+    for (1..5) |seed| try runSeed(seed);
 }

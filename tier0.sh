@@ -20,10 +20,18 @@ ALONE=(-Dgopher-root="$NOWHERE" -Dwebbox-root="$NOWHERE" -Ddogpark-root="$NOWHER
 # The unit tests, the simulators' own tests, this repo's kernels and host
 # programs type-checked, `zig fmt --check src`, the machine lint and its
 # cases. The summary is kept: each test binary's time is in it.
-zig build test "${ALONE[@]}" --summary all > "$VERDICTS/tier0-test.txt" 2>&1
+# **MORE JOBS THAN CORES** (198.11): zig's default (one per core) left the
+# four big test binaries waiting on small steps' slots: 50 s warm here, 30 s
+# with -j8. Each binary is one thread.
+JOBS=$(( $(nproc 2>/dev/null || echo 4) * 2 ))
+zig build test "${ALONE[@]}" -j"$JOBS" --summary all > "$VERDICTS/tier0-test.txt" 2>&1
 [ $? = 0 ] || failed+=(test)
 grep -E "tests passed|error" "$VERDICTS/tier0-test.txt" | tail -5
 lap "zig build test"
+# **THE BUDGET** (198.11, B31): any test binary whose run passes it fails the
+# tier, so the cost cannot creep back. TIER0_RUN_BUDGET names another.
+python3 tools/test_budget.py "$VERDICTS/tier0-test.txt" "${TIER0_RUN_BUDGET:-45}"
+case $? in 0 | 2) ;; *) failed+=(test-budget) ;; esac
 
 # The rest of src/'s neighbours that only need Python.
 zig fmt --check probe droplet native > /dev/null || failed+=(fmt)

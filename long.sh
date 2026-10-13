@@ -105,6 +105,15 @@ if [ "$want" != metal ]; then
     fi
     [ $code = 0 ] || failed+=(sim)
     lap "simulator"
+
+    # **THE FAULT SWEEPS WHOLE** (metal-vmm QUEUE 198.11): tier 0 stops a
+    # FAT operation at a sample of its requests; here, at every one.
+    echo "── the FAT's fault and lie sweeps, every request"
+    zig build test -Dtest-file=src/disk_fat_faults_test.zig -Dfault-sweep-full > "$OUT.faults" 2>&1
+    code=$?
+    grep -E "error|failed" "$OUT.faults" | head -5
+    [ $code = 0 ] || failed+=(fault-sweeps)
+    lap "fault sweeps"
 fi
 
 if [ "$want" != sim ]; then

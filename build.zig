@@ -654,6 +654,10 @@ pub fn build(b: *std.Build) void {
     // tools/check_fat16_images.sh does both.
     const disk_fat_opts = b.addOptions();
     disk_fat_opts.addOption([]const u8, "images_dir", b.option([]const u8, "fat16-images", "where disk_fat_test writes its disk images") orelse "");
+    // **THE FAULT SWEEPS, SAMPLED IN TIER 0** (metal-vmm QUEUE 198.11):
+    // every request a fault can land on under -Dfault-sweep=full, as long.sh
+    // runs them; the ends and two dozen between otherwise.
+    disk_fat_opts.addOption(bool, "fault_sweep_full", b.option(bool, "fault-sweep-full", "disk_fat_faults_test stops at every request, not a sample (long.sh)") orelse false);
     disk_fat_opts.addOption([]const u8, "foreign_dir", b.option([]const u8, "fat16-foreign", "volumes other tools made, for disk_fat_test's check to judge") orelse "");
     // **Debug, like every other test** (metal-vmm QUEUE 136): these were
     // ReleaseSafe for a run a third as long (12.5 s, not 33 s), but its
@@ -682,7 +686,7 @@ pub fn build(b: *std.Build) void {
     const disk_fat_faults_opts = disk_fat_opts.createModule();
     // **EVERY TEST IN THE FILE RUNS UNDER ONE FILTER OR THE OTHER**, or the
     // build stops: a test named outside them would never run, and say nothing.
-    const faults_filters = [_][]const u8{ "every operation stopped after every write", "a request that fails is an error", "a request that fails before a write's commit", "a request that fails or lies leaves no cluster lost" };
+    const faults_filters = [_][]const u8{ "every operation stopped after every write", "a request that fails is an error", "a request that fails before a write's commit", "a request that fails or lies leaves no cluster lost", "a sampled sweep" };
     const lies_filters = [_][]const u8{ "a disk that lies", "a write that lands and answers failure" };
     everyTestFiltered(b, "src/disk_fat_faults_test.zig", &(faults_filters ++ lies_filters));
     for ([_][]const []const u8{
