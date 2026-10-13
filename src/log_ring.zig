@@ -179,8 +179,11 @@ pub const Ring = struct {
 ///     value after that goes: to its closing quote if it opened with one,
 ///     else up to a space, a quote, `&`, `;`, `,` or the line's end. That covers a query string (`?key=...`) as the request
 ///     line logs it;
-///   - **`/uploads/`**: the path segment after it goes. An upload is served
-///     at `.../uploads/<32 random hex>.<ext>`, and that id is what names it.
+///   - **`/uploads/`**, in any case: the slashes after it are kept and the
+///     next path segment goes, up to `.`, `/`, `?`, `#`, a space or a quote
+///     (`upload_id_cases`, 194.3). An upload is served at
+///     `.../uploads/<32 random hex>.<ext>`, and that id is what names it;
+///     `/uploads//<id>` serves it too.
 ///
 /// What goes is replaced by `[redacted]`, once. A word that only contains a
 /// key (`passwords: 3`, `keyrevoked=5`) is left alone; one that ends in a
@@ -194,7 +197,7 @@ pub const Redactor = struct {
     /// quoted password may hold spaces. Zero for a bare value.
     quote: u8 = 0,
 
-    const State = enum { plain, after_key, before_value, in_value, in_segment, in_line };
+    const State = enum { plain, after_key, before_value, in_value, before_segment, in_segment, in_line };
 
     pub const line_keys = [_][]const u8{ "cookie:", "authorization:" };
     pub const value_keys = [_][]const u8{ "password", "passwd", "secret", "token", "key", "session", "bcrypt" };
@@ -249,8 +252,21 @@ pub const Redactor = struct {
                 ' ', '\t', '"', '\'', '&', ';', ',', '\n', '\r' => self.state = .plain,
                 else => return,
             },
+            // The slashes after `/uploads/` are kept (194.3: `/uploads//<id>`
+            // is served as `/uploads/<id>`); the segment's first byte marks
+            // it taken out, and one that ends it at once leaves nothing to.
+            .before_segment => switch (b) {
+                '/' => return put(sink, b),
+                '.', '?', '#', ' ', '\t', '"', '\'', '\n', '\r' => self.state = .plain,
+                else => {
+                    props.reachable(@src(), "log ring: an upload's id is taken out of its path", null);
+                    for (mark) |m| put(sink, m);
+                    self.state = .in_segment;
+                    return;
+                },
+            },
             .in_segment => switch (b) {
-                '.', '/', '?', ' ', '\t', '"', '\n', '\r' => self.state = .plain,
+                '.', '/', '?', '#', ' ', '\t', '"', '\'', '\n', '\r' => self.state = .plain,
                 else => return,
             },
             .in_line => {
@@ -274,9 +290,7 @@ pub const Redactor = struct {
         }
         for (segment_keys) |k| {
             if (std.mem.endsWith(u8, &self.window, k)) {
-                props.reachable(@src(), "log ring: an upload's id is taken out of its path", null);
-                for (mark) |m| put(sink, m);
-                self.state = .in_segment;
+                self.state = .before_segment;
                 return;
             }
         }
@@ -573,4 +587,31 @@ test "a ring moved to another buffer keeps what it held, its count from there, a
     var small = Ring.init(a[0..16]);
     small.write("aaaaaaaaaa\nbbbbbbbbbb\ncc");
     try testing.expectEqualStrings("bbbbbbbbbb\ncc", small.moveTo(&b).read(&out));
+}
+
+/// **ONE RULE FOR AN UPLOAD'S ID, HERE AND IN ZIG-WEBBOX** (metal-vmm QUEUE
+/// 194.3): after `/uploads/`, in any case, the slashes that follow are kept
+/// and the next segment goes, up to `.`, `/`, `?`, `#`, a space, a quote or
+/// the line's end. zig-webbox's `traffic.keptPath` keeps paths by the same
+/// rule, and its test carries this same table: change both together.
+pub const upload_id_cases = [_][2][]const u8{
+    .{ "/c/T/uploads/00112233.png", "/c/T/uploads/[redacted].png" },
+    .{ "/c/T/uploads//00112233.png", "/c/T/uploads//[redacted].png" },
+    .{ "/c/T/uploads///00112233", "/c/T/uploads///[redacted]" },
+    .{ "/c/T/Uploads/00112233.png", "/c/T/Uploads/[redacted].png" },
+    .{ "/c/T/UPLOADS/00112233", "/c/T/UPLOADS/[redacted]" },
+    .{ "/c/T/uploads/abc/more", "/c/T/uploads/[redacted]/more" },
+    .{ "/c/T/uploads/", "/c/T/uploads/" },
+    .{ "/c/T/uploads/#x", "/c/T/uploads/#x" },
+    .{ "/c/T/nothing/here", "/c/T/nothing/here" },
+};
+
+test "an upload's id after a doubled slash, or in any case, is still taken out (metal-vmm QUEUE 194.3)" {
+    for (upload_id_cases) |c| {
+        var in: [96]u8 = undefined;
+        var want: [96]u8 = undefined;
+        const line = try std.fmt.bufPrint(&in, "GET {s} -> ok\n", .{c[0]});
+        const kept = try std.fmt.bufPrint(&want, "GET {s} -> ok\n", .{c[1]});
+        try expectRedacted(kept, &.{line});
+    }
 }
