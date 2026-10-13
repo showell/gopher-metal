@@ -73,6 +73,10 @@ zig build test "${ZIG_GOPHER[@]}" --summary all > "$VERDICTS/test-summary.txt" 2
 # `test`), and its reason is said here, not only in the summary file.
 grep -E "tests passed|error|NOT type-checked" "$VERDICTS/test-summary.txt"
 lap "zig build test"
+# The library's own tests, on its Linux host: the kernel builds its sources,
+# and no other step here runs them.
+(cd "$WEBBOX_ROOT" && zig build test 2>&1 | tail -5; exit "${PIPESTATUS[0]}") || failed+=(webbox-test)
+lap "zig-webbox's zig build test"
 zig build kernels "${ZIG_GOPHER[@]}" 2>&1 | grep error
 [ "${PIPESTATUS[0]}" = 0 ] || failed+=(kernels)
 zig build gopher "${ZIG_GOPHER[@]}" 2>&1 | grep error
