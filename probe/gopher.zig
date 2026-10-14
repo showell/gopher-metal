@@ -641,6 +641,10 @@ pub fn kmain() noreturn {
         serial.fail("the host contract's setup (app.site.start) failed");
     };
     const hub = &started.hub;
+    // **DURABLE ON DEMAND** (metal-vmm QUEUE 200): the script route's
+    // sequence number is flushed before its script runs, and a failed
+    // flush refuses the run.
+    webbox.store.durable_now = Io.durableChecked;
     drains = .{ .gpa = hub.gpa, .limit = app.site.bodyLimit };
     {
         var said: [1024]u8 = undefined;

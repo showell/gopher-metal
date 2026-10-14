@@ -154,6 +154,16 @@ fn pagesFor(path: []const u8) ?*PageCache {
 /// may be a disk with no cache at all. The flush is tried again before the
 /// next response.
 pub fn durable() void {
+    _ = durableChecked();
+}
+
+/// **DURABLE NOW, AND WHETHER IT HELD** (webbox's `store.makeDurable`,
+/// metal-vmm QUEUE 200): `durable`, answering false when a flush failed, for
+/// the one caller that may not go on until its writes are kept (the script
+/// route's sequence number, before the script runs). The host sets it as
+/// webbox's `store.durable_now`.
+pub fn durableChecked() bool {
+    var ok = true;
     for ([_]?disk_fat.Volume{ site, data }, 0..) |maybe, k| {
         const v = maybe orelse continue;
         if (!v.blk.unflushed) continue;
@@ -163,8 +173,10 @@ pub fn durable() void {
             // and writes through.
             props.reachable(@src(), "io: a flush failed, and the response goes out anyway", .{ .disk = k });
             serial.put(if (k == 0) "  a flush of the boot disk failed\n" else "  a flush of the volume failed\n");
+            ok = false;
         }
     }
+    return ok;
 }
 
 /// The two volumes, for a host's status report: the site's, and the data's
