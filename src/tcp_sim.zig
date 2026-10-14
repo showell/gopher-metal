@@ -1297,6 +1297,9 @@ const Sim = struct {
     /// table's `oldestHalfOpen`): the class of item 24's red rough seeds.
     given_way_on: [max_clients]u64 = @splat(0),
     rough: Rough = .{},
+    /// Set by a test after the sim's init: `slotsOf` counts its calls, and
+    /// holds every 16th to `slotOf` for every client.
+    slots_checked: ?u64 = null,
     flooded: u8 = 0,
     /// The table's give-ups on the client's own connection: with a flood,
     /// `table.given_up` also counts the flood's half-open ones, which it
@@ -1481,6 +1484,31 @@ const Sim = struct {
         return null;
     }
 
+    /// Every client's `slotOf`, into `out[0..n_clients]`, in one pass over
+    /// the table: a crowd's client `i` has the port `client_port + i`, so a
+    /// slot's port names its client, and the first slot found for it is
+    /// `slotOf`'s. Clients times slots, every frame, was nearly all of a
+    /// full table's run (metal-vmm QUEUE 203(d)).
+    fn slotsOf(self: *const Sim, out: *[max_clients]?usize) void {
+        out.* = @splat(null);
+        if (self.crowd == null) {
+            for (0..self.n_clients) |i| out[i] = self.slotOf(i);
+            return;
+        }
+        for (self.table.conns, 0..) |c, k| {
+            if (c.state == .closed or !std.mem.eql(u8, &c.peer_ip, &client_ip)) continue;
+            if (c.peer_port < client_port) continue;
+            const i: usize = c.peer_port - client_port;
+            if (i >= self.n_clients or self.clientAtConst(i).port != c.peer_port) continue;
+            if (out[i] == null) out[i] = k;
+        }
+        if (self.slots_checked) |n| {
+            // Every 16th call: each one is the cost this pass removes.
+            if (n % 16 == 0) for (0..self.n_clients) |i| std.debug.assert(out[i] == self.slotOf(i));
+            @constCast(self).slots_checked = n + 1;
+        }
+    }
+
     fn quiescent(self: *const Sim) bool {
         for (self.table.conns) |c| if (c.state != .closed) return false;
         return true;
@@ -1515,9 +1543,10 @@ const Sim = struct {
             while (self.net.take(self.now, &buf)) |p| {
                 if (p.to_table) {
                     const given_way = self.table.half_open_given_way;
-                    var half_open: [max_clients]?usize = @splat(null);
-                    for (0..self.n_clients) |i| if (self.slotOf(i)) |k| {
-                        if (self.table.conns[k].state == .syn_received) half_open[i] = k;
+                    var half_open: [max_clients]?usize = undefined;
+                    self.slotsOf(&half_open);
+                    for (half_open[0..self.n_clients]) |*h| if (h.*) |k| {
+                        if (self.table.conns[k].state != .syn_received) h.* = null;
                     };
                     _ = self.table.handle(&wire, p.frame, self.now);
                     if (self.table.half_open_given_way != given_way) for (0..self.n_clients) |i| if (half_open[i]) |k| {
@@ -1537,8 +1566,8 @@ const Sim = struct {
             // Give-ups happen only in `transmit`: one that closes a client's
             // slot is a give-up on that client.
             const given_up = self.table.given_up;
-            var mine: [max_clients]?usize = @splat(null);
-            for (0..self.n_clients) |i| mine[i] = self.slotOf(i);
+            var mine: [max_clients]?usize = undefined;
+            self.slotsOf(&mine);
             self.table.transmit(&wire, self.now);
             if (self.table.given_up != given_up) for (0..self.n_clients) |i| if (mine[i]) |k| {
                 if (self.table.conns[k].state == .closed) {
@@ -1865,7 +1894,8 @@ const rough_red = [_]u64{ 11277, 11529, 13514, 16190, 20063, 20615, 22509, 25720
 const crowd_red = [_]u64{ 640, 1281, 1452, 1872, 1961, 2305, 2870, 4362, 6606, 7546, 8003, 8575, 9366, 9769, 9951 };
 
 test "a crowd the size of the kernel's table: every oracle holds, and the table fills" {
-    // **ONE IN TIER 0** (metal-vmm QUEUE 198.12): 1.7 s in Debug each;
+    // **ONE IN TIER 0** (metal-vmm QUEUE 198.12): 1.7 s in Debug each
+    // then, 0.35 s since `slotsOf` (203(d));
     // `zig build properties` and long.sh sweep the full table's seeds.
     for (1..2) |seed| try runFullSeed(seed);
 }
@@ -1910,6 +1940,17 @@ test "revival changes nothing where nothing gave way: the same frames, with the 
 // is the repro; a clean sweep says the bug is not a single lost frame in this
 // shape, and the box reads a wire capture under KVM (the bulk story carries
 // the per-connection close counts it needs).
+test "every client's slot in one pass is each client's own lookup's: a crowd and a full table, compared every 16th frame" {
+    for ([_]bool{ false, true }) |full| {
+        const sim = try std.testing.allocator.create(Sim);
+        defer std.testing.allocator.destroy(sim);
+        if (full) sim.initFull(1) else sim.initCrowd(3);
+        sim.slots_checked = 0;
+        try runCrowded(sim);
+        try std.testing.expect(sim.slots_checked.? > 160);
+    }
+}
+
 test "item 96: one lost frame to the client, swept over the first 20, always recovers" {
     for ([_]bool{ true, false }) |announces| {
         for ([_]usize{ 3000, 4895, 16000 }) |answer| {
