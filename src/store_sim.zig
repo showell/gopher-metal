@@ -450,16 +450,16 @@ test {
 /// The seeds `zig build test` runs, of `runSeed` and of `replaysExactly`.
 /// `zig build properties` sweeps the rest: 1,000 seeds of `runSeed`, and
 /// seeds 1 to 20 of `replaysExactly`, which `test` ran until
-/// they cost most of a minute of a Debug run (metal-vmm QUEUE 136).
+/// they cost most of a minute of a Debug run (metal-vmm QUEUE 136). One
+/// since 203(d) (tier 0 on the box's 2 cores): 1 and 2 were the ordinary
+/// runs every seed of the sweep repeats.
 const seeds = [_]u64{
-    1,
-    2,
     // Kills mutant S4 (MUTATION.md: a full volume's `Full` not mapped to
     // NoSpace); 1 and 2 never fill it.
     5,
 };
 
-test "store_sim: three seeds (properties: 1..1000)" {
+test "store_sim: one seed, the one that fills the volume (properties: 1..1000)" {
     for (seeds) |seed| try runSeed(seed);
 }
 

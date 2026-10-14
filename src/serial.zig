@@ -243,14 +243,14 @@ var captured_buf: [captured_max]u8 = undefined;
 var captured_len: usize = 0;
 
 fn captureForTest(bytes: []const u8) void {
-    for (bytes) |b| {
-        if (captured_len == captured_max) {
-            std.mem.copyForwards(u8, captured_buf[0 .. captured_max - 1], captured_buf[1..]);
-            captured_len -= 1;
-        }
-        captured_buf[captured_len] = b;
-        captured_len += 1;
-    }
+    // The last `captured_max` bytes of what was held and `bytes`, moved once
+    // a call (metal-vmm QUEUE 203(d): a byte at a time, a full buffer moved
+    // 4 KiB for every byte, a second of tier 0 in the backlog's test).
+    const new = bytes[bytes.len -| captured_max..];
+    const keep = @min(captured_len, captured_max - new.len);
+    std.mem.copyForwards(u8, captured_buf[0..keep], captured_buf[captured_len - keep .. captured_len]);
+    @memcpy(captured_buf[keep..][0..new.len], new);
+    captured_len = keep + new.len;
 }
 
 pub fn captured() []const u8 {
@@ -259,6 +259,29 @@ pub fn captured() []const u8 {
 
 pub fn clearCaptured() void {
     captured_len = 0;
+}
+
+test "a host test's capture keeps the last 4 KiB written, oldest dropped first, as a byte at a time would (metal-vmm QUEUE 203(d))" {
+    const testing = std.testing;
+    defer clearCaptured();
+    clearCaptured();
+    var model: std.ArrayList(u8) = .empty;
+    defer model.deinit(testing.allocator);
+    var prng: std.Random.DefaultPrng = .init(203);
+    const r = prng.random();
+    var buf: [9000]u8 = undefined;
+    for (0..200) |_| {
+        const n = if (r.boolean()) r.uintAtMost(usize, 40) else r.uintAtMost(usize, buf.len);
+        for (buf[0..n]) |*b| b.* = r.int(u8);
+        captureForTest(buf[0..n]);
+        try model.appendSlice(testing.allocator, buf[0..n]);
+        if (model.items.len > captured_max) {
+            const drop = model.items.len - captured_max;
+            std.mem.copyForwards(u8, model.items[0..captured_max], model.items[drop..]);
+            model.shrinkRetainingCapacity(captured_max);
+        }
+        try testing.expectEqualSlices(u8, model.items, captured());
+    }
 }
 
 test "the console's backlog: kept while deferred, drained in order, across its wrap, and written first when it fills (metal-vmm QUEUE 197.3)" {
