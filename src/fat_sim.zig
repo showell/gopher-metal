@@ -1034,8 +1034,9 @@ pub fn runSeed(seed: u64) !void {
 
 /// The seeds `zig build test` runs, plain and with probes. `zig build
 /// properties` sweeps 1..20 of both (it was 1..8 here until metal-vmm QUEUE
-/// 136: a quick test is a smoke test, and the sweep is the coverage).
-const seeds = [_]u64{ 1, 2 };
+/// 136: a quick test is a smoke test, and the sweep is the coverage). One
+/// since 203(d) (tier 0 on the box's 2 cores).
+const seeds = [_]u64{1};
 
 /// **SEEDS THAT ONCE FAILED**, each under what it found. Run by
 /// `zig build properties` (src/properties.zig) on every sweep, not by
@@ -1078,11 +1079,11 @@ test "disk_fat: the deepest tree makePath makes is one check and removeTree take
     try testing.expect(after.health.clean());
 }
 
-test "the same, with probes of what the volume must refuse, two seeds (properties: 1..20)" {
+test "the same, with probes of what the volume must refuse, one seed (properties: 1..20)" {
     for (seeds) |seed| try runProbeSeed(seed);
 }
 
-test "FAT16 and FAT32 against a random workload, two seeds (properties: 1..20), both FAT paths" {
+test "FAT16 and FAT32 against a random workload, one seed (properties: 1..20), both FAT paths" {
     for (seeds) |seed| try runSeed(seed);
 }
 

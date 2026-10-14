@@ -11,6 +11,7 @@ const Shape = test_disk.Shape;
 const Layout = test_disk.Layout;
 const small = test_disk.small;
 const disk_fat_test = @import("disk_fat_test.zig");
+const options = @import("disk_fat_test_options");
 const chainOf = disk_fat_test.chainOf;
 const damageFat = disk_fat_test.damageFat;
 const setEntry = disk_fat_test.setEntry;
@@ -572,7 +573,12 @@ test "a directory's name is held to the same length as a file's: one too long is
     }
 }
 
-test "a tree removes whole whatever its size within the directory limit: past 4,096 entries too" {
+// **PAST 4,096 ENTRIES ONLY UNDER `-Dfault-sweep-full` (long.sh)**: the
+// old bound was 4,096 rounds, and `removeTree` re-lists each round, so
+// 4,100 entries cost seconds (metal-vmm QUEUE 203(d)); the unit run
+// removes 600, the same path short of that bound.
+test "a tree removes whole whatever its size within the directory limit: past 4,096 entries under long.sh" {
+    const entries: u32 = if (options.fault_sweep_full) 4100 else 600;
     for (configs) |cfg| {
         if (cfg.shape.kind != .fat16 or !cfg.cached) continue;
         const d = try Disk.make("remove-large", cfg.shape, cfg.cached);
@@ -580,7 +586,7 @@ test "a tree removes whole whatever its size within the directory limit: past 4,
         _ = try d.vol.makePath("data/big");
         var name: [32]u8 = undefined;
         var i: u32 = 0;
-        while (i < 4100) : (i += 1) try d.vol.writeFile(try std.fmt.bufPrint(&name, "data/big/F{d}", .{i}), "");
+        while (i < entries) : (i += 1) try d.vol.writeFile(try std.fmt.bufPrint(&name, "data/big/F{d}", .{i}), "");
         try d.vol.removeTree("data/big");
         try testing.expectError(disk_fat.Error.NotFound, d.vol.open("data/big"));
         const r = try d.check();

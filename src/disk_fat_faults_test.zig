@@ -12,13 +12,24 @@ const testing = std.testing;
 const Shape = test_disk.Shape;
 const Layout = test_disk.Layout;
 const formats = [_]Shape{ test_disk.small, test_disk.small32 };
+/// Every format with its FAT held in memory and without, under
+/// `-Dfault-sweep-full` (long.sh). In tier 0 (metal-vmm QUEUE 203(d), the
+/// box's 2 cores), FAT32 only as the kernel mounts it, its FAT held: its
+/// 35 MB disk made the uncached run the dearest of all, and FAT16 still
+/// runs both, so each path is swept on every change.
+const Config = struct { shape: Shape, cached: bool };
 const configs = blk: {
-    var out: [formats.len * 2]struct { shape: Shape, cached: bool } = undefined;
-    for (formats, 0..) |f, i| {
-        out[2 * i] = .{ .shape = f, .cached = false };
-        out[2 * i + 1] = .{ .shape = f, .cached = true };
-    }
-    break :blk out;
+    var out: [formats.len * 2]Config = undefined;
+    var n: usize = 0;
+    for (formats) |f| for ([_]bool{ false, true }) |cached| {
+        if (!options.fault_sweep_full and f.kind == .fat32 and !cached) continue;
+        out[n] = .{ .shape = f, .cached = cached };
+        n += 1;
+    };
+    const len = n;
+    var trimmed: [len]Config = undefined;
+    @memcpy(&trimmed, out[0..len]);
+    break :blk trimmed;
 };
 
 /// `test_disk.Disk`, kept as an image when the tests are asked to keep them
@@ -853,8 +864,9 @@ test "a write that lands and answers failure (or fails) to a held FAT sector, it
     for (stopped_ops) |op| {
         if (std.mem.indexOf(u8, op.name, "spanning FAT sectors") == null) continue;
         // FAT16 and FAT32, each with its FAT held.
-        for ([_]@FieldType(@import("virtio.zig").Block.Fault, "kind"){ .fails, .lands_and_fails }) |fault| for ([_]usize{ 1, 3 }) |c| {
-            const cfg = configs[c];
+        for ([_]@FieldType(@import("virtio.zig").Block.Fault, "kind"){ .fails, .lands_and_fails }) |fault| for (formats) |shape| {
+            // Each format with its FAT held, the one that holds it.
+            const cfg: Config = .{ .shape = shape, .cached = true };
             const total = try requestsOf(op, cfg);
             const d = try Disk.makeUnkept("limit-held-twice", cfg.shape, true);
             defer d.deinit();

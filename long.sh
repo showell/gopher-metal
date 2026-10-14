@@ -113,6 +113,12 @@ if [ "$want" != metal ]; then
     code=$?
     grep -E "error|failed" "$OUT.faults" | head -5
     [ $code = 0 ] || failed+=(fault-sweeps)
+    # And disk_fat_test's own long cases (QUEUE 203(d)): a tree past
+    # 4,096 entries removed whole.
+    zig build test -Dtest-file=src/disk_fat_test.zig -Dfault-sweep-full > "$OUT.fatlong" 2>&1
+    code=$?
+    grep -E "error|failed" "$OUT.fatlong" | head -5
+    [ $code = 0 ] || failed+=(fat-long)
     lap "fault sweeps"
 fi
 
