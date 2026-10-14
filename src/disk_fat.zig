@@ -136,6 +136,32 @@ const bad_cluster: Cluster = 0xFFF7;
 /// FAT32's entries are 28 bits; the top four are reserved, and its marks
 /// are 28-bit too.
 pub const fat32_mask: Cluster = 0x0FFF_FFFF;
+
+/// `Volume.freeEntries` for entries of type `T` (little-endian on the
+/// disk), the bits `mask` holds: 16 entries a vector where the host is
+/// little-endian too (every target this runs on), then one at a time.
+fn freeOf(comptime T: type, comptime mask: T, sectors: []const u8, lo: u32, hi: u32, first: *?u32) u32 {
+    const lanes = 16;
+    const V = @Vector(lanes, T);
+    const w = @sizeOf(T);
+    var free: u32 = 0;
+    var i = lo;
+    if (comptime @import("builtin").cpu.arch.endian() == .little) {
+        while (i + lanes <= hi) : (i += lanes) {
+            const v: V = @bitCast(sectors[i * w ..][0 .. lanes * w].*);
+            const zero: u16 = @bitCast((v & @as(V, @splat(mask))) == @as(V, @splat(0)));
+            if (zero == 0) continue;
+            free += @popCount(zero);
+            if (first.* == null) first.* = i + @ctz(zero);
+        }
+    }
+    while (i < hi) : (i += 1) {
+        if (std.mem.readInt(T, sectors[i * w ..][0..w], .little) & mask != 0) continue;
+        free += 1;
+        if (first.* == null) first.* = i;
+    }
+    return free;
+}
 const fat32_chain_end: Cluster = 0x0FFF_FFF8;
 const fat32_bad_cluster: Cluster = 0x0FFF_FFF7;
 
@@ -702,19 +728,35 @@ pub const Volume = struct {
                     break :read run[0 .. n * sector_size];
                 },
             };
-            var i: u32 = 0;
-            while (i < n * per) : (i += 1) {
-                const c = s * per + i;
-                if (c < 2) continue;
-                if (c > self.max_cluster) return .{ .free = free, .first_free = first };
-                if (self.entryIn(sectors, i) == 0) {
-                    free += 1;
-                    if (first == null) first = c;
-                }
+            // The run's entries that are clusters: from cluster 2, to the
+            // last cluster.
+            const base = s * per;
+            const lo = if (base < 2) 2 - base else 0;
+            const hi = @min(n * per, self.max_cluster + 1 -| base);
+            if (lo < hi) {
+                var at: ?u32 = null;
+                free += self.freeEntries(sectors, lo, hi, &at);
+                if (first == null) if (at) |i| {
+                    first = base + i;
+                };
             }
+            if (base + n * per > self.max_cluster) break;
             s += n;
         }
         return .{ .free = free, .first_free = first };
+    }
+
+    /// **THE FREE ENTRIES OF A RUN OF FAT SECTORS**, `lo` to `hi` (not
+    /// counting `hi`), and the first of them into `first`: as `entryIn`
+    /// reads each and counts the zeros, but a vector of entries at a time
+    /// (metal-vmm QUEUE 203(b), P198.12). A call per entry was most of a
+    /// FAT32 mount's time in a Debug build, the tests' (a 35 MB disk's
+    /// FAT is 270,000 entries). Its own test holds it to `entryIn`'s count.
+    pub fn freeEntries(self: *const Volume, sectors: []const u8, lo: u32, hi: u32, first: *?u32) u32 {
+        return switch (self.kind) {
+            .fat16 => freeOf(u16, 0xFFFF, sectors, lo, hi, first),
+            .fat32 => freeOf(u32, fat32_mask, sectors, lo, hi, first),
+        };
     }
 
     /// How many sectors a FAT is read in at a time where it is read whole:
@@ -993,4 +1035,43 @@ pub const Volume = struct {
 fn refuseWrite() Error {
     props.reachable(@src(), "fat: a write is refused, the FAT's copies unweighed", null);
     return Error.WritesRefused;
+}
+
+test "the free entries of a run of FAT sectors, a vector at a time, are entryIn's zeros one at a time: both kinds, every bound, the FAT32 top bits ignored (203(b))" {
+    var prng: std.Random.DefaultPrng = .init(198);
+    const r = prng.random();
+    var bytes: [2 * sector_size]u8 = undefined;
+    var checked: usize = 0;
+    for ([_]Kind{ .fat16, .fat32 }) |kind| {
+        // Only the kind is read here.
+        var vol: Volume = undefined;
+        vol.kind = kind;
+        const per = 2 * vol.entriesPerSector();
+        for (0..200) |_| {
+            // Mostly taken, some free, and on FAT32 free entries with the
+            // reserved top four bits set (still free).
+            r.bytes(&bytes);
+            const w = vol.entryBytes();
+            for (0..per) |i| if (r.uintLessThan(u8, 4) == 0) {
+                const top: u8 = if (kind == .fat32 and r.boolean()) 0xF0 else 0;
+                @memset(bytes[i * w ..][0..w], 0);
+                bytes[i * w + w - 1] = top;
+            };
+            const lo = r.uintAtMost(u32, per);
+            const hi = r.intRangeAtMost(u32, lo, per);
+            var first: ?u32 = null;
+            const free = vol.freeEntries(&bytes, lo, hi, &first);
+            var want: u32 = 0;
+            var want_first: ?u32 = null;
+            var i = lo;
+            while (i < hi) : (i += 1) if (vol.entryIn(&bytes, i) == 0) {
+                want += 1;
+                if (want_first == null) want_first = i;
+            };
+            try std.testing.expectEqual(want, free);
+            try std.testing.expectEqual(want_first, first);
+            checked += 1;
+        }
+    }
+    try std.testing.expectEqual(@as(usize, 400), checked);
 }

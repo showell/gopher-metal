@@ -644,55 +644,83 @@ pub fn aliasFor(self: *Volume, dir_cluster: Cluster, name: []const u8) Error![11
         } else |_| {}
     }
 
-    var n: u32 = 1;
-    while (n < 1000) : (n += 1) {
-        var short = [_]u8{' '} ** 11;
-
-        var tail: [4]u8 = undefined;
-        var tail_len: usize = 1;
-        tail[0] = '~';
-        var digits: [3]u8 = undefined;
-        var d: usize = 0;
-        var v = n;
-        while (v > 0) : (v /= 10) {
-            digits[d] = '0' + @as(u8, @intCast(v % 10));
-            d += 1;
-        }
-        while (d > 0) {
-            d -= 1;
-            tail[tail_len] = digits[d];
-            tail_len += 1;
-        }
-
-        // The base: what fits before the tail, without dots and spaces.
-        const keep = 8 - tail_len;
-        var w: usize = 0;
-        for (name) |c| {
-            if (w >= keep) break;
-            if (c == '.' or c == ' ') continue;
-            short[w] = upper(c);
-            w += 1;
-        }
-        for (tail[0..tail_len], 0..) |c, i| short[w + i] = c;
-
-        // The extension, from the last dot.
-        var dot: usize = name.len;
-        for (name, 0..) |c, i| {
-            if (c == '.') dot = i;
-        }
-        if (dot < name.len) {
-            var x: usize = 0;
-            for (name[dot + 1 ..]) |c| {
-                if (x >= 3) break;
-                short[8 + x] = upper(c);
-                x += 1;
+    // **ONE LISTING** (metal-vmm QUEUE 203(b), P198.12): every `~N` this
+    // name's aliases already hold, marked in one pass; then the first free.
+    // Probing `~1, ~2, …` with a listing each was cubic in a directory of
+    // names sharing their first six characters.
+    const Taken = struct {
+        name: []const u8,
+        n: std.StaticBitSet(1000) = .initEmpty(),
+        fn each(t: *@This(), e: Entry) void {
+            // Each `~` in the 8-character part may start the tail: the
+            // name's own characters can hold one too.
+            for (e.short[0..8], 0..) |c, at| {
+                if (c != '~') continue;
+                var v: u32 = 0;
+                var k = at + 1;
+                while (k < 8 and e.short[k] >= '0' and e.short[k] <= '9') : (k += 1) v = v * 10 + (e.short[k] - '0');
+                if (k == at + 1 or v == 0 or v >= 1000) continue;
+                if (eqlBytes(&aliasCandidate(t.name, v), &e.short)) t.n.set(v);
             }
         }
-
-        if (!(try self.aliasTaken(dir_cluster, short))) return short;
+    };
+    var taken = Taken{ .name = name };
+    try self.list(dir_cluster, &taken, Taken.each);
+    var n: u32 = 1;
+    while (n < 1000) : (n += 1) {
+        if (!taken.n.isSet(n)) return aliasCandidate(name, n);
     }
     props.reachable(@src(), "fat: no 8.3 alias is left for a name", null);
     return Error.BadName;
+}
+
+/// The `~n` alias of `name` (1 ≤ n < 1000): its first characters, without
+/// dots and spaces, as many as fit before the tail (`~9` keeps six, `~10`
+/// five), upper-cased; the extension from its last dot.
+pub fn aliasCandidate(name: []const u8, n: u32) [11]u8 {
+    var short = [_]u8{' '} ** 11;
+
+    var tail: [4]u8 = undefined;
+    var tail_len: usize = 1;
+    tail[0] = '~';
+    var digits: [3]u8 = undefined;
+    var d: usize = 0;
+    var v = n;
+    while (v > 0) : (v /= 10) {
+        digits[d] = '0' + @as(u8, @intCast(v % 10));
+        d += 1;
+    }
+    while (d > 0) {
+        d -= 1;
+        tail[tail_len] = digits[d];
+        tail_len += 1;
+    }
+
+    // The base: what fits before the tail, without dots and spaces.
+    const keep = 8 - tail_len;
+    var w: usize = 0;
+    for (name) |c| {
+        if (w >= keep) break;
+        if (c == '.' or c == ' ') continue;
+        short[w] = upper(c);
+        w += 1;
+    }
+    for (tail[0..tail_len], 0..) |c, i| short[w + i] = c;
+
+    // The extension, from the last dot.
+    var dot: usize = name.len;
+    for (name, 0..) |c, i| {
+        if (c == '.') dot = i;
+    }
+    if (dot < name.len) {
+        var x: usize = 0;
+        for (name[dot + 1 ..]) |c| {
+            if (x >= 3) break;
+            short[8 + x] = upper(c);
+            x += 1;
+        }
+    }
+    return short;
 }
 
 /// Whether a directory already holds this exact 8.3 field.
