@@ -19,18 +19,26 @@ ALONE=(-Dgopher-root="$NOWHERE" -Dwebbox-root="$NOWHERE")
 
 # The unit tests, the simulators' own tests, this repo's kernels and host
 # programs type-checked, `zig fmt --check src`, the machine lint and its
-# cases. The summary is kept: each test binary's time is in it.
+# cases. Each test binary runs under tools/cpu_time.py, which writes its CPU
+# time to $CPU_DIR (198.12). The directory is part of the build's command
+# line, so it is the same one every run: a new one would compile every test
+# binary again.
 # **MORE JOBS THAN CORES** (198.11): zig's default (one per core) left the
-# four big test binaries waiting on small steps' slots: 50 s warm here, 30 s
-# with -j8. Each binary is one thread.
+# four big test binaries waiting on small steps' slots. Each binary is one
+# thread.
 JOBS=$(( $(nproc 2>/dev/null || echo 4) * 2 ))
-zig build test "${ALONE[@]}" -j"$JOBS" --summary all > "$VERDICTS/tier0-test.txt" 2>&1
+CPU_DIR="$HERE/.zig-cache/test-cpu"
+rm -rf "$CPU_DIR"
+zig build test "${ALONE[@]}" -Dtest-cpu-dir="$CPU_DIR" -j"$JOBS" --summary all > "$VERDICTS/tier0-test.txt" 2>&1
 [ $? = 0 ] || failed+=(test)
 grep -E "tests passed|error" "$VERDICTS/tier0-test.txt" | tail -5
 lap "zig build test"
-# **THE BUDGET** (198.11, B31): any test binary whose run passes it fails the
-# tier, so the cost cannot creep back. TIER0_RUN_BUDGET names another.
-python3 tools/test_budget.py "$VERDICTS/tier0-test.txt" "${TIER0_RUN_BUDGET:-45}"
+# **THE BUDGET** (198.11, B31; 198.12: CPU time, not wall time): a test
+# binary whose CPU time passes TIER0_RUN_BUDGET (25 s), or all of them
+# together past TIER0_TOTAL_BUDGET (75 s), fails the tier, so the cost cannot
+# creep back. CPU time is the same on 2 cores and on 8; wall time under -j
+# was the neighbours' as much as the test's.
+python3 tools/test_budget.py "$CPU_DIR" "${TIER0_RUN_BUDGET:-25}" "${TIER0_TOTAL_BUDGET:-75}"
 case $? in 0 | 2) ;; *) failed+=(test-budget) ;; esac
 
 # The rest of src/'s neighbours that only need Python.
@@ -52,7 +60,7 @@ tier 0 does NOT check, and which tier does:
   - src/pinned/webbox_body.zig against zig-webbox's body.zig (zig build
     pinned); gopher.elf type-checked (zig build check-apps) and built;
     the limits zig-webbox copies (tools/check_limits.py); zig-webbox's own
-    tests; the site volume, the chat and Dog Park judges; metal-vmm on
+    tests; the site volume and the chat judges; metal-vmm on
     gopher.elf: tier 3
 NOTE
 verdict

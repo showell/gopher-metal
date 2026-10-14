@@ -162,8 +162,8 @@ test "copies apart whose second weighing cannot run: the first copy is held as i
         try testing.expect(last >= 3);
         const was = l.get(d.bytes, 1, last);
         l.set(d.bytes, 0, last, 0);
-        const damaged = try testing.allocator.dupe(u8, d.bytes);
-        defer testing.allocator.free(damaged);
+        const damaged = try d.snapshot();
+        defer d.drop(damaged);
         const buf = try testing.allocator.alloc(u8, d.vol.fatBytes());
         defer testing.allocator.free(buf);
         const room = try testing.allocator.alloc(u8, d.vol.checkBytes());
@@ -520,8 +520,8 @@ test "a directory's growth stopped at any request before its commit is an error,
         _ = try d.vol.makePath("data/full");
         var name: [32]u8 = undefined;
         for (0..14) |k| try d.vol.writeFile(try std.fmt.bufPrint(&name, "data/full/F{d}", .{k}), "x");
-        const before = try testing.allocator.dupe(u8, d.bytes);
-        defer testing.allocator.free(before);
+        const before = try d.snapshot();
+        defer d.drop(before);
         try d.mount(false);
         const r0 = d.blk.requests;
         try d.vol.writeFile("data/full/NEXT", "x"); // grows the directory
@@ -597,8 +597,8 @@ test "an append onto a chain longer than its size fills that tail first, and lin
         defer d.deinit();
         var first: [600]u8 = undefined;
         try d.vol.writeFile("data/LOG", pattern(&first, 1));
-        const before = try testing.allocator.dupe(u8, d.bytes);
-        defer testing.allocator.free(before);
+        const before = try d.snapshot();
+        defer d.drop(before);
         var more: [1000]u8 = undefined;
         _ = pattern(&more, 2);
 
@@ -645,8 +645,8 @@ test "a rename whose write fails, refused whole or landed, keeps the file under 
         var body: [1500]u8 = undefined;
         _ = pattern(&body, 7);
         try d.vol.writeFile("data/a long old name.txt", &body);
-        const before = try testing.allocator.dupe(u8, d.bytes);
-        defer testing.allocator.free(before);
+        const before = try d.snapshot();
+        defer d.drop(before);
         try d.mount(cached);
         const r0 = d.blk.requests;
         try d.vol.rename("data/a long old name.txt", "data/a new long name.md");
@@ -698,8 +698,8 @@ test "a rename whose undo is refused too keeps the file under one whole name, or
         var body: [1500]u8 = undefined;
         _ = pattern(&body, 9);
         try d.vol.writeFile("data/a long old name.txt", &body);
-        const before = try testing.allocator.dupe(u8, d.bytes);
-        defer testing.allocator.free(before);
+        const before = try d.snapshot();
+        defer d.drop(before);
         try d.mount(cached);
         const r0 = d.blk.requests;
         try d.vol.rename("data/a long old name.txt", "data/a new long name.md");
@@ -846,8 +846,8 @@ test "the check counts orphaned long-name parts as fsck.fat finds them: by run, 
     const d = try Disk.make("orphan-rules", test_disk.small, false);
     defer d.deinit();
     try d.vol.writeFile("data/A Rather Long Name For A Test File.txt", "x");
-    const pristine = try testing.allocator.dupe(u8, d.bytes);
-    defer testing.allocator.free(pristine);
+    const pristine = try d.snapshot();
+    defer d.drop(pristine);
     // The run: its last-flagged part first, the short entry after its parts.
     const first = blk: {
         var at: usize = 0;

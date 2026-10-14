@@ -25,6 +25,12 @@ pub const Shape = struct {
 
 /// Lays a fresh filesystem of `shape.kind` over all of `disk`.
 pub fn format(disk: []u8, shape: Shape) void {
+    @memset(disk, 0);
+    formatZeroed(disk, shape);
+}
+
+/// `format`, over a disk already all zeros (`zeroedDisk`'s).
+fn formatZeroed(disk: []u8, shape: Shape) void {
     switch (shape.kind) {
         .fat16 => format16(disk, shape),
         .fat32 => format32(disk, shape),
@@ -37,7 +43,6 @@ pub fn format(disk: []u8, shape: Shape) void {
 /// are the media mark, an end mark, and the root's end. FSInfo's free count
 /// and hint are "unknown", which the spec allows and Linux recomputes.
 fn format32(disk: []u8, shape: Shape) void {
-    @memset(disk, 0);
     const reserved: u32 = 32;
     const fat_sectors: u32 = ((shape.sectors / shape.sectors_per_cluster + 2) * 4 + sector - 1) / sector;
     const b = disk[0..sector];
@@ -84,7 +89,6 @@ fn format32(disk: []u8, shape: Shape) void {
 /// FAT16: a BPB, two FATs whose first two entries are the media byte and an
 /// end mark, and an empty root.
 fn format16(disk: []u8, shape: Shape) void {
-    @memset(disk, 0);
     const reserved: u32 = 1;
     // A FAT large enough for every cluster the data region could hold, and a
     // little more: the spec allows a FAT longer than its clusters need.
@@ -122,6 +126,74 @@ fn format16(disk: []u8, shape: Shape) void {
 
 /// What the BPB on a disk says, read from its bytes, and the FAT read and
 /// written the same way: from the spec, not through disk_fat.zig.
+// ---- **TEST TIME** (metal-vmm QUEUE 198.12) ---------------------------------
+//
+// The FAT tests run in Debug, where std.mem.eql is about 14 instructions a
+// byte, a FAT entry read through `Layout.get` a function call, and every
+// allocation and free fills its bytes with 0xAA: on a 35 MB FAT32 disk with
+// a 256 KiB FAT, made, compared and counted hundreds of times a run, that
+// was half of disk_fat_lies_test's time (callgrind). The helpers below do
+// the same thing a chunk at a time; the volume's own code is untouched.
+
+/// `a` and `b` hold the same bytes: `std.mem.eql`, 64 bytes at a time.
+pub fn sameBytes(a: []const u8, b: []const u8) bool {
+    if (a.len != b.len) return false;
+    const chunk = 64;
+    var i: usize = 0;
+    while (i + chunk <= a.len) : (i += chunk) {
+        const va: @Vector(chunk, u8) = a[i..][0..chunk].*;
+        const vb: @Vector(chunk, u8) = b[i..][0..chunk].*;
+        if (!@reduce(.And, va == vb)) return false;
+    }
+    return std.mem.eql(u8, a[i..], b[i..]);
+}
+
+/// How many of FAT entries 2 to `clusters + 1` in `fat` are 0 under `mask`
+/// (free), 16 entries at a time.
+fn zeroEntries(comptime T: type, comptime mask: T, fat: []const u8, clusters: usize) usize {
+    comptime std.debug.assert(@import("builtin").cpu.arch.endian() == .little);
+    const w = @sizeOf(T);
+    const lanes = 16;
+    const end = (clusters + 2) * w;
+    var n: usize = 0;
+    var at: usize = 2 * w;
+    while (at + lanes * w <= end) : (at += lanes * w) {
+        const v: @Vector(lanes, T) = @bitCast(fat[at..][0 .. lanes * w].*);
+        const free_lanes: u16 = @bitCast((v & @as(@Vector(lanes, T), @splat(mask))) == @as(@Vector(lanes, T), @splat(0)));
+        n += @popCount(free_lanes);
+    }
+    while (at < end) : (at += w) {
+        if (std.mem.readInt(T, fat[at..][0..w], .little) & mask == 0) n += 1;
+    }
+    return n;
+}
+
+/// **A DISK THAT IS ZEROS BEFORE IT IS TOUCHED** (198.12): pages the
+/// kernel maps fresh, so the sectors a test never writes cost neither a
+/// fill (in Debug, `@memset` of a 35 MB FAT32 disk is a byte loop) nor a
+/// page fault. Always the page allocator, whatever the disk's `gpa`.
+fn zeroedDisk(n: usize) ![]u8 {
+    const p = std.heap.page_allocator.rawAlloc(n, .of(u8), @returnAddress()) orelse return error.OutOfMemory;
+    return p[0..n];
+}
+
+fn freeDisk(bytes: []u8) void {
+    std.heap.page_allocator.rawFree(bytes, .of(u8), @returnAddress());
+}
+
+/// Bytes the caller fills before reading (a disk `format` zeroes, a FAT the
+/// mount reads into): no 0xAA fill in Debug, so a 35 MB disk costs its
+/// format, not three passes.
+pub fn allocUnset(gpa: std.mem.Allocator, n: usize) ![]u8 {
+    const p = gpa.rawAlloc(n, .of(u8), @returnAddress()) orelse return error.OutOfMemory;
+    return p[0..n];
+}
+
+/// Gives back `allocUnset`'s bytes, unfilled.
+pub fn freeUnset(gpa: std.mem.Allocator, bytes: []u8) void {
+    gpa.rawFree(bytes, .of(u8), @returnAddress());
+}
+
 pub const Layout = struct {
     fat_start: usize,
     fat_bytes: usize,
@@ -220,6 +292,9 @@ pub const Disk = struct {
     trusted: u32 = 0,
     /// Room for the mount's check of each FAT copy, as gopher.zig gives it.
     check_room: ?[]u8 = null,
+    /// While a `Mounted` is kept: the 64 KiB chunks of `bytes` written
+    /// since it was last restored, a bit each, told by `blk.observe`.
+    dirty: ?[]u64 = null,
 
     /// Formats `shape` into a fresh disk and mounts it, holding its FAT in
     /// memory if `cached`. Heap-allocated: the volume points at the block and
@@ -233,8 +308,9 @@ pub const Disk = struct {
     pub fn makeIn(gpa: std.mem.Allocator, io: std.Io, label: []const u8, shape: Shape, cached: bool) !*Disk {
         const d = try gpa.create(Disk);
         errdefer gpa.destroy(d);
-        const bytes = try gpa.alloc(u8, @as(usize, shape.sectors) * sector);
-        format(bytes, shape);
+        const bytes = try zeroedDisk(@as(usize, shape.sectors) * sector);
+        errdefer freeDisk(bytes);
+        formatZeroed(bytes, shape);
         d.* = .{ .gpa = gpa, .io = io, .label = label, .suffix = shape.suffix, .bytes = bytes, .blk = virtio.Block.inMemory(bytes) };
         try d.mount(cached);
         return d;
@@ -242,19 +318,144 @@ pub const Disk = struct {
 
     pub fn mount(d: *Disk, cached: bool) !void {
         d.vol = try disk_fat.Volume.mount(&d.blk, &d.scratch, 0);
-        if (d.fat_cache) |c| d.gpa.free(c);
-        d.fat_cache = null;
-        if (d.check_room) |r| d.gpa.free(r);
-        d.check_room = null;
+        // The held FAT's room is kept from one mount to the next when it is
+        // the same size, so a `Mounted` stays the disk's (198.12).
+        const reuse = cached and d.fat_cache != null and d.fat_cache.?.len == d.vol.fatBytes() and
+            d.check_room != null and d.check_room.?.len == d.vol.checkBytes();
+        if (!reuse) {
+            if (d.fat_cache) |c| freeUnset(d.gpa, c);
+            d.fat_cache = null;
+            if (d.check_room) |r| freeUnset(d.gpa, r);
+            d.check_room = null;
+        }
         if (cached) {
-            d.fat_cache = try d.gpa.alloc(u8, d.vol.fatBytes());
-            if (d.check_room) |r| d.gpa.free(r);
-            d.check_room = try d.gpa.alloc(u8, d.vol.checkBytes());
+            if (!reuse) {
+                d.fat_cache = try allocUnset(d.gpa, d.vol.fatBytes());
+                d.check_room = try allocUnset(d.gpa, d.vol.checkBytes());
+            }
             const m = try d.vol.cacheFatChecked(d.fat_cache.?, d.check_room.?);
             d.repaired = m.repaired;
             d.trusted = m.trusted;
             d.vol.dir_burst = &d.dir_burst;
             d.vol.cacheDirs(&d.dir_keys, &d.dir_data);
+        }
+    }
+
+    /// **A MOUNT TO GO BACK TO** (metal-vmm QUEUE 198.12): the disk's bytes
+    /// and the volume as `mount` left them, so a test that puts the disk back
+    /// before each of hundreds of runs (`@memcpy` then `mount`) mounts once.
+    /// A mount is the disk's bytes read, nothing else: the same bytes give
+    /// the same volume (the test "a restored mount is a fresh mount" holds
+    /// it to that), and in Debug a FAT32 mount, every entry of its FAT
+    /// counted, was most of the fault tests' time. The mount a test is
+    /// about (the next boot's, after a fault) is still a mount.
+    pub const Mounted = struct {
+        bytes: []u8,
+        vol: disk_fat.Volume,
+        cached: bool,
+        fat: ?[]u8,
+        scratch: [sector]u8,
+        repaired: u32,
+        trusted: u32,
+    };
+
+    /// The disk mounted (`cached` as `mount` takes it), kept to `restore`.
+    pub fn mountSaved(d: *Disk, cached: bool) !Mounted {
+        std.debug.assert(d.dirty == null);
+        try d.mount(cached);
+        const bytes = try d.snapshot();
+        errdefer d.drop(bytes);
+        const fat: ?[]u8 = if (d.fat_cache) |c| try d.gpa.dupe(u8, c) else null;
+        errdefer if (fat) |f| d.gpa.free(f);
+        // Every write from here on is told, so `restore` copies back only
+        // the chunks written: the whole 35 MB of a FAT32 disk, put back
+        // before each of thousands of runs, was memory bandwidth, not work.
+        if (d.blk.observe == null) {
+            const chunks = (d.bytes.len + dirty_chunk - 1) / dirty_chunk;
+            const words = try d.gpa.alloc(u64, (chunks + 63) / 64);
+            @memset(words, 0);
+            d.dirty = words;
+            d.blk.observe = .{ .context = d, .each = noteWrite };
+        }
+        return .{ .bytes = bytes, .vol = d.vol, .cached = cached, .fat = fat, .scratch = d.scratch, .repaired = d.repaired, .trusted = d.trusted };
+    }
+
+    /// The disk and its volume as `mountSaved` left them: what
+    /// `@memcpy(d.bytes, saved bytes)` and `mount` would give. Where the
+    /// held FAT's room is not the one the saved volume points at (a mount
+    /// since that held none, or held it elsewhere), it is exactly that: put
+    /// back and mounted.
+    pub fn restore(d: *Disk, m: *const Mounted) !void {
+        d.putBack(m.bytes);
+        if (m.fat) |fat| {
+            const room = d.fat_cache orelse return d.mount(m.cached);
+            if (m.vol.fat == null or m.vol.fat.?.ptr != room.ptr or room.len != fat.len) return d.mount(m.cached);
+            @memcpy(room, fat);
+        } else if (d.fat_cache != null) return d.mount(m.cached);
+        d.scratch = m.scratch;
+        d.repaired = m.repaired;
+        d.trusted = m.trusted;
+        d.vol = m.vol;
+        if (m.fat != null) d.vol.cacheDirs(&d.dir_keys, &d.dir_data);
+    }
+
+    pub fn dropMounted(d: *Disk, m: *const Mounted) void {
+        d.drop(m.bytes);
+        if (m.fat) |fat| d.gpa.free(fat);
+        if (d.dirty) |words| {
+            if (d.watching()) d.blk.observe = null;
+            d.gpa.free(words);
+            d.dirty = null;
+        }
+    }
+
+    const dirty_chunk = 64 * 1024;
+
+    fn noteWrite(context: *anyopaque, write: bool, lba: u64, sectors: u32) void {
+        if (!write or sectors == 0) return;
+        const d: *Disk = @ptrCast(@alignCast(context));
+        const words = d.dirty orelse return;
+        const first = lba * sector / dirty_chunk;
+        const last = @min((lba + sectors) * sector - 1, d.bytes.len - 1) / dirty_chunk;
+        var c = first;
+        while (c <= last and c / 64 < words.len) : (c += 1) words[@intCast(c / 64)] |= @as(u64, 1) << @intCast(c % 64);
+    }
+
+    /// Whether the disk's observer is still `mountSaved`'s.
+    fn watching(d: *const Disk) bool {
+        const o = d.blk.observe orelse return false;
+        return o.context == @as(*anyopaque, @ptrCast(@constCast(d))) and o.each == &noteWrite;
+    }
+
+    /// Whether the disk holds other bytes than `m` saved: the chunks
+    /// written since it was restored, where every write was told.
+    pub fn changedSince(d: *const Disk, m: *const Mounted) bool {
+        const words = d.dirty orelse return !sameBytes(d.bytes, m.bytes);
+        if (!d.watching()) return !sameBytes(d.bytes, m.bytes);
+        for (words, 0..) |w0, i| {
+            var w = w0;
+            while (w != 0) : (w &= w - 1) {
+                const at = (i * 64 + @ctz(w)) * dirty_chunk;
+                const end = @min(at + dirty_chunk, d.bytes.len);
+                if (!sameBytes(d.bytes[at..end], m.bytes[at..end])) return true;
+            }
+        }
+        return false;
+    }
+
+    /// `bytes` back over the disk: the chunks written since, where every
+    /// write was told; all of it otherwise.
+    fn putBack(d: *Disk, bytes: []const u8) void {
+        const words = d.dirty orelse return @memcpy(d.bytes, bytes);
+        if (!d.watching()) return @memcpy(d.bytes, bytes);
+        for (words, 0..) |*w, i| {
+            while (w.* != 0) {
+                const c = i * 64 + @ctz(w.*);
+                w.* &= w.* - 1;
+                const at = c * dirty_chunk;
+                const end = @min(at + dirty_chunk, d.bytes.len);
+                @memcpy(d.bytes[at..end], bytes[at..end]);
+            }
         }
     }
 
@@ -271,9 +472,9 @@ pub const Disk = struct {
             if (!r.health.clean()) std.debug.panic("{s}: left healthy, and the check found {d} problems, the first {s} at {s}", .{ d.label, r.health.problems, @tagName(r.found[0].problem), r.found[0].text() });
         }
         if (d.images_dir.len > 0) d.keep() catch |e| std.debug.panic("writing {s}: {s}", .{ d.label, @errorName(e) });
-        if (d.fat_cache) |c| d.gpa.free(c);
-        if (d.check_room) |r| d.gpa.free(r);
-        d.gpa.free(d.bytes);
+        if (d.fat_cache) |c| freeUnset(d.gpa, c);
+        if (d.check_room) |r| freeUnset(d.gpa, r);
+        freeDisk(d.bytes);
         d.gpa.destroy(d);
     }
 
@@ -304,17 +505,29 @@ pub const Disk = struct {
     /// Free clusters, counted in the first FAT as it sits on the disk.
     pub fn free(d: *const Disk) usize {
         const l = Layout.of(d.bytes);
-        var n: usize = 0;
-        for (2..l.clusters + 2) |c| {
-            if (l.get(d.bytes, 0, c) == 0) n += 1;
-        }
-        return n;
+        const fat = d.bytes[l.fat_start..][0..l.fat_bytes];
+        return switch (l.kind) {
+            .fat16 => zeroEntries(u16, 0xFFFF, fat, l.clusters),
+            .fat32 => zeroEntries(u32, 0x0FFF_FFFF, fat, l.clusters),
+        };
+    }
+
+    /// A copy of the disk to put back (`@memcpy(d.bytes, copy)`), made
+    /// without Debug's fill; given back with `drop`.
+    pub fn snapshot(d: *const Disk) ![]u8 {
+        const copy = try allocUnset(d.gpa, d.bytes.len);
+        @memcpy(copy, d.bytes);
+        return copy;
+    }
+
+    pub fn drop(d: *const Disk, copy: []u8) void {
+        freeUnset(d.gpa, copy);
     }
 
     /// Both FAT copies on the disk, byte for byte the same.
     pub fn fatsAgree(d: *const Disk) bool {
         const l = Layout.of(d.bytes);
-        return std.mem.eql(u8, d.bytes[l.fat_start..][0..l.fat_bytes], d.bytes[l.fat_start + l.fat_bytes ..][0..l.fat_bytes]);
+        return sameBytes(d.bytes[l.fat_start..][0..l.fat_bytes], d.bytes[l.fat_start + l.fat_bytes ..][0..l.fat_bytes]);
     }
 
     /// `Volume.check`, with what it found kept, and **THE DISK UNCHANGED BY
@@ -326,8 +539,8 @@ pub const Disk = struct {
     /// checks after every stop (QUEUE.md item 79).
     pub fn check(d: *Disk) !Report {
         const writes = d.blk.writes;
-        const seen = try d.gpa.alloc(u8, d.vol.checkBytes());
-        defer d.gpa.free(seen);
+        const seen = try allocUnset(d.gpa, d.vol.checkBytes());
+        defer freeUnset(d.gpa, seen);
         var r = Report{};
         r.health = try d.vol.check(seen, &r, Report.each);
         try testing.expectEqual(r.health.problems, r.len);
@@ -492,6 +705,39 @@ pub const Cache = struct {
         @memcpy(d.bytes, c.kept);
     }
 };
+
+test "a restored mount is a fresh mount (198.12)" {
+    for ([_]Shape{ small, small32 }) |shape| {
+        for ([_]bool{ false, true }) |cached| {
+            const d = try Disk.make("restored", shape, cached);
+            defer d.deinit();
+            _ = try d.vol.makePath("data");
+            try d.vol.writeFile("data/one.md", "one");
+            var saved = try d.mountSaved(cached);
+            defer d.dropMounted(&saved);
+            // Changed, then put back two ways: restored, and mounted afresh.
+            try d.vol.writeFile("data/two.md", "two");
+            try d.vol.remove("data/one.md");
+            try d.restore(&saved);
+            const restored = d.vol;
+            const restored_fat = if (d.fat_cache) |c| try testing.allocator.dupe(u8, c) else null;
+            defer if (restored_fat) |f| testing.allocator.free(f);
+            @memcpy(d.bytes, saved.bytes);
+            try d.mount(cached);
+            // Field by field, a pointer by where it points: the volume's
+            // pointers are into this `Disk`, the same before and after.
+            inline for (@typeInfo(disk_fat.Volume).@"struct".fields) |f| {
+                if (!std.meta.eql(@field(d.vol, f.name), @field(restored, f.name))) {
+                    std.debug.print("restored, the volume's {s} is not a fresh mount's\n", .{f.name});
+                    return error.TestUnexpectedResult;
+                }
+            }
+            if (restored_fat) |f| try testing.expectEqualSlices(u8, d.fat_cache.?, f);
+            try d.expectFile("data/one.md", "one");
+            try testing.expectError(disk_fat.Error.NotFound, d.vol.open("data/two.md"));
+        }
+    }
+}
 
 test "a write cache: a flush keeps, a cut drops what waits, and keeps what it is told" {
     const d = try Disk.make("damaged-cache", small, false);

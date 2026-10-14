@@ -524,8 +524,10 @@ pub fn runSeed(seed: u64) !void {
 }
 
 test "the pure modules under a seed, a handful of seeds" {
-    // **THREE IN TIER 0** (metal-vmm QUEUE 198.11): a seed is about 1.8 s
-    // in Debug, nearly all of it the kept log's boots that write past their
-    // 1.25 MiB slot; `zig build properties` sweeps 200 and long.sh 10,000.
-    for (1..4) |seed| try runSeed(seed);
+    // **ONE IN TIER 0** (metal-vmm QUEUE 198.11, then 198.12 for a box of
+    // 2 cores): a seed is about 1.5 s in Debug, nearly all of it the kept
+    // log's boots that write past their 1.25 MiB slot, and one runs every
+    // module and every path of each; `zig build properties` sweeps 200 and
+    // long.sh 10,000.
+    for (1..2) |seed| try runSeed(seed);
 }

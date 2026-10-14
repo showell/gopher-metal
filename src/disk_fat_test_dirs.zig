@@ -473,8 +473,8 @@ test "copies apart and a directory that cannot be read: the volume mounts, and n
         try testing.expect(last >= 3);
         const was = l.get(d.bytes, 1, last);
         l.set(d.bytes, 0, last, 0);
-        const damaged = try testing.allocator.dupe(u8, d.bytes);
-        defer testing.allocator.free(damaged);
+        const damaged = try d.snapshot();
+        defer d.drop(damaged);
         const buf = try testing.allocator.alloc(u8, d.vol.fatBytes());
         defer testing.allocator.free(buf);
         const room = try testing.allocator.alloc(u8, d.vol.checkBytes());
@@ -638,8 +638,8 @@ test "a repair of FAT copies apart that the disk refuses: the mount goes on (the
         // first checks cleaner, and the second is to be written from it.
         const l = Layout.of(d.bytes);
         l.set(d.bytes, 1, 300, l.end());
-        const damaged = try testing.allocator.dupe(u8, d.bytes);
-        defer testing.allocator.free(damaged);
+        const damaged = try d.snapshot();
+        defer d.drop(damaged);
         const buf = try testing.allocator.alloc(u8, d.vol.fatBytes());
         defer testing.allocator.free(buf);
         const room = try testing.allocator.alloc(u8, d.vol.checkBytes());

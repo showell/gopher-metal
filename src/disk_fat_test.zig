@@ -175,12 +175,17 @@ test "a directory grows past its first cluster, and every name in it is found" {
         const d = try Disk.make("growth", shape, cached);
         defer d.deinit();
         // Each name takes three entries; a 512-byte cluster holds sixteen.
+        // **A HUNDRED, NOT 200** (metal-vmm QUEUE 198.12): every name here
+        // shares its first six characters, so the k-th tries k aliases
+        // (SESSIO~1, ~2, ...) and each try lists the directory: the cost is
+        // the cube of the count, 4 s of Debug at 200. A hundred names are 300
+        // entries, nineteen clusters, and reach the ~100 alias.
         var path: [64]u8 = undefined;
-        for (0..200) |k| {
+        for (0..100) |k| {
             const p = try std.fmt.bufPrint(&path, "data/sessions/session-{d:0>4}.md", .{k});
             try d.vol.writeFile(p, p);
         }
-        for (0..200) |k| {
+        for (0..100) |k| {
             const p = try std.fmt.bufPrint(&path, "data/sessions/session-{d:0>4}.md", .{k});
             try d.expectFile(p, p);
         }

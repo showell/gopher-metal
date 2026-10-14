@@ -1865,7 +1865,9 @@ const rough_red = [_]u64{ 11277, 11529, 13514, 16190, 20063, 20615, 22509, 25720
 const crowd_red = [_]u64{ 640, 1281, 1452, 1872, 1961, 2305, 2870, 4362, 6606, 7546, 8003, 8575, 9366, 9769, 9951 };
 
 test "a crowd the size of the kernel's table: every oracle holds, and the table fills" {
-    for (1..3) |seed| try runFullSeed(seed);
+    // **ONE IN TIER 0** (metal-vmm QUEUE 198.12): 1.7 s in Debug each;
+    // `zig build properties` and long.sh sweep the full table's seeds.
+    for (1..2) |seed| try runFullSeed(seed);
 }
 
 test "revival: item 24's seeds, rough and crowded, pass; with the ring off, each fails as before" {

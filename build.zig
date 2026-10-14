@@ -364,6 +364,12 @@ pub fn build(b: *std.Build) void {
         test_step.dependOn(&lint_cases.step);
     }
     var test_file_found = test_file == null;
+    // **EACH TEST BINARY'S CPU TIME** (metal-vmm QUEUE 198.12): with
+    // -Dtest-cpu-dir, every binary below runs under tools/cpu_time.py, which
+    // writes its user and system time there, for tier 0's budget
+    // (tools/test_budget.py). Wall time under -j on 2 cores was half
+    // contention; CPU time is the test's own.
+    test_cpu_dir = b.option([]const u8, "test-cpu-dir", "record each test binary's CPU time in this directory (tier0.sh's budget)");
     // **WHICH LINES OF tcp.zig ITS UNIT TESTS RUN** (`zig build tcp-coverage`):
     // tcp_test.zig at every start below, each run once under
     // tools/linecov.py; the lines with code that none of them ran are listed.
@@ -427,6 +433,7 @@ pub fn build(b: *std.Build) void {
             .target = b.graph.host,
             .imports = &unit_imports,
         }) });
+        timed(unit, path);
         test_step.dependOn(&b.addRunArtifact(unit).step);
         // disk_fat's lines run in the merged binary, or in its own.
         if (std.mem.eql(u8, path, "src/unit_tests.zig") or std.mem.eql(u8, path, "src/disk_fat.zig") or std.mem.eql(u8, path, "src/disk_fat_dirent.zig")) {
@@ -658,6 +665,7 @@ pub fn build(b: *std.Build) void {
             },
         }),
     });
+    timed(disk_fat_unit, disk_fat_unit.name);
     if (wanted(test_file, "src/disk_fat_test.zig")) test_step.dependOn(&b.addRunArtifact(disk_fat_unit).step);
     for (fat_coverage) |run| run.addArtifactArg(disk_fat_unit);
     // The stops and the lying disk (QUEUE.md items 79-80): hundreds of runs
@@ -689,6 +697,7 @@ pub fn build(b: *std.Build) void {
                 },
             }),
         });
+        timed(unit, name);
         if (wanted(test_file, "src/disk_fat_faults_test.zig")) test_step.dependOn(&b.addRunArtifact(unit).step);
         for (fat_coverage) |run| run.addArtifactArg(unit);
     }
@@ -718,9 +727,21 @@ pub fn build(b: *std.Build) void {
                 },
             }),
         });
+        timed(unit, unit.name);
         if (wanted(test_file, "src/tcp_test.zig")) test_step.dependOn(&b.addRunArtifact(unit).step);
         tcp_coverage.addArtifactArg(unit);
     }
+}
+
+/// -Dtest-cpu-dir, read where the test step is declared.
+var test_cpu_dir: ?[]const u8 = null;
+
+/// `unit`'s runs go through tools/cpu_time.py, which records its CPU time
+/// under `name` in -Dtest-cpu-dir; without the option, nothing changes.
+fn timed(unit: *std.Build.Step.Compile, name: []const u8) void {
+    const dir = test_cpu_dir orelse return;
+    const b = unit.step.owner;
+    unit.setExecCmd(&.{ "python3", b.pathFromRoot("tools/cpu_time.py"), b.pathFromRoot(dir), name, null });
 }
 
 /// Whether `zig build test` runs `path`'s tests: all of them, or only
