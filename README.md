@@ -275,6 +275,35 @@ last resort, moving the site back to Linux, is in [`CUTOVER.md`](CUTOVER.md),
 "The way back"; it needs the data copied off the volume first, or everything
 written since the cutover is lost.
 
+### Release notes: the script route (metal-vmm QUEUE 200; v31 or later, Steve's go)
+
+`POST /admin/script` runs a signed Shale script on the live site
+(angry-gopher's `admin_script.zig`, zig-webbox's `script_route.zig`). It is
+refused until a key is set, so a release with it changes nothing until
+these steps. Once, after the release that carries it:
+
+1. **On the box, make the key pair** (zig-webbox checkout):
+   `zig build shale-sign -- keygen`. The private key is
+   `~/.shale_signing_key`, mode 600; the program never prints it. It prints
+   the public key's line, `public_key = <64 hex>`; `-- pubkey` prints it
+   again.
+2. **On the site, set it**: sign in as the admin, open `/admin/script-key`,
+   paste the 64 hex digits, leave the target `lynrummy.com`, type the admin
+   password, Set. (On Linux the same file can be written by hand instead:
+   `<auth>/shale.conf` with `public_key = <hex>` and `target = <name>`.)
+3. **The admin's API key** is the first lock: the one `/admin/host` takes
+   (`/admin`, the admin's row, Generate), kept on the box as
+   `SHALE_ADMIN_KEY` in the environment.
+4. **A script**: `zig build shale-sign -- sign topics.shale lynrummy.com`
+   writes `topics.shale.<sequence>.req` and prints the `curl` line that
+   sends it. Each request runs once: a replay, an older number, one past
+   its expiry (10 minutes by default) or for another target is refused.
+
+Explore first with a script that only reads (it changes nothing), then
+send the one that changes. Every run is logged under `auth/shale/` on the
+volume (the log, and each run's source by its number). Changing the key is
+step 2 again; the old key's scripts are refused from then on.
+
 [`CUTOVER.md`](CUTOVER.md) is the record of the move from Linux on 2026-10-04,
 with the tools it used, backups, and the way back.
 `droplet/new_volume.py` builds a new, empty data volume.
