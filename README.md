@@ -275,7 +275,7 @@ last resort, moving the site back to Linux, is in [`CUTOVER.md`](CUTOVER.md),
 "The way back"; it needs the data copied off the volume first, or everything
 written since the cutover is lost.
 
-### Release notes: the script route (metal-vmm QUEUE 200; v31 or later, Steve's go)
+### Release notes: the script route (metal-vmm QUEUE 200; serving since v30)
 
 `POST /admin/script` runs a signed Shale script on the live site
 (angry-gopher's `admin_script.zig`, zig-webbox's `script_route.zig`). It is
@@ -310,10 +310,11 @@ with the tools it used, backups, and the way back.
 
 ## Where it stands (2026-10-13)
 
-**Serving: tag `v29`**, deployed 2026-10-13: this repo at `0519d8c`,
-angry-gopher at `24e0b21a`. The way back is `v28`. `master` is ahead of `v29`;
-what serves is always a tag, never a branch. The tag's message
-(`git show v29 --no-patch`) has the image's checksum.
+**Serving: tag `v30`**, deployed 2026-10-14: this repo at `1d8642c`,
+angry-gopher at `2e560b2b`, zig-webbox at `92ea157`. The way back is `v29`.
+`master` may be ahead of `v30`; what serves is always a tag, never a branch.
+The tag's message (`git show v30 --no-patch`) has the image's checksum. The
+script route's key is set (2026-10-14); its first three runs are in metal-vmm's FEEDBACK (2026-10-14, "v30 serves").
 
 - **served**: in v29, on lynrummy.com.
 - **master**: on `master`, newer than v29, not served yet.
