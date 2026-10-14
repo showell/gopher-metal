@@ -24,6 +24,7 @@ const Disk = disk_fat_test.Disk;
 // ---- the paths the tests above leave untried (coverage, 2026-10-09) ----------
 
 const dirent = @import("disk_fat_dirent.zig");
+const disk_fat_dir = @import("disk_fat_dir.zig");
 
 const IgnoreFindings = struct {
     fn each(_: void, _: disk_fat.Finding) void {}
@@ -1077,4 +1078,70 @@ test "a write-through disk's clear is not counted as a SYNCHRONIZE sent; a write
     try testing.expectError(disk_fat.Error.WritesRefused, d.vol.writeSector(d.vol.data_start, &sector));
     try testing.expectError(disk_fat.Error.WritesRefused, d.vol.writeSectors(d.vol.data_start, 1, &sector));
     try testing.expectEqual(@as(u64, 2), d.vol.writes_turned_away);
+}
+
+/// `aliasFor` as it was before 203(b): `~1, ~2, …`, a listing for each.
+fn aliasByProbing(vol: *disk_fat.Volume, dir: u32, name: []const u8) ![11]u8 {
+    var n: u32 = 1;
+    while (n < 1000) : (n += 1) {
+        const c = disk_fat_dir.aliasCandidate(name, n);
+        if (!try vol.aliasTaken(dir, c)) return c;
+    }
+    return disk_fat.Error.BadName;
+}
+
+test "a name's ~N alias, from one listing, is the one probing ~1, ~2, … a listing each gives: directories with holes, other bases, and names that hold a ~ (metal-vmm QUEUE 203(b))" {
+    var prng: std.Random.DefaultPrng = .init(203);
+    const r = prng.random();
+    var compared: usize = 0;
+    for (0..12) |round| {
+        const cached = round % 2 == 0;
+        const d = try Disk.make("alias-one-listing", test_disk.small, cached);
+        defer d.deinit();
+        const dir = try d.vol.makePath("data/d");
+        var path: [64]u8 = undefined;
+        // Names sharing the probe's first six characters, some removed
+        // again past a point (holes), so the first free alias lands
+        // anywhere from ~1 to past ~100 (the base shortens at ~10 and ~100).
+        // The first round has none: its first free is ~131, past ~100.
+        const most = if (round == 0) 130 else r.intRangeAtMost(usize, 1, 120);
+        const holes_from = if (round == 0) most else r.intRangeAtMost(usize, 0, most);
+        for (0..most) |k| try d.vol.writeFile(try std.fmt.bufPrint(&path, "data/d/abcdefgh-{d}.txt", .{k}), "x");
+        for (holes_from..most) |k| if (r.boolean()) try d.vol.remove(try std.fmt.bufPrint(&path, "data/d/abcdefgh-{d}.txt", .{k}));
+        // Other bases, another extension, and names that are themselves
+        // aliases or hold a ~ in what an alias keeps of them.
+        try d.vol.writeFile("data/d/abcdefgh-x.md", "x");
+        try d.vol.writeFile("data/d/zzzzzzzz-1.txt", "x");
+        // An alias as a name is refused while its file holds it.
+        d.vol.writeFile(try std.fmt.bufPrint(&path, "data/d/ABCDEF~{d}.TXT", .{r.intRangeAtMost(u32, 1, 9)}), "x") catch |e| switch (e) {
+            disk_fat.Error.NameTaken => {},
+            else => return e,
+        };
+        try d.vol.writeFile("data/d/ab~1cdefgh.txt", "x");
+        for ([_][]const u8{ "abcdefgh-new.txt", "abcdefgh-new.md", "ab~1cdefgh-2.txt", "zzzzzzzz-2.txt", "abc.defghij" }) |name| {
+            try testing.expectEqual(try aliasByProbing(&d.vol, dir, name), try d.vol.aliasFor(dir, name));
+            compared += 1;
+        }
+        const c = try d.check();
+        try c.expect(&.{});
+    }
+    try testing.expectEqual(@as(usize, 60), compared);
+}
+
+test "a name's alias costs one listing however many of its directory's names share its first six characters (203(b))" {
+    const d = try Disk.make("alias-cost", test_disk.small, false);
+    defer d.deinit();
+    const dir = try d.vol.makePath("data/sessions");
+    var path: [64]u8 = undefined;
+    for (0..300) |k| try d.vol.writeFile(try std.fmt.bufPrint(&path, "data/sessions/session-{d:0>4}.md", .{k}), "x");
+    // Its ~301 among 300 alike, and a name alone in its base: the same
+    // reads, one listing each.
+    const before_alike = d.blk.requests;
+    const alike = try d.vol.aliasFor(dir, "session-0300.md");
+    const alike_reads = d.blk.requests - before_alike;
+    const before_alone = d.blk.requests;
+    _ = try d.vol.aliasFor(dir, "unrelated-name.md");
+    const alone_reads = d.blk.requests - before_alone;
+    try testing.expectEqualStrings("SESS~301MD ", &alike);
+    try testing.expectEqual(alone_reads, alike_reads);
 }
