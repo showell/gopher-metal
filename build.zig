@@ -87,7 +87,7 @@ pub fn build(b: *std.Build) void {
         .{ .name = "plant_options", .module = plant_options },
         .{ .name = "coverage_catalog", .module = coverage_catalog },
     };
-    const metal = b.createModule(.{
+    const metal = b.addModule("metal", .{
         .root_source_file = b.path("src/metal.zig"),
         .red_zone = false,
         .imports = &with_coverage,
@@ -190,34 +190,42 @@ pub fn build(b: *std.Build) void {
     // **`host_io`, THIS MACHINE'S** (src/host_io_metal.zig): the one file the
     // application's sources take their `Io` from, std's on Linux, this
     // machine's here. Nothing in them is rewritten.
-    const host_io = b.createModule(.{
+    const host_io = b.addModule("host_io", .{
         .root_source_file = b.path("src/host_io_metal.zig"),
         .red_zone = false,
         .imports = &.{.{ .name = "metal", .module = metal }},
     });
-    const webbox = b.createModule(.{
+    const webbox = b.addModule("webbox", .{
         .root_source_file = .{ .cwd_relative = b.fmt("{s}/webbox.zig", .{webbox_src}) },
         .red_zone = false,
         .imports = &.{.{ .name = "host_io", .module = host_io }},
     });
+    // The kernel's parts every application's kernel shares, exported for
+    // `addAppKernel` (a dependent package reaches them through it, not by
+    // name): `metal`, `host_io` and `webbox` above, and `gm_build`.
+    const gm_build = gm_opts.createModule();
+    b.modules.put(b.allocator, b.dupe("gm_build"), gm_build) catch @panic("out of memory");
     // **THE APPLICATION, ANY APPLICATION** (Phase B step 4): an application
     // is its root (exporting `site` and `hosting`) and its assets.zon; the
     // kernel around it is probe/gopher.zig for every one. angry-gopher's chat
-    // is the first, Dog Park the second.
-    const gopher = addAppKernel(b, .{
-        .name = "gopher.elf",
-        .root = b.fmt("{s}/router.zig", .{gopher_src}),
-        .served = servedBy(b, b.fmt("{s}/zig-server/assets.zon", .{gopher_root})),
-        // assets.zon's embedded paths are relative to zig-server/.
-        .embed_base = b.fmt("{s}/zig-server", .{gopher_root}),
+    // is built here through the same API another repository calls
+    // (`addAppKernel`, below).
+    const gopher_app = b.createModule(.{
+        .root_source_file = .{ .cwd_relative = b.fmt("{s}/router.zig", .{gopher_src}) },
         .imports = &.{.{ .name = "build_options", .module = build_opts.createModule() }},
-    }, .{ .metal = metal, .host_io = host_io, .webbox = webbox, .gm_build = gm_opts.createModule(), .optimize = optimize });
-    const app = gopher.root_module.import_table.get("app").?;
+    });
+    const gopher = appKernel(b, b, .{
+        .name = "gopher.elf",
+        .module = gopher_app,
+        // assets.zon's embedded paths are relative to zig-server/.
+        .assets = .{ .cwd_relative = b.fmt("{s}/zig-server/assets.zon", .{gopher_root}) },
+        .optimize = optimize,
+    });
     const gopher_imports = [_]std.Build.Module.Import{
         .{ .name = "metal", .module = metal },
-        .{ .name = "app", .module = app },
+        .{ .name = "app", .module = gopher_app },
         .{ .name = "webbox", .module = webbox },
-        .{ .name = "gm_build", .module = gm_opts.createModule() },
+        .{ .name = "gm_build", .module = gm_build },
     };
     const gopher_copy = b.addUpdateSourceFiles();
     gopher_copy.addCopyFileToSource(gopher.getEmittedBin(), "probe/gopher.elf");
@@ -751,72 +759,85 @@ fn wanted(test_file: ?[]const u8, path: []const u8) bool {
     return std.mem.eql(u8, only, path);
 }
 
-/// `git rev-parse --short HEAD` in `dir`, with `+dirty` when its tree has
-/// uncommitted changes; `unknown` when git cannot say.
-/// One application, as `addAppKernel` takes it.
-const AppKernel = struct {
-    /// The kernel's file name in probe/.
+/// **ONE APPLICATION, AS `addAppKernel` TAKES IT**: what its own build makes.
+pub const App = struct {
+    /// The kernel's file name (`gopher.elf`).
     name: []const u8,
-    /// The application's root: exports `site` and `hosting`.
-    root: []const u8,
-    /// Its assets.zon, read (`servedBy`).
-    served: Served,
-    /// The directory its `.embedded` paths are relative to.
-    embed_base: []const u8,
-    /// What else its root imports that only its own build supplies.
-    imports: []const std.Build.Module.Import,
-};
-
-/// What every application's kernel shares.
-const KernelParts = struct {
-    metal: *std.Build.Module,
-    host_io: *std.Build.Module,
-    webbox: *std.Build.Module,
-    gm_build: *std.Build.Module,
+    /// The application, built by its own build.zig with its own options and
+    /// imports. Its root exports `site` and `hosting` (probe/gopher.zig's
+    /// host contract). It names no target or optimize mode: it takes the
+    /// kernel's. It imports neither `host_io` nor `webbox`: those are this
+    /// machine's, and `addAppKernel` adds them.
+    module: *std.Build.Module,
+    /// Its assets.zon, a file in a checkout (not a generated one): read at
+    /// configure time, as every build of the application reads it. Each
+    /// `.embedded` path is relative to the file's own directory.
+    assets: std.Build.LazyPath,
+    /// ReleaseSafe for anything served; Debug only to iterate (`-Ddev`
+    /// says why the kernel cannot take Debug's C sanitizer).
     optimize: std.builtin.OptimizeMode,
 };
 
-/// **ANY APPLICATION, AS A KERNEL** (Phase B step 4): its root as the `app`
-/// module (with `host_io`, `webbox`, and what `imports` adds), each of its
-/// embedded assets by name, and probe/gopher.zig around it. The same
-/// webbox and host_io for every application: one library, one machine.
-fn addAppKernel(b: *std.Build, a: AppKernel, k: KernelParts) *std.Build.Step.Compile {
-    var imports: std.ArrayList(std.Build.Module.Import) = .empty;
-    imports.appendSlice(b.allocator, &.{
-        .{ .name = "host_io", .module = k.host_io },
-        .{ .name = "webbox", .module = k.webbox },
-    }) catch @panic("out of memory");
-    imports.appendSlice(b.allocator, a.imports) catch @panic("out of memory");
-    const app = b.createModule(.{
-        .root_source_file = .{ .cwd_relative = a.root },
-        .red_zone = false,
-        .imports = imports.items,
-    });
+/// **ANY APPLICATION, AS A KERNEL: THE PUBLIC BUILD API.** Another
+/// repository's build.zig calls it with this package as a dependency:
+///
+///     const zmu = @import("zig_metal_unikernel");
+///     const kernel = b.dependency("zig_metal_unikernel", .{});
+///     const elf = zmu.addAppKernel(b, kernel, .{ .name = "x.elf", .module = app, .assets = b.path("assets.zon"), .optimize = .ReleaseSafe });
+///
+/// The kernel's parts stay the kernel's: probe/gopher.zig as the root, its
+/// link script and entry, and its `metal`, `host_io`, `webbox` and
+/// `gm_build` modules (this package's `-Dwebbox-root`, `-Drestart` and
+/// `-Dcoverage` are the dependency's options). The caller hands over only
+/// the application.
+///
+/// **AN EMBEDDED NAME THE MODULE ALREADY IMPORTS IS THE CALLER'S**: a file
+/// its own build graph makes (a wasm compiled in the same `zig build`) is
+/// imported by the caller from that step's output, and assets.zon's path
+/// for it is not read. Every other `.embedded` row is added from its path.
+pub fn addAppKernel(b: *std.Build, kernel: *std.Build.Dependency, app: App) *std.Build.Step.Compile {
+    return appKernel(b, kernel.builder, app);
+}
+
+/// `addAppKernel` with the kernel's own builder: `kb` is this package's,
+/// whether it is the root build (gopher.elf) or a dependency.
+fn appKernel(b: *std.Build, kb: *std.Build, a: App) *std.Build.Step.Compile {
+    const m = a.module;
+    if (m.resolved_target != null or m.optimize != null)
+        std.process.fatal("addAppKernel({s}): the application's module names a target or optimize mode; it takes the kernel's (leave both unset)", .{a.name});
+    for ([_][]const u8{ "host_io", "webbox" }) |name| {
+        if (m.import_table.contains(name))
+            std.process.fatal("addAppKernel({s}): the application's module imports `{s}` itself; the kernel supplies this machine's (drop the import)", .{ a.name, name });
+    }
+    m.red_zone = false;
+    m.addImport("host_io", exported(kb, "host_io"));
+    m.addImport("webbox", exported(kb, "webbox"));
     // A page embeds these by name, and a name that no build graph declared is
     // a compile error with a confusing message.
-    for (a.served.embedded) |e| {
-        app.addAnonymousImport(e.name, .{
-            .root_source_file = .{ .cwd_relative = b.fmt("{s}/{s}", .{ a.embed_base, e.path }) },
+    const assets_path = a.assets.getPath(b);
+    const base = std.fs.path.dirname(assets_path) orelse ".";
+    for (servedBy(b, assets_path).embedded) |e| {
+        if (m.import_table.contains(e.name)) continue;
+        m.addAnonymousImport(e.name, .{
+            .root_source_file = .{ .cwd_relative = b.fmt("{s}/{s}", .{ base, e.path }) },
         });
     }
-    const exe = b.addExecutable(.{ .name = a.name, .root_module = kernelModule(b, b.path("probe/gopher.zig"), k.optimize, &.{
-        .{ .name = "metal", .module = k.metal },
-        .{ .name = "app", .module = app },
-        .{ .name = "webbox", .module = k.webbox },
-        .{ .name = "gm_build", .module = k.gm_build },
+    const exe = b.addExecutable(.{ .name = a.name, .root_module = kernelModule(b, kb.path("probe/gopher.zig"), a.optimize, &.{
+        .{ .name = "metal", .module = exported(kb, "metal") },
+        .{ .name = "app", .module = m },
+        .{ .name = "webbox", .module = exported(kb, "webbox") },
+        .{ .name = "gm_build", .module = exported(kb, "gm_build") },
     }) });
     // Zig's own x86 backend, which Debug would otherwise pick, cannot yet
     // assemble this kernel's AT&T or its soft-float.
     exe.use_llvm = true;
-    exe.setLinkerScript(b.path("probe/link.ld"));
+    exe.setLinkerScript(kb.path("probe/link.ld"));
     exe.entry = .{ .symbol_name = "_start" };
     return exe;
 }
 
-fn dirExists(b: *std.Build, path: []const u8) bool {
-    var dir = std.Io.Dir.cwd().openDir(b.graph.io, path, .{}) catch return false;
-    dir.close(b.graph.io);
-    return true;
+fn exported(kb: *std.Build, name: []const u8) *std.Build.Module {
+    return kb.modules.get(name) orelse std.process.fatal("zig-metal-unikernel's build exports no module `{s}`", .{name});
 }
 
 /// **WHAT AN APPLICATION SERVES BESIDES ITS CODE** (Phase B step 3): its
@@ -838,6 +859,8 @@ fn servedBy(b: *std.Build, path: []const u8) Served {
         std.process.fatal("{s} does not read as an application's assets (.embedded and .site)", .{path});
 }
 
+/// `git rev-parse --short HEAD` in `dir`, with `+dirty` when its tree has
+/// uncommitted changes; `unknown` when git cannot say.
 fn commitOf(b: *std.Build, dir: []const u8) []const u8 {
     var code: u8 = 0;
     const head = b.runAllowFail(&.{ "git", "-C", dir, "rev-parse", "--short", "HEAD" }, &code, .ignore) catch return "unknown";
