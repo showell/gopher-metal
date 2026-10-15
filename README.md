@@ -277,7 +277,9 @@ cheapest first, and stops at the first one that fails.
 A developer can defer every test against angry-gopher (tier 3)
 and still have reasonable confidence in a change that tier 0 passes.
 
-Each script's header says what it runs and why. The coverage properties and
+Each script's header says what it runs and why. `./release-check.sh <dir>`
+runs the two in order, the long tier only after the gates pass, detached,
+with their logs and a summary in `<dir>`. The coverage properties and
 the floors a long run must reach are in [`COVERAGE.md`](COVERAGE.md).
 
 **A verdict is for exact code.** A full `./gates.sh` and a whole `./long.sh`
