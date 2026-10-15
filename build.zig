@@ -810,8 +810,14 @@ fn appKernel(b: *std.Build, kb: *std.Build, a: App) *std.Build.Step.Compile {
             std.process.fatal("addAppKernel({s}): the application's module imports `{s}` itself; the kernel supplies this machine's (drop the import)", .{ a.name, name });
     }
     m.red_zone = false;
+    // The machine's imports first, then the caller's: the order the
+    // compiler meets them in is the order it numbers its generated types,
+    // which name symbols in the kernel's debug info.
+    const callers = m.import_table;
+    m.import_table = .empty;
     m.addImport("host_io", exported(kb, "host_io"));
     m.addImport("webbox", exported(kb, "webbox"));
+    for (callers.keys(), callers.values()) |name, module| m.addImport(name, module);
     // A page embeds these by name, and a name that no build graph declared is
     // a compile error with a confusing message.
     const assets_path = a.assets.getPath(b);

@@ -190,6 +190,34 @@ application, `probe/gopher.zig`, and `addAppKernel` in `build.zig` puts the
 two together. The contract between an application and its host is
 [`HOST.md`](HOST.md).
 
+**Another repository builds its own application into a kernel** with
+`addAppKernel`, a public function of this package's `build.zig`. It names
+this checkout as a dependency (a sibling, as zig-webbox is), builds its
+application module itself, with its own options and imports, and hands over
+the module, its `assets.zon` and a name; it gets the kernel's compile step
+back:
+
+    // build.zig.zon: .zig_metal_unikernel = .{ .path = "../zig-metal-unikernel" },
+    const zmu = @import("zig_metal_unikernel");
+    const app = b.createModule(.{ .root_source_file = b.path("src/hosted.zig"), .imports = ... });
+    const elf = zmu.addAppKernel(b, b.dependency("zig_metal_unikernel", .{}), .{
+        .name = "app.elf",
+        .module = app,
+        .assets = b.path("assets.zon"),
+        .optimize = .ReleaseSafe,
+    });
+
+The module names no target or optimize mode (it takes the kernel's) and
+imports neither `host_io` nor `webbox`: `addAppKernel` adds this machine's
+(webbox from `../zig-webbox`, or the dependency's `-Dwebbox-root`). Each
+`.embedded` row of `assets.zon` is compiled in by name from its path,
+relative to `assets.zon`, **unless the module already imports that name**:
+a file the caller's own build makes (a wasm, say) is imported by the caller
+from the step that makes it. The kernel's parts stay the kernel's: its root,
+link script, `metal` and `gm_build`; `-Drestart` and `-Dcoverage` are
+options of the dependency. `zig build gopher` goes through the same
+function.
+
 Useful options: `-Ddev` builds Debug kernels, which rebuild in seconds instead
 of tens of seconds (releases are ReleaseSafe, and every run says which it
 judged); `-Drestart=false` makes a crash halt the machine instead of
@@ -333,7 +361,7 @@ script route's key is set (2026-10-14); its first three runs are in metal-vmm's 
 | FAT16 and FAT32, read and write | served | long names, folders, append, replace, delete; checked by `fsck` and by Linux reading what it wrote. Production's volume is FAT32 |
 | clocks and entropy | served | the CMOS real-time clock; the TSC's rate measured against the PIT; random bytes from virtio-rng where the machine has one, and RDRAND |
 | angry-gopher's whole site | served | every route, judged equal to the Linux build, including chat's live streams and uploads |
-| dog-park as a kernel | not here | dog-park builds on zig-webbox and may run on this kernel later; this repo neither builds nor judges it (an application is not this repo's test of itself) |
+| another repository's application as a kernel | built, not served | `addAppKernel`, called from that repository's own build.zig; this repo neither builds nor judges any application but angry-gopher (an application is not this repo's test of itself) |
 | file contents kept in memory | served | after their first read, write-through (`page_cache_mib`, 64 MiB by default) |
 | large disk requests | served | a run of contiguous clusters is one request of up to 1 MiB (the least of the disk's, the controller's and our own limit) |
 | the FAT written a sector at a time | served | v29's measured disk requests for a 1.8 MB, 10 MB and 100 MB upload: 59, 26 and 115 (v28: 93, 218 and 2,017) |
