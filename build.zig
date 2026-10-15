@@ -507,7 +507,7 @@ pub fn build(b: *std.Build) void {
             },
         }),
     });
-    b.step("store-judge", "angry-gopher's store on Linux and on metal against the model (needs ../angry-gopher and a port)").dependOn(&b.addRunArtifact(store_judge).step);
+    b.step("store-judge", "zig-webbox's store on Linux and on metal against the model (needs ../zig-webbox and a port)").dependOn(&b.addRunArtifact(store_judge).step);
 
     // **WHAT EACH STORE CALL COSTS THE DISK** (src/store_cost.zig, metal-vmm
     // 151): angry-gopher's store over io.zig, the disk requests of each call

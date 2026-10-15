@@ -82,12 +82,13 @@ two.
 - **[angry-gopher](https://github.com/showell/angry-gopher)**, Steve
   Howell's personal site, lynrummy.com: a chat and a handful of small apps
   (Lyn Rummy, a two-player rummy game, among them). **In production on this kernel.**
-- **[dog-park](https://github.com/showell/dog-park)**, a small multiplayer
-  toy. It is here to prove the kernel hosts *an* application, not just one.
-  Every full check builds it as a kernel and judges it against its Linux
-  build. Its own README (2026-10-11) says it does not serve the public yet.
+- **[dog-park](https://github.com/showell/dog-park)**, a small game on
+  zig-webbox, Linux-only today. This repo neither builds nor judges it
+  (8af778b: an application is not this repo's test of itself). dog-park
+  will build its own image, with this repo as a dependency, through
+  `addAppKernel` (below; metal-vmm QUEUE 215).
 
-**The same source, the same answers.** Each application builds as an ordinary
+**The same source, the same answers.** angry-gopher builds as an ordinary
 Linux program and as a kernel from this repo. The checks here send the same
 requests to both, built from the same source over the same files, and require
 the same answers: status, redirect, cookies, content type, and the body byte
@@ -104,8 +105,10 @@ Six repos, kept separate, checked out side by side:
                     zig-webbox  (the library)
                     /          \
        angry-gopher              dog-park
-     (lynrummy.com)              (a second app)
-                    \          /
+     (lynrummy.com)              (a game; Linux today)
+           |                         :
+           |                         : (planned: dog-park builds its
+           |                         :  own image, QUEUE 215)
               zig-metal-unikernel  (this repo: the machine)
                     /          \
             metal-vmm            zig-coverage-sdk
@@ -117,10 +120,11 @@ Six repos, kept separate, checked out side by side:
   Linux builds.
 - **[zig-webbox](https://github.com/showell/zig-webbox)**: the library both
   applications are written against.
-- **[angry-gopher](https://github.com/showell/angry-gopher)** and
-  **[dog-park](https://github.com/showell/dog-park)**: the applications. The
-  kernel build compiles them from their checkouts as they are; nothing is
-  copied in.
+- **[angry-gopher](https://github.com/showell/angry-gopher)**: the
+  application this repo builds and serves, compiled from its checkout as it
+  is; nothing is copied in. **[dog-park](https://github.com/showell/dog-park)**:
+  an application this repo does not build; it will build itself into a
+  kernel through `addAppKernel`.
 - **[metal-vmm](https://github.com/showell/metal-vmm)**: a deterministic
   hypervisor of our own, on Linux's KVM, used only for testing. It runs the
   real kernel with time, the network and the disks under the test's control,
@@ -336,7 +340,7 @@ step 2 again; the old key's scripts are refused from then on.
 with the tools it used, backups, and the way back.
 `droplet/new_volume.py` builds a new, empty data volume.
 
-## Where it stands (2026-10-13)
+## Where it stands (2026-10-15)
 
 **Serving: tag `v30`**, deployed 2026-10-14: this repo at `1d8642c`,
 angry-gopher at `2e560b2b`, zig-webbox at `92ea157`. The way back is `v29`.
@@ -344,8 +348,8 @@ angry-gopher at `2e560b2b`, zig-webbox at `92ea157`. The way back is `v29`.
 The tag's message (`git show v30 --no-patch`) has the image's checksum. The
 script route's key is set (2026-10-14); its first three runs are in metal-vmm's FEEDBACK (2026-10-14, "v30 serves").
 
-- **served**: in v29, on lynrummy.com.
-- **master**: on `master`, newer than v29, not served yet.
+- **served**: in v30, on lynrummy.com.
+- **master**: on `master`, newer than v30, not served yet.
 - **test only**: exists for the checks, never deployed.
 - **unmeasured**: built, but the number a reader would want has not been taken.
 
@@ -366,15 +370,14 @@ script route's key is set (2026-10-14); its first three runs are in metal-vmm's 
 | large disk requests | served | a run of contiguous clusters is one request of up to 1 MiB (the least of the disk's, the controller's and our own limit) |
 | the FAT written a sector at a time | served | v29's measured disk requests for a 1.8 MB, 10 MB and 100 MB upload: 59, 26 and 115 (v28: 93, 218 and 2,017) |
 | the FAT's two copies weighed at mount | served | if they differ, the cleaner copy wins and the other is rewritten from it |
-| a mount whose FAT copies cannot be weighed | master | refuses writes until a weighing succeeds (a 503 with Retry-After). v29 serves such a volume as it is |
-| an overwrite read back before the old copy is freed | master | |
+| a mount whose FAT copies cannot be weighed | served | refuses writes until a weighing succeeds (a 503 with Retry-After) |
+| an overwrite read back before the old copy is freed | served | |
 | a disk check at every boot | served | both disks; a damaged disk is reported and still served |
 | a disk check in idle time | served | after 200 ms with nothing arriving, the kernel checks the volume a slice at a time ([HOST.md](HOST.md), "Idle time"). Its cost on production's full volume: unmeasured here |
 | exact accounting of what a failed write leaves | served | leaked clusters, orphaned name entries and long chains, counted on `/admin/host` |
 | restarting after a crash | served | on by default since a droplet's reset was measured to restart it (2026-10-03); the last boot's log is kept across the restart, and a disk that stops answering restarts it too ([RESTART.md](RESTART.md)) |
-| the log on `/admin/host` | served | the newest 60 lines of a 64 KiB ring, secrets removed as they are written |
-| a larger, timed log, and `/admin/log` | master | a 1.25 MiB ring; every request line with its time, status and duration; `/admin/log` as plain text for scripts; recent uploads and request counts ([docs/admin-for-agents.md](docs/admin-for-agents.md)) |
-| the new name, and zig-webbox as its own checkout | master | v29 still reads `gopher-metal.conf` and builds the library from angry-gopher's tree |
+| the log, on `/admin/host` and `/admin/log` | served | a 1.25 MiB ring, secrets removed as they are written; every request line with its time, status and duration; `/admin/host` shows the newest lines, `/admin/log` all of it as plain text for scripts; recent uploads and request counts ([docs/admin-for-agents.md](docs/admin-for-agents.md)) |
+| the new name, and zig-webbox as its own checkout | served | `zig-metal-unikernel.conf`; the library built from `../zig-webbox` |
 | `/admin/backup` | served | the whole data set as one tar, checked by `droplet/check_backup.py`; taken by hand with `droplet/backup.sh`. Routine backups were not yet scheduled as of 2026-10-08 ([CUTOVER.md](CUTOVER.md), "Backups") |
 | speed against Linux | unmeasured | last measured 2026-10-01 on v4, before the caches ([docs/port.md](docs/port.md)) |
 
@@ -408,7 +411,7 @@ script route's key is set (2026-10-14); its first three runs are in metal-vmm's 
   the TCP does not do.
 - [`docs/probes.md`](docs/probes.md): the test kernels, and QEMU's traps.
 - [`docs/admin-for-agents.md`](docs/admin-for-agents.md): reading
-  `/admin/host` and `/admin/log` (describes `master`, not v29).
+  `/admin/host` and `/admin/log`.
 - [`docs/designs/`](docs/designs/README.md) and
   [`docs/reviews/`](docs/reviews/README.md): notes and adversarial reviews
   of particular changes.
