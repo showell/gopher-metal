@@ -298,3 +298,42 @@ rtc: an hour, minute or second out of range
 floor_sim: a SYN's option has a length under 2
 floor_sim: a quoted secret the line ends before it closes keeps the line's CRLF
 floor_sim: a SYN's options carry an MSS
+# **THE CLIENT AND THE DRIFT** (the box, 2026-10-16): QUEUE 225's client
+# (chunks 4-7), the pair sim and ARP's newest, and the tcp.zig properties
+# that had drifted off this list since the header above was true.
+tcp: a connection of our own is established
+tcp: a connection of our own is let go at a deadline
+tcp: a lost SYN is sent again
+tcp_pair_sim: a deadline lets the client go, on time
+tcp_pair_sim: the client's FIN sent again finds the server's slot free and is reset
+tcp_pair_sim: a lost SYN, and the client established within the connect bound
+tcp_pair_sim: two tables exchange a request and an answer whole
+arp: an operation other than a request or a reply
+tcp: a caller consumes no more than is pending
+tcp: what is outstanding has its retransmission timer
+tcp: a reopened window said again has its clock
+tcp: a window reopens on an ACK of nothing new, and sending starts again at una
+tcp: an ACK past every byte covers our FIN and nothing more
+tcp: after an ACK, what was sent lies within what is queued
+tcp: a SYN finds the table full, and nothing to give way
+tcp_sim: a real client's half-open slot gives way to another's SYN
+tcp: a segment ahead of a hole is held
+tcp: a hole filled delivers what was held behind it
+tcp: a FIN held ahead is taken once the bytes before it are
+# **NOT ON THIS FLOOR, AND WHERE THEY ARE REACHED** (the box, 2026-10-16;
+# no simulator reached them at 1,000 seeds):
+# - "tcp: a connection of our own is refused by the peer's reset": our own
+#   server never answers a SYN with a reset (a closed port and a full table
+#   both drop it: DEPARTS (bounded)), so only another stack refuses. The
+#   native judge's fetch case "refused" reaches it, against Linux.
+# - "arp: the cached peer's hardware address changes", "arp: the one entry
+#   is replaced by another peer": no simulator speaks ARP; arp.zig's unit
+#   tests reach both.
+# - "tcp: a peer names a segment size under the least, and is sent the
+#   least": tcp_sim's peers name no MSS under 536; tcp_test reaches it.
+#   A rough peer that does would put it back here.
+# - "tcp: a segment ahead finds the held pieces full, and is dropped":
+#   five holes open at once; the pair sim's reordering (one path's jitter)
+#   never makes more than four. tcp_test reaches it. A gap to close in the
+#   pair sim, not a line to forget.
+# - PLANT lines: only a planted build reaches them, by design.
