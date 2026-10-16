@@ -734,6 +734,13 @@ pub fn kmain() noreturn {
                 serial.drain(console_budget);
                 continue;
             }
+            // Then the application's work between requests, a slice a turn
+            // while it says there is more: a request that arrives meanwhile
+            // is served first, on the next turn.
+            if (between.more) {
+                betweenSlice(io);
+                continue;
+            }
             // Then idle work, a step, once nothing has arrived for a while.
             if (idle_work.turn(now, awakeNow)) continue;
             if (arrived == null) interrupts.rest();
@@ -748,6 +755,10 @@ pub fn kmain() noreturn {
         request_heap.reset();
         if (coverage_checks) checkVolumes();
         deepest = reportStack(deepest);
+        // One slice of the application's work after each served turn: the
+        // request may have started it, and a steady run of requests never
+        // starves it.
+        betweenSlice(io);
         // **LOUD, ONCE PER OCCURRENCE** (REVIEW-item90-step2.md finding 1): a
         // frame too long to send is a kernel bug net.zig refused rather than
         // overrun. The count is on /admin/host; this is the console line.
@@ -2071,6 +2082,37 @@ fn metalLogs(io: Io, alloc: std.mem.Allocator) anyerror!?webbox.host_facts.Logs 
 /// **IDLE TIME** (src/idle.zig): the work queued for quiet moments, and a
 /// check of each volume in it, the boot disk's first.
 var idle_work: metal.idle.Idle = .{};
+
+/// **BETWEEN REQUESTS** (metal-vmm QUEUE 216): the application's own work
+/// (webbox's `Site.between`, a background Shale run's slice), opaque here:
+/// the kernel calls it and keeps its clock, nothing more. One call after
+/// each served turn, and calls on idle turns while it says there is more.
+/// A request waits at most one slice, so a slice past `between_target_ns`
+/// is counted, for /admin/host. 50 ms: a slice is 100,000 steps or one
+/// store call (zig-webbox `script_route.slice_steps`), a few ms on this
+/// machine; 50 ms is a wait a person at a page would notice, and a quarter
+/// of the idle step's 200 ms budget, so an overrun is a slice gone wrong,
+/// not a slow one.
+const Between = struct {
+    /// What the last call said: whether there is more to do.
+    more: bool = true,
+    calls: u64 = 0,
+    overruns: u64 = 0,
+    longest_ns: u64 = 0,
+};
+var between: Between = .{};
+const between_target_ns: u64 = 50 * std.time.ns_per_ms;
+
+/// One call of the application's `between`, timed.
+fn betweenSlice(io: Io) void {
+    const from = awakeNow();
+    const unix: i64 = @intCast(@divFloor(Io.Clock.now(.real, io).nanoseconds, std.time.ns_per_s));
+    between.more = app.site.between(io, unix);
+    const took: u64 = @intCast(@max(0, awakeNow() - from));
+    between.calls += 1;
+    between.longest_ns = @max(between.longest_ns, took);
+    if (took > between_target_ns) between.overruns += 1;
+}
 var volume_checks: [2]?metal.idle_check.VolumeCheck = .{ null, null };
 const volume_check_names = [2][]const u8{ "the boot disk's check", "the volume's check" };
 
@@ -2211,6 +2253,9 @@ fn metalFacts(io: Io, alloc: std.mem.Allocator) anyerror![]const webbox.host_fac
     } else try add(&facts, alloc, "data files in memory", "none (page_cache_mib = 0)", .{});
     try add(&facts, alloc, "idle time", "{d} steps in quiet moments, {d} over the {d} ms budget", .{
         idle_work.steps, idle_work.overruns, idle_work.budget_ns / std.time.ns_per_ms,
+    });
+    try add(&facts, alloc, "between requests", "{d} calls of the application's work, {d} over the {d} ms target, the longest {d} ms", .{
+        between.calls, between.overruns, between_target_ns / std.time.ns_per_ms, between.longest_ns / std.time.ns_per_ms,
     });
     for (&volume_checks, volume_check_names) |*maybe, name| {
         if (maybe.*) |*c| try facts.append(alloc, .{ .label = name, .value = try checkFact(alloc, c) });
