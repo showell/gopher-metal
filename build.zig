@@ -42,7 +42,7 @@ fn bareTarget(b: *std.Build) std.Build.ResolvedTarget {
 }
 
 /// The plants (src/plant.zig): one at most, by `-Dplant=<name>`.
-const Plant = enum { none, disk_write_swallowed, net_goback_byte, counted_leak_short };
+const Plant = enum { none, disk_write_swallowed, net_goback_byte, counted_leak_short, client_ack_off_by_one };
 
 pub fn build(b: *std.Build) void {
     // **NOT Debug.** A Debug build pulls in zig's UBSan runtime, which wants
@@ -321,7 +321,19 @@ pub fn build(b: *std.Build) void {
             .imports = &.{.{ .name = "netcore", .module = netcore }},
         }),
     });
-    b.step("native", "the TCP table as a Linux program behind a TAP device").dependOn(&b.addInstallArtifact(serve, .{}).step);
+    // native/fetch.zig, the table as a client (metal-vmm QUEUE 225, chunk 8).
+    const fetch_native = b.addExecutable(.{
+        .name = "gm-fetch",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("native/fetch.zig"),
+            .target = b.graph.host,
+            .optimize = .Debug,
+            .imports = &.{.{ .name = "netcore", .module = netcore }},
+        }),
+    });
+    const native_step = b.step("native", "the TCP table as a Linux program behind a TAP device: gm-serve, and gm-fetch, its client");
+    native_step.dependOn(&b.addInstallArtifact(serve, .{}).step);
+    native_step.dependOn(&b.addInstallArtifact(fetch_native, .{}).step);
 
     // **A DISK A DROPLET CAN BOOT.** droplet/image.zig puts the boot loader
     // and a kernel on a GPT disk; droplet/boot.sh assembles the loader and
@@ -338,6 +350,7 @@ pub fn build(b: *std.Build) void {
     });
     b.step("droplet", "the disk-image builder for a droplet").dependOn(&b.addInstallArtifact(image, .{}).step);
     check_step.dependOn(&serve.step);
+    check_step.dependOn(&fetch_native.step);
     check_step.dependOn(&image.step);
 
     // **HOST TESTS** for the parts of src/ that are pure — no ports, no
@@ -406,7 +419,7 @@ pub fn build(b: *std.Build) void {
     // QUEUE 142): one compile of the runner, std and the shared imports,
     // and each file's tests run once, not in every binary that imports it.
     // This list is the authority; unit_tests.zig must import exactly it.
-    const unit_files = [_][]const u8{ "src/rtc.zig", "src/pit.zig", "src/gpt.zig", "src/stack.zig", "src/civil.zig", "src/disk_fat.zig", "src/disk_fat_dirent.zig", "src/machine.zig", "src/seq.zig", "src/ring_pieces.zig", "src/pvh.zig", "src/pages.zig", "src/tcp.zig", "src/tcp_check.zig", "src/tcp_sim.zig", "src/tcp_pair_sim.zig", "src/fat_sim.zig", "src/page_sim.zig", "src/pure_sim.zig", "src/ready_sim.zig", "src/durable_sim.zig", "src/durable.zig", "src/scsi_mode.zig", "src/floor_sim.zig", "src/store.zig", "src/store_model.zig", "src/store_test.zig", "src/store_linux.zig", "src/store_sim.zig", "src/scratch_dir.zig", "src/io_test.zig", "src/log_ring.zig", "src/restart.zig", "src/kept_log.zig", "src/ready.zig", "src/drain.zig", "src/drain_sim.zig", "src/request_heap.zig", "src/page_cache.zig", "src/admin_reset.zig", "src/dhcp.zig", "src/screen.zig", "src/serial_gate.zig", "src/net.zig", "src/idle.zig", "src/idle_check.zig", "src/request_line.zig", "src/uploads_seen.zig", "src/device_wait.zig", "src/disk_failures.zig", "src/boot_facts.zig", "src/rest_count.zig", "src/config_text.zig", "src/virtio.zig", "src/serial.zig", "src/after_turn.zig", "src/spill_rule.zig", "src/apic_rule.zig", "src/failed_seeds.zig", "src/tcp_segment.zig", "src/arp.zig", "src/tcp_held.zig" };
+    const unit_files = [_][]const u8{ "src/rtc.zig", "src/pit.zig", "src/gpt.zig", "src/stack.zig", "src/civil.zig", "src/disk_fat.zig", "src/disk_fat_dirent.zig", "src/machine.zig", "src/seq.zig", "src/ring_pieces.zig", "src/pvh.zig", "src/pages.zig", "src/tcp.zig", "src/tcp_check.zig", "src/tcp_sim.zig", "src/tcp_pair_sim.zig", "src/fat_sim.zig", "src/page_sim.zig", "src/pure_sim.zig", "src/ready_sim.zig", "src/durable_sim.zig", "src/durable.zig", "src/scsi_mode.zig", "src/floor_sim.zig", "src/store.zig", "src/store_model.zig", "src/store_test.zig", "src/store_linux.zig", "src/store_sim.zig", "src/scratch_dir.zig", "src/io_test.zig", "src/log_ring.zig", "src/restart.zig", "src/kept_log.zig", "src/ready.zig", "src/drain.zig", "src/drain_sim.zig", "src/request_heap.zig", "src/page_cache.zig", "src/admin_reset.zig", "src/dhcp.zig", "src/screen.zig", "src/serial_gate.zig", "src/net.zig", "src/idle.zig", "src/idle_check.zig", "src/request_line.zig", "src/uploads_seen.zig", "src/device_wait.zig", "src/disk_failures.zig", "src/boot_facts.zig", "src/rest_count.zig", "src/config_text.zig", "src/virtio.zig", "src/serial.zig", "src/after_turn.zig", "src/spill_rule.zig", "src/apic_rule.zig", "src/failed_seeds.zig", "src/tcp_segment.zig", "src/arp.zig", "src/tcp_held.zig", "src/fetch.zig" };
     comptime {
         @setEvalBranchQuota(1_000_000);
         const root = @embedFile("src/unit_tests.zig");

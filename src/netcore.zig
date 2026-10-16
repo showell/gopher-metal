@@ -5,3 +5,4 @@
 pub const proto = @import("proto.zig");
 pub const arp = @import("arp.zig");
 pub const tcp = @import("tcp.zig");
+pub const fetch = @import("fetch.zig");

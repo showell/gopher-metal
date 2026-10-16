@@ -21,6 +21,11 @@ boot to ask before, and takes seconds here:
   keepalive     Linux's keepalive probes are answered
   loss          frames lost toward the table (netem) and from it
                 (GM_LOSE_SENT) are recovered
+  fetch         the table as a client (zig-out/bin/gm-fetch, metal-vmm
+                QUEUE 225 chunk 8) against Linux at 10.77.0.1: a 200, 300 KB,
+                refused, silent, idle and total servers, the SYN eaten 1, 2
+                and 3 times, and single losses each way, each by its exit
+                code (`FETCH_ONLY=1` runs these alone)
 
 Exit 0 when every check passes."""
 import hashlib
@@ -35,6 +40,14 @@ import time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 SERVE = os.path.join(HERE, "..", "zig-out", "bin", "gm-serve")
+FETCH = os.path.join(HERE, "..", "zig-out", "bin", "gm-fetch")
+LINUX = "10.77.0.1"
+# TWO-KERNELS.md §5's metal values, for the native runs with seeded single
+# losses: connect 150 ms (two SYNs sent again, at 25 and 75 ms), idle 1 s,
+# total 3 s.
+METAL_DEADLINES = ["connect_ms=150", "idle_ms=1000", "total_ms=3000"]
+# fetch.Outcome's codes (src/fetch.zig).
+OK, REFUSED, CONNECT_DEADLINE, IDLE_DEADLINE, TOTAL_DEADLINE = 0, 2, 3, 4, 5
 TAP = "gmtap0"
 ADDR = "10.77.0.2"
 failures = 0
@@ -381,6 +394,127 @@ def check_loss():
            f"{st['fast_retransmits']} of them asked for by the peer, {st['given_up']} given up", started)
 
 
+class LinuxServers:
+    """What gm-fetch asks, on Linux's side of the TAP: `python3 -m
+    http.server` with a 2-byte /tiny and a 300 KB /big; nothing on 8001
+    (refused); on 8002 a server that takes the request and never answers
+    (idle); on 8003 one that answers a byte every 500 ms (total)."""
+
+    def __init__(self):
+        self.www = os.path.join(HERE, "..", "zig-out", "fetch-www")
+        os.makedirs(self.www, exist_ok=True)
+        with open(os.path.join(self.www, "tiny"), "wb") as f:
+            f.write(b"ok")
+        with open(os.path.join(self.www, "big"), "wb") as f:
+            f.write(pattern(300_000))
+        self.http = subprocess.Popen([sys.executable, "-m", "http.server", "8000", "--bind", LINUX],
+                                     cwd=self.www, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        self.stop_now = threading.Event()
+        self.socks = []
+        for port, serve in ((8002, self._mute), (8003, self._trickle)):
+            ls = socket.socket()
+            ls.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            ls.bind((LINUX, port))
+            ls.listen(4)
+            ls.settimeout(0.2)
+            self.socks.append(ls)
+            threading.Thread(target=self._accept, args=(ls, serve), daemon=True).start()
+        deadline = time.time() + 5
+        while time.time() < deadline:
+            try:
+                socket.create_connection((LINUX, 8000), timeout=0.5).close()
+                return
+            except OSError:
+                time.sleep(0.05)
+        raise RuntimeError("python3 -m http.server never listened")
+
+    def _accept(self, ls, serve):
+        while not self.stop_now.is_set():
+            try:
+                c, _ = ls.accept()
+            except OSError:
+                continue
+            threading.Thread(target=serve, args=(c,), daemon=True).start()
+
+    def _mute(self, c):
+        c.recv(4096)
+        self.stop_now.wait(10)
+        c.close()
+
+    def _trickle(self, c):
+        c.recv(4096)
+        try:
+            c.sendall(b"HTTP/1.1 200 OK\r\ncontent-length: 100\r\n\r\n")
+            for _ in range(100):
+                if self.stop_now.wait(0.5):
+                    break
+                c.sendall(b"x")
+        except OSError:
+            pass
+        c.close()
+
+    def stop(self):
+        self.stop_now.set()
+        for ls in self.socks:
+            ls.close()
+        self.http.terminate()
+        self.http.wait()
+
+
+def fetch(port, path, **env):
+    """One gm-fetch run: its exit code, its body, its stderr line, seconds."""
+    t = time.time()
+    p = subprocess.run([FETCH, LINUX, str(port), path] + METAL_DEADLINES,
+                       env=dict(os.environ, **{k: str(v) for k, v in env.items()}),
+                       capture_output=True, timeout=10)
+    return p.returncode, p.stdout, p.stderr.decode().strip(), time.time() - t
+
+
+def check_fetch():
+    """**THE TABLE AS A CLIENT, LINUX AS THE WITNESS** (metal-vmm QUEUE 225,
+    chunk 8). Each case is one gm-fetch run and the exit code it must give,
+    with the body exact where there is one, and the time a deadline took
+    within 50 ms of the deadline."""
+    if not os.path.exists(FETCH):
+        report(False, "fetch", "no zig-out/bin/gm-fetch: run `zig build native`", time.time())
+        return
+    servers = LinuxServers()
+    big = pattern(300_000)
+    cases = [
+        # name, port, path, env, the code, the body, the time it should take
+        ("a 200", 8000, "/tiny", {}, OK, b"ok", None),
+        ("300 KB", 8000, "/big", {}, OK, big, None),
+        ("refused", 8001, "/tiny", {}, REFUSED, b"", None),
+        ("the SYN eaten once", 8000, "/tiny", {"GM_EAT_SYNS": 1}, OK, b"ok", None),
+        ("the SYN eaten twice", 8000, "/tiny", {"GM_EAT_SYNS": 2}, OK, b"ok", None),
+        # The fourth SYN goes at 175 ms, past the connect deadline.
+        ("the SYN eaten three times", 8000, "/tiny", {"GM_EAT_SYNS": 3}, CONNECT_DEADLINE, b"", 0.150),
+        ("idle", 8002, "/", {}, IDLE_DEADLINE, b"", 1.0),
+        ("total", 8003, "/", {}, TOTAL_DEADLINE, None, 3.0),
+    ]
+    # Single losses each way, at places across the transfer: the request
+    # itself (sent frame 2), and segments of the answer.
+    for k in (2, 3, 5, 9):
+        cases.append((f"our frame {k} lost", 8000, "/big", {"GM_DROP_SENT": k}, OK, big, None))
+    for k in (1, 2, 10, 50, 150):
+        cases.append((f"Linux's frame {k} lost", 8000, "/big", {"GM_DROP_RECEIVED": k}, OK, big, None))
+    # Silent: no TCP frame from Linux is taken, so its SYN-ACKs never
+    # arrive (GM_DEAF_FROM=0; ARP still is, so the server's address is
+    # known). Not netem: it would drop the ARP reply too, and the outcome
+    # would be no_arp.
+    cases.insert(6, ("silent", 8000, "/tiny", {"GM_DEAF_FROM": 0}, CONNECT_DEADLINE, b"", 0.150))
+    try:
+        for name, port, path, env, want, body, takes in cases:
+            started = time.time()
+            code, got, line, took = fetch(port, path, **env)
+            ok = code == want and (body is None or got == body)
+            if takes is not None:
+                ok = ok and takes <= took and took < takes + 0.25
+            report(ok, f"fetch, {name}", f"exit {code} (want {want}); {line}", started)
+    finally:
+        servers.stop()
+
+
 def main() -> int:
     if not os.path.exists(SERVE):
         print("FAIL  no zig-out/bin/gm-serve: run `zig build native`")
@@ -388,6 +522,11 @@ def main() -> int:
     ensure_tap()
     netem(None)
     begun = time.time()
+    if os.environ.get("FETCH_ONLY"):
+        check_fetch()
+        print(f"{'every check passed' if not failures else f'{failures} checks failed'} "
+              f"({time.time() - begun:.0f} s)")
+        return 1 if failures else 0
     server = Server()
     try:
         check_connections(server)
@@ -401,6 +540,7 @@ def main() -> int:
         check_keepalive()
     finally:
         server.stop()
+    check_fetch()
     # Loss waits out real retransmission timers on both sides; the quick tier
     # leaves it to the full run.
     if not os.environ.get("JUDGE_QUICK"):

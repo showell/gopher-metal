@@ -279,6 +279,16 @@ ok    half-close / reset / keepalive
 ok    loss: 5% lost toward the table and 1 in 13 from it: recovered
 ```
 
+**And as a client** (metal-vmm QUEUE 225, chunk 8): `native/fetch.zig`
+(`gm-fetch`) makes one GET with `Table.connect` to Linux at 10.77.0.1,
+asking ARP for its address first, and exits with the outcome's code
+(`src/fetch.zig`). The judge's fetch cases (`FETCH_ONLY=1` alone, about
+5 s) hold each to its code: a 200 and 300 KB exact; refused; silent, idle
+and total servers, each let go at its deadline to within 250 ms; the SYN
+eaten once and twice (a 200) and three times (the connect deadline, since
+the fourth SYN goes at 175 ms); and one frame lost at places each way.
+`GM_TRACE=1` prints every TCP frame each way.
+
 **Why it exists.** The send side was debugged one 40-second QEMU boot at a
 time, and the bugs it found were ones a reading of RFC 9293 would have named
 in minutes. A cold review against the RFC found eight more, each now a pure

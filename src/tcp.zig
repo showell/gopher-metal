@@ -925,6 +925,13 @@ pub const Table = struct {
                 // should be advanced to equal SEG.ACK", and the window and
                 // segment size are the SYN-ACK's.
                 c.rcv_nxt = seg.seq +% 1;
+                // PLANT (src/plant.zig): our ACK of the SYN-ACK names the
+                // server's ISS, not ISS + 1, so the server refuses the
+                // handshake (native/judge_native.py's fetch cases).
+                if (comptime plant.on == .client_ack_off_by_one) {
+                    props.reachable(@src(), "PLANT: client-ack-off-by-one fires", null);
+                    c.rcv_nxt = seg.seq;
+                }
                 c.una = seg.ack;
                 c.wnd = seg.window;
                 c.wl1 = seg.seq;

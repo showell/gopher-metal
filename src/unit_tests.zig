@@ -29,6 +29,7 @@ test {
     _ = @import("tcp_pair_sim.zig");
     _ = @import("arp.zig");
     _ = @import("tcp_held.zig");
+    _ = @import("fetch.zig");
     _ = @import("fat_sim.zig");
     _ = @import("page_sim.zig");
     _ = @import("pure_sim.zig");
