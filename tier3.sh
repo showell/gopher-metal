@@ -20,7 +20,7 @@
 # **THE CHAT JUDGE RUNS FAT32 HERE, FAT16 IN long.sh** (QUEUE.md item 88):
 # prod's data is a FAT32 volume.
 #
-# **SKIP="word …"** leaves slow steps out (tools/skip_lib.sh): webbox-test, vmm-pc, vmm-timeouts, gopher-judges.
+# **SKIP="word …"** leaves slow steps out (tools/skip_lib.sh): webbox-test, vmm-pc, pair, vmm-timeouts, gopher-judges.
 # A run with a skip ends NOT A PASS, exit 3, and keeps no verdict.
 TIER="tier 3"
 source "$(dirname "${BASH_SOURCE[0]}")/tools/tier_lib.sh"
@@ -90,6 +90,16 @@ export GUESTS="$HERE/probe"
 (cd "$VMM" && zig build 2>&1 | tail -5; exit "${PIPESTATUS[0]}") || failed+=(vmm-build)
 if ! skip vmm-pc; then
     (cd "$VMM" && SITE="$SITE_VOLUME" ./pc_vs_microvm.sh all 2>&1 | tail -2; exit "${PIPESTATUS[0]}") || failed+=(vmm-pc)
+fi
+# **TWO KERNELS TALKING** (metal-vmm QUEUE 225 chunk 13, pair.sh): gopher.elf
+# serves probe/fetch.elf on metal-vmm's PAIR mode, deterministic; about 50
+# runs in about 22 s (unhurt twice, the SYN eaten, silent, no ARP, idle, and
+# each side's first 12 and last 8 frames lost in turn), every page checked
+# against the single-guest run's.
+if ! skip pair; then
+    zig build fetch > "$VERDICTS/fetch-build.txt" 2>&1 || failed+=(pair)
+    (cd "$VMM" && GUESTS="$HERE/probe" SITE="$SITE_VOLUME" ./pair.sh 2>&1 | tail -4; exit "${PIPESTATUS[0]}") || failed+=(pair)
+    lap "pair: two kernels talking"
 fi
 if ! skip vmm-timeouts; then
     (cd "$VMM" && SITE="$SITE_VOLUME" ./timeouts.sh 2>&1 | tail -3; exit "${PIPESTATUS[0]}") || failed+=(vmm-timeouts)
