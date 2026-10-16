@@ -676,6 +676,11 @@ pub fn kmain() noreturn {
     // built in, it restarts the machine (RESTART.md).
     if (gm_build.restart) metal.restarting.serving();
 
+    // **STEPPED BEFORE THE FIRST REQUEST** (metal-vmm QUEUE 222), as the
+    // Linux host does: a site that learns from its first `between` that its
+    // host steps background runs knows it before the first request.
+    betweenSlice(io);
+
     // ── the loop: talk to the network, serve whatever is ready ──────────────
     //
     // **MANY CONNECTIONS, ONE REQUEST AT A TIME.** Every turn moves the
