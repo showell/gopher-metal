@@ -28,6 +28,7 @@
 //! paths the runs reached.
 
 const std = @import("std");
+const ev = @import("sim_events.zig");
 const disk_fat = @import("disk_fat.zig");
 const test_disk = @import("test_disk.zig");
 const props = @import("coverage");
@@ -323,6 +324,7 @@ const Sim = struct {
     fn run(s: *Sim) !void {
         s.rng = s.drawn orelse s.prng.random();
         while (s.step < s.sc.ops and s.broken == null) : (s.step += 1) {
+            ev.count += 1;
             const full = s.full;
             try s.turn();
             if (s.probeRandom()) |p| if (s.broken == null and p.uintLessThan(u8, 3) == 0) {

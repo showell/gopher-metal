@@ -27,6 +27,7 @@
 //!   and the Linux store are made what FAT holds, as after a cut.
 
 const std = @import("std");
+const ev = @import("sim_events.zig");
 const store = @import("store.zig");
 const explore = @import("explore");
 const Model = @import("store_model.zig").Model;
@@ -252,6 +253,7 @@ fn runFrom(gpa: std.mem.Allocator, io: std.Io, seed: u64, r: std.Random, second:
     var outs: [3][8192]u8 = undefined;
     const cut_every = r.intRangeAtMost(u32, 4, 20);
     for (0..r.intRangeAtMost(usize, 30, 120)) |step| {
+        ev.count += 1;
         const op: Op = switch (explore.pickAs(r, usize, "store_sim: the operation", .{ .read = 1, .write = 1, .append = 1, .remove = 1, .replace = 1, .list = 1 })) {
             inline else => |o| @field(Op, @tagName(o)),
         };

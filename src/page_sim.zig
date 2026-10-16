@@ -36,6 +36,7 @@
 //! not from `keyOf`.
 
 const std = @import("std");
+const ev = @import("sim_events.zig");
 const PageCache = @import("page_cache.zig").PageCache;
 const props = @import("coverage");
 
@@ -294,6 +295,7 @@ const Sim = struct {
         var other: [PageCache.max_key + 64]u8 = undefined;
         var data: [16 * page]u8 = undefined;
         while (self.step < self.sc.ops and self.broken == null) : (self.step += 1) {
+            ev.count += 1;
             const r = self.rng;
             const name = paths[r.uintLessThan(usize, paths.len)];
             const path = self.spell(&spelled, name);

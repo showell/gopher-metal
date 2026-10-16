@@ -591,6 +591,7 @@ pub fn build(b: *std.Build) void {
     // a sweep of seeds, then every assertion they reach judged. Not part of `test`: its report is read, not gated on, while it
     // is a proof of concept (a `sometimes` never met is a gap, not a bug).
     const props_opts = b.addOptions();
+    props_opts.addOption(bool, "trace_reach", b.option(bool, "trace-reach", "`properties` prints, for each floor line, the simulators that reach it and the first seed each did (measuring, slower)") orelse false);
     props_opts.addOption(u64, "seeds", b.option(u64, "seeds", "how many tcp_sim seeds `properties` sweeps") orelse 100);
     // Every seed runs as a crowd too, unless asked for fewer: revival
     // (tcp.zig) made item 24's crowd seeds green (tcp_sim.zig, `crowd_red`).

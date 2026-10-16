@@ -57,6 +57,7 @@
 //! the run to look at first.
 
 const std = @import("std");
+const ev = @import("sim_events.zig");
 const proto = @import("proto.zig");
 const tcp = @import("tcp.zig");
 const invariants = @import("tcp_check.zig");
@@ -1532,6 +1533,7 @@ const Sim = struct {
         self.client.open(self);
         var buf: [1600]u8 = undefined;
         while (self.now < horizon_ns and self.broken == null and !self.over()) {
+            ev.count += 1;
             self.now += tick_ns;
             self.flood();
             for (1..self.n_clients) |i| {
@@ -1541,6 +1543,7 @@ const Sim = struct {
             var wire = TableWire{ .sim = self };
             const refused = self.table.refused;
             while (self.net.take(self.now, &buf)) |p| {
+                ev.count += 1;
                 if (p.to_table) {
                     const given_way = self.table.half_open_given_way;
                     var half_open: [max_clients]?usize = undefined;

@@ -41,6 +41,7 @@
 //! failed.
 
 const std = @import("std");
+const ev = @import("sim_events.zig");
 const ready = @import("ready.zig");
 const body_rule = @import("body_rule");
 const tcp = @import("tcp.zig");
@@ -256,6 +257,7 @@ pub fn runSeed(seed: u64) !void {
         else => 1 << 20,
     };
     for (0..r.intRangeAtMost(usize, 1, 20)) |q_i| {
+        ev.count += 1;
         var q = try generate(r, cap);
         defer q.bytes.deinit(testing.allocator);
         const bytes = q.bytes.items;

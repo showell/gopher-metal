@@ -30,6 +30,7 @@
 //! - after a failed one, the next output sends one again.
 
 const std = @import("std");
+const ev = @import("sim_events.zig");
 const durable = @import("durable.zig");
 const props = @import("coverage");
 
@@ -137,6 +138,7 @@ pub fn runSeed(seed: u64) Failure!void {
     var spill: [8]Kept = undefined;
     var spilled: usize = 0;
     for (0..r.intRangeAtMost(usize, 1, 200)) |_| {
+        ev.count += 1;
         switch (r.uintLessThan(u8, 6)) {
             0, 1 => {
                 const k = r.uintLessThan(usize, 2);

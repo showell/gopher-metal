@@ -66,6 +66,7 @@
 //!   from parsing them again.
 
 const std = @import("std");
+const ev = @import("sim_events.zig");
 const virtio = @import("virtio.zig");
 const gpt = @import("gpt.zig");
 const kernel_partition = @import("kernel_partition.zig");
@@ -878,6 +879,7 @@ pub fn mssSeed(seed: u64) Failure!void {
 }
 
 pub fn runSeed(seed: u64) Failure!void {
+    ev.count += 14;
     try gptSeed(seed);
     try pageSeed(seed);
     try redactSeed(seed);

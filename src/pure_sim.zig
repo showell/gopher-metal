@@ -30,6 +30,7 @@
 //!   found something here: it does not, after a reset (`heap_red`).
 
 const std = @import("std");
+const ev = @import("sim_events.zig");
 const log_ring = @import("log_ring.zig");
 const kept_log = @import("kept_log.zig");
 const restart = @import("restart.zig");
@@ -167,6 +168,7 @@ pub fn ringSeed(seed: u64) !void {
 
     const lines = r.intRangeAtMost(usize, 1, 80);
     for (0..lines) |step| {
+        ev.count += 1;
         text.clearRetainingCapacity();
         try logLine(r, &text, &secrets, gpa);
         // In pieces split anywhere, as serial.put writes a line.
@@ -251,6 +253,7 @@ pub fn keptSeed(seed: u64) !void {
 
     const boots = r.intRangeAtMost(usize, 2, 30);
     for (0..boots) |step| {
+        ev.count += 1;
         // The boot the model says came before: the newer of the slots.
         var best: ?u1 = null;
         for ([_]u1{ 0, 1 }) |s| if (slots[s]) |x| {
@@ -355,6 +358,7 @@ pub fn restartSeed(seed: u64) !void {
     var now: ?u32 = r.uintLessThan(u32, 3_000_000);
     const restarts = if (streak) r.intRangeAtMost(usize, 260, 400) else r.intRangeAtMost(usize, 1, 400);
     for (0..restarts) |step| {
+        ev.count += 1;
         const got = restart.Record.decode(cmos);
         if (!std.meta.eql(got, model)) return fail(seed, "restart: the record read back is not the one written", step);
         // The clock: a little later, the hour exactly, much later, earlier,
@@ -454,6 +458,7 @@ pub fn heapSeed(seed: u64, strict: bool) !void {
     var used_by_request: [2]usize = undefined;
     const requests = r.intRangeAtMost(usize, 1, 12);
     for (0..requests) |step| {
+        ev.count += 1;
         // A request, and then the same one again: the same ops from the same
         // dice, so the same amount asked.
         const ops_seed = r.int(u64);

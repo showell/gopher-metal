@@ -39,10 +39,15 @@ const options = @import("tcp_properties_options");
 var jsonl: std.ArrayList(u8) = .empty;
 
 /// **WHERE THE SWEEP'S TIME GOES** (metal-vmm QUEUE 224.1): each simulator's
-/// seconds, summed over its seeds, printed at the end with the whole run's,
+/// runs, events (sim_events.zig) and seconds, summed over its seeds, and its
+/// nanoseconds an event, printed at the end with the whole run's seconds,
 /// so the long tier can tell the build's time from the run's (long.sh).
-const Sim = enum { tcp_plain, tcp_rough, tcp_crowd, fat, page, pure, ready, drain, tcp_full, store, floor, durable, replays, regressions };
+const Sim = enum { tcp_plain, tcp_rough, tcp_crowd, fat, page, pure, ready, drain, tcp_full, store, floor, durable, fat_replays, store_replays, regressions };
 var spent = std.EnumArray(Sim, u64).initFill(0);
+var runs = std.EnumArray(Sim, u64).initFill(0);
+/// Each simulator's natural unit, as sim_events.zig lists them.
+var events = std.EnumArray(Sim, u64).initFill(0);
+const ev = @import("sim_events.zig");
 
 fn seconds(ns: u64) f64 {
     return @as(f64, @floatFromInt(ns)) / std.time.ns_per_s;
@@ -55,8 +60,61 @@ fn awake() u64 {
 /// `run(seed)` timed into `sim`'s total: whether every oracle held.
 fn timed(sim_: Sim, comptime run: anytype, seed: u64) bool {
     const from = awake();
-    defer spent.getPtr(sim_).* += awake() - from;
+    const counted = ev.count;
+    defer {
+        spent.getPtr(sim_).* += awake() - from;
+        runs.getPtr(sim_).* += 1;
+        events.getPtr(sim_).* += ev.count - counted;
+        if (options.trace_reach) traceReach(sim_, seed);
+    }
     return if (run(seed)) true else |_| false;
+}
+
+/// **WHO REACHES EACH FLOOR LINE, AND BY WHICH SEED** (metal-vmm QUEUE 224,
+/// Steve's "challenge needing to do that much work"; `-Dtrace-reach`): after
+/// each run, the sites whose passes it moved, so each floor line can say
+/// which simulators reach it and the first seed each did. A walk of the
+/// catalog a run: for measuring, not for the long tier.
+const no_seed = std.math.maxInt(u64);
+var passes_seen: []u32 = &.{};
+var first_pass: []std.EnumArray(Sim, u64) = &.{};
+
+fn traceReach(sim_: Sim, seed: u64) void {
+    if (passes_seen.len == 0) {
+        const n = at.catalog().count();
+        passes_seen = std.heap.page_allocator.alloc(u32, n) catch @panic("out of memory for the reach trace");
+        first_pass = std.heap.page_allocator.alloc(std.EnumArray(Sim, u64), n) catch @panic("out of memory for the reach trace");
+        @memset(passes_seen, 0);
+        @memset(first_pass, .initFill(no_seed));
+    }
+    var it = at.catalog();
+    var i: usize = 0;
+    while (it.next()) |site| : (i += 1) {
+        if (site.passes == passes_seen[i]) continue;
+        passes_seen[i] = site.passes;
+        const first = first_pass[i].getPtr(sim_);
+        if (first.* == no_seed) first.* = seed;
+    }
+}
+
+/// Each floor line, with the simulators that reach it and the first seed
+/// each did: `reach: <line> | tcp_plain@3 store@120`.
+fn printReach(floor: []const u8) void {
+    var lines = std.mem.splitScalar(u8, floor, '\n');
+    while (lines.next()) |raw| {
+        const line = std.mem.trim(u8, raw, " \t\r");
+        if (line.len == 0 or line[0] == '#') continue;
+        var who = std.EnumArray(Sim, u64).initFill(no_seed);
+        var it = at.catalog();
+        var i: usize = 0;
+        while (it.next()) |site| : (i += 1) {
+            if (!std.mem.eql(u8, std.mem.span(site.message), line)) continue;
+            for (std.enums.values(Sim)) |k| who.set(k, @min(who.get(k), first_pass[i].get(k)));
+        }
+        std.debug.print("reach: {s} |", .{line});
+        for (std.enums.values(Sim)) |k| if (who.get(k) != no_seed) std.debug.print(" {t}@{d}", .{ k, who.get(k) });
+        std.debug.print("\n", .{});
+    }
 }
 
 fn keep(line: []const u8) void {
@@ -142,13 +200,13 @@ test "the properties over a sweep of seeds" {
     // code, and at 300 seeds its two runs a seed were 600 more runs, the
     // whole of the long tier's slowdown since v21 (metal-vmm QUEUE B38).
     for (1..41) |seed| {
-        const ok = timed(.replays, fat_sim.replaysExactly, seed);
+        const ok = timed(.fat_replays, fat_sim.replaysExactly, seed);
         if (!ok) failed_seeds += 1;
         at.always(@src(), ok, "fat_sim: a run under a tape replays exactly", .{ .seed = seed });
     }
     // And a store run, the 20 seeds `zig build test` ran (QUEUE 136).
     for (1..21) |seed| {
-        const ok = timed(.replays, store_sim.replaysExactly, seed);
+        const ok = timed(.store_replays, store_sim.replaysExactly, seed);
         if (!ok) failed_seeds += 1;
         at.always(@src(), ok, "store_sim: a run under a tape replays exactly", .{ .seed = seed });
     }
@@ -161,7 +219,11 @@ test "the properties over a sweep of seeds" {
 
     // Each simulator's seconds, then the run's (long.sh takes the build's
     // as its lap less this).
-    for (std.enums.values(Sim)) |k| std.debug.print("time: sim {t} {d:.1} s\n", .{ k, seconds(spent.get(k)) });
+    // Against the floor of about 1 µs an event (metal-vmm QUEUE 224.1).
+    for (std.enums.values(Sim)) |k| {
+        const per = if (events.get(k) == 0) 0 else spent.get(k) / events.get(k);
+        std.debug.print("time: sim {t} {d} runs, {d} events, {d:.1} s, {d} ns/event\n", .{ k, runs.get(k), events.get(k), seconds(spent.get(k)), per });
+    }
     std.debug.print("time: sim run {d:.1} s\n", .{seconds(awake() - began)});
 
     var buf: [64 * 1024]u8 = undefined;
@@ -191,6 +253,7 @@ test "the properties over a sweep of seeds" {
         defer std.testing.allocator.free(text);
         w = .fixed(&buf);
         under = try at.checkFloor(text, &w);
+        if (options.trace_reach) printReach(text);
         std.debug.print("{s}floor {s}: {d} under it\n", .{ w.buffered(), options.floor, under });
     }
     try std.testing.expectEqual(@as(usize, 0), broken);

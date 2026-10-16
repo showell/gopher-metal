@@ -35,6 +35,7 @@
 //!   wait's only after the slot wait, whatever the budget.
 
 const std = @import("std");
+const ev = @import("sim_events.zig");
 const drain = @import("drain.zig");
 const body_rule = @import("body_rule");
 const props = @import("coverage");
@@ -544,6 +545,7 @@ pub fn runSeed(seed: u64) !void {
     defer for (0..conns) |i| s.close(i);
     const steps = 600 + r.uintLessThan(usize, 600);
     for (0..steps) |_| {
+        ev.count += 1;
         // New connections in free slots.
         for (0..conns) |i| if (s.clients[i] == null and r.uintLessThan(u8, 3) == 0) try s.open(i);
         // A client gone now and then (a reset): its memory and slot back.
