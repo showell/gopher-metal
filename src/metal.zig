@@ -23,6 +23,7 @@ pub const proto = @import("proto.zig");
 pub const dhcp = @import("dhcp.zig");
 pub const arp = @import("arp.zig");
 pub const tcp = @import("tcp.zig");
+pub const fetch = @import("fetch.zig");
 pub const coverage = @import("coverage");
 pub const stream = @import("stream.zig");
 pub const ready = @import("ready.zig");

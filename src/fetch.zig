@@ -242,6 +242,49 @@ pub const Client = struct {
     }
 };
 
+/// **WHAT A COMMAND LINE ASKS** (`fetch <ip> <port> <path> connect_ms=N
+/// idle_ms=N total_ms=N`, the leading word optional; probe/fetch.zig's),
+/// or why it cannot be read. The deadlines have no defaults.
+pub const Ask = struct { target: Target, deadlines: tcp.Deadlines };
+
+pub fn parseAsk(line: []const u8) error{ NoTarget, BadAddress, BadPort, NoDeadline, BadDeadline }!Ask {
+    var words = std.mem.tokenizeScalar(u8, line, ' ');
+    var first = words.next() orelse return error.NoTarget;
+    if (std.mem.eql(u8, first, "fetch")) first = words.next() orelse return error.NoTarget;
+    var ip: [4]u8 = undefined;
+    var parts = std.mem.splitScalar(u8, first, '.');
+    for (&ip) |*b| b.* = std.fmt.parseInt(u8, parts.next() orelse return error.BadAddress, 10) catch return error.BadAddress;
+    if (parts.next() != null) return error.BadAddress;
+    const port = std.fmt.parseInt(u16, words.next() orelse return error.BadPort, 10) catch return error.BadPort;
+    const path = words.next() orelse return error.NoTarget;
+    var connect: ?u64 = null;
+    var idle: ?u64 = null;
+    var total: ?u64 = null;
+    while (words.next()) |w| {
+        const eq = std.mem.indexOfScalar(u8, w, '=') orelse continue;
+        const ms = std.fmt.parseInt(u64, w[eq + 1 ..], 10) catch return error.BadDeadline;
+        const ns = ms * std.time.ns_per_ms;
+        const name = w[0..eq];
+        if (std.mem.eql(u8, name, "connect_ms")) connect = ns;
+        if (std.mem.eql(u8, name, "idle_ms")) idle = ns;
+        if (std.mem.eql(u8, name, "total_ms")) total = ns;
+    }
+    return .{
+        .target = .{ .ip = ip, .port = port, .path = path },
+        .deadlines = .{
+            .connect_ns = connect orelse return error.NoDeadline,
+            .idle_ns = idle orelse return error.NoDeadline,
+            .total_ns = total orelse return error.NoDeadline,
+        },
+    };
+}
+
+/// **WHAT QEMU REPORTS** for a kernel that ended with `o` through
+/// isa-debug-exit: `code << 1 | 1`.
+pub fn qemuExit(o: Outcome) u8 {
+    return o.code() << 1 | 1;
+}
+
 // ── tests ──────────────────────────────────────────────────────────────────
 
 const testing = std.testing;
@@ -421,4 +464,38 @@ test "the client against the kernel's own server: a 200, no ARP, the connect and
     try testing.expectEqual(Outcome.idle_deadline, try against(.mute, &sink));
     sink = .{};
     try testing.expectEqual(Outcome.short_answer, try against(.short, &sink));
+}
+
+test "a command line: target and deadlines, the leading word optional, no default deadline" {
+    const a = try parseAsk("fetch 10.0.2.2 8000 /big connect_ms=150 idle_ms=1000 total_ms=3000");
+    try testing.expectEqual([4]u8{ 10, 0, 2, 2 }, a.target.ip);
+    try testing.expectEqual(@as(u16, 8000), a.target.port);
+    try testing.expectEqualStrings("/big", a.target.path);
+    try testing.expectEqual(@as(u64, 150 * std.time.ns_per_ms), a.deadlines.connect_ns);
+    _ = try parseAsk("10.0.2.2 80 / total_ms=1 idle_ms=1 connect_ms=1");
+    try testing.expectError(error.NoDeadline, parseAsk("fetch 10.0.2.2 80 / connect_ms=1 idle_ms=1"));
+    try testing.expectError(error.BadAddress, parseAsk("fetch 10.0.2 80 / connect_ms=1 idle_ms=1 total_ms=1"));
+    try testing.expectError(error.BadPort, parseAsk("fetch 10.0.2.2 http / connect_ms=1 idle_ms=1 total_ms=1"));
+    try testing.expectError(error.NoTarget, parseAsk(""));
+}
+
+test "what QEMU reports for each outcome: a whole 200 is 1, a kernel that could not start is 3, and no outcome shares one" {
+    const Row = struct { o: Outcome, qemu: u8 };
+    const rows = [_]Row{
+        .{ .o = .ok, .qemu = 1 },
+        .{ .o = .refused, .qemu = 5 },
+        .{ .o = .connect_deadline, .qemu = 7 },
+        .{ .o = .idle_deadline, .qemu = 9 },
+        .{ .o = .total_deadline, .qemu = 11 },
+        .{ .o = .given_up, .qemu = 13 },
+        .{ .o = .reset, .qemu = 15 },
+        .{ .o = .bad_answer, .qemu = 17 },
+        .{ .o = .no_arp, .qemu = 19 },
+        .{ .o = .short_answer, .qemu = 21 },
+    };
+    try testing.expectEqual(std.enums.values(Outcome).len, rows.len);
+    for (rows) |r| {
+        try testing.expectEqual(r.qemu, qemuExit(r.o));
+        try testing.expect(r.qemu != 3); // serial.fail's
+    }
 }

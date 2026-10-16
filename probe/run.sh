@@ -10,6 +10,7 @@
 #   probe/run.sh gopher isolated      a boot per single request: what a push
 #                                     is judged on
 #   probe/run.sh native     the TCP table on Linux, against Linux's TCP
+#   probe/run.sh fetch      the client kernel, one GET against Linux
 #   probe/run.sh ladder     one operation many times, at a flat cost
 #   probe/run.sh soak       one long boot (SOAK_ROUNDS); not part of `all`
 #
@@ -673,6 +674,23 @@ fi
 # The one that matters: the HTTP is zig's own std.http.Server, unmodified.
 if [ "$want" = all ] || [ "$want" = stdhttp ]; then
     serve stdhttp "hello from std.http.Server, with no Linux under it"
+fi
+
+# **THE CLIENT KERNEL** (metal-vmm QUEUE 225, chunk 9): fetch.elf makes one GET
+# with tcp.zig's connect to python3 -m http.server here, which the guest sees
+# as 10.0.2.2, and ends with the outcome's code. probe/judge_fetch.py boots it
+# once a case and judges QEMU's exit code and the body's hash.
+if [ "$want" = all ] || [ "$want" = fetch ]; then
+    if [ ! -f "$HERE/fetch.elf" ]; then
+        echo "FAIL fetch | no fetch.elf; run: zig build fetch"
+        failed=1
+    elif python3 "$HERE/judge_fetch.py" "$HERE/fetch.elf" "$WORK/fetch" > "$WORK/fetch.verdict" 2>&1; then
+        echo "PASS fetch | $(tail -1 "$WORK/fetch.verdict")"
+    else
+        echo "FAIL fetch | $(tail -1 "$WORK/fetch.verdict")"
+        grep "^FAIL" "$WORK/fetch.verdict" | sed 's/^/             /'
+        failed=1
+    fi
 fi
 
 # **THE REAL SERVER.** angry-gopher's own driving.zig, from its own source,

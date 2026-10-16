@@ -36,7 +36,11 @@ The rest: `stdhttp` (zig's own HTTP server, [port.md](port.md)), `stdio` (the
 ([disk.md](disk.md)), `clock` and `realunset` (the TSC, the RTC, and refusing
 a wall-clock read before the clock is set), `rng`, `memory`
 ([port.md](port.md)), `ladder` ([tcp.md](tcp.md)), `restart` and `backoff`
-(the restart on failure, [RESTART.md](../RESTART.md)). A run looks like this
+(the restart on failure, [RESTART.md](../RESTART.md)), and `fetch`, the client
+kernel: one GET with tcp.zig's `connect` to `python3 -m http.server` on the
+host (10.0.2.2 to the guest), its outcome the exit code (`src/fetch.zig`;
+`probe/judge_fetch.py` judges QEMU's code and the body's hash: a 200, 300 KB,
+refused, no ARP, and a command line without its deadlines). A run looks like this
 (an excerpt):
 
 ```
@@ -64,6 +68,7 @@ PASS rng |   over 4 KB: 16347 of 32768 bits set, commonest byte appears 25 times
 PASS net |   server : 10.0.2.2
 PASS http | curl got "hello from no Linux"
 PASS stdhttp | curl got "hello from std.http.Server, with no Linux under it"
+PASS fetch | every case passed
 ```
 
 **One gate of the judge at a time.** `probe/run.sh gopher <gate>` runs one;

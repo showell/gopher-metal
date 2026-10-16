@@ -110,6 +110,7 @@ pub fn build(b: *std.Build) void {
         .{ .name = "rng.elf", .root = "probe/rng.zig", .step = "rng", .help = "entropy from virtio-rng and RDRAND" },
         .{ .name = "net.elf", .root = "probe/net.zig", .step = "net", .help = "the virtio-net and DHCP probe kernel" },
         .{ .name = "http.elf", .root = "probe/http.zig", .step = "http", .help = "the one-request web server probe kernel" },
+        .{ .name = "fetch.elf", .root = "probe/fetch.zig", .step = "fetch", .help = "the client kernel: one GET with tcp.zig's connect, its outcome the exit code (metal-vmm QUEUE 225)" },
         .{ .name = "ladder.elf", .root = "probe/ladder.zig", .step = "ladder", .help = "one operation many times, at a flat cost" },
         .{ .name = "stdhttp.elf", .root = "probe/stdhttp.zig", .step = "stdhttp", .help = "the same, but with zig's own std.http.Server" },
         .{ .name = "backoff.elf", .root = "probe/backoff.zig", .step = "backoff", .help = "the restart end to end: four restarts, then the back-off (RESTART.md)" },
