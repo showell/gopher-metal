@@ -7,8 +7,8 @@
 //! **THE RFC'S WORDS ARE QUOTED** (chunk 3b), on lines that begin `> `,
 //! copied from `docs/rfc/rfc9293.txt` word for word (tcp_test.zig holds
 //! every quote to that file): each decision's step first, then the code
-//! that does it. A `DEPARTS:` line names each place the code does
-//! otherwise.
+//! that does it. A `DEPARTS (reason):` line names each place the code does
+//! otherwise, and why (the five reasons: tcp.zig's header).
 
 const tcp = @import("tcp.zig");
 const Conn = tcp.Conn;
@@ -65,7 +65,7 @@ const sq = @import("seq.zig").Seq(u32);
 ///   still count);
 /// - `behind`: at or before RCV.NXT, a resend of what was taken;
 /// - `beyond`: past the window, or half the circle away.
-/// DEPARTS: the RFC also accepts a segment that starts behind and runs past
+/// DEPARTS (simpler): the RFC also accepts a segment that starts behind and runs past
 /// RCV.NXT, and trims it; here it is `behind`, and the peer resends. And a
 /// segment `ahead` is not held for later (SHLD-31): its sender resends it.
 pub const Acceptability = enum { next, ahead, behind, beyond };
@@ -150,7 +150,7 @@ pub fn resetCheck(c: *const Conn, seq: u32) ResetCheck {
 /// - in a synchronized state, `new` when it acknowledges bytes past
 ///   SND.UNA, `duplicate` when it is SND.UNA, and `ignore` when it names
 ///   what was never sent, or is from before SND.UNA (a wrap past `highest`).
-/// DEPARTS: the RFC answers an ACK of something never sent with an ACK and
+/// DEPARTS (bounded): the RFC answers an ACK of something never sent with an ACK and
 /// drops the segment; here only its ACK is ignored (`acknowledge`).
 pub const AckCheck = enum { reset_it, ignore, duplicate, new };
 
@@ -166,10 +166,10 @@ pub fn ackCheck(c: *const Conn, number: u32) AckCheck {
 /// SYN means. In SYN-SENT, `una` is ISS and SND.NXT is ISS + 1
 /// (`highest`). The steps are the RFC's, in its order, each quoted in the
 /// body before the code that does it.
-/// DEPARTS: a simultaneous open (a SYN with no ACK) is dropped and counted
+/// DEPARTS (simpler): a simultaneous open (a SYN with no ACK) is dropped and counted
 /// (`simultaneous_opens_refused`), with no reset, where the RFC answers it
 /// with a SYN-ACK and enters SYN-RECEIVED.
-/// DEPARTS: text or a FIN on the SYN-ACK is not taken, where the RFC
+/// DEPARTS (simpler): text or a FIN on the SYN-ACK is not taken, where the RFC
 /// continues processing it at §3.10.7.4's sixth step; the peer sends it
 /// again, since our ACK does not cover it.
 pub const SynSent = enum { reset_it, drop, refused, established, simultaneous_open };

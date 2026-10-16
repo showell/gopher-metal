@@ -7,7 +7,8 @@
 //!
 //! **THE RFCS' WORDS ARE QUOTED** (chunk 3b), on lines that begin `> `,
 //! copied from `docs/rfc/` word for word (tcp_test.zig holds every quote to
-//! those files). A `DEPARTS:` line names each place the code does otherwise.
+//! those files). A `DEPARTS (reason):` line names each place the code does otherwise,
+//! and why (the five reasons: tcp.zig's header).
 
 const tcp = @import("tcp.zig");
 const Conn = tcp.Conn;
@@ -43,14 +44,25 @@ fn here() @import("std").builtin.SourceLocation {
 /// > (2.5) A maximum value MAY be placed on RTO provided it is at least 60
 /// >       seconds.
 ///
-/// DEPARTS: the first wait (2.1) and the floor (2.4) are 200 ms, not one
+/// DEPARTS (fast): the first wait (2.1) and the floor (2.4) are 200 ms, not one
 /// second, for the reasons above.
-/// DEPARTS: the ceiling is 5 s, under (2.5)'s 60 s, so a peer back from a
+/// DEPARTS (fast): the ceiling is 5 s, under (2.5)'s 60 s, so a peer back from a
 /// bad patch is heard from within seconds.
 ///
 /// Each timeout doubles the wait up to `max_rto_ns`, and the connection is
 /// reset after `max_retries` timeouts with nothing acknowledged: RFC 9293's
 /// R2 (§3.8.3), counted in timeouts.
+/// DEPARTS (bounded): that holds for a shut window too, even while the peer
+/// answers every probe, where RFC 9293 §3.8.6.1 keeps it open:
+/// > As long as the receiving TCP peer continues to
+/// > send acknowledgments in response to the probe segments, the sending
+/// > TCP peer MUST allow the connection to stay open (MUST-37).
+/// A reader that never reads would otherwise hold a slot of the table for
+/// good (Steve, 2026-10-16: "Keep the drop"), which the same paragraph
+/// allows for:
+/// > The behavior
+/// > is subject to the implementation's resource management concerns, as
+/// > noted in [41].
 pub const min_rto_ns: u64 = 200 * tcp.ns_per_ms;
 pub const first_rto_ns: u64 = min_rto_ns;
 pub const max_rto_ns: u64 = 5 * tcp.ns_per_s;
@@ -65,7 +77,7 @@ pub const max_retries: u8 = 6;
 /// >       MUST be re-initialized to 3 seconds when data transmission
 /// >       begins (i.e., after the three-way handshake completes).
 ///
-/// DEPARTS: once established, a connection whose SYN or SYN-ACK was sent
+/// DEPARTS (fast): once established, a connection whose SYN or SYN-ACK was sent
 /// again has `first_rto_ns` (200 ms), not 3 s, until its first sample.
 pub const syn_first_rto_ns: u64 = 25 * tcp.ns_per_ms;
 
@@ -103,7 +115,7 @@ pub fn pastDeadline(c: *const Conn, now: i96) ?Deadline {
 /// > ACKs, TCP performs a retransmission of what appears to be the missing
 /// > segment, without waiting for the retransmission timer to expire.
 ///
-/// DEPARTS: there is no congestion control (tcp.zig's header), so no fast
+/// DEPARTS (scale): there is no congestion control (tcp.zig's header), so no fast
 /// recovery, and no Limited Transmit: the first and second duplicate ACKs
 /// send nothing new (§3.2, step 1, after RFC 3042).
 pub const dupacks_before_resend: u8 = 3;

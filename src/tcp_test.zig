@@ -2806,6 +2806,41 @@ fn checkQuotes(gpa: std.mem.Allocator, source: []const u8, rfcs: []const []const
     return quotes;
 }
 
+test "every DEPARTS line names one of tcp.zig's five reasons" {
+    // **ONE STORY FOR EVERY DEPARTURE** (Steve, 2026-10-16: "a consistent
+    // story in all our DEPARTS lines"): `DEPARTS (reason):`, the reason one
+    // of the five tcp.zig's header defines. `reason` itself is the
+    // placeholder the headers use to name the form.
+    const gpa = testing.allocator;
+    const io = testing.io;
+    const reasons = [_][]const u8{ "bounded", "fast", "simpler", "stricter", "scale", "reason" };
+    const files = [_][]const u8{ "src/tcp.zig", "src/tcp_arrives.zig", "src/tcp_timeouts.zig", "src/tcp_segment.zig" };
+    var named: usize = 0;
+    var unnamed: usize = 0;
+    for (files) |f| {
+        const source = try std.Io.Dir.cwd().readFileAlloc(io, f, gpa, .unlimited);
+        defer gpa.free(source);
+        var at: usize = 0;
+        while (std.mem.indexOfPos(u8, source, at, "DEPARTS")) |i| {
+            at = i + "DEPARTS".len;
+            const rest = source[at..];
+            // A heading's "DEPARTS FROM" is prose, not a line of the form.
+            if (!std.mem.startsWith(u8, rest, " (") and !std.mem.startsWith(u8, rest, ":")) continue;
+            const ok = for (reasons) |r| {
+                if (std.mem.startsWith(u8, rest[@min(2, rest.len)..], r) and std.mem.startsWith(u8, rest[@min(2 + r.len, rest.len)..], "):")) break true;
+            } else false;
+            if (ok) named += 1 else {
+                unnamed += 1;
+                const end = std.mem.indexOfScalarPos(u8, source, at, '\n') orelse source.len;
+                std.debug.print("{s}: a DEPARTS line with no reason of the five: \"DEPARTS{s}\"\n", .{ f, source[at..end] });
+            }
+        }
+    }
+    try testing.expectEqual(@as(usize, 0), unnamed);
+    // Not vacuous: 19 departures (2026-10-16), plus the headers' placeholders.
+    try testing.expect(named >= 19);
+}
+
 test "every quote of an RFC in the tcp files is the RFC's own words (docs/rfc/)" {
     const gpa = testing.allocator;
     const io = testing.io;
