@@ -938,6 +938,48 @@ test "a shut window is probed, and the rest goes when it opens" {
     try testing.expectEqual(from + 1, f.wire.count);
 }
 
+test "a probe the shut window refuses is not taken as sent: when the window opens, the oldest byte goes first (metal-vmm QUEUE 227)" {
+    var f: Fixture = .{};
+    f.init();
+    var p = Peer{ .ip = .{ 10, 0, 2, 2 }, .port = 40000, .window = 1000 };
+    const i = try p.connect(&f.table, &f.wire, 0);
+    var body: [3000]u8 = undefined;
+    _ = f.table.queue(i, pattern(&body));
+    transmit(&f.table, &f.wire, 0);
+    // The peer shuts its window and takes none of what was in flight.
+    p.window = 0;
+    _ = p.ackUpTo(&f.table, &f.wire, p.ack, 5 * ms);
+    // The timeout probes with the oldest byte, and the shut window refuses
+    // it too: the peer's answer acknowledges nothing.
+    var now = f.table.conns[i].rto_at.?;
+    transmit(&f.table, &f.wire, now);
+    try testing.expectEqual(@as(usize, 1), f.wire.last().payload.len);
+    try testing.expectEqual(p.ack, f.wire.last().seq);
+    _ = p.ackUpTo(&f.table, &f.wire, p.ack, now + 1 * ms);
+
+    // The window opens, still acknowledging nothing: what goes next starts
+    // at the oldest byte, the one the probe carried and the peer refused.
+    // Taking the probe as sent left a hole there, which only a later,
+    // backed-off timeout filled (long.sh's rough shut-window, 2026-10-16).
+    p.window = 1000;
+    now += 10 * ms;
+    _ = p.ackUpTo(&f.table, &f.wire, p.ack, now);
+    const from = f.wire.count;
+    transmit(&f.table, &f.wire, now);
+    try testing.expect(f.wire.count > from);
+    try testing.expectEqual(p.ack, f.wire.at(from).seq);
+
+    // And the rest follows, an acknowledgement at a time, with no timer.
+    var guard: usize = 0;
+    while (f.table.conns[i].queued() > 0) : (guard += 1) {
+        try testing.expect(guard < 20);
+        now += 10 * ms;
+        _ = p.ackAll(&f.table, &f.wire, now);
+        transmit(&f.table, &f.wire, now);
+    }
+    try testing.expectEqual(@as(u64, 1), f.table.retransmits);
+}
+
 test "a window that stays shut is given up on" {
     var f: Fixture = .{};
     f.init();
@@ -1174,7 +1216,9 @@ test "an acknowledgement of bytes sent before a timeout still counts after it" {
     p.window = 0;
     _ = p.ackUpTo(&f.table, &f.wire, first, 1);
     transmit(&f.table, &f.wire, rto);
-    try testing.expectEqual(@as(usize, 1), f.table.conns[i].sent);
+    try testing.expectEqual(@as(usize, 1), f.wire.last().payload.len);
+    // A probe is not counted as sent (QUEUE 227), only as `high`.
+    try testing.expectEqual(@as(usize, 0), f.table.conns[i].sent);
     // The peer's acknowledgement of all 1000 bytes is still good.
     p.window = 2000;
     _ = p.ackUpTo(&f.table, &f.wire, first +% 1000, rto + 1);
@@ -2760,6 +2804,41 @@ fn checkQuotes(gpa: std.mem.Allocator, source: []const u8, rfcs: []const []const
         if (line == null) break;
     }
     return quotes;
+}
+
+test "every DEPARTS line names one of tcp.zig's five reasons" {
+    // **ONE STORY FOR EVERY DEPARTURE** (Steve, 2026-10-16: "a consistent
+    // story in all our DEPARTS lines"): `DEPARTS (reason):`, the reason one
+    // of the five tcp.zig's header defines. `reason` itself is the
+    // placeholder the headers use to name the form.
+    const gpa = testing.allocator;
+    const io = testing.io;
+    const reasons = [_][]const u8{ "bounded", "fast", "simpler", "stricter", "scale", "reason" };
+    const files = [_][]const u8{ "src/tcp.zig", "src/tcp_arrives.zig", "src/tcp_timeouts.zig", "src/tcp_segment.zig" };
+    var named: usize = 0;
+    var unnamed: usize = 0;
+    for (files) |f| {
+        const source = try std.Io.Dir.cwd().readFileAlloc(io, f, gpa, .unlimited);
+        defer gpa.free(source);
+        var at: usize = 0;
+        while (std.mem.indexOfPos(u8, source, at, "DEPARTS")) |i| {
+            at = i + "DEPARTS".len;
+            const rest = source[at..];
+            // A heading's "DEPARTS FROM" is prose, not a line of the form.
+            if (!std.mem.startsWith(u8, rest, " (") and !std.mem.startsWith(u8, rest, ":")) continue;
+            const ok = for (reasons) |r| {
+                if (std.mem.startsWith(u8, rest[@min(2, rest.len)..], r) and std.mem.startsWith(u8, rest[@min(2 + r.len, rest.len)..], "):")) break true;
+            } else false;
+            if (ok) named += 1 else {
+                unnamed += 1;
+                const end = std.mem.indexOfScalarPos(u8, source, at, '\n') orelse source.len;
+                std.debug.print("{s}: a DEPARTS line with no reason of the five: \"DEPARTS{s}\"\n", .{ f, source[at..end] });
+            }
+        }
+    }
+    try testing.expectEqual(@as(usize, 0), unnamed);
+    // Not vacuous: 19 departures (2026-10-16), plus the headers' placeholders.
+    try testing.expect(named >= 19);
 }
 
 test "every quote of an RFC in the tcp files is the RFC's own words (docs/rfc/)" {

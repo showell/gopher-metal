@@ -16,12 +16,14 @@
 #    (metal-vmm QUEUE 224.7). Moved here from gates.sh, whose FAT32 judges
 #    are what prod runs. It runs LAST, being QEMU, after 3 to 5.
 #
-# 3. **The real kernel, losing each of its frames in turn.** gopher.elf, built
+# 3. **The real kernel, losing its frames in turn.** gopher.elf, built
 #    with -Dcoverage, on metal-vmm's PC-shaped machine (TRANSPORT=pci: it
 #    halts between frames and wakes on interrupts, as on a droplet), over a
 #    5 ms wire. For each route, the wire eats the guest's 1st frame, then its
-#    2nd, and so on through every frame the route sends, one deterministic run
-#    each. **Every run must still serve the page an unhurt run serves**: TCP's
+#    2nd, and so on through a sample of the frames the route sends (the first
+#    4, the last 4, every 5th), one deterministic run each, two at a time.
+#    The release kernel runs the unhurt case, and must match the coverage
+#    kernel's byte for byte. **Every run must still serve the page an unhurt run serves**: TCP's
 #    whole promise is that losing a frame costs time, not the answer. Every
 #    run's coverage lines go to one sdk.jsonl, judged by zig-coverage-sdk's
 #    report.py against `coverage/floor-metal.txt`.
@@ -156,7 +158,7 @@ if [ "$want" != metal ]; then
 fi
 
 if [ "$want" != sim ]; then
-    echo "── the real kernel on metal-vmm's PC-shaped machine, losing each frame in turn"
+    echo "── the real kernel on metal-vmm's PC-shaped machine, losing its frames in turn, sampled"
     mkdir -p "$OUT"
     rm -f "$OUT/sdk.jsonl"
     if [ -z "$SITE" ]; then
@@ -165,44 +167,66 @@ if [ "$want" != sim ]; then
     fi
     [ -f "$SITE" ] || { echo "no site volume at $SITE"; exit 2; }
     (cd "$VMM" && zig build) || { echo "metal-vmm does not build"; exit 2; }
-    # **TWO KERNELS, TWO JOBS** (2026-10-07): the production build is what
-    # each page is judged on, since it is what ships; the -Dcoverage build
-    # runs every case again only to say what it reached, its pages unjudged.
-    # A coverage kernel prints its catalog to the console, a byte an exit,
-    # about nine seconds of the guest's time a boot once the floor was named,
-    # and that alone made a late lost frame's resend miss the two seconds a
-    # guest gives its connections after its last request: v19's first
-    # long.sh failed every route that way while its production kernel served
-    # each page whole.
+    # **ONE KERNEL A CASE** (metal-vmm QUEUE 224.5): every case runs on the
+    # -Dcoverage kernel alone, judged on its page and counted for coverage.
+    # The release kernel, which ships, runs each route's unhurt case, and
+    # must send the same frames and serve the same page byte for byte: that
+    # comparison is what lets the coverage kernel stand in for it. **It is
+    # not the same run.** Through metal-vmm's coverage door (`a92ca03`) its
+    # properties cost no serial exits, but it does more work: the PDF route,
+    # unhurt, measured 2026-10-16, 8,058 exits to the release kernel's 7,543
+    # (clock 1,316 to 1,007, mmio 891 to 685), 147 disk requests to 95, and
+    # 807 ms of guest time to 756, the same 57 frames and the same page. A
+    # bug that only the release kernel's timing reaches is outside this tier. (Before the door, a coverage kernel printed its
+    # catalog a byte an exit, and v19's first long.sh failed every route on
+    # it while the release kernel served each page whole.)
     zig build gopher -Dcoverage -Dgopher-root="$GOPHER_ROOT" -Dwebbox-root="$WEBBOX_ROOT" > "$OUT/build.log" 2>&1 || { echo "gopher.elf -Dcoverage does not build: $OUT/build.log"; exit 2; }
     cp probe/gopher.elf "$OUT/gopher-coverage.elf"
     zig build gopher -Dgopher-root="$GOPHER_ROOT" -Dwebbox-root="$WEBBOX_ROOT" > "$OUT/rebuild.log" 2>&1 || { echo "gopher.elf does not build: $OUT/rebuild.log"; exit 2; }
     JUDGED=probe/gopher.elf
     COUNTED="$OUT/gopher-coverage.elf"
+    lap "the metal half's builds (the site volume, metal-vmm, two kernels)"
 
-    # run <eat> <path> [kernel]: one boot; sets code, sent, status, and the
-    # page in $OUT/page. The judged kernel unless another is named.
+    # run <eat> <path> [kernel]: one boot in the folder $W; sets code, sent,
+    # status, and the page in $W/page, and adds its coverage to
+    # $W/sdk.jsonl. The judged kernel unless another is named.
+    W="$OUT"
     run() {
-        cp "$SITE" "$OUT/run.img"
-        cp "$SITE" "$OUT/run.vol"
+        cp "$SITE" "$W/run.img"
+        cp "$SITE" "$W/run.vol"
         # A page is this run's or none: metal-vmm writes none for an answer
         # it kept only in part, and a page left by the run before would be
         # judged in its place.
-        rm -f "$OUT/page"
-        TRANSPORT=pci VOLUME="$OUT/run.vol" WIRE_LATENCY_US="$LATENCY_US" WIRE_EAT="$1" PEER_BODY="$OUT/page" \
-            timeout 120 "$VMM/zig-out/bin/metal-vmm" "${3:-$JUDGED}" "$OUT/run.img" "" "$2" \
-            > "$OUT/run.out" 2> "$OUT/run.err"
+        rm -f "$W/page"
+        TRANSPORT=pci VOLUME="$W/run.vol" WIRE_LATENCY_US="$LATENCY_US" WIRE_EAT="$1" PEER_BODY="$W/page" \
+            timeout 120 "$VMM/zig-out/bin/metal-vmm" "${3:-$JUDGED}" "$W/run.img" "" "$2" \
+            > "$W/run.out" 2> "$W/run.err"
         code=$?
-        sent=$(sed -n 's/^wire: \([0-9]*\) frames sent.*/\1/p' "$OUT/run.err")
-        status=$(sed -n 's/^peer: \([0-9]*\).*/\1/p' "$OUT/run.out")
-        grep -a '^coverage: ' "$OUT/run.out" | sed -e 's/^coverage: //' -e 's/\r$//' >> "$OUT/sdk.jsonl"
+        sent=$(sed -n 's/^wire: \([0-9]*\) frames sent.*/\1/p' "$W/run.err")
+        status=$(sed -n 's/^peer: \([0-9]*\).*/\1/p' "$W/run.out")
+        grep -a '^coverage: ' "$W/run.out" | sed -e 's/^coverage: //' -e 's/\r$//' >> "$W/sdk.jsonl"
+    }
+
+    # **SAMPLED** (metal-vmm QUEUE 224.6): the frames lost in turn are the
+    # first 4, the last 4 and every 5th between. The handshake and the
+    # request are early, the FIN late, and the middle is the same work
+    # again; the floor (`floor-metal.txt`) says whether the sample still
+    # reaches what every frame did.
+    sampled() {
+        for n in $(seq 1 "$1"); do
+            if [ "$n" -le 4 ] || [ "$n" -gt $(($1 - 4)) ] || [ $((n % 5)) = 0 ]; then echo "$n"; fi
+        done
     }
 
     lost_pages=0
     for route in $ROUTES; do
-        # Frame 9999 is never sent: the unhurt run, whose page every other must match.
-        run 9999 "$route" "$COUNTED"
+        # Frame 9999 is never sent: the unhurt run, whose page every other
+        # must match. The release kernel's first, then the coverage kernel's.
         run 9999 "$route"
+        rm -f "$OUT/release.page"
+        cp "$OUT/page" "$OUT/release.page" 2>/dev/null
+        release_status=$status release_sent=$sent
+        run 9999 "$route" "$COUNTED"
         rm -f "$OUT/unhurt.page"
         cp "$OUT/page" "$OUT/unhurt.page" 2>/dev/null
         unhurt_status=$status
@@ -212,18 +236,36 @@ if [ "$want" != sim ]; then
             failed+=("metal $route")
             continue
         fi
-        bad=""
-        for n in $(seq 1 "$total"); do
-            run "$n" "$route" "$COUNTED"
-            run "$n" "$route"
-            if [ "$code" != 0 ] || [ "$status" != "$unhurt_status" ] || ! cmp -s "$OUT/page" "$OUT/unhurt.page"; then
-                bad="$bad #$n"
-                lost_pages=$((lost_pages + 1))
-                cp "$OUT/run.out" "$OUT/lost-$(echo "$route" | tr / _)-$n.out"
-            fi
+        if [ "$release_status" != "$unhurt_status" ] || [ "$release_sent" != "$total" ] || ! cmp -s "$OUT/release.page" "$OUT/unhurt.page"; then
+            echo "  $route: the release kernel's unhurt run is not the coverage kernel's (status $release_status and $unhurt_status, frames $release_sent and $total)"
+            failed+=("metal $route")
+            continue
+        fi
+        # **TWO AT A TIME** (224.6), a folder each, the sample dealt between them.
+        picks=$(sampled "$total")
+        for j in 0 1; do
+            (
+                W="$OUT/job$j"
+                mkdir -p "$W"
+                rm -f "$W/sdk.jsonl" "$W/bad"
+                k=0
+                for n in $picks; do
+                    k=$((k + 1))
+                    [ $((k % 2)) = "$j" ] || continue
+                    run "$n" "$route" "$COUNTED"
+                    if [ "$code" != 0 ] || [ "$status" != "$unhurt_status" ] || ! cmp -s "$W/page" "$OUT/unhurt.page"; then
+                        echo "$n" >> "$W/bad"
+                        cp "$W/run.out" "$OUT/lost-$(echo "$route" | tr / _)-$n.out"
+                    fi
+                done
+            ) &
         done
+        wait
+        cat "$OUT"/job0/sdk.jsonl "$OUT"/job1/sdk.jsonl >> "$OUT/sdk.jsonl" 2>/dev/null
+        bad=$(cat "$OUT"/job0/bad "$OUT"/job1/bad 2>/dev/null | sort -n | sed 's/^/ #/' | tr -d '\n')
+        lost_pages=$((lost_pages + $(cat "$OUT"/job0/bad "$OUT"/job1/bad 2>/dev/null | wc -l)))
         if [ -z "$bad" ]; then
-            echo "  $route: $total frames, each lost in turn: the same page every time ($unhurt_status)"
+            echo "  $route: $total frames, $(echo "$picks" | wc -w) of them lost in turn: the same page every time ($unhurt_status)"
         else
             echo "  $route: $total frames; losing these lost the page:$bad (logs in $OUT/lost-*)"
             failed+=("metal $route")
@@ -256,16 +298,16 @@ if [ "$want" != sim ]; then
         [ -z "$name" ] && continue
         img="$SITE"
         [ "$volume" = two ] && img="$OUT/two.img"
-        for kernel in "$COUNTED" "$JUDGED"; do
-            cp "$img" "$OUT/run.img"
-            cp "$SITE" "$OUT/run.vol"
-            # shellcheck disable=SC2086 # knobs are words on purpose
-            env TRANSPORT=pci VOLUME="$OUT/run.vol" WIRE_LATENCY_US="$LATENCY_US" PATIENCE_S=60 PEER_BODY="$OUT/page" $knobs \
-                timeout 300 "$VMM/zig-out/bin/metal-vmm" "$kernel" "$OUT/run.img" "" "$route" \
-                > "$OUT/run.out" 2> "$OUT/run.err"
-            code=$?
-            grep -a '^coverage: ' "$OUT/run.out" | sed -e 's/^coverage: //' -e 's/\r$//' >> "$OUT/sdk.jsonl"
-        done
+        # The coverage kernel alone (224.5), its page against the release
+        # kernel's unhurt one above.
+        cp "$img" "$OUT/run.img"
+        cp "$SITE" "$OUT/run.vol"
+        # shellcheck disable=SC2086 # knobs are words on purpose
+        env TRANSPORT=pci VOLUME="$OUT/run.vol" WIRE_LATENCY_US="$LATENCY_US" PATIENCE_S=60 PEER_BODY="$OUT/page" $knobs \
+            timeout 300 "$VMM/zig-out/bin/metal-vmm" "$COUNTED" "$OUT/run.img" "" "$route" \
+            > "$OUT/run.out" 2> "$OUT/run.err"
+        code=$?
+        grep -a '^coverage: ' "$OUT/run.out" | sed -e 's/^coverage: //' -e 's/\r$//' >> "$OUT/sdk.jsonl"
         ok=yes
         case "$code" in
             0) ;;
@@ -309,9 +351,8 @@ EOF
     # item 6): the whole chat story on QEMU's microvm with the data on FAT16,
     # every run. **LAST, BEING QEMU** (Steve, 2026-10-11: find things
     # quickly), on gopher.elf as a release builds it, which the coverage
-    # build above put back.
+    # build above put back (224.5: no build here, it was a cache hit).
     echo "── the chat judge on FAT16 (microvm), its write path"
-    zig build gopher -Dgopher-root="$GOPHER_ROOT" -Dwebbox-root="$WEBBOX_ROOT" > "$OUT.fat16-build" 2>&1 || { echo "gopher.elf does not build: $OUT.fat16-build"; exit 2; }
     # **ITS WRITE PATH ONLY** (metal-vmm QUEUE 224.7): the gates that write,
     # append and rewrite (uploads, churn, bulk), quick. FAT16 matters again
     # (Dog Park keeps its data on FAT16 in production); endurance and

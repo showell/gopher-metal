@@ -42,6 +42,13 @@ python3 tools/test_budget.py "$CPU_DIR" "${TIER0_RUN_BUDGET:-25}" "${TIER0_TOTAL
 case $? in 0 | 2) ;; *) failed+=(test-budget) ;; esac
 
 # The rest of src/'s neighbours that only need Python.
+# **THE GOLDEN TRACES** (metal-vmm QUEUE 225, chunk 1): every pinned
+# tcp_sim world sends the same frames, or the commit that changes them says
+# so and rewrites coverage/tcp-traces.txt. In no tier until 2026-10-16, when
+# a change to the wire (QUEUE 227) went in claiming them unchanged, unrun.
+# ReleaseSafe, a binary of its own: the build is most of its minute cold.
+zig build tcp-traces "${ALONE[@]}" > "$VERDICTS/tier0-traces.txt" 2>&1 || { failed+=(tcp-traces); grep -E "trace changed|pinned|now " "$VERDICTS/tier0-traces.txt" | head -9; }
+lap "zig build tcp-traces"
 zig fmt --check probe droplet native > /dev/null || failed+=(fmt)
 python3 droplet/check_volume_tree.py --self-test > /dev/null || failed+=(volume-tree)
 # Parsed, not run: a syntax error in a judge would otherwise wait for tier 1.

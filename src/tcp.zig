@@ -13,11 +13,13 @@
 //! - **The segment size.** Each side's SYN carries its MSS; a peer that sends
 //!   none is sent 536-byte segments (RFC 9293 §3.7.1).
 //! - **Retransmission.** Sent bytes stay in our custody until acknowledged.
-//!   On a timeout everything from the oldest is sent again and the timeout
-//!   doubles.
+//!   On a timeout the oldest segment is sent again, then twice as much for
+//!   each acknowledgement (`recovery`), and the timeout doubles. A shut
+//!   window's timeout is a probe, not a loss.
 //! - **Giving up.** After `max_retries` timeouts with no progress the
 //!   connection is reset: so a vanished peer is noticed, and one that stops
-//!   reading (window shut, probes unanswered) is let go.
+//!   reading is let go, even while it answers every probe (a departure for
+//!   a reason below: bounded).
 //! - **The FIN goes last**, after every queued byte. Once it is acknowledged
 //!   we wait up to `fin_wait_ns` for the peer's. There is no TIME-WAIT: a FIN
 //!   repeated after the close is answered with a reset.
@@ -31,6 +33,20 @@
 //! network: no congestion control, no SACK, no window scaling, no delayed
 //! ACK. Segments ahead of a hole are held, a few a connection, in the
 //! receive buffer itself (`tcp_held.zig`). It does have fast retransmit.
+//!
+//! **WHY IT DEPARTS FROM THE RFCs.** Each `DEPARTS (reason):` line names one
+//! of five reasons, and no other:
+//! - **bounded**: a hostile or broken peer cannot make the table hold more,
+//!   answer more, or wait longer: no reply to junk, nothing for a scanner,
+//!   no connection pinned by a reader that never reads (denial of service);
+//! - **fast**: our networks are short and private (a private network to
+//!   Caddy, a 5 ms test wire), so timers are seconds where the RFC's are
+//!   minutes, and a confused peer hears at once;
+//! - **simpler**: a simpler path whose cost is a frame or a round trip,
+//!   never a wrong byte, because a correct peer's own rules recover it;
+//! - **stricter**: the table takes or believes less than the RFC allows;
+//! - **scale**: a handful of connections to peers we name, one at a time,
+//!   with nobody to share the path with.
 //!
 //! **PURE, SO IT IS TESTED ON THE HOST.** Frames go out through the caller's
 //! `wire` (anything with `send([]const u8)`), the ISN comes from a function
@@ -886,7 +902,7 @@ pub const Table = struct {
     /// > 49152-65535.  However, ephemeral port selection algorithms should use
     /// > the whole range 1024-65535.
     ///
-    /// DEPARTS: only the dynamic range, counting up by one from where the
+    /// DEPARTS (scale): only the dynamic range, counting up by one from where the
     /// host seeds `ephemeral_next`, where RFC 6056 §3.3 picks each port by
     /// an obfuscating algorithm: this machine opens a handful of
     /// connections to peers it names, behind a private network.
@@ -1101,10 +1117,13 @@ pub const Table = struct {
             // **THE OLDEST SEGMENT AGAIN** (RFC 6298 (5.4): "Retransmit the
             // earliest segment that has not been acknowledged by the TCP
             // receiver"): from `una`, and no further than one segment until
-            // the peer acknowledges it (`recovery`). The one-byte probe of a
-            // shut window fits in it too.
+            // the peer acknowledges it (`recovery`).
+            // **A SHUT WINDOW IS NOT A LOSS** (metal-vmm QUEUE 227): its
+            // timeout is the persist timer's, and owes a probe, not a
+            // recovery; what the window refused goes again whole when it
+            // opens.
             c.sent = 0;
-            timeouts.recover(c);
+            if (c.wnd != 0) timeouts.recover(c);
             if (c.fin.is(.sent)) c.fin.fire(.timed_out);
             c.timed_at = null; // Karn: no telling which copy is answered
             self.retransmits += 1;
@@ -1137,7 +1156,21 @@ pub const Table = struct {
                 }
                 self.probes += 1;
                 props.reachable(@src(), "tcp: a shut window is probed", .{ .conn = i });
-                n = 1;
+                // **A PROBE IS A QUESTION, NOT A SEND** (metal-vmm QUEUE
+                // 227): its byte is `high`'s, so an ACK that takes it counts,
+                // but not `sent`'s, since a shut window takes nothing. RFC
+                // 9293 §3.4:
+                // > Note that when the receive window is zero no segments should be
+                // > acceptable except ACK segments.
+                // Counted as sent, a refused probe left a hole at `una` when
+                // the window opened. It is never timed: its byte goes again,
+                // in the probe after it or the segment that follows the
+                // opening (Karn).
+                const seq = c.una +% @as(u32, @intCast(c.sent));
+                self.emit(wire, i, flag_psh | flag_ack, seq, c.tx[c.tx_start + c.sent ..][0..1]);
+                c.high = @max(c.high, c.sent + 1);
+                if (c.rto_at == null) c.rto_at = now + c.rto_ns;
+                break;
             }
             probe = .none;
             const first_time = c.sent + n > c.high;
@@ -1279,7 +1312,7 @@ pub const Table = struct {
             c.tx_end = 0;
         }
         c.una +%= advance;
-        // DEPARTS: `wnd` shrinks by each advance the window rule skips, so
+        // DEPARTS (stricter): `wnd` shrinks by each advance the window rule skips, so
         // the right edge stays where the peer put it, where RFC 9293 keeps
         // SND.WND and lets SND.UNA + SND.WND move forward.
         // **THE WINDOW IS MEASURED FROM `una`.** When the window rule skipped
@@ -1349,7 +1382,7 @@ pub const Table = struct {
         // >       <SEQ=SEG.ACK><CTL=RST>
         // >
         // >    Return.
-        // DEPARTS: a segment to a port nobody listens on is dropped silently,
+        // DEPARTS (bounded): a segment to a port nobody listens on is dropped silently,
         // where CLOSED (RFC 9293 §3.10.7.1) answers it with a reset.
         const dst_port = proto.readBe16(t[2..4]);
         if (dst_port != self.port and !self.initiatedOn(dst_port)) {
@@ -1394,7 +1427,7 @@ pub const Table = struct {
         // > -  An incoming RST segment could not be valid since it could not
         // >    have been sent in response to anything sent by this incarnation
         // >    of the connection.  An incoming RST should be ignored.  Return.
-        // DEPARTS: RST is checked first, before the sequence number's
+        // DEPARTS (stricter): RST is checked first, before the sequence number's
         // acceptability (RFC 9293 §3.10.7.4 checks the sequence first, then
         // RST); `resetCheck` asks the same question of a reset's number.
         if (flags & flag_rst != 0) {
@@ -1494,7 +1527,7 @@ pub const Table = struct {
                 self.passed.not_for_us +%= 1;
                 return .{ .event = .nothing };
             }
-            // DEPARTS: a segment with neither SYN nor ACK is answered with a
+            // DEPARTS (fast): a segment with neither SYN nor ACK is answered with a
             // reset (`refuse`, RST|ACK, as CLOSED answers it), where LISTEN
             // (RFC 9293 §3.10.7.2, fourth) drops it.
             if (flags & flag_syn == 0 or flags & flag_ack != 0) {
@@ -1565,7 +1598,7 @@ pub const Table = struct {
         // >    drop the unacceptable segment and stop processing further.
         // >    Note that RFC 5961 and Errata ID 4772 [99] contain
         // >    additional ACK throttling notes for an implementation.
-        // DEPARTS: SYN is checked before the sequence number's acceptability
+        // DEPARTS (stricter): SYN is checked before the sequence number's acceptability
         // (RFC 9293 §3.10.7.4 checks the SYN fourth).
         // A repeated SYN in SYN-RECEIVED means our SYN-ACK was lost or is
         // late: it is sent again, from ISS, as Linux does (the RFC's
@@ -1583,7 +1616,7 @@ pub const Table = struct {
         // >
         // > -  if the ACK bit is off, drop the segment and return
         // No ACK bit: dropped (RFC 9293 §3.10.7.4, fifth check).
-        // DEPARTS: dropped before the first check's answer, so an
+        // DEPARTS (bounded): dropped before the first check's answer, so an
         // unacceptable segment with no ACK draws no ACK in reply.
         if (flags & flag_ack == 0) return .{ .event = .nothing };
 
@@ -1629,7 +1662,7 @@ pub const Table = struct {
             // forged one set SND.WL1 to a sequence the peer never reaches,
             // after which the window rule rejects every genuine update.
             // At or before rcv_nxt; half the circle away is neither, and not behind.
-            // DEPARTS: from behind, its ACK still counts, where the RFC drops
+            // DEPARTS (fast): from behind, its ACK still counts, where the RFC drops
             // an unacceptable segment whole (the paragraph above).
             const behind = acceptable == .behind;
             const done = behind and c.state != .syn_received and
@@ -1643,7 +1676,7 @@ pub const Table = struct {
         var event: Event = .nothing;
         var fin_acknowledged = false;
         if (c.state == .syn_received) {
-            // DEPARTS: a segment ahead in SYN-RECEIVED is answered and
+            // DEPARTS (simpler): a segment ahead in SYN-RECEIVED is answered and
             // dropped, its ACK not taken: the handshake completes only on the
             // next byte.
             if (early) {
@@ -1808,7 +1841,7 @@ pub const Table = struct {
         // >    the user.
         // No TIME-WAIT is kept: a connection whose FIN is acknowledged closes
         // when the peer's FIN arrives (`close`).
-        // DEPARTS: text and a FIN in one segment draw two ACKs, the text's
+        // DEPARTS (simpler): text and a FIN in one segment draw two ACKs, the text's
         // and the FIN's, where RFC 9293 §3.10.7.4 sends one after both.
         // A FIN held ahead (`holdAhead`) is taken when the bytes before it
         // are: by this segment's text, or by what that text made whole.
