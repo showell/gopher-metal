@@ -35,6 +35,7 @@ const durable_sim = @import("durable_sim.zig");
 const floor_sim = @import("floor_sim.zig");
 const store_sim = @import("store_sim.zig");
 const options = @import("tcp_properties_options");
+const failed_seeds_file = @import("failed_seeds.zig");
 
 var jsonl: std.ArrayList(u8) = .empty;
 
@@ -42,7 +43,7 @@ var jsonl: std.ArrayList(u8) = .empty;
 /// runs, events (sim_events.zig) and seconds, summed over its seeds, and its
 /// nanoseconds an event, printed at the end with the whole run's seconds,
 /// so the long tier can tell the build's time from the run's (long.sh).
-const Sim = enum { tcp_plain, tcp_rough, tcp_crowd, fat, page, pure, ready, drain, tcp_full, store, floor, durable, fat_replays, store_replays, regressions };
+const Sim = enum { tcp_plain, tcp_rough, tcp_crowd, fat, page, pure, ready, drain, tcp_full, store, floor, durable, fat_replays, store_replays, regressions, failed_before };
 var spent = std.EnumArray(Sim, u64).initFill(0);
 var runs = std.EnumArray(Sim, u64).initFill(0);
 /// Each simulator's natural unit, as sim_events.zig lists them.
@@ -194,21 +195,59 @@ test "the properties over a sweep of seeds" {
         if (!ok) failed_seeds += 1;
         at.always(@src(), ok, "durable_sim: every oracle holds for every seed", .{ .seed = seed });
     }
-    // A FAT run under a tape replays exactly: seeds 1 to 40, the 40 `zig
-    // build test` ran before metal-vmm QUEUE 136 kept four there. Fixed, not
-    // the sweep's FAT seeds: it checks the harness's replay, not the FAT
-    // code, and at 300 seeds its two runs a seed were 600 more runs, the
-    // whole of the long tier's slowdown since v21 (metal-vmm QUEUE B38).
-    for (1..41) |seed| {
+    // **A RUN UNDER A TAPE REPLAYS EXACTLY: A FEW** (Steve, 2026-10-16: "cut
+    // the replays to a few"). They check the harness's replay, not the FAT
+    // or store code, and -Dtrace-reach found no floor line only they reach
+    // (1,000 TCP and 300 FAT seeds): four FAT tapes and two store tapes, the
+    // replays `zig build test` keeps and three more, where the 40 and 20
+    // before were 42 s of the run (metal-vmm QUEUE B38, 224).
+    for (1..5) |seed| {
         const ok = timed(.fat_replays, fat_sim.replaysExactly, seed);
         if (!ok) failed_seeds += 1;
         at.always(@src(), ok, "fat_sim: a run under a tape replays exactly", .{ .seed = seed });
     }
-    // And a store run, the 20 seeds `zig build test` ran (QUEUE 136).
-    for (1..21) |seed| {
+    for (1..3) |seed| {
         const ok = timed(.store_replays, store_sim.replaysExactly, seed);
         if (!ok) failed_seeds += 1;
         at.always(@src(), ok, "store_sim: a run under a tape replays exactly", .{ .seed = seed });
+    }
+    // **EVERY SEED THAT ONCE BROKE AN ORACLE** (coverage/seeds-that-failed.txt,
+    // metal-vmm QUEUE 224.3), whatever the counts above.
+    {
+        const io = std.testing.io;
+        const text = try std.Io.Dir.cwd().readFileAlloc(io, "coverage/seeds-that-failed.txt", std.testing.allocator, .unlimited);
+        defer std.testing.allocator.free(text);
+        var entries = failed_seeds_file.Entries.init(text);
+        while (try entries.next()) |e| {
+            const which = std.meta.stringToEnum(Sim, e.simulator) orelse {
+                std.debug.print("coverage/seeds-that-failed.txt: no simulator {s}\n", .{e.simulator});
+                return error.NoSuchSimulator;
+            };
+            const ok = switch (which) {
+                .tcp_plain => timed(.failed_before, sim.runSeed, e.seed),
+                .tcp_rough => timed(.failed_before, sim.runRoughSeed, e.seed),
+                .tcp_crowd => timed(.failed_before, sim.runCrowdSeed, e.seed),
+                .tcp_full => timed(.failed_before, sim.runFullSeed, e.seed),
+                .fat => both: {
+                    const plain = timed(.failed_before, fat_sim.runSeed, e.seed);
+                    const probed = timed(.failed_before, fat_sim.runProbeSeed, e.seed);
+                    break :both plain and probed;
+                },
+                .page => timed(.failed_before, page_sim.runSeed, e.seed),
+                .pure => timed(.failed_before, pure_sim.runSeed, e.seed),
+                .ready => timed(.failed_before, ready_sim.runSeed, e.seed),
+                .drain => timed(.failed_before, drain_sim.runSeed, e.seed),
+                .store => timed(.failed_before, store_sim.runSeed, e.seed),
+                .floor => timed(.failed_before, floor_sim.runSeed, e.seed),
+                .durable => timed(.failed_before, durable_sim.runSeed, e.seed),
+                .fat_replays, .store_replays, .regressions, .failed_before => {
+                    std.debug.print("coverage/seeds-that-failed.txt: {s} is not a simulator's seeds\n", .{e.simulator});
+                    return error.NoSuchSimulator;
+                },
+            };
+            if (!ok) failed_seeds += 1;
+            at.always(@src(), ok, "every seed that once broke an oracle holds", .{ .seed = e.seed });
+        }
     }
     // Every sweep, whatever its size: they are the regression tests.
     for (fat_sim.regressions) |seed| {

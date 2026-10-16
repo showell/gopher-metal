@@ -279,10 +279,10 @@ cheapest first, and stops at the first one that fails.
 | `./tier1.sh` | + QEMU, dosfstools, gdisk, mtools, curl, binutils, `sudo -n` for loop mounts; KVM for the droplet boots (or `ACCEL=tcg`) | each test kernel ("probe") boots and works on virtual hardware; the judges' own tests; the droplet's boot loader and image | ~45 s of probes, then the droplet boots |
 | `./tier2.sh` | + metal-vmm beside this checkout, and /dev/kvm | metal-vmm runs this checkout's probe kernels the same as QEMU does, and the same twice | minutes |
 | `./tier3.sh` | + zig-webbox and angry-gopher beside this checkout | the library's tests and the limits it copies; the unit tests' pinned body rule is still the library's; gopher.elf type-checks, builds and is judged against its Linux build on QEMU's microvm and the droplet-shaped machine; the PC-shaped machine's rests and the timeouts on metal-vmm | ~20 min |
-| `zig build properties` | as tier 0 | the simulators over many seeds, judged by their coverage properties: zig alone, but not in tier 0 for its time (20 min in Debug, 5 with `-Dsweep-optimize=ReleaseSafe`); long.sh runs it at 10,000 seeds | 5-20 min |
+| `zig build properties` | as tier 0 | the simulators over many seeds, judged by their coverage properties: zig alone, but not in tier 0 for its time (20 min in Debug, 5 with `-Dsweep-optimize=ReleaseSafe`); long.sh runs it at 1,000 TCP seeds, 500 of them crowded (the smallest count that reaches its floor, metal-vmm QUEUE 224) | 5-20 min |
 | `./gates.sh quick` | as tier 3 | tiers 0 and 1, then gopher.elf and one chat-judge story | |
 | `./gates.sh` | as tier 3 | tiers 0 to 3, for a batch | |
-| `./long.sh` | as tier 3 | before every release: the simulators at 10,000 seeds; the FAT16 judge; the real kernel on metal-vmm losing each packet it sends in turn, facing a misbehaving client, and under 100 seeded fault schedules over the network and disks, every run still serving the right page | longest |
+| `./long.sh` | as tier 3 | before every release: the simulators at 1,000 seeds; the FAT16 judge; the real kernel on metal-vmm losing each packet it sends in turn, facing a misbehaving client, and under 100 seeded fault schedules over the network and disks, every run still serving the right page | longest |
 
 A developer can defer every test against angry-gopher (tier 3)
 and still have reasonable confidence in a change that tier 0 passes.

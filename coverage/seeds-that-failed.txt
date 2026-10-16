@@ -1,0 +1,14 @@
+# **EVERY SEED THAT ONCE BROKE AN ORACLE** (metal-vmm QUEUE 224.3): run by
+# every `zig build properties`, whatever its seed counts are, so a sweep cut
+# to the seeds that reach its floor still runs each seed that found a bug.
+# `<simulator> <seed>`, the simulator as properties.zig names it (tcp_plain,
+# tcp_rough, tcp_crowd, fat, page, pure, ready, drain, tcp_full, store,
+# floor, durable); src/failed_seeds.zig reads it. A seed that breaks an
+# oracle goes here with the fix (fat_sim.zig's `regressions` are the older
+# list, run every sweep as before).
+#
+# From the history (git log):
+fat 93        # disk_fat B42: a copy's failed FAT write counted apart (fsck "FATs differ")
+fat 295       # disk_fat: a new entry's long-name parts left orphaned, uncounted
+tcp_plain 23953   # tcp_sim: a closed client answers with a reset
+tcp_rough 23953

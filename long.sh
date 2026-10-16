@@ -2,9 +2,9 @@
 # **THE LONG TIER** (COVERAGE.md): for bug hunting, and before a deploy. Not
 # for every commit; that is gates.sh.
 #
-#   ./long.sh                 the simulator at 10,000 seeds, then the lossy
+#   ./long.sh                 the simulator at 1,000 seeds (500 crowded), then the lossy
 #                             sweep of the real kernel
-#   SEEDS=50000 ./long.sh     more seeds
+#   SEEDS=10000 ./long.sh     more seeds, for hunting
 #   ./long.sh sim | metal     one half
 #
 # 1. **The simulators** (`zig build properties`, ReleaseSafe): TCP's plain and
@@ -69,7 +69,13 @@ SITE="${SITE:-}"
 GOPHER_ROOT="${GOPHER_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/angry-gopher}"
 WEBBOX_ROOT="${WEBBOX_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/zig-webbox}"
 export WEBBOX_ROOT
-SEEDS="${SEEDS:-10000}"
+# **SEEDS BY MEASUREMENT** (metal-vmm QUEUE 224.3): the smallest of 1k, 2k
+# and 5k that reaches the whole floor-sim.txt. 1,000 does (2026-10-16,
+# -Dtrace-reach: every TCP floor line by seed 89), and crowds on 500 of
+# them. A floor line a later change leaves unreached fails the tier and
+# names it; raising this, or moving the line, is a commit.
+SEEDS="${SEEDS:-1000}"
+CROWD_SEEDS="${CROWD_SEEDS:-500}"
 FAT_SEEDS="${FAT_SEEDS:-300}"
 LATENCY_US="${LATENCY_US:-5000}"
 VOLUME_SEEDS="${VOLUME_SEEDS:-100}"
@@ -86,7 +92,7 @@ VERDICT_PAIR="$(python3 tools/verdicts.py ids)" || exit 2
 export VERDICT_PAIR
 python3 tools/verdicts.py pair
 keeps_verdict=no
-[ "$want" = all ] && [ "$SEEDS" -ge 10000 ] && [ "$FAT_SEEDS" -ge 300 ] && keeps_verdict=yes
+[ "$want" = all ] && [ "$SEEDS" -ge 1000 ] && [ "$CROWD_SEEDS" -ge 500 ] && [ "$FAT_SEEDS" -ge 300 ] && keeps_verdict=yes
 
 failed=()
 began=$(date +%s)
@@ -95,7 +101,7 @@ lap() { echo "time: $1 $(( $(date +%s) - began )) s"; began=$(date +%s); }
 if [ "$want" != metal ]; then
     echo "── the simulators: $SEEDS TCP seeds, plain and rough, and $FAT_SEEDS FAT seeds, against coverage/floor-sim.txt"
     # ReleaseSafe: a sweep this long is nearly all running (build.zig).
-    zig build properties -Dseeds="$SEEDS" -Dfat-seeds="$FAT_SEEDS" -Dsweep-optimize=ReleaseSafe \
+    zig build properties -Dseeds="$SEEDS" -Dcrowd-seeds="$CROWD_SEEDS" -Dfat-seeds="$FAT_SEEDS" -Dsweep-optimize=ReleaseSafe \
         -Dfloor=coverage/floor-sim.txt > "$OUT.sim" 2>&1
     code=$?
     grep -E 'runs failed|not satisfied|^ *(FAIL|FLOOR|STALE)|floor .*under' "$OUT.sim" | sed 's/^ *//'
@@ -296,7 +302,7 @@ fi
 
 if [ ${#failed[@]} = 0 ]; then
     if [ $keeps_verdict = yes ]; then python3 tools/verdicts.py record long PASS
-    else echo "no verdict kept: only a whole run ($want) at full size (SEEDS>=10000, FAT_SEEDS>=300) keeps one"; fi
+    else echo "no verdict kept: only a whole run ($want) at full size (SEEDS>=1000, CROWD_SEEDS>=500, FAT_SEEDS>=300) keeps one"; fi
     echo "LONG: PASS"
 else
     [ $keeps_verdict = yes ] && python3 tools/verdicts.py record long FAIL

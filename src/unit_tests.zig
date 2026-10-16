@@ -68,4 +68,5 @@ test {
     _ = @import("after_turn.zig");
     _ = @import("spill_rule.zig");
     _ = @import("apic_rule.zig");
+    _ = @import("failed_seeds.zig");
 }
