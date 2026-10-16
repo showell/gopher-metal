@@ -27,6 +27,7 @@ import hashlib
 import os
 import socket
 import struct
+import random
 import subprocess
 import sys
 import threading
@@ -37,6 +38,9 @@ SERVE = os.path.join(HERE, "..", "zig-out", "bin", "gm-serve")
 TAP = "gmtap0"
 ADDR = "10.77.0.2"
 failures = 0
+# The loss check's own limit on its 300 KB transfer: a stall past it is a
+# failure with the table's counters, never a wait on the machine's patience.
+LOSS_LIMIT_S = 20
 
 
 def sh(cmd, check=True):
@@ -333,28 +337,48 @@ def check_stalled_reader(server):
 
 
 def check_loss():
+    """**LOSS BOTH WAYS, AND A STALL CAUGHT** (metal-vmm QUEUE 225, chunk 0c):
+    netem drops 5% toward the table and the table drops 1 in 13 of what it
+    sends, at random from a seed printed here (GM_LOSE_SEED, LOSS_SEED to
+    repeat one). A transfer that stalls is caught at this check's own limit
+    and reported with the table's counters, not as a traceback."""
     started = time.time()
+    seed = int(os.environ.get("LOSS_SEED") or random.randrange(1, 1 << 31))
     netem("loss 5%")
+    stalled, st = None, {}
     try:
-        server = Server(GM_LOSE_SENT="13")
+        server = Server(GM_LOSE_SENT="13", GM_LOSE_SEED=str(seed))
         try:
             wrong = 0
-            for _ in range(100):
-                if get("/tiny", timeout=30) != b"ok":
-                    wrong += 1
-            big = get("/bytes/300000", timeout=60) == pattern(300_000)
-            st = server.stats()
+            big = False
+            try:
+                for _ in range(100):
+                    if get("/tiny", timeout=30) != b"ok":
+                        wrong += 1
+                big = get("/bytes/300000", timeout=LOSS_LIMIT_S) == pattern(300_000)
+            except OSError as e:  # socket.timeout is one
+                stalled = f"{type(e).__name__}: {e}"
+            netem(None)  # the counters must come back whatever the loss
+            try:
+                st = server.stats()
+            except OSError as e:
+                st = {"stats_unanswered": 1}
+                stalled = (stalled or "") + f"; /stats unanswered too ({e})"
         finally:
             server.stop()
     finally:
         netem(None)
+    if stalled:
+        report(False, "loss", f"seed {seed}: stalled ({stalled}); the table's counters: "
+               + ", ".join(f"{k} {v}" for k, v in sorted(st.items())), started)
+        return
     # **THE PEER'S DUPLICATE ACKNOWLEDGEMENTS DO THE WORK A TIMER WOULD.** With
     # a bulk answer in flight, Linux says what is missing at once, and this
     # check fails if the table waited for its own clock every time instead.
-    report(wrong == 0 and big and st["fast_retransmits"] > 0, "loss",
-           f"5% lost toward the table and 1 in 13 from it: 100 small answers ({wrong} wrong) and "
+    report(wrong == 0 and big and st["fast_retransmits"] > 0 and st["given_up"] == 0, "loss",
+           f"seed {seed}: 5% lost toward the table and 1 in 13 from it: 100 small answers ({wrong} wrong) and "
            f"300 KB {'exact' if big else 'WRONG'}; {st['retransmits']} retransmits, "
-           f"{st['fast_retransmits']} of them asked for by the peer", started)
+           f"{st['fast_retransmits']} of them asked for by the peer, {st['given_up']} given up", started)
 
 
 def main() -> int:

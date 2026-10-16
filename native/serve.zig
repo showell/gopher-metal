@@ -18,7 +18,10 @@
 //!
 //! The device is `gmtap0` (GM_TAP overrides it), created and addressed by
 //! `native/judge_native.py`; this program only opens it. It is 10.77.0.2.
-//! GM_LOSE_SENT=N drops every Nth TCP frame it sends.
+//! GM_LOSE_SENT=N drops one in N of the frames it sends, at random from
+//! GM_LOSE_SEED (default 1), so a run is repeated by its seed. It was every
+//! Nth: that phase-locked with a go-back retransmission (metal-vmm QUEUE 225,
+//! chunk 0c), a loss pattern no network has.
 
 const std = @import("std");
 const linux = std.os.linux;
@@ -58,12 +61,13 @@ var quitting = false;
 const Wire = struct {
     fd: i32,
     lose_one_in: u64 = 0,
+    loss: std.Random.DefaultPrng = .init(1),
     sent: u64 = 0,
     lost: u64 = 0,
 
     pub fn send(self: *Wire, frame: []const u8) void {
         self.sent += 1;
-        if (self.lose_one_in != 0 and self.sent % self.lose_one_in == 0) {
+        if (self.lose_one_in != 0 and self.loss.random().uintLessThan(u64, self.lose_one_in) == 0) {
             self.lost += 1;
             return;
         }
@@ -202,6 +206,8 @@ pub fn main(init: std.process.Init.Minimal) !void {
     const fd = openTap(name);
     var wire = Wire{ .fd = fd };
     if (env.get("GM_LOSE_SENT")) |v| wire.lose_one_in = std.fmt.parseInt(u64, v, 10) catch 0;
+    if (env.get("GM_LOSE_SEED")) |v| wire.loss = .init(std.fmt.parseInt(u64, v, 10) catch 1);
+    if (wire.lose_one_in != 0) std.debug.print("serve: losing 1 in {d} of the frames sent, seed {s}\n", .{ wire.lose_one_in, env.get("GM_LOSE_SEED") orelse "1" });
 
     for (&conns, &rx, &tx) |*c, *r, *t| c.* = .{ .rx = r, .tx = t };
     var table = tcp.Table.init(our_ip, our_mac, 80, &conns, &out, isn);
