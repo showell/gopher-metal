@@ -178,8 +178,14 @@ MEMBER_STORY = [
     # **A BODY THAT COMES AFTER ITS HEAD** (angry-gopher's server.zig): the
     # Linux server read such a body over its head in the read buffer, and
     # routed the request by the body's bytes (a login answered 404).
+    # It asks for `Connection: close`: a raw step compares the answers' bytes,
+    # headers and all, and since zig-webbox's keep-alive (metal-vmm QUEUE 213)
+    # Linux may keep an HTTP/1.1 connection open where metal always closes
+    # it, so unasked the two differ by that one header (`connection: close`),
+    # which is not what this step is about.
     step("a wrong password, its body sent after its head", "RAW", "-", raw=[
-        b"POST /login/full HTTP/1.1\r\nHost: x\r\nContent-Type: application/x-www-form-urlencoded\r\n"
+        b"POST /login/full HTTP/1.1\r\nHost: x\r\nConnection: close\r\n"
+        b"Content-Type: application/x-www-form-urlencoded\r\n"
         b"Content-Length: 65\r\n\r\n",
         b"name=Steve&password=hunter2&action=login&next=%2Fchat&pad=xxxxxxx"]),
     step("the right one (a $2a$ hash)", "POST", "/login/full", None,
