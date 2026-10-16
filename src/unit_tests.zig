@@ -26,6 +26,7 @@ test {
     _ = @import("tcp.zig");
     _ = @import("tcp_check.zig");
     _ = @import("tcp_sim.zig");
+    _ = @import("tcp_pair_sim.zig");
     _ = @import("fat_sim.zig");
     _ = @import("page_sim.zig");
     _ = @import("pure_sim.zig");

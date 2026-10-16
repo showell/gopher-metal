@@ -207,6 +207,17 @@ around" will agree with the table's bugs.
 Bug C falls out of this: loss of the one window update, plus a persist timer
 that has backed off, gives a run that exceeds the progress bound.
 
+**And the table against itself** (`src/tcp_pair_sim.zig`, metal-vmm QUEUE
+225 chunk 6). Two kernels on one machine will talk through two of these
+tables, so the turned-around peer is no longer a mistake to avoid but the
+thing under test: the table's client (`connect`) against its server, 300
+seeds in `zig build test`, each with single chosen losses under the metal
+`Deadlines`, random loss under the production ones, or a peer that makes one
+deadline fire. Its first run found what neither peer alone shows: the table
+takes segments in order only, so between two tables a reordering path
+stalls on the doubled RTO (the file's last test). Its paths are first in,
+first out, as metal-vmm's pair is, until that is decided.
+
 ## 4. Small-scope exhaustive exploration
 
 Random simulation finds what is likely. Bounded model checking finds what is
