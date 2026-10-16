@@ -1,10 +1,12 @@
 #!/usr/bin/env python3
-"""Breaks src/tcp.zig one way at a time and reports every break that
+"""Breaks the TCP table (src/tcp.zig and the files it was split into,
+`TARGETS`) one way at a time and reports every break that
 `zig build test` does not notice (TCP_TESTING.md §10).
 
     tools/mutate_tcp.py                 every mutant
     tools/mutate_tcp.py NAME...         just these
     tools/mutate_tcp.py --list          their names and what each breaks
+    tools/mutate_tcp.py --where         the file each mutant's text is in
 
 The oracle is `zig build test`. That runs:
 
@@ -46,7 +48,9 @@ import mutate_run
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
-TARGET = "src/tcp.zig"
+# **THE TABLE IS FOUR FILES** (metal-vmm QUEUE 225, chunk 3a): a mutant is
+# applied to whichever of these holds its text, exactly one of them.
+TARGETS = ["src/tcp.zig", "src/tcp_segment.zig", "src/tcp_arrives.zig", "src/tcp_timeouts.zig"]
 TIMEOUT_S = 600
 
 # (name, what it breaks, the text, its replacement, which occurrence when the
@@ -81,11 +85,11 @@ MUTANTS = [
 
     # ── going back, and Karn ───────────────────────────────────────────────
     ("go-back-no-rewind", "a timeout sends again from where it was, not from una",
-     "            c.sent = 0;\n            if (c.fin.is(.sent)) c.fin.fire(.timed_out);\n            c.timed_at = null; // Karn: no telling",
-     "            if (c.fin.is(.sent)) c.fin.fire(.timed_out);\n            c.timed_at = null; // Karn: no telling", None),
+     "            c.sent = 0;\n            timeouts.recover(c);\n            if (c.fin.is(.sent)) c.fin.fire(.timed_out);",
+     "            timeouts.recover(c);\n            if (c.fin.is(.sent)) c.fin.fire(.timed_out);", None),
     ("go-back-keeps-fin", "a timeout does not send our FIN again",
-     "            c.sent = 0;\n            if (c.fin.is(.sent)) c.fin.fire(.timed_out);\n            c.timed_at = null; // Karn: no telling",
-     "            c.sent = 0;\n            c.timed_at = null; // Karn: no telling", None),
+     "            timeouts.recover(c);\n            if (c.fin.is(.sent)) c.fin.fire(.timed_out);\n            c.timed_at = null; // Karn: no telling",
+     "            timeouts.recover(c);\n            c.timed_at = null; // Karn: no telling", None),
     ("karn-off", "a timeout keeps timing a segment it is about to send again",
      "            c.timed_at = null; // Karn: no telling which copy is answered\n",
      "", None),
@@ -110,7 +114,7 @@ MUTANTS = [
 
     # ── acknowledgements and the window ────────────────────────────────────
     ("ack-past-flight", "an acknowledgement one past anything sent is taken",
-     "if (advance > flight) return false;", "if (advance > flight + 1) return false;", None),
+     "if (advance > flight) return .ignore;", "if (advance > flight + 1) return .ignore;", None),
     ("window-rule-off", "an older segment's window overrules a newer one's",
      "const updated = sq.after(seq, c.wl1) or (seq == c.wl1 and !sq.after(c.wl2, number));",
      "const updated = true;", None),
@@ -128,17 +132,17 @@ MUTANTS = [
 
     # ── the receive side ───────────────────────────────────────────────────
     ("rst-in-window", "a reset anywhere in the window resets, not only at RCV.NXT",
-     "if (seq == c.rcv_nxt) return self.close(i);",
-     "if (seq == c.rcv_nxt or c.ahead(seq)) return self.close(i);", None),
+     "if (c.ahead(seq)) return .challenge;",
+     "if (c.ahead(seq)) return .exact;", None),
     ("no-challenge-ack", "a reset in the window is ignored rather than challenged",
-     "            if (c.ahead(seq)) self.emit(wire, i, flag_ack, c.highest(), \"\");\n", "", None),
+     "if (c.ahead(seq)) return .challenge;", "if (c.ahead(seq)) return .ignore;", None),
     ("window-edge-inclusive", "a segment at the window's right edge counts as ahead",
      "return seq != self.rcv_nxt and sq.within(seq, self.rcv_nxt, @max(self.window(), 1));",
      "return seq != self.rcv_nxt and sq.within(seq, self.rcv_nxt, @as(u32, @max(self.window(), 1)) + 1);", None),
     ("everything-behind", "a segment past the window is taken as one from behind",
-     "const behind = sq.atOrAfter(c.rcv_nxt, seq);", "const behind = true;", None),
+     "const behind = acceptable == .behind;", "const behind = true;", None),
     ("handshake-any-ack", "the handshake completes on any acknowledgement number",
-     "if (number != c.una +% 1) {", "if (false) {", None),
+     "if (ackCheck(c, number) == .reset_it) {", "if (false) {", None),
     ("peer-fin-forgotten", "the peer's FIN is acknowledged but not recorded",
      "            c.peer_half.fire(.fin_received);\n", "", None),
     ("fin-wait-unbounded", "our FIN acknowledged starts no wait for the peer's",
@@ -164,6 +168,13 @@ MUTANTS = [
     # ── slots ──────────────────────────────────────────────────────────────
     ("claimed-slot-reused", "a slot the host still holds is handed to a new connection",
      "if (c.state == .closed and !c.claimed) return i;", "if (c.state == .closed) return i;", None),
+    # ── recovering from a loss (RFC 6298 (5.4); metal-vmm QUEUE 225, 0a) ──
+    ("recovery-no-floor", "a timeout with nothing past una outstanding allows no byte, so a shut window is never probed",
+     "c.recovery = @max(1, @min(@as(usize, c.mss), c.high));",
+     "c.recovery = @min(@as(usize, c.mss), c.high);", None),
+    ("recovery-cap-unchecked", "recovering, the send loop sends the whole window again (the go-back)",
+     "if (c.recovery) |cap| if (c.sent >= cap) break;",
+     "if (c.recovery) |cap| if (c.sent >= cap and false) break;", None),
 ]
 
 
@@ -192,26 +203,47 @@ def run_tests():
     return mutate_run.verdict(code, out), took, out
 
 
+def where(sources, old, new, nth):
+    """(target, its source mutated) for the one target the mutant applies
+    to, or None when none does, or more than one would."""
+    found = [(t, m) for t, src in sources.items() if (m := apply(src, old, new, nth)) is not None]
+    return found[0] if len(found) == 1 else None
+
+
+def read_targets():
+    out = {}
+    for t in TARGETS:
+        with open(os.path.join(ROOT, t)) as f:
+            out[t] = f.read()
+    return out
+
+
 def main(argv):
     if "--list" in argv:
         for name, what, *_ in MUTANTS:
             print(f"{name:24} {what}")
         return 0
+    if "--where" in argv:
+        sources = read_targets()
+        stale = 0
+        for name, _, old, new, nth in MUTANTS:
+            hit = where(sources, old, new, nth)
+            stale += hit is None
+            print(f"{name:24} {hit[0] if hit else 'OUT OF DATE: in no target, or in more than one'}")
+        return 1 if stale else 0
     wanted = [a for a in argv[1:] if not a.startswith("-")]
     names = {m[0] for m in MUTANTS}
     unknown = [w for w in wanted if w not in names]
     if unknown:
         print(f"no such mutant: {', '.join(unknown)} (see --list)", file=sys.stderr)
         return 2
-    if git("status", "--porcelain", "--", TARGET).strip():
-        print(f"{TARGET} has uncommitted changes; commit or stash them first: this restores it from git",
+    if git("status", "--porcelain", "--", *TARGETS).strip():
+        print(f"{' '.join(TARGETS)}: uncommitted changes; commit or stash them first: this restores them from git",
               file=sys.stderr)
         return 2
 
     rev = git("rev-parse", "HEAD").strip()
-    path = os.path.join(ROOT, TARGET)
-    with open(path) as f:
-        source = f.read()
+    sources = read_targets()
 
     print(f"tcp.zig at {rev[:10]}: checking the unmutated tree first")
     outcome, took, out = run_tests()
@@ -225,17 +257,18 @@ def main(argv):
         for name, what, old, new, nth in MUTANTS:
             if wanted and name not in wanted:
                 continue
-            mutated = apply(source, old, new, nth)
-            if mutated is None:
+            hit = where(sources, old, new, nth)
+            if hit is None:
                 results.append((name, "out of date", what))
-                print(f"  {name:24} out of date: its text is not in tcp.zig (once)")
+                print(f"  {name:24} out of date: its text is in none of the table's files (once), or in more than one")
                 continue
-            with open(path, "w") as f:
+            target, mutated = hit
+            with open(os.path.join(ROOT, target), "w") as f:
                 f.write(mutated)
             try:
                 outcome, took, out = run_tests()
             finally:
-                git("checkout", rev, "--", TARGET)
+                git("checkout", rev, "--", target)
             results.append((name, outcome, what))
             print(f"  {name:24} {outcome:18} {took:5.0f} s  {what}")
             if outcome == "did not compile":
@@ -246,7 +279,7 @@ def main(argv):
             elif outcome == "unclassified":
                 print("      " + mutate_run.tail(out).replace("\n", "\n      "))
     finally:
-        git("checkout", rev, "--", TARGET)
+        git("checkout", rev, "--", *TARGETS)
 
     survived = [r for r in results if r[1] == "SURVIVED"]
     stale = [r for r in results if r[1] == "out of date"]

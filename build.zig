@@ -378,11 +378,17 @@ pub fn build(b: *std.Build) void {
     // (tools/test_budget.py). Wall time under -j on 2 cores was half
     // contention; CPU time is the test's own.
     test_cpu_dir = b.option([]const u8, "test-cpu-dir", "record each test binary's CPU time in this directory (tier0.sh's budget)");
-    // **WHICH LINES OF tcp.zig ITS UNIT TESTS RUN** (`zig build tcp-coverage`):
-    // tcp_test.zig at every start below, each run once under
-    // tools/linecov.py; the lines with code that none of them ran are listed.
-    const tcp_coverage = b.addSystemCommand(&.{ "python3", "tools/linecov.py", "src/tcp.zig" });
-    b.step("tcp-coverage", "the lines of tcp.zig its unit tests never run").dependOn(&tcp_coverage.step);
+    // **WHICH LINES OF THE TCP TABLE ITS UNIT TESTS RUN** (`zig build
+    // tcp-coverage`): tcp_test.zig at every start below, each run once under
+    // tools/linecov.py; the lines with code that none of them ran are listed,
+    // for each of the table's four files (metal-vmm QUEUE 225, chunk 3a).
+    const tcp_files = [_][]const u8{ "src/tcp.zig", "src/tcp_segment.zig", "src/tcp_arrives.zig", "src/tcp_timeouts.zig" };
+    var tcp_coverage: [tcp_files.len]*std.Build.Step.Run = undefined;
+    const tcp_coverage_step = b.step("tcp-coverage", "the lines of the TCP table (tcp.zig and the files split from it) its unit tests never run");
+    for (tcp_files, &tcp_coverage) |path, *run| {
+        run.* = b.addSystemCommand(&.{ "python3", "tools/linecov.py", path });
+        tcp_coverage_step.dependOn(&run.*.step);
+    }
     // The same for the FAT: disk_fat.zig and disk_fat_dirent.zig, over the
     // merged unit binary (which also runs the simulators and store tests that
     // reach the FAT, so a line only a simulator runs counts as run) and
@@ -766,7 +772,7 @@ pub fn build(b: *std.Build) void {
         });
         timed(unit, unit.name);
         if (wanted(test_file, "src/tcp_test.zig")) test_step.dependOn(&b.addRunArtifact(unit).step);
-        tcp_coverage.addArtifactArg(unit);
+        for (tcp_coverage) |run| run.addArtifactArg(unit);
     }
 }
 

@@ -113,28 +113,14 @@ pub const our_mss: u16 = 1460;
 pub const min_mss: u16 = 88;
 pub const mss_option = [4]u8{ 2, 4, our_mss >> 8, our_mss & 0xFF };
 
-/// **THE RETRANSMISSION CLOCK IS MEASURED** (RFC 6298): one segment timed at
-/// a time, RTO = SRTT + 4 * RTTVAR. The handshake is the first sample, so the
-/// first byte of a response already goes out under a measured clock.
-///
-/// **THE FLOOR IS ABOUT THE PEER'S DELAYED ACKS, NOT THE PATH.** A peer may
-/// hold an ACK for tens of milliseconds (Linux) or up to 200 (slirp). Waiting
-/// less turns a delay into a "loss" and resends a whole window for nothing,
-/// so the floor is Linux's `TCP_RTO_MIN`, not RFC 6298's one second (2.4).
-/// It is also the first, unmeasured wait: over a private network to Caddy,
-/// RFC 6298's second is a thousand round trips.
-///
-/// Each timeout doubles the wait up to `max_rto_ns` (RFC 6298 (5.5); the
-/// RFC's ceiling is at least 60 s), and the connection is reset after
-/// `max_retries` timeouts with nothing acknowledged: RFC 9293's R2 (§3.8.3),
-/// counted in timeouts.
-pub const min_rto_ns: u64 = 200 * ns_per_ms;
-pub const first_rto_ns: u64 = min_rto_ns;
-pub const max_rto_ns: u64 = 5 * ns_per_s;
-pub const max_retries: u8 = 6;
-/// Duplicate ACKs that mean a segment is lost (RFC 5681): the peer says at
-/// once what the timer would only guess a round trip later.
-pub const dupacks_before_resend: u8 = 3;
+// **THE RETRANSMISSION CLOCK AND ITS BOUNDS** (RFC 6298, RFC 5681;
+// tcp_timeouts.zig).
+const timeouts = @import("tcp_timeouts.zig");
+pub const min_rto_ns = timeouts.min_rto_ns;
+pub const first_rto_ns = timeouts.first_rto_ns;
+pub const max_rto_ns = timeouts.max_rto_ns;
+pub const max_retries = timeouts.max_retries;
+pub const dupacks_before_resend = timeouts.dupacks_before_resend;
 /// How long FIN-WAIT-2 waits for the peer's FIN. RFC 9293 sets no bound;
 /// Linux's `tcp_fin_timeout` is the same idea.
 pub const fin_wait_ns: u64 = 30 * ns_per_s;
@@ -399,7 +385,7 @@ pub const Conn = struct {
     /// **AHEAD**: past `rcv_nxt` but inside the window we advertise, so
     /// acceptable to RFC 9293's sequence test (§3.10.7.4) but not the next
     /// byte. A shut window has nothing ahead.
-    fn ahead(self: *const Conn, seq: u32) bool {
+    pub fn ahead(self: *const Conn, seq: u32) bool {
         return seq != self.rcv_nxt and sq.within(seq, self.rcv_nxt, @max(self.window(), 1));
     }
 
@@ -485,58 +471,15 @@ pub const Revivable = struct {
     told_wnd: u16 = 0,
 };
 
-// ── The pure decisions of SEGMENT ARRIVES (metal-vmm QUEUE 225, chunk 2):
-// each says what a segment means for a connection, and `Table` acts on the
-// answer. Each has a table-driven test (tcp_test.zig).
-
-/// **IS THE SEGMENT ACCEPTABLE?** (RFC 9293 §3.10.7.4, first check), by its
-/// first sequence number only:
-/// - `next`: it is RCV.NXT, the byte expected, and is taken;
-/// - `ahead`: past RCV.NXT inside the window we advertise, so acceptable to
-///   the RFC, but this table takes only the next byte (its ACK and window
-///   still count);
-/// - `behind`: at or before RCV.NXT, a resend of what was taken;
-/// - `beyond`: past the window, or half the circle away.
-/// DEPARTS: the RFC also accepts a segment that starts behind and runs past
-/// RCV.NXT, and trims it; here it is `behind`, and the peer resends.
-pub const Acceptability = enum { next, ahead, behind, beyond };
-
-pub fn acceptability(c: *const Conn, seq: u32) Acceptability {
-    if (seq == c.rcv_nxt) return .next;
-    if (c.ahead(seq)) return .ahead;
-    return if (sq.atOrAfter(c.rcv_nxt, seq)) .behind else .beyond;
-}
-
-/// **A RESET MUST NAME RCV.NXT EXACTLY** (RFC 9293 §3.10.7.4, second check,
-/// after RFC 5961 §3): `exact` closes the connection; `challenge`, one
-/// elsewhere in the window, draws a challenge ACK, which a genuine peer
-/// answers with an exact reset; `ignore`, one outside it, changes nothing.
-pub const ResetCheck = enum { exact, challenge, ignore };
-
-pub fn resetCheck(c: *const Conn, seq: u32) ResetCheck {
-    if (seq == c.rcv_nxt) return .exact;
-    if (c.ahead(seq)) return .challenge;
-    return .ignore;
-}
-
-/// **THE ACK FIELD** (RFC 9293 §3.10.7.4, fifth check):
-/// - in SYN-RECEIVED, `new` when it is ISS + 1, which completes the
-///   handshake, and `reset_it` otherwise ("form a reset segment
-///   <SEQ=SEG.ACK><CTL=RST>");
-/// - in a synchronized state, `new` when it acknowledges bytes past
-///   SND.UNA, `duplicate` when it is SND.UNA, and `ignore` when it names
-///   what was never sent, or is from before SND.UNA (a wrap past `highest`).
-/// DEPARTS: the RFC answers an ACK of something never sent with an ACK and
-/// drops the segment; here only its ACK is ignored (`acknowledge`).
-pub const AckCheck = enum { reset_it, ignore, duplicate, new };
-
-pub fn ackCheck(c: *const Conn, number: u32) AckCheck {
-    if (c.state == .syn_received) return if (number == c.una +% 1) .new else .reset_it;
-    const flight = sq.offset(c.una, c.highest());
-    const advance = sq.offset(c.una, number);
-    if (advance > flight) return .ignore;
-    return if (advance == 0) .duplicate else .new;
-}
+// **SEGMENT ARRIVES' PURE DECISIONS** (RFC 9293 §3.10.7; tcp_arrives.zig):
+// what a segment means for a connection; `Table` acts on the answer.
+const arrives = @import("tcp_arrives.zig");
+pub const Acceptability = arrives.Acceptability;
+pub const acceptability = arrives.acceptability;
+pub const ResetCheck = arrives.ResetCheck;
+pub const resetCheck = arrives.resetCheck;
+pub const AckCheck = arrives.AckCheck;
+pub const ackCheck = arrives.ackCheck;
 
 pub const Table = struct {
     local_ip: [4]u8,
@@ -899,7 +842,7 @@ pub const Table = struct {
         if (c.state == .syn_received) {
             // The SYN-ACK was lost, or its answer was.
             if (!expired) return;
-            if (!backoff(c, now)) return self.giveUp(wire, i);
+            if (!timeouts.backoff(c, now)) return self.giveUp(wire, i);
             self.retransmits += 1;
             props.reachable(@src(), "tcp: a lost SYN-ACK is sent again", .{ .conn = i });
             c.timed_at = null; // Karn: no telling which copy the ACK answers
@@ -910,14 +853,14 @@ pub const Table = struct {
         // A timeout owes the window one probe, if it is shut: one byte.
         var probe: enum { none, owed } = .none;
         if (expired) {
-            if (!backoff(c, now)) return self.giveUp(wire, i);
+            if (!timeouts.backoff(c, now)) return self.giveUp(wire, i);
             // **THE OLDEST SEGMENT AGAIN** (RFC 6298 (5.4): "Retransmit the
             // earliest segment that has not been acknowledged by the TCP
             // receiver"): from `una`, and no further than one segment until
             // the peer acknowledges it (`recovery`). The one-byte probe of a
             // shut window fits in it too.
             c.sent = 0;
-            c.recovery = @max(1, @min(@as(usize, c.mss), c.high));
+            timeouts.recover(c);
             if (c.fin.is(.sent)) c.fin.fire(.timed_out);
             c.timed_at = null; // Karn: no telling which copy is answered
             self.retransmits += 1;
@@ -1018,7 +961,7 @@ pub const Table = struct {
         c.dupacks = 0;
         c.duplicates = .answered;
         c.sent = 0;
-        c.recovery = @max(1, @min(@as(usize, c.mss), c.high));
+        timeouts.recover(c);
         if (c.fin.is(.sent)) c.fin.fire(.resent_early);
         c.timed_at = null; // Karn, the same as after a timeout
         c.rto_at = now + c.rto_ns;
@@ -1034,32 +977,9 @@ pub const Table = struct {
         const at = c.timed_at orelse return;
         if (!sq.atOrAfter(number, c.timed_seq)) return; // not there yet
         c.timed_at = null;
-        const rtt: u64 = @intCast(@max(0, now - at));
-        if (c.srtt_ns == 0) {
-            c.srtt_ns = rtt;
-            c.rttvar_ns = rtt / 2;
-        } else {
-            const off = if (c.srtt_ns > rtt) c.srtt_ns - rtt else rtt - c.srtt_ns;
-            c.rttvar_ns = (3 * c.rttvar_ns + off) / 4;
-            c.srtt_ns = (7 * c.srtt_ns + rtt) / 8;
-        }
-        c.rto_ns = @min(@max(c.srtt_ns + 4 * c.rttvar_ns, min_rto_ns), max_rto_ns);
-        props.always(@src(), c.rto_ns >= min_rto_ns and c.rto_ns <= max_rto_ns, "tcp: a measured RTO is within its bounds", .{ .rto_ns = c.rto_ns });
-        props.sometimes(@src(), c.srtt_ns > rtt, "tcp: a round trip comes in faster than the estimate", null);
+        timeouts.fold(c, @intCast(@max(0, now - at)));
         self.samples += 1;
         self.measured_ns = c.srtt_ns;
-    }
-
-    /// One more timeout (RFC 6298 (5.5), (5.6)): false once they have run out.
-    fn backoff(c: *Conn, now: i96) bool {
-        if (c.retries >= max_retries) return false;
-        c.retries += 1;
-        c.rto_ns = @min(c.rto_ns * 2, max_rto_ns);
-        props.always(@src(), c.rto_ns <= max_rto_ns, "tcp: a backed-off RTO stays under the cap", .{ .rto_ns = c.rto_ns });
-        props.sometimes(@src(), c.rto_ns == max_rto_ns, "tcp: backoff reaches the RTO cap", null);
-        props.alwaysLessThanOrEqualTo(@src(), c.retries, max_retries, "tcp: a connection's timeouts stay within its retries", null);
-        c.rto_at = now + c.rto_ns;
-        return true;
     }
 
     fn giveUp(self: *Table, wire: anytype, i: usize) void {
@@ -1115,10 +1035,7 @@ pub const Table = struct {
         // **RECOVERY GROWS BY TWICE WHAT WAS ACKNOWLEDGED** (RFC 6298 (5.4)'s
         // one segment, then doubling each round trip), and ends once it
         // covers all that was sent (`high`, after this ACK).
-        if (c.recovery) |cap| {
-            const grown = (cap -| advance) + 2 * @as(usize, advance);
-            c.recovery = if (grown >= c.high) null else grown;
-        }
+        timeouts.recovered(c, advance);
         c.retries = 0;
         self.measure(c, number, now);
         if (c.srtt_ns == 0) c.rto_ns = first_rto_ns;
