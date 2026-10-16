@@ -185,6 +185,7 @@ if [ "$want" != sim ]; then
     zig build gopher -Dgopher-root="$GOPHER_ROOT" -Dwebbox-root="$WEBBOX_ROOT" > "$OUT/rebuild.log" 2>&1 || { echo "gopher.elf does not build: $OUT/rebuild.log"; exit 2; }
     JUDGED=probe/gopher.elf
     COUNTED="$OUT/gopher-coverage.elf"
+    lap "the metal half's builds (the site volume, metal-vmm, two kernels)"
 
     # run <eat> <path> [kernel]: one boot in the folder $W; sets code, sent,
     # status, and the page in $W/page, and adds its coverage to
