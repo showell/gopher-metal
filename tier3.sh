@@ -98,7 +98,8 @@ fi
 # against the single-guest run's.
 if ! skip pair; then
     zig build fetch > "$VERDICTS/fetch-build.txt" 2>&1 || failed+=(pair)
-    (cd "$VMM" && GUESTS="$HERE/probe" SITE="$SITE_VOLUME" ./pair.sh 2>&1 | tail -4; exit "${PIPESTATUS[0]}") || failed+=(pair)
+    (cd "$VMM" && GUESTS="$HERE/probe" SITE="$SITE_VOLUME" ./pair.sh > "$VERDICTS/pair.txt" 2>&1) || failed+=(pair)
+    grep -E "FAIL|NOT RUN|^time|^PAIR" "$VERDICTS/pair.txt"
     lap "pair: two kernels talking"
 fi
 if ! skip vmm-timeouts; then
