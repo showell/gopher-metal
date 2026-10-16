@@ -1213,10 +1213,26 @@ pub const Table = struct {
         // its ACK is ignored.
         if (check == .ignore) return false;
         const updated = sq.after(seq, c.wl1) or (seq == c.wl1 and !sq.after(c.wl2, number));
+        const was_shut = c.wnd == 0;
         if (updated) {
             c.wnd = window;
             c.wl1 = seq;
             c.wl2 = number;
+        }
+        // **A WINDOW THAT REOPENS ON AN ACK OF NOTHING NEW REFUSED WHAT WAS
+        // SENT PAST `una`** (metal-vmm QUEUE 227): the probe byte, and any
+        // segment that reached it shut. RFC 9293 §3.8.6.1:
+        // > When the receiving TCP peer has a zero window and a segment arrives,
+        // > it must still send an acknowledgment showing its next expected
+        // > sequence number and current window (zero).
+        // So sending starts again at `una`; otherwise the next segment
+        // starts past the refused byte, is dropped as ahead of a hole, and
+        // draws one duplicate ACK where three resend, leaving the rest to
+        // the backed-off timer.
+        if (check == .duplicate and was_shut and c.wnd > 0 and c.sent > 0) {
+            props.reachable(@src(), "tcp: a window reopens on an ACK of nothing new, and sending starts again at una", .{ .sent = c.sent });
+            c.sent = 0;
+            c.timed_at = null; // Karn: what goes now is sent again
         }
         if (check == .duplicate) return false;
 

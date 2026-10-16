@@ -2808,3 +2808,56 @@ test "the quote check finds a word changed" {
     try testing.expectEqual(@as(usize, 1), try checkQuotes(gpa, bad, &.{rfc}, &missing));
     try testing.expectEqual(@as(usize, 1), missing.items.len);
 }
+
+// ── a window that shuts with bytes in flight, and reopens (QUEUE 227) ─────
+
+test "a window that shuts with bytes in flight and refuses its probes: once it reopens, the rest arrives within a few round trips (metal-vmm QUEUE 227)" {
+    // long.sh's rough `shut-window` case, small: the peer takes some,
+    // shuts its window with segments still on the way (lost to it, having
+    // no room), refuses each one-byte probe, and later opens again with an
+    // ACK that acknowledges nothing. 0a cut what follows to one segment past
+    // the refused probe byte, which the peer drops as ahead of a hole.
+    var f: Fixture = .{};
+    f.init();
+    var p = Peer{ .ip = .{ 10, 0, 2, 2 }, .port = 40000, .window = 1600 };
+    const i = try p.connect(&f.table, &f.wire, 0);
+    const total = 2000; // the fixture's send buffer holds 2048
+    var body: [total]u8 = undefined;
+    for (&body, 0..) |*b, k| b.* = @truncate(k *% 7 +% 1);
+    try testing.expectEqual(@as(usize, total), f.table.queue(i, &body));
+    const base = p.ack; // the byte numbered 0
+    transmit(&f.table, &f.wire, 0);
+    // It takes one segment and shuts; the rest of the 1600 is lost to it.
+    p.window = 0;
+    _ = p.ackUpTo(&f.table, &f.wire, base +% 536, 2 * ms);
+    var now: i96 = 2 * ms;
+    for (0..3) |_| {
+        now = f.table.conns[i].rto_at.?;
+        transmit(&f.table, &f.wire, now);
+        _ = p.ackUpTo(&f.table, &f.wire, base +% 536, now + 1 * ms); // refused
+    }
+    try testing.expect(f.table.probes >= 3);
+    // It opens again: an ACK of nothing new, with room.
+    const reopened = now + 50 * ms;
+    p.window = 8000;
+    _ = p.ackUpTo(&f.table, &f.wire, base +% 536, reopened);
+    // A peer that takes each segment at the next byte, and acknowledges it
+    // a millisecond later; one ahead of the next byte is dropped and
+    // answered with an ACK of what it has.
+    var got: u32 = 536;
+    var seen = f.wire.count;
+    now = reopened;
+    while (got < total) : (now += 1 * ms) {
+        try testing.expect(now - reopened <= 30 * ms); // a few round trips
+        transmit(&f.table, &f.wire, now);
+        var answer = false;
+        while (seen < f.wire.count) : (seen += 1) {
+            const s = f.wire.at(seen);
+            if (s.payload.len == 0) continue;
+            answer = true;
+            if (s.seq == base +% got) got += @intCast(s.payload.len);
+        }
+        if (answer) _ = p.ackUpTo(&f.table, &f.wire, base +% got, now + 1 * ms);
+    }
+    try testing.expectEqual(@as(u64, 0), f.table.given_up);
+}
