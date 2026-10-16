@@ -691,7 +691,8 @@ if [ "$want" = gopher ] || [ $quick = 1 ]; then
         echo "FAIL gopher | the Linux build of the same source failed; see $WORK/gopher.linux-build"
         failed=1
     else
-        JUDGE_QUICK=$([ $quick = 1 ] && echo 1) JUDGE_ONLY="$gate" \
+        # JUDGE_QUICK from the caller too (long.sh's FAT16 write path).
+        JUDGE_QUICK="${JUDGE_QUICK:-$([ $quick = 1 ] && echo 1)}" JUDGE_ONLY="$gate" \
             python3 "$HERE/judge_gopher.py" "$HERE/gopher.elf" \
             "$GOPHER_ROOT/zig-server/zig-out/bin/zig-server" "$GOPHER_ROOT" "$WORK/gopher" \
             > "$WORK/gopher.verdict" 2>&1

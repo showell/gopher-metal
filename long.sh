@@ -11,9 +11,10 @@
 #    rough seeds and FAT's, with `coverage/floor-sim.txt` as their floor:
 #    every property on it must be reached, and none broken.
 #
-# 2. **The chat judge on FAT16** (QEMU's microvm, the whole story): moved
-#    here from gates.sh, whose FAT32 judges are what prod runs. It runs
-#    LAST, being QEMU, after 3 to 5.
+# 2. **The chat judge on FAT16** (QEMU's microvm), its write path: the
+#    gates that write, append and rewrite (uploads, churn, bulk), quick
+#    (metal-vmm QUEUE 224.7). Moved here from gates.sh, whose FAT32 judges
+#    are what prod runs. It runs LAST, being QEMU, after 3 to 5.
 #
 # 3. **The real kernel, losing each of its frames in turn.** gopher.elf, built
 #    with -Dcoverage, on metal-vmm's PC-shaped machine (TRANSPORT=pci: it
@@ -289,10 +290,15 @@ EOF
     # every run. **LAST, BEING QEMU** (Steve, 2026-10-11: find things
     # quickly), on gopher.elf as a release builds it, which the coverage
     # build above put back.
-    echo "── the chat judge on FAT16 (microvm)"
+    echo "── the chat judge on FAT16 (microvm), its write path"
     zig build gopher -Dgopher-root="$GOPHER_ROOT" -Dwebbox-root="$WEBBOX_ROOT" > "$OUT.fat16-build" 2>&1 || { echo "gopher.elf does not build: $OUT.fat16-build"; exit 2; }
-    env JUDGE_DROPLET=0 FAT=16 PROBE_WORK="$HOME/build/zig-metal-unikernel/probe-microvm-fat16" probe/run.sh gopher \
-        > "$OUT.fat16" 2>&1
+    # **ITS WRITE PATH ONLY** (metal-vmm QUEUE 224.7): the gates that write,
+    # append and rewrite (uploads, churn, bulk), quick. FAT16 matters again
+    # (Dog Park keeps its data on FAT16 in production); endurance and
+    # stamina stay on tier 3's FAT32. The whole judge on FAT16 is
+    # `FAT=16 probe/run.sh gopher` (193 s under TCG, 2026-10-16).
+    env JUDGE_DROPLET=0 FAT=16 JUDGE_QUICK=1 PROBE_WORK="$HOME/build/zig-metal-unikernel/probe-microvm-fat16" \
+        probe/run.sh gopher "uploads churn bulk" > "$OUT.fat16" 2>&1
     code=$?
     sed -n '/^\(PASS\|FAIL\|    \) *gopher/,$p' "$OUT.fat16"
     { [ "$code" = 0 ] && grep -q "^PASS gopher" "$OUT.fat16"; } || failed+=(fat16-judge)
