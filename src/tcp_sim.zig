@@ -1918,8 +1918,10 @@ const rough_red = [_]u64{ 11277, 11529, 13514, 16190, 20063, 20615, 22509, 25720
 // **FOUR LEFT WITH RFC 6298 (5.4)** (640, 1961, 2870, 6606; metal-vmm QUEUE
 // 225, chunk 0a): a timeout sends one segment again, not the window, so each
 // crowd's frames change, and these four pass with the ring off as well as
-// on. None witnesses the ring any more; the eleven left still fail without it.
-const crowd_red = [_]u64{ 1281, 1452, 1872, 2305, 4362, 7546, 8003, 8575, 9366, 9769, 9951 };
+// on. None witnesses the ring any more. **FOUR MORE WITH FAST RETRANSMIT
+// SENDING ONE SEGMENT** (4362, 8003, 8575, 9366; chunk 0b), the same way.
+// The seven left still fail without it.
+const crowd_red = [_]u64{ 1281, 1452, 1872, 2305, 7546, 9769, 9951 };
 
 test "a crowd the size of the kernel's table: every oracle holds, and the table fills" {
     // **ONE IN TIER 0** (metal-vmm QUEUE 198.12): 1.7 s in Debug each

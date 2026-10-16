@@ -1560,6 +1560,34 @@ test "three duplicate acknowledgements send it again at once" {
     try testing.expectEqual(@as(u8, 0), f.table.conns[i].dupacks);
 }
 
+test "three duplicate acknowledgements resend exactly one segment, the oldest, and its acknowledgement lets twice as much follow (RFC 6298 (5.4), RFC 5681; metal-vmm QUEUE 225, chunk 0b)" {
+    var f: Fixture = .{};
+    f.init();
+    var p = Peer{ .ip = .{ 10, 0, 2, 2 }, .port = 40000, .window = 8192 };
+    const i = try p.connect(&f.table, &f.wire, ms);
+    var body: [3000]u8 = undefined;
+    _ = f.table.queue(i, pattern(&body));
+    transmit(&f.table, &f.wire, 2 * ms);
+    const una = f.table.conns[i].una;
+    const retries = f.table.conns[i].retries;
+    const rto_ns = f.table.conns[i].rto_ns;
+
+    var from = f.wire.count;
+    for (0..3) |_| _ = p.ackUpTo(&f.table, &f.wire, una, 3 * ms);
+    var sizes: [8]usize = undefined;
+    try testing.expectEqualSlices(usize, &.{536}, f.wire.sizesSince(from, &sizes));
+    try testing.expectEqual(una, f.wire.at(from).seq);
+    // The backoff is untouched: a hole is no evidence of a slower path.
+    try testing.expectEqual(retries, f.table.conns[i].retries);
+    try testing.expectEqual(rto_ns, f.table.conns[i].rto_ns);
+
+    // The resent segment acknowledged: two more follow.
+    _ = p.ackUpTo(&f.table, &f.wire, una +% 536, 4 * ms);
+    from = f.wire.count;
+    transmit(&f.table, &f.wire, 4 * ms);
+    try testing.expectEqualSlices(usize, &.{ 536, 536 }, f.wire.sizesSince(from, &sizes));
+}
+
 test "a duplicate acknowledgement names SND.UNA: an older one, or one of data never sent, counts toward no fast retransmit (metal-vmm QUEUE 133, RFC 5681 §2)" {
     var f: Fixture = .{};
     f.init();

@@ -954,15 +954,17 @@ pub const Table = struct {
         self.emit(wire, i, flag_ack, c.highest(), "");
     }
 
-    /// RFC 5681's fast retransmit: everything from `una` again, now, without
+    /// RFC 5681's fast retransmit: the oldest segment again, now, without
     /// touching the backoff, since a hole is not evidence of a slower path.
-    /// Goes back like a timeout; with no congestion control there is no fast
-    /// recovery.
+    /// It recovers as a timeout does (`recovery`, one segment and doubling;
+    /// metal-vmm QUEUE 225, chunk 0b), where it once went back over the
+    /// whole window; with no congestion control there is no fast recovery.
     fn resend(self: *Table, wire: anytype, i: usize, now: i96) void {
         const c = &self.conns[i];
         c.dupacks = 0;
         c.duplicates = .answered;
         c.sent = 0;
+        c.recovery = @max(1, @min(@as(usize, c.mss), c.high));
         if (c.fin.is(.sent)) c.fin.fire(.resent_early);
         c.timed_at = null; // Karn, the same as after a timeout
         c.rto_at = now + c.rto_ns;
