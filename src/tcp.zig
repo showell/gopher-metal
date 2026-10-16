@@ -855,7 +855,17 @@ pub const Table = struct {
     }
 
     /// The next ephemeral port no connection holds, counting up and
-    /// wrapping within the dynamic range (RFC 6335 §6: 49152-65535).
+    /// wrapping within the dynamic range (RFC 6335 §6: 49152-65535). RFC
+    /// 6056 §3.2:
+    ///
+    /// > As mentioned in Section 2.1, the dynamic ports consist of the range
+    /// > 49152-65535.  However, ephemeral port selection algorithms should use
+    /// > the whole range 1024-65535.
+    ///
+    /// DEPARTS: only the dynamic range, counting up by one from where the
+    /// host seeds `ephemeral_next`, where RFC 6056 §3.3 picks each port by
+    /// an obfuscating algorithm: this machine opens a handful of
+    /// connections to peers it names, behind a private network.
     fn nextEphemeral(self: *Table) u16 {
         while (true) {
             const port = self.ephemeral_next;
@@ -1273,6 +1283,25 @@ pub const Table = struct {
         }
 
         const t = pkt.payload;
+        // RFC 9293 §3.10.7.1, CLOSED STATE:
+        // > If the state is CLOSED (i.e., TCB does not exist), then
+        // >
+        // >    all data in the incoming segment is discarded.  An incoming
+        // >    segment containing a RST is discarded.  An incoming segment not
+        // >    containing a RST causes a RST to be sent in response.  The
+        // >    acknowledgment and sequence field values are selected to make the
+        // >    reset sequence acceptable to the TCP endpoint that sent the
+        // >    offending segment.
+        // >
+        // >    If the ACK bit is off, sequence number zero is used,
+        // >
+        // >       <SEQ=0><ACK=SEG.SEQ+SEG.LEN><CTL=RST,ACK>
+        // >
+        // >    If the ACK bit is on,
+        // >
+        // >       <SEQ=SEG.ACK><CTL=RST>
+        // >
+        // >    Return.
         // DEPARTS: a segment to a port nobody listens on is dropped silently,
         // where CLOSED (RFC 9293 §3.10.7.1) answers it with a reset.
         const dst_port = proto.readBe16(t[2..4]);
@@ -1301,6 +1330,23 @@ pub const Table = struct {
         // and SYN checks below, which are the synchronized states'.
         if (found) |i| if (self.conns[i].state == .syn_sent) return self.synSentArrives(wire, i, seg, now);
 
+        // RFC 9293 §3.10.7.4, the synchronized states' RST check, which this
+        // block does (`resetCheck` quotes the RFC 5961 checks):
+        // > Second, check the RST bit:
+        // >
+        // > -  RFC 5961 [9], Section 3 describes a potential blind reset
+        // >    attack and optional mitigation approach.  This does not provide
+        // >    a cryptographic protection (e.g., as in IPsec or TCP-AO) but
+        // >    can be applicable in situations described in RFC 5961.  For
+        // >    stacks implementing the protection described in RFC 5961, the
+        // >    three checks below apply; otherwise, processing for these
+        // >    states is indicated further below.
+        // And in LISTEN (§3.10.7.2), where a reset finds no connection:
+        // > First, check for a RST:
+        // >
+        // > -  An incoming RST segment could not be valid since it could not
+        // >    have been sent in response to anything sent by this incarnation
+        // >    of the connection.  An incoming RST should be ignored.  Return.
         // DEPARTS: RST is checked first, before the sequence number's
         // acceptability (RFC 9293 §3.10.7.4 checks the sequence first, then
         // RST); `resetCheck` asks the same question of a reset's number.
@@ -1349,6 +1395,49 @@ pub const Table = struct {
             }
         }
 
+        // RFC 9293 §3.10.7.2, LISTEN STATE (its first step, the RST, is
+        // above):
+        // > Second, check for an ACK:
+        // >
+        // > -  Any acknowledgment is bad if it arrives on a connection still
+        // >    in the LISTEN state.  An acceptable reset segment should be
+        // >    formed for any arriving ACK-bearing segment.  The RST should be
+        // >    formatted as follows:
+        // >
+        // >       <SEQ=SEG.ACK><CTL=RST>
+        // >
+        // > -  Return.
+        //
+        // > Third, check for a SYN:
+        // >
+        // > -  If the SYN bit is set, check the security.  If the security/
+        // >    compartment on the incoming segment does not exactly match the
+        // >    security/compartment in the TCB, then send a reset and return.
+        // >
+        // >       <SEQ=0><ACK=SEG.SEQ+SEG.LEN><CTL=RST,ACK>
+        // >
+        // > -  Set RCV.NXT to SEG.SEQ+1, IRS is set to SEG.SEQ, and any other
+        // >    control or text should be queued for processing later.  ISS
+        // >    should be selected and a SYN segment sent of the form:
+        // >
+        // >       <SEQ=ISS><ACK=RCV.NXT><CTL=SYN,ACK>
+        // >
+        // > -  SND.NXT is set to ISS+1 and SND.UNA to ISS.  The connection
+        // >    state should be changed to SYN-RECEIVED.  Note that any other
+        // >    incoming control or data (combined with SYN) will be processed
+        // >    in the SYN-RECEIVED state, but processing of SYN and ACK should
+        // >    not be repeated.  If the listen was not fully specified (i.e.,
+        // >    the remote socket was not fully specified), then the
+        // >    unspecified fields should be filled in now.
+        //
+        // > Fourth, other data or control:
+        // >
+        // > -  This should not be reached.  Drop the segment and return.  Any
+        // >    other control or data-bearing segment (not containing SYN) must
+        // >    have an ACK and thus would have been discarded by the ACK
+        // >    processing in the second step, unless it was first discarded by
+        // >    RST checking in the first step.
+        // The security check does not apply: there are no compartments.
         // The table is LISTEN (RFC 9293 §3.10.7.2) on its own port: a SYN for
         // no connection opens one if there is a slot; anything else is
         // refused. A port of this machine's own connections listens for
@@ -1399,6 +1488,36 @@ pub const Table = struct {
 
         const c = &self.conns[i];
 
+        // RFC 9293 §3.10.7.4:
+        // > Fourth, check the SYN bit:
+        // >
+        // > -  SYN-RECEIVED STATE
+        // >
+        // >    o  If the connection was initiated with a passive OPEN, then
+        // >       return this connection to the LISTEN state and return.
+        // >       Otherwise, handle per the directions for synchronized states
+        // >       below.
+        //
+        // > o  If the SYN bit is set in these synchronized states, it may
+        // >    be either a legitimate new connection attempt (e.g., in the
+        // >    case of TIME-WAIT), an error where the connection should be
+        // >    reset, or the result of an attack attempt, as described in
+        // >    RFC 5961 [9].  For the TIME-WAIT state, new connections can
+        // >    be accepted if the Timestamp Option is used and meets
+        // >    expectations (per [40]).  For all other cases, RFC 5961
+        // >    provides a mitigation with applicability to some situations,
+        // >    though there are also alternatives that offer cryptographic
+        // >    protection (see Section 7).  RFC 5961 recommends that in
+        // >    these synchronized states, if the SYN bit is set,
+        // >    irrespective of the sequence number, TCP endpoints MUST send
+        // >    a "challenge ACK" to the remote peer:
+        // >
+        // >    <SEQ=SND.NXT><ACK=RCV.NXT><CTL=ACK>
+        // >
+        // > o  After sending the acknowledgment, TCP implementations MUST
+        // >    drop the unacceptable segment and stop processing further.
+        // >    Note that RFC 5961 and Errata ID 4772 [99] contain
+        // >    additional ACK throttling notes for an implementation.
         // DEPARTS: SYN is checked before the sequence number's acceptability
         // (RFC 9293 §3.10.7.4 checks the SYN fourth).
         // A repeated SYN in SYN-RECEIVED means our SYN-ACK was lost or is
@@ -1413,11 +1532,27 @@ pub const Table = struct {
             return .{ .event = .nothing };
         }
 
+        // > Fifth, check the ACK field:
+        // >
+        // > -  if the ACK bit is off, drop the segment and return
         // No ACK bit: dropped (RFC 9293 §3.10.7.4, fifth check).
         // DEPARTS: dropped before the first check's answer, so an
         // unacceptable segment with no ACK draws no ACK in reply.
         if (flags & flag_ack == 0) return .{ .event = .nothing };
 
+        // RFC 9293 §3.10.7.4, "First, check sequence number" (quoted whole
+        // at `acceptability`, tcp_arrives.zig):
+        // > o  If an incoming segment is not acceptable, an acknowledgment
+        // >    should be sent in reply (unless the RST bit is set, if so
+        // >    drop the segment and return):
+        // >
+        // >    <SEQ=SND.NXT><ACK=RCV.NXT><CTL=ACK>
+        // >
+        // > o  After sending the acknowledgment, drop the unacceptable
+        // >    segment and return.
+        // Third, the security check, does not apply: there are no
+        // compartments.
+        //
         // **A SEGMENT THAT IS NOT THE NEXT ONE IS ANSWERED, NOT TAKEN.**
         //
         // - **the next** (`seq == rcv_nxt`): acceptable, and taken;
@@ -1521,6 +1656,57 @@ pub const Table = struct {
             return self.settle(i, event, fin_acknowledged, now);
         }
 
+        // RFC 9293 §3.10.7.4:
+        // > Sixth, check the URG bit:
+        // >
+        // > -  ESTABLISHED STATE
+        // >
+        // > -  FIN-WAIT-1 STATE
+        // >
+        // > -  FIN-WAIT-2 STATE
+        // >
+        // >    o  If the URG bit is set, RCV.UP <- max(RCV.UP,SEG.UP), and
+        // >       signal the user that the remote side has urgent data if the
+        // >       urgent pointer (RCV.UP) is in advance of the data consumed.
+        // >       If the user has already been signaled (or is still in the
+        // >       "urgent mode") for this continuous sequence of urgent data,
+        // >       do not signal the user again.
+        // Not applicable: URG is neither read nor sent.
+        //
+        // > Seventh, process the segment text:
+        // >
+        // > -  ESTABLISHED STATE
+        // >
+        // > -  FIN-WAIT-1 STATE
+        // >
+        // > -  FIN-WAIT-2 STATE
+        // >
+        // >    o  Once in the ESTABLISHED state, it is possible to deliver
+        // >       segment data to user RECEIVE buffers.  Data from segments
+        // >       can be moved into buffers until either the buffer is full or
+        // >       the segment is empty.  If the segment empties and carries a
+        // >       PUSH flag, then the user is informed, when the buffer is
+        // >       returned, that a PUSH has been received.
+        // >
+        // >    o  When the TCP endpoint takes responsibility for delivering
+        // >       the data to the user, it must also acknowledge the receipt
+        // >       of the data.
+        // >
+        // >    o  Once the TCP endpoint takes responsibility for the data, it
+        // >       advances RCV.NXT over the data accepted, and adjusts RCV.WND
+        // >       as appropriate to the current buffer availability.  The
+        // >       total of RCV.NXT and RCV.WND should not be reduced.
+        // >
+        // >    o  A TCP implementation MAY send an ACK segment acknowledging
+        // >       RCV.NXT when a valid segment arrives that is in the window
+        // >       but not at the left window edge (MAY-13).
+        // >
+        // >    o  Please note the window management suggestions in
+        // >       Section 3.8.
+        // >
+        // >    o  Send an acknowledgment of the form:
+        // >
+        // >       <SEQ=SND.NXT><ACK=RCV.NXT><CTL=ACK>
         if (data.len > 0) {
             if (c.peerDone()) {
                 self.emit(wire, i, flag_ack, c.highest(), "");
@@ -1541,6 +1727,19 @@ pub const Table = struct {
             if (n < data.len) return self.settle(i, event, fin_acknowledged, now);
         }
 
+        // > Eighth, check the FIN bit:
+        // >
+        // > -  Do not process the FIN if the state is CLOSED, LISTEN, or SYN-
+        // >    SENT since the SEG.SEQ cannot be validated; drop the segment
+        // >    and return.
+        // >
+        // > -  If the FIN bit is set, signal the user "connection closing" and
+        // >    return any pending RECEIVEs with same message, advance RCV.NXT
+        // >    over the FIN, and send an acknowledgment for the FIN.  Note
+        // >    that FIN implies PUSH for any segment text not yet delivered to
+        // >    the user.
+        // No TIME-WAIT is kept: a connection whose FIN is acknowledged closes
+        // when the peer's FIN arrives (`close`).
         // DEPARTS: text and a FIN in one segment draw two ACKs, the text's
         // and the FIN's, where RFC 9293 §3.10.7.4 sends one after both.
         if (flags & flag_fin != 0 and !c.peerDone() and seq +% @as(u32, @intCast(data.len)) == c.rcv_nxt) {
