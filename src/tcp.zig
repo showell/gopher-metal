@@ -1019,6 +1019,9 @@ pub const Table = struct {
             c.tx_end = 0;
         }
         c.una +%= advance;
+        // DEPARTS: `wnd` shrinks by each advance the window rule skips, so
+        // the right edge stays where the peer put it, where RFC 9293 keeps
+        // SND.WND and lets SND.UNA + SND.WND move forward.
         // **THE WINDOW IS MEASURED FROM `una`.** When the window rule skipped
         // this segment's window, `wnd` shrinks by the advance, so the right
         // edge stays where the peer put it. (RFC 9293's SND.UNA + SND.WND
@@ -1067,6 +1070,8 @@ pub const Table = struct {
         }
 
         const t = pkt.payload;
+        // DEPARTS: a segment to a port nobody listens on is dropped silently,
+        // where CLOSED (RFC 9293 §3.10.7.1) answers it with a reset.
         if (proto.readBe16(t[2..4]) != self.port) {
             self.passed.not_for_us +%= 1;
             return .{ .event = .nothing };
@@ -1087,6 +1092,9 @@ pub const Table = struct {
 
         var found = self.find(pkt.src_ip, src_port);
 
+        // DEPARTS: RST is checked first, before the sequence number's
+        // acceptability (RFC 9293 §3.10.7.4 checks the sequence first, then
+        // RST); `resetCheck` asks the same question of a reset's number.
         if (flags & flag_rst != 0) {
             // **A RESET MUST NAME RCV.NXT EXACTLY** (RFC 9293 §3.10.7.4,
             // after RFC 5961). One ahead draws a challenge ACK, which a
@@ -1135,6 +1143,9 @@ pub const Table = struct {
         // The table is LISTEN (RFC 9293 §3.10.7.2): a SYN for no connection
         // opens one if there is a slot; anything else is refused.
         const i = found orelse {
+            // DEPARTS: a segment with neither SYN nor ACK is answered with a
+            // reset (`refuse`, RST|ACK, as CLOSED answers it), where LISTEN
+            // (RFC 9293 §3.10.7.2, fourth) drops it.
             if (flags & flag_syn == 0 or flags & flag_ack != 0) {
                 props.reachable(@src(), "tcp: a segment for no connection is refused", null);
                 self.refuse(wire, .{ .mac = pkt.src_mac, .ip = pkt.src_ip, .port = src_port }, seq, number, flags, data.len);
@@ -1172,6 +1183,8 @@ pub const Table = struct {
 
         const c = &self.conns[i];
 
+        // DEPARTS: SYN is checked before the sequence number's acceptability
+        // (RFC 9293 §3.10.7.4 checks the SYN fourth).
         // A repeated SYN in SYN-RECEIVED means our SYN-ACK was lost or is
         // late: it is sent again, from ISS, as Linux does (the RFC's
         // sequence test would send a bare ACK). In any later state it draws
@@ -1185,6 +1198,8 @@ pub const Table = struct {
         }
 
         // No ACK bit: dropped (RFC 9293 §3.10.7.4, fifth check).
+        // DEPARTS: dropped before the first check's answer, so an
+        // unacceptable segment with no ACK draws no ACK in reply.
         if (flags & flag_ack == 0) return .{ .event = .nothing };
 
         // **A SEGMENT THAT IS NOT THE NEXT ONE IS ANSWERED, NOT TAKEN.**
@@ -1215,6 +1230,8 @@ pub const Table = struct {
             // forged one set SND.WL1 to a sequence the peer never reaches,
             // after which the window rule rejects every genuine update.
             // At or before rcv_nxt; half the circle away is neither, and not behind.
+            // DEPARTS: from behind, its ACK still counts, where the RFC drops
+            // an unacceptable segment whole (the paragraph above).
             const behind = acceptable == .behind;
             const done = behind and c.state != .syn_received and
                 self.acknowledge(c, seq, number, window, now);
@@ -1227,6 +1244,9 @@ pub const Table = struct {
         var event: Event = .nothing;
         var fin_acknowledged = false;
         if (c.state == .syn_received) {
+            // DEPARTS: a segment ahead in SYN-RECEIVED is answered and
+            // dropped, its ACK not taken: the handshake completes only on the
+            // next byte.
             if (early) {
                 self.emit(wire, i, flag_ack, c.highest(), "");
                 return .{ .event = .nothing };
@@ -1305,6 +1325,8 @@ pub const Table = struct {
             if (n < data.len) return self.settle(i, event, fin_acknowledged, now);
         }
 
+        // DEPARTS: text and a FIN in one segment draw two ACKs, the text's
+        // and the FIN's, where RFC 9293 §3.10.7.4 sends one after both.
         if (flags & flag_fin != 0 and !c.peerDone() and seq +% @as(u32, @intCast(data.len)) == c.rcv_nxt) {
             c.rcv_nxt +%= 1; // their FIN takes one
             c.peer_half.fire(.fin_received);
