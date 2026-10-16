@@ -2427,3 +2427,161 @@ test "the slot kept for this machine's own connections is never taken by an acce
     _ = handle(&f.table, &f.wire, q.frame(&buf, flag_syn, q.seq, ""), 0);
     try testing.expectEqual(@as(u64, 1), f.table.refused);
 }
+
+// ── SYN-SENT: this machine's own connections (metal-vmm QUEUE 225, 5a) ────
+
+const site_ip = [4]u8{ 10, 0, 2, 2 };
+const the_site: Table.Remote = .{ .mac = client_mac, .ip = site_ip, .port = 80 };
+
+/// Opens a connection to the site and checks its SYN: from an ephemeral
+/// port, to 80, numbered ISS, carrying our segment size. Returns the slot.
+fn openToSite(f: *Fixture) !usize {
+    const i = f.table.connect(&f.wire, the_site, 0) orelse return error.NoSlot;
+    verify(&f.table, &f.wire, 0, .after_transmit);
+    const syn = f.wire.last();
+    try testing.expectEqual(flag_syn, syn.flags);
+    try testing.expectEqual(@as(u16, tcp.ephemeral_first), syn.src_port);
+    try testing.expectEqual(@as(u16, 80), syn.dst_port);
+    try testing.expectEqual(f.table.conns[i].una, syn.seq);
+    try testing.expectEqual(@as(?u16, tcp.our_mss), parseMss(syn.options));
+    try testing.expectEqual(State.syn_sent, f.table.conns[i].state);
+    return i;
+}
+
+/// The site, answering from port 80 to the connection's own port.
+fn siteFor(f: *const Fixture, i: usize) Peer {
+    return .{ .ip = site_ip, .port = 80, .to_port = f.table.conns[i].local_port, .seq = start.peer, .mss = 1000 };
+}
+
+test "SYN-SENT: an acceptable SYN-ACK establishes the connection, and our ACK names the site's next byte (RFC 9293 §3.10.7.3, fourth)" {
+    var f: Fixture = .{};
+    f.init();
+    const i = try openToSite(&f);
+    const iss = f.table.conns[i].una;
+    var p = siteFor(&f, i);
+    p.ack = iss +% 1;
+    var buf: [1600]u8 = undefined;
+    const r = handle(&f.table, &f.wire, p.frame(&buf, flag_syn | flag_ack, p.seq, ""), 3 * ms);
+    try testing.expectEqual(Event.opened, r.event);
+    try testing.expectEqual(i, r.index);
+    const c = &f.table.conns[i];
+    try testing.expectEqual(State.established, c.state);
+    try testing.expectEqual(p.seq +% 1, c.rcv_nxt);
+    try testing.expectEqual(iss +% 1, c.una);
+    try testing.expectEqual(@as(u16, 1000), c.mss);
+    try testing.expectEqual(@as(?i96, null), c.rto_at);
+    const ack = f.wire.last();
+    try testing.expectEqual(flag_ack, ack.flags);
+    try testing.expectEqual(iss +% 1, ack.seq);
+    try testing.expectEqual(p.seq +% 1, ack.ack);
+    try testing.expectEqual(c.local_port, ack.src_port);
+    try testing.expectEqual(@as(u64, 1), f.table.samples); // the handshake is timed
+}
+
+test "SYN-SENT: an ACK of ISS itself, or past SND.NXT, is answered with <SEQ=SEG.ACK><CTL=RST> (RFC 9293 §3.10.7.3, first)" {
+    var f: Fixture = .{};
+    f.init();
+    const i = try openToSite(&f);
+    const iss = f.table.conns[i].una;
+    var buf: [1600]u8 = undefined;
+    for ([_]u32{ iss, iss +% 2 }, 1..) |number, n| {
+        var p = siteFor(&f, i);
+        p.ack = number;
+        const from = f.wire.count;
+        _ = handle(&f.table, &f.wire, p.frame(&buf, flag_syn | flag_ack, p.seq, ""), 3 * ms);
+        try testing.expectEqual(from + 1, f.wire.count);
+        const rst = f.wire.last();
+        try testing.expectEqual(flag_rst, rst.flags);
+        try testing.expectEqual(number, rst.seq);
+        try testing.expectEqual(State.syn_sent, f.table.conns[i].state);
+        try testing.expectEqual(@as(u64, n), f.table.syn_sent_bad_acks);
+    }
+    // A reset with an unacceptable ACK is dropped, not answered.
+    var p = siteFor(&f, i);
+    p.ack = iss;
+    const from = f.wire.count;
+    _ = handle(&f.table, &f.wire, p.frame(&buf, flag_rst | flag_ack, 0, ""), 4 * ms);
+    try testing.expectEqual(from, f.wire.count);
+    try testing.expectEqual(State.syn_sent, f.table.conns[i].state);
+}
+
+test "SYN-SENT: a reset with an acceptable ACK refuses the connection and sends nothing back; one with no ACK is dropped (RFC 9293 §3.10.7.3, second)" {
+    var f: Fixture = .{};
+    f.init();
+    const i = try openToSite(&f);
+    const iss = f.table.conns[i].una;
+    var buf: [1600]u8 = undefined;
+    var p = siteFor(&f, i);
+    // No ACK: dropped. Its number is 0, which is RCV.NXT's too before the
+    // handshake: a dispatch that took the synchronized states' RST check
+    // first would close the connection here.
+    var from = f.wire.count;
+    _ = handle(&f.table, &f.wire, p.frame(&buf, flag_rst, 0, ""), 2 * ms);
+    try testing.expectEqual(State.syn_sent, f.table.conns[i].state);
+    try testing.expectEqual(from, f.wire.count);
+    // RST|ACK, as Linux refuses a port: <SEQ=0><ACK=ISS+1><CTL=RST,ACK>.
+    p.ack = iss +% 1;
+    from = f.wire.count;
+    const r = handle(&f.table, &f.wire, p.frame(&buf, flag_rst | flag_ack, 0, ""), 3 * ms);
+    try testing.expectEqual(Event.closed, r.event);
+    try testing.expectEqual(State.closed, f.table.conns[i].state);
+    try testing.expectEqual(@as(u64, 1), f.table.connects_refused);
+    try testing.expectEqual(from, f.wire.count);
+}
+
+test "SYN-SENT: a SYN with no ACK, a simultaneous open, is dropped and counted; a bare acceptable ACK is dropped (RFC 9293 §3.10.7.3, fourth and fifth)" {
+    var f: Fixture = .{};
+    f.init();
+    const i = try openToSite(&f);
+    const iss = f.table.conns[i].una;
+    var buf: [1600]u8 = undefined;
+    var p = siteFor(&f, i);
+    const from = f.wire.count;
+    _ = handle(&f.table, &f.wire, p.frame(&buf, flag_syn, p.seq, ""), 2 * ms);
+    try testing.expectEqual(@as(u64, 1), f.table.simultaneous_opens_refused);
+    try testing.expectEqual(State.syn_sent, f.table.conns[i].state);
+    p.ack = iss +% 1;
+    _ = handle(&f.table, &f.wire, p.frame(&buf, flag_ack, p.seq, ""), 3 * ms);
+    try testing.expectEqual(State.syn_sent, f.table.conns[i].state);
+    try testing.expectEqual(from, f.wire.count);
+}
+
+test "SYN-SENT: a SYN unanswered is sent again by the timer, untimed, and the connection given up after the last" {
+    var f: Fixture = .{};
+    f.init();
+    const i = try openToSite(&f);
+    const iss = f.table.conns[i].una;
+    const from = f.wire.count;
+    transmit(&f.table, &f.wire, f.table.conns[i].rto_at.?);
+    try testing.expectEqual(from + 1, f.wire.count);
+    try testing.expectEqual(flag_syn, f.wire.last().flags);
+    try testing.expectEqual(iss, f.wire.last().seq);
+    try testing.expectEqual(@as(?i96, null), f.table.conns[i].timed_at);
+    while (f.table.conns[i].state != .closed) transmit(&f.table, &f.wire, f.table.conns[i].rto_at.?);
+    try testing.expectEqual(@as(u64, 1), f.table.given_up);
+}
+
+test "synSent: each of the RFC's answers, by its ACK and its bits (RFC 9293 §3.10.7.3)" {
+    var rx: [16]u8 = undefined;
+    var tx: [16]u8 = undefined;
+    const c: Conn = .{ .rx = &rx, .tx = &tx, .state = .syn_sent, .una = 0xFFFF_FFFF }; // ISS; SND.NXT is 0
+    const Row = struct { ctl: tcp.Ctl, ack: u32, want: tcp.SynSent };
+    const rows = [_]Row{
+        .{ .ctl = .{ .syn = true, .ack = true }, .ack = 0, .want = .established }, // ISS + 1, across zero
+        .{ .ctl = .{ .syn = true, .ack = true }, .ack = 0xFFFF_FFFF, .want = .reset_it }, // ISS itself
+        .{ .ctl = .{ .syn = true, .ack = true }, .ack = 1, .want = .reset_it }, // past SND.NXT
+        .{ .ctl = .{ .rst = true, .ack = true }, .ack = 0, .want = .refused },
+        .{ .ctl = .{ .rst = true, .ack = true }, .ack = 1, .want = .drop }, // a reset, unacceptable
+        .{ .ctl = .{ .rst = true }, .ack = 0, .want = .drop },
+        .{ .ctl = .{ .syn = true }, .ack = 0, .want = .simultaneous_open },
+        .{ .ctl = .{ .ack = true }, .ack = 0, .want = .drop },
+        .{ .ctl = .{}, .ack = 0, .want = .drop },
+    };
+    for (rows) |r| {
+        const seg: tcp.Segment = .{ .src_port = 80, .dst_port = 49152, .seq = 5, .ack = r.ack, .ctl = r.ctl, .window = 100 };
+        testing.expectEqual(r.want, tcp.synSent(&c, seg)) catch |e| {
+            std.debug.print("synSent: ctl {any}, ack {x}\n", .{ r.ctl, r.ack });
+            return e;
+        };
+    }
+}

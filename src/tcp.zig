@@ -112,6 +112,9 @@ pub const our_mss: u16 = 1460;
 /// normalization hunt, 2026-10-10).
 pub const min_mss: u16 = 88;
 pub const mss_option = [4]u8{ 2, 4, our_mss >> 8, our_mss & 0xFF };
+/// Where ephemeral ports start unless the host seeds another start: the
+/// dynamic range's first (RFC 6335 §6).
+pub const ephemeral_first: u16 = 49152;
 
 // **THE RETRANSMISSION CLOCK AND ITS BOUNDS** (RFC 6298, RFC 5681;
 // tcp_timeouts.zig).
@@ -134,6 +137,9 @@ pub const State = enum {
     closed,
     /// SYN-RECEIVED: our SYN-ACK is out, its acknowledgement not yet in.
     syn_received,
+    /// SYN-SENT: our SYN is out (an active OPEN, `Table.connect`), the
+    /// peer's SYN-ACK not yet in.
+    syn_sent,
     /// ESTABLISHED, and CLOSE-WAIT once the peer has finished.
     established,
     /// Our FIN is queued, sent or acknowledged: FIN-WAIT-1, FIN-WAIT-2
@@ -370,7 +376,7 @@ pub const Conn = struct {
     }
 
     pub fn open(self: *const Conn) bool {
-        return self.state == .established or self.state == .syn_received;
+        return self.state == .established or self.state == .syn_received or self.state == .syn_sent;
     }
 
     /// **SND.NXT: just past the furthest thing we have ever sent** (BSD's
@@ -380,7 +386,7 @@ pub const Conn = struct {
     /// duplicate ACK.
     pub fn highest(self: *const Conn) u32 {
         var n = self.una +% @as(u32, @intCast(self.high));
-        if (self.state == .syn_received) n +%= 1;
+        if (self.state == .syn_received or self.state == .syn_sent) n +%= 1; // the SYN takes one
         if (self.fin.in(.numbered)) n +%= 1;
         return n;
     }
@@ -491,6 +497,8 @@ pub const ResetCheck = arrives.ResetCheck;
 pub const resetCheck = arrives.resetCheck;
 pub const AckCheck = arrives.AckCheck;
 pub const ackCheck = arrives.ackCheck;
+pub const SynSent = arrives.SynSent;
+pub const synSent = arrives.synSent;
 
 pub const Table = struct {
     local_ip: [4]u8,
@@ -515,6 +523,16 @@ pub const Table = struct {
     refused: u64 = 0,
     /// Half-opens that gave way to a new SYN (see `oldestHalfOpen`).
     half_open_given_way: u64 = 0,
+    /// **THIS MACHINE'S OWN CONNECTIONS** (`connect`, metal-vmm QUEUE 225):
+    /// opened; refused by the peer's reset; SYN-ACKs whose ACK named
+    /// something else, reset; and simultaneous opens, dropped.
+    connects: u64 = 0,
+    connects_refused: u64 = 0,
+    syn_sent_bad_acks: u64 = 0,
+    simultaneous_opens_refused: u64 = 0,
+    /// **THE NEXT EPHEMERAL PORT** (RFC 6056): seeded by the host, counted
+    /// up from there, never reused while the run has others to give.
+    ephemeral_next: u16 = ephemeral_first,
     /// **THE RECENTLY GIVEN WAY, KEPT TO BE REVIVED**, newest over oldest. A
     /// real client whose handshake outlasted `min_rto_ns` (a lost SYN-ACK or
     /// ACK) can lose its slot to a flood's SYN; its ACK finds its entry here
@@ -781,6 +799,96 @@ pub const Table = struct {
         }
     }
 
+    /// The peer an active OPEN is to.
+    pub const Remote = struct { mac: [6]u8, ip: [4]u8, port: u16 };
+
+    /// **AN ACTIVE OPEN** (RFC 9293 §3.10.1, OPEN, active): a slot, which
+    /// may be the one kept for this machine (`reserved_for_initiated`), an
+    /// ephemeral port of its own, ISS from the table's source, and the SYN,
+    /// with our segment size: <SEQ=ISS><CTL=SYN>. The connection is
+    /// SYN-SENT until the peer answers (`synSent`), and its SYN is sent
+    /// again by the retransmission timer. Null when no slot is free.
+    pub fn connect(self: *Table, wire: anytype, to: Remote, now: i96) ?usize {
+        const slot = self.free(.initiated) orelse return null;
+        const c = &self.conns[slot];
+        c.reset();
+        c.role = .initiated;
+        c.peer_ip = to.ip;
+        c.peer_mac = to.mac;
+        c.peer_port = to.port;
+        c.local_port = self.nextEphemeral();
+        c.una = self.isn(); // ISS; SND.NXT is ISS + 1 once the SYN is out
+        c.state = .syn_sent;
+        c.opened_at = now;
+        c.heard_at = now;
+        c.rto_at = now + c.rto_ns;
+        self.connects += 1;
+        self.arrivals += 1;
+        c.serial = self.arrivals;
+        self.noteSlots();
+        self.emit(wire, slot, flag_syn, c.una, "");
+        // The handshake is the first RTT sample, as for an accepted one.
+        c.time(now, c.una +% 1);
+        return slot;
+    }
+
+    /// The next ephemeral port no connection holds, counting up and
+    /// wrapping within the dynamic range (RFC 6335 §6: 49152-65535).
+    fn nextEphemeral(self: *Table) u16 {
+        while (true) {
+            const port = self.ephemeral_next;
+            self.ephemeral_next = if (port == 0xFFFF) ephemeral_first else port + 1;
+            if (port == self.port or self.initiatedOn(port)) continue;
+            return port;
+        }
+    }
+
+    /// **WHAT SYN-SENT DOES WITH THE ANSWER** (RFC 9293 §3.10.7.3): `synSent`
+    /// decides, and this acts.
+    fn synSentArrives(self: *Table, wire: anytype, i: usize, seg: Segment, now: i96) Result {
+        const c = &self.conns[i];
+        switch (arrives.synSent(c, seg)) {
+            .drop => return .{ .event = .nothing },
+            .reset_it => {
+                // <SEQ=SEG.ACK><CTL=RST>
+                self.syn_sent_bad_acks +%= 1;
+                self.segment(wire, .{ .mac = c.peer_mac, .ip = c.peer_ip, .port = c.peer_port, .from = c.local_port }, flag_rst, seg.ack, 0, 0, "");
+                return .{ .event = .nothing };
+            },
+            .refused => {
+                props.reachable(@src(), "tcp: a connection of our own is refused by the peer's reset", .{ .conn = i });
+                self.abandon(wire, i, .refused);
+                return .{ .event = .closed, .index = i };
+            },
+            .simultaneous_open => {
+                self.simultaneous_opens_refused +%= 1;
+                return .{ .event = .nothing };
+            },
+            .established => {
+                // "RCV.NXT is set to SEG.SEQ+1, IRS is set to SEG.SEQ. SND.UNA
+                // should be advanced to equal SEG.ACK", and the window and
+                // segment size are the SYN-ACK's.
+                c.rcv_nxt = seg.seq +% 1;
+                c.una = seg.ack;
+                c.wnd = seg.window;
+                c.wl1 = seg.seq;
+                c.wl2 = seg.ack;
+                const named = parseMss(seg.options) orelse default_mss;
+                c.mss = std.math.clamp(named, min_mss, our_mss);
+                c.rto_at = null;
+                c.retries = 0;
+                c.heard_at = now;
+                self.measure(c, seg.ack, now);
+                if (c.srtt_ns == 0) c.rto_ns = first_rto_ns;
+                c.state = .established;
+                props.reachable(@src(), "tcp: a connection of our own is established", .{ .conn = i });
+                // <SEQ=SND.NXT><ACK=RCV.NXT><CTL=ACK>
+                self.emit(wire, i, flag_ack, c.highest(), "");
+                return .{ .event = .opened, .index = i };
+            },
+        }
+    }
+
     /// Queues as much of `bytes` as fits and returns how much; `transmit`
     /// sends it. Takes nothing unless established with no FIN queued.
     pub fn queue(self: *Table, i: usize, bytes: []const u8) usize {
@@ -817,7 +925,9 @@ pub const Table = struct {
     }
 
     /// Why a connection is given up on, for its count.
-    pub const Abandon = enum { silent_peer, fin_wait, slow_client, stream_behind, unfinished };
+    /// `refused`: the peer answered our SYN with a reset (RFC 9293
+    /// §3.10.7.3, "error: connection reset"), so nothing is sent back.
+    pub const Abandon = enum { silent_peer, fin_wait, slow_client, stream_behind, unfinished, refused };
 
     /// Gives up on connection `i` with a reset, so a peer waiting for the
     /// rest of an answer, or for its handshake, does not wait out its timer.
@@ -827,9 +937,10 @@ pub const Table = struct {
             .slow_client => self.abandoned_slow_client +%= 1,
             .stream_behind => self.abandoned_stream_behind +%= 1,
             .unfinished => self.abandoned_unfinished +%= 1,
+            .refused => self.connects_refused +%= 1,
         }
         const c = &self.conns[i];
-        if (c.state != .closed) {
+        if (c.state != .closed and why != .refused) {
             self.emit(wire, i, flag_rst | flag_ack, c.highest(), "");
         }
         c.reset();
@@ -879,6 +990,17 @@ pub const Table = struct {
                 self.fin_waits_expired += 1;
                 self.abandon(wire, i, .fin_wait);
             };
+            return;
+        }
+
+        if (c.state == .syn_sent) {
+            // Our SYN was lost, or its SYN-ACK was (RFC 9293 §3.8.1).
+            if (!expired) return;
+            if (!timeouts.backoff(c, now)) return self.giveUp(wire, i);
+            self.retransmits += 1;
+            props.reachable(@src(), "tcp: a lost SYN is sent again", .{ .conn = i });
+            c.timed_at = null; // Karn: no telling which copy the SYN-ACK answers
+            self.emit(wire, i, flag_syn, c.una, "");
             return;
         }
 
@@ -1135,6 +1257,11 @@ pub const Table = struct {
         const data = seg.data;
 
         var found = self.find(pkt.src_ip, src_port, dst_port);
+
+        // **SYN-SENT FIRST** (RFC 9293 §3.10.7.3): a connection of our own,
+        // waiting for its SYN-ACK, is decided by `synSent` before the RST
+        // and SYN checks below, which are the synchronized states'.
+        if (found) |i| if (self.conns[i].state == .syn_sent) return self.synSentArrives(wire, i, seg, now);
 
         // DEPARTS: RST is checked first, before the sequence number's
         // acceptability (RFC 9293 §3.10.7.4 checks the sequence first, then
@@ -1451,6 +1578,9 @@ pub fn writeCounts(t: *const Table, w: *std.Io.Writer) std.Io.Writer.Error!void 
     });
     try w.print("{d} resets from peers ({d} inexact ones challenged), {d} bad handshake ACKs reset; given up by the host: {d} clients that stopped taking a response, {d} streams too far behind, {d} closes of an unfinished handshake; ", .{
         t.resets_received, t.challenge_acks, t.bad_ack_resets, t.abandoned_slow_client, t.abandoned_stream_behind, t.abandoned_unfinished,
+    });
+    try w.print("{d} connections of our own opened ({d} refused, {d} bad SYN-ACKs reset, {d} simultaneous opens dropped); ", .{
+        t.connects, t.connects_refused, t.syn_sent_bad_acks, t.simultaneous_opens_refused,
     });
     try w.print("{d} round trips measured, the newest {d} ns", .{ t.samples, t.measured_ns });
 }

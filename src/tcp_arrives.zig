@@ -57,3 +57,42 @@ pub fn ackCheck(c: *const Conn, number: u32) AckCheck {
     if (advance > flight) return .ignore;
     return if (advance == 0) .duplicate else .new;
 }
+
+/// **IF THE STATE IS SYN-SENT** (RFC 9293 §3.10.7.3): what the answer to our
+/// SYN means. In SYN-SENT, `una` is ISS and SND.NXT is ISS + 1
+/// (`highest`). The steps are the RFC's, in its order (its words to be
+/// quoted in chunk 3b; paraphrased here):
+/// - **First, the ACK bit.** If it is set and SEG.ACK =< ISS or SEG.ACK >
+///   SND.NXT, the ACK is not acceptable: a reset is sent, <SEQ=SEG.ACK>
+///   <CTL=RST>, unless the segment is itself a reset, which is dropped. If
+///   SND.UNA < SEG.ACK =< SND.NXT, the ACK is acceptable.
+/// - **Second, the RST bit.** With an acceptable ACK, the connection is
+///   refused ("error: connection reset") and closed; with no ACK, the
+///   segment is dropped.
+/// - **Third, the security**: not applicable; there are no compartments.
+/// - **Fourth, the SYN bit.** With an acceptable ACK, the connection is
+///   ESTABLISHED and our ACK is sent; with no ACK, the RFC enters
+///   SYN-RECEIVED (a simultaneous open).
+/// - **Fifth**, neither SYN nor RST: the segment is dropped.
+/// DEPARTS: a simultaneous open (a SYN with no ACK) is dropped and counted
+/// (`simultaneous_opens_refused`), with no reset, where the RFC answers it
+/// with a SYN-ACK and enters SYN-RECEIVED.
+/// DEPARTS: text or a FIN on the SYN-ACK is not taken, where the RFC queues
+/// it; the peer sends it again, since our ACK does not cover it.
+pub const SynSent = enum { reset_it, drop, refused, established, simultaneous_open };
+
+pub fn synSent(c: *const Conn, seg: tcp.Segment) SynSent {
+    // First, the ACK bit: acceptable when SND.UNA < SEG.ACK =< SND.NXT.
+    const acceptable: ?bool = if (!seg.ctl.ack) null else sq.after(seg.ack, c.una) and sq.atOrAfter(c.highest(), seg.ack);
+    if (acceptable == false) return if (seg.ctl.rst) .drop else .reset_it;
+    // Second, the RST bit.
+    if (seg.ctl.rst) return if (acceptable == true) .refused else .drop;
+    // Third, the security: not applicable.
+    // Fourth, the SYN bit.
+    if (seg.ctl.syn) {
+        if (acceptable == true) return .established;
+        return .simultaneous_open;
+    }
+    // Fifth, neither SYN nor RST.
+    return .drop;
+}

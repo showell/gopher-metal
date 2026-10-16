@@ -5,9 +5,12 @@
 tcp: a SYN finds the table full, and nothing to give way
 tcp: a backed-off RTO stays under the cap
 tcp: a caller consumes no more than is pending
+tcp: a connection of our own is established
+tcp: a connection of our own is refused by the peer's reset
 tcp: a connection's timeouts stay within its retries
 tcp: a damaged segment is dropped
 tcp: a given-way half-open is revived by its client's ACK
+tcp: a lost SYN is sent again
 tcp: a lost SYN-ACK is sent again
 tcp: a measured RTO is within its bounds
 tcp: a peer names a segment size under the least, and is sent the least

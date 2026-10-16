@@ -124,7 +124,7 @@ fn safety(c: *const Conn) ?Rule {
     if (!(c.sent <= c.high and c.high <= c.queued())) return .sent_past_high_or_queue;
     if ((c.state == .closing) != (!c.fin.is(.none))) return .closing_disagrees_with_fin;
     if (c.fin.is(.acknowledged) and (c.queued() != 0 or c.high != 0)) return .fin_acknowledged_with_bytes_left;
-    if (c.state == .syn_received) {
+    if (c.state == .syn_received or c.state == .syn_sent) {
         if (c.queued() != 0 or c.end != 0) return .handshake_with_bytes;
         if (c.peerDone()) return .peer_finished_during_handshake;
     }
@@ -183,7 +183,7 @@ const liveness = [_]Row{
 };
 
 fn inHandshake(c: *const Conn) bool {
-    return c.state == .syn_received;
+    return c.state == .syn_received or c.state == .syn_sent;
 }
 fn inFlight(c: *const Conn) bool {
     return c.highest() != c.una;
