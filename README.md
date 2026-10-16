@@ -4,7 +4,9 @@ A small operating-system kernel, written in Zig, that runs one web
 application on a cloud machine with nothing else under it. No Linux, no libc,
 no system calls: the kernel boots the machine, drives the network card and the
 disks, and serves HTTP itself. It has served
-[lynrummy.com](https://lynrummy.com) since 2026-10-04.
+[lynrummy.com](https://lynrummy.com) since 2026-10-04, and
+[dogpark.lynrummy.com](https://dogpark.lynrummy.com), a second application
+on a droplet of its own, since 2026-10-16.
 
 This repo was called **gopher-metal** until 2026-10-13. GitHub redirects the
 old links, and dated documents here still use the old name.
@@ -82,11 +84,13 @@ two.
 - **[angry-gopher](https://github.com/showell/angry-gopher)**, Steve
   Howell's personal site, lynrummy.com: a chat and a handful of small apps
   (Lyn Rummy, a two-player rummy game, among them). **In production on this kernel.**
-- **[dog-park](https://github.com/showell/dog-park)**, a small game on
-  zig-webbox, Linux-only today. This repo neither builds nor judges it
-  (8af778b: an application is not this repo's test of itself). dog-park
-  will build its own image, with this repo as a dependency, through
-  `addAppKernel` (below; metal-vmm QUEUE 215).
+- **[dog-park](https://github.com/showell/dog-park)**, a small herding
+  game on zig-webbox. **In production on this kernel since 2026-10-16**, at
+  dogpark.lynrummy.com, on its own droplet. dog-park builds its own image,
+  with this repo as a dependency, through `addAppKernel` (below; metal-vmm
+  QUEUE 215) and `droplet/app_image.py`, and runs its own QEMU gate. This
+  repo neither builds nor judges it (8af778b: an application is not this
+  repo's test of itself).
 
 **The same source, the same answers.** angry-gopher builds as an ordinary
 Linux program and as a kernel from this repo. The checks here send the same
@@ -105,10 +109,10 @@ Six repos, kept separate, checked out side by side:
                     zig-webbox  (the library)
                     /          \
        angry-gopher              dog-park
-     (lynrummy.com)              (a game; Linux today)
-           |                         :
-           |                         : (planned: dog-park builds its
-           |                         :  own image, QUEUE 215)
+     (lynrummy.com)        (dogpark.lynrummy.com)
+           |                         |
+           |                         | (builds its own image,
+           |                         |  through addAppKernel)
               zig-metal-unikernel  (this repo: the machine)
                     /          \
             metal-vmm            zig-coverage-sdk
@@ -123,8 +127,8 @@ Six repos, kept separate, checked out side by side:
 - **[angry-gopher](https://github.com/showell/angry-gopher)**: the
   application this repo builds and serves, compiled from its checkout as it
   is; nothing is copied in. **[dog-park](https://github.com/showell/dog-park)**:
-  an application this repo does not build; it will build itself into a
-  kernel through `addAppKernel`.
+  an application this repo does not build; it builds itself into a kernel
+  through `addAppKernel`, and its image through `droplet/app_image.py`.
 - **[metal-vmm](https://github.com/showell/metal-vmm)**: a deterministic
   hypervisor of our own, on Linux's KVM, used only for testing. It runs the
   real kernel with time, the network and the disks under the test's control,
@@ -155,6 +159,12 @@ Six repos, kept separate, checked out side by side:
   kernel's (this repo's commit, uptime, clock, connections, memory, disks,
   disk work, and the newest lines of the kernel's log). Linux shows the same
   page with its own half.
+
+**Dog Park runs the same way**, on a droplet of its own on the same private
+network, behind the same Caddy, but with **one disk**: its image holds the
+kernel, the site and the data together, so a new release starts its games
+over (dog-park's DEPLOY.md). It is the first application in production that
+this repo does not build.
 
 ## Using it
 
@@ -346,7 +356,7 @@ step 2 again; the old key's scripts are refused from then on.
 with the tools it used, backups, and the way back.
 `droplet/new_volume.py` builds a new, empty data volume.
 
-## Where it stands (2026-10-15)
+## Where it stands (2026-10-16)
 
 **Serving: tag `v30`**, deployed 2026-10-14: this repo at `1d8642c`,
 angry-gopher at `2e560b2b`, zig-webbox at `92ea157`. The way back is `v29`.
@@ -371,7 +381,7 @@ script route's key is set (2026-10-14); its first three runs are in metal-vmm's 
 | FAT16 and FAT32, read and write | served | long names, folders, append, replace, delete; checked by `fsck` and by Linux reading what it wrote. Production's volume is FAT32 |
 | clocks and entropy | served | the CMOS real-time clock; the TSC's rate measured against the PIT; random bytes from virtio-rng where the machine has one, and RDRAND |
 | angry-gopher's whole site | served | every route, judged equal to the Linux build, including chat's live streams and uploads |
-| another repository's application as a kernel | built, not served | `addAppKernel`, called from that repository's own build.zig; this repo neither builds nor judges any application but angry-gopher (an application is not this repo's test of itself) |
+| another repository's application as a kernel | served | Dog Park, on dogpark.lynrummy.com since 2026-10-16: dog-park's image `ab222a2`, built with this repo at `67faf97` (`master`, newer than v30), through `addAppKernel` and `droplet/app_image.py`; one disk, no volume. This repo neither builds nor judges any application but angry-gopher (an application is not this repo's test of itself); Dog Park's own QEMU gate and droplet rehearsal check its image |
 | file contents kept in memory | served | after their first read, write-through (`page_cache_mib`, 64 MiB by default) |
 | large disk requests | served | a run of contiguous clusters is one request of up to 1 MiB (the least of the disk's, the controller's and our own limit) |
 | the FAT written a sector at a time | served | v29's measured disk requests for a 1.8 MB, 10 MB and 100 MB upload: 59, 26 and 115 (v28: 93, 218 and 2,017) |
