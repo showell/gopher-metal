@@ -36,6 +36,35 @@ pub const min_rto_ns: u64 = 200 * tcp.ns_per_ms;
 pub const first_rto_ns: u64 = min_rto_ns;
 pub const max_rto_ns: u64 = 5 * tcp.ns_per_s;
 pub const max_retries: u8 = 6;
+/// **OUR SYN'S FIRST WAIT** (metal-vmm docs/TWO-KERNELS.md §8, decision 2):
+/// 25 ms, doubling, for a connection of our own only. `min_rto_ns` is about a
+/// peer that delays its ACKs, and nobody delays a SYN-ACK. The server's
+/// SYN-ACK keeps the 200 ms floor.
+pub const syn_first_rto_ns: u64 = 25 * tcp.ns_per_ms;
+
+/// **HOW LONG A CONNECTION OF OUR OWN MAY TAKE** (RFC 9293 §3.10.8, "USER
+/// TIMEOUT", which leaves the value to the user; TWO-KERNELS.md §5): to be
+/// established (`connect_ns`, from the SYN), with nothing heard from the
+/// peer (`idle_ns`), and in all (`total_ns`, from the SYN). No defaults: each
+/// caller says what its run can wait, and a test's values are not a
+/// production run's.
+pub const Deadlines = struct { connect_ns: u64, idle_ns: u64, total_ns: u64 };
+
+/// Which of a connection's `Deadlines` has passed.
+pub const Deadline = enum { connect, total, idle };
+
+/// **THE FIRST OF `c`'s DEADLINES TO HAVE PASSED BY `now`**, or null: none
+/// has, or `c` has none (an accepted connection, which the host bounds).
+/// `connect` counts only while SYN-SENT; `total` is named before `idle`
+/// when both have passed.
+pub fn pastDeadline(c: *const Conn, now: i96) ?Deadline {
+    const d = c.deadlines orelse return null;
+    if (c.state == .syn_sent and now >= c.opened_at + d.connect_ns) return .connect;
+    if (now >= c.opened_at + d.total_ns) return .total;
+    if (now >= c.heard_at + d.idle_ns) return .idle;
+    return null;
+}
+
 /// Duplicate ACKs that mean a segment is lost (RFC 5681): the peer says at
 /// once what the timer would only guess a round trip later.
 pub const dupacks_before_resend: u8 = 3;

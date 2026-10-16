@@ -50,6 +50,7 @@ pub const Rule = enum {
 
     // ── liveness: the rows of `liveness` ────────────────────────────────────
     handshake_without_a_timer,
+    syn_sent_without_a_timer,
     in_flight_without_a_timer,
     queued_without_a_timer,
     fin_queued_and_not_sent,
@@ -75,6 +76,7 @@ pub const Rule = enum {
             .retries_past_the_limit => "more timeouts than max_retries without giving up",
             .window_timer_without_news => "the window-update timer is armed, and no reopened window is being repeated",
             .handshake_without_a_timer => "a SYN-ACK is unanswered and nothing will send it again",
+            .syn_sent_without_a_timer => "our SYN is unanswered and nothing will send it again",
             .in_flight_without_a_timer => "bytes or a FIN are on the wire unacknowledged and nothing will send them again",
             .queued_without_a_timer => "bytes are queued and unsent, a turn has passed, and no timer will probe for room",
             .fin_queued_and_not_sent => "our FIN is queued behind nothing, and a turn passed without sending it",
@@ -82,7 +84,7 @@ pub const Rule = enum {
             .reopened_window_not_timed => "a reopened window was announced and a turn passed without timing its repeat",
             .reopened_window_without_a_timer => "a reopened window is said and not yet heard, and nothing will say it again",
             .reopened_window_not_announced => "the peer last saw a shut window, there is room now, and a turn passed without saying so",
-            .deadline_passed => "a deadline is in the past after a turn that should have acted on it",
+            .deadline_passed => "a deadline is in the past after a turn that should have acted on it, a connection's own `Deadlines` among them",
         };
     }
 };
@@ -106,13 +108,19 @@ pub fn checkConn(c: *const Conn, now: i96, phase: Phase) ?Rule {
     if (phase == .after_transmit) {
         if (passed(c.rto_at, now) or passed(c.fin_wait_until, now) or passed(c.update_at, now))
             return .deadline_passed;
+        // A connection of our own past one of its bounds is let go by the
+        // turn that finds it so (tcp.zig's `transmitOne`).
+        if (c.deadlines) |d| {
+            if (c.state == .syn_sent and passed(c.opened_at + d.connect_ns, now)) return .deadline_passed;
+            if (passed(c.opened_at + d.total_ns, now) or passed(c.heard_at + d.idle_ns, now)) return .deadline_passed;
+        }
     }
     return null;
 }
 
 /// A slot that is free has been reset whole: nothing armed, nothing held.
 fn free(c: *const Conn) ?Rule {
-    if (c.rto_at != null or c.fin_wait_until != null or c.update_at != null or c.window_news != .none)
+    if (c.rto_at != null or c.deadlines != null or c.fin_wait_until != null or c.update_at != null or c.window_news != .none)
         return .closed_holds_a_deadline;
     if (c.queued() != 0 or c.start != 0 or c.end != 0) return .closed_holds_bytes;
     return null;
@@ -160,6 +168,9 @@ const liveness = [_]Row{
     // Our SYN-ACK, until the handshake's last ACK comes: the retransmission
     // timer sends it again, and gives up after max_retries.
     .{ .rule = .handshake_without_a_timer, .owes = &inHandshake, .covered = &rtoArmed },
+    // Our SYN, until its SYN-ACK comes: the retransmission timer sends it
+    // again, from 25 ms; `deadlines.connect_ns` and max_retries give up.
+    .{ .rule = .syn_sent_without_a_timer, .owes = &synSent, .covered = &rtoArmed },
     // Bytes or a FIN on the wire, unacknowledged: the retransmission timer.
     .{ .rule = .in_flight_without_a_timer, .owes = &inFlight, .covered = &rtoArmed },
     // Bytes queued and not yet sent: the next turn sends what the window
@@ -183,7 +194,10 @@ const liveness = [_]Row{
 };
 
 fn inHandshake(c: *const Conn) bool {
-    return c.state == .syn_received or c.state == .syn_sent;
+    return c.state == .syn_received;
+}
+fn synSent(c: *const Conn) bool {
+    return c.state == .syn_sent;
 }
 fn inFlight(c: *const Conn) bool {
     return c.highest() != c.una;
@@ -351,5 +365,41 @@ test "safety rules fire on inconsistent bookkeeping" {
 
     c = conn(&rx, &tx);
     c.rto_at = 5; // a free slot with a timer
+    try testing.expectEqual(@as(?Rule, .closed_holds_a_deadline), checkConn(&c, 0, .after_handle));
+}
+
+test "our SYN unanswered with its timer cleared is owed (metal-vmm QUEUE 225, 5b)" {
+    var rx: [64]u8 = undefined;
+    var tx: [64]u8 = undefined;
+    var c = conn(&rx, &tx);
+    c.state = .syn_sent;
+    c.rto_at = 25;
+    try testing.expectEqual(@as(?Rule, null), checkConn(&c, 0, .after_transmit));
+    c.rto_at = null;
+    try testing.expectEqual(@as(?Rule, .syn_sent_without_a_timer), checkConn(&c, 0, .after_handle));
+    try testing.expectEqual(@as(?Rule, .syn_sent_without_a_timer), checkConn(&c, 0, .after_transmit));
+}
+
+test "a connection of our own past one of its deadlines after a turn is a deadline passed" {
+    var rx: [64]u8 = undefined;
+    var tx: [64]u8 = undefined;
+    var c = conn(&rx, &tx);
+    c.state = .syn_sent;
+    c.rto_at = 1000;
+    c.opened_at = 10;
+    c.heard_at = 10;
+    c.deadlines = .{ .connect_ns = 150, .idle_ns = 400, .total_ns = 900 };
+    try testing.expectEqual(@as(?Rule, null), checkConn(&c, 159, .after_transmit));
+    try testing.expectEqual(@as(?Rule, .deadline_passed), checkConn(&c, 160, .after_transmit));
+    try testing.expectEqual(@as(?Rule, null), checkConn(&c, 160, .after_handle)); // the turn's to act on
+    c.state = .established; // connect no longer counts
+    try testing.expectEqual(@as(?Rule, null), checkConn(&c, 409, .after_transmit));
+    try testing.expectEqual(@as(?Rule, .deadline_passed), checkConn(&c, 410, .after_transmit)); // idle
+    c.heard_at = 600;
+    try testing.expectEqual(@as(?Rule, null), checkConn(&c, 909, .after_transmit));
+    try testing.expectEqual(@as(?Rule, .deadline_passed), checkConn(&c, 910, .after_transmit)); // total
+    // A free slot keeps no deadlines.
+    c = conn(&rx, &tx);
+    c.deadlines = .{ .connect_ns = 1, .idle_ns = 1, .total_ns = 1 };
     try testing.expectEqual(@as(?Rule, .closed_holds_a_deadline), checkConn(&c, 0, .after_handle));
 }

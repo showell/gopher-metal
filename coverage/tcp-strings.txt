@@ -6,6 +6,7 @@ tcp: a SYN finds the table full, and nothing to give way
 tcp: a backed-off RTO stays under the cap
 tcp: a caller consumes no more than is pending
 tcp: a connection of our own is established
+tcp: a connection of our own is let go at a deadline
 tcp: a connection of our own is refused by the peer's reset
 tcp: a connection's timeouts stay within its retries
 tcp: a damaged segment is dropped

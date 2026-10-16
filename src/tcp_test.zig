@@ -2436,7 +2436,16 @@ const the_site: Table.Remote = .{ .mac = client_mac, .ip = site_ip, .port = 80 }
 /// Opens a connection to the site and checks its SYN: from an ephemeral
 /// port, to 80, numbered ISS, carrying our segment size. Returns the slot.
 fn openToSite(f: *Fixture) !usize {
-    const i = f.table.connect(&f.wire, the_site, 0) orelse return error.NoSlot;
+    return openToSiteWithin(f, far);
+}
+
+/// Deadlines no 5a test reaches.
+const far: tcp.Deadlines = .{ .connect_ns = 3600 * tcp.ns_per_s, .idle_ns = 3600 * tcp.ns_per_s, .total_ns = 3600 * tcp.ns_per_s };
+/// TWO-KERNELS.md §5's metal <-> metal values.
+const pair: tcp.Deadlines = .{ .connect_ns = 150 * tcp.ns_per_ms, .idle_ns = 1 * tcp.ns_per_s, .total_ns = 3 * tcp.ns_per_s };
+
+fn openToSiteWithin(f: *Fixture, d: tcp.Deadlines) !usize {
+    const i = f.table.connect(&f.wire, the_site, d, 0) orelse return error.NoSlot;
     verify(&f.table, &f.wire, 0, .after_transmit);
     const syn = f.wire.last();
     try testing.expectEqual(flag_syn, syn.flags);
@@ -2584,4 +2593,109 @@ test "synSent: each of the RFC's answers, by its ACK and its bits (RFC 9293 §3.
             return e;
         };
     }
+}
+
+// ── a connection of our own's deadlines (metal-vmm QUEUE 225, 5b) ─────────
+
+/// The site's SYN-ACK to connection `i`, at `now`.
+fn establish(f: *Fixture, i: usize, now: i96) !Peer {
+    var p = siteFor(f, i);
+    p.ack = f.table.conns[i].una +% 1;
+    var buf: [1600]u8 = undefined;
+    const r = handle(&f.table, &f.wire, p.frame(&buf, flag_syn | flag_ack, p.seq, ""), now);
+    try testing.expectEqual(Event.opened, r.event);
+    p.seq +%= 1;
+    return p;
+}
+
+test "SYN-SENT: our SYN is sent again at 25 ms, then 50 ms later, not at the server's 200 ms floor" {
+    var f: Fixture = .{};
+    f.init();
+    const i = try openToSiteWithin(&f, pair);
+    const from = f.wire.count;
+    transmit(&f.table, &f.wire, 25 * ms - 1);
+    try testing.expectEqual(from, f.wire.count);
+    transmit(&f.table, &f.wire, 25 * ms);
+    try testing.expectEqual(from + 1, f.wire.count);
+    try testing.expectEqual(flag_syn, f.wire.last().flags);
+    try testing.expectEqual(@as(?i96, 75 * ms), f.table.conns[i].rto_at);
+    transmit(&f.table, &f.wire, 75 * ms);
+    try testing.expectEqual(from + 2, f.wire.count);
+    try testing.expectEqual(@as(?i96, 175 * ms), f.table.conns[i].rto_at);
+}
+
+test "SYN-SENT: not established by deadlines.connect_ns, the connection is let go with no reset (RFC 9293 §3.10.5, ABORT in SYN-SENT)" {
+    var f: Fixture = .{};
+    f.init();
+    const i = try openToSiteWithin(&f, pair);
+    transmit(&f.table, &f.wire, 25 * ms);
+    transmit(&f.table, &f.wire, 75 * ms);
+    const from = f.wire.count;
+    transmit(&f.table, &f.wire, 150 * ms - 1);
+    try testing.expectEqual(State.syn_sent, f.table.conns[i].state);
+    transmit(&f.table, &f.wire, 150 * ms);
+    try testing.expectEqual(State.closed, f.table.conns[i].state);
+    try testing.expectEqual(from, f.wire.count);
+    try testing.expectEqual(@as(u64, 1), f.table.connect_deadlines);
+    try testing.expectEqual(@as(u64, 0), f.table.given_up);
+    verify(&f.table, &f.wire, 150 * ms, .after_transmit);
+}
+
+test "a connection of our own whose peer is silent for deadlines.idle_ns is reset; one heard from is not" {
+    var f: Fixture = .{};
+    f.init();
+    const i = try openToSiteWithin(&f, pair);
+    var p = try establish(&f, i, 3 * ms);
+    // Heard at 500 ms: the idle clock starts again from there.
+    var buf: [1600]u8 = undefined;
+    _ = handle(&f.table, &f.wire, p.frame(&buf, flag_ack, p.seq, ""), 500 * ms);
+    transmit(&f.table, &f.wire, 1003 * ms);
+    try testing.expectEqual(State.established, f.table.conns[i].state);
+    transmit(&f.table, &f.wire, 1500 * ms - 1);
+    try testing.expectEqual(State.established, f.table.conns[i].state);
+    const from = f.wire.count;
+    transmit(&f.table, &f.wire, 1500 * ms);
+    try testing.expectEqual(State.closed, f.table.conns[i].state);
+    try testing.expectEqual(from + 1, f.wire.count);
+    try testing.expectEqual(flag_rst | flag_ack, f.wire.last().flags);
+    try testing.expectEqual(@as(u64, 1), f.table.idle_deadlines);
+    verify(&f.table, &f.wire, 1500 * ms, .after_transmit);
+}
+
+test "a connection of our own open for deadlines.total_ns is reset, however lately heard from" {
+    var f: Fixture = .{};
+    f.init();
+    const i = try openToSiteWithin(&f, pair);
+    var p = try establish(&f, i, 3 * ms);
+    var buf: [1600]u8 = undefined;
+    var now: i96 = 500 * ms;
+    while (now < 3 * tcp.ns_per_s) : (now += 500 * ms) {
+        _ = handle(&f.table, &f.wire, p.frame(&buf, flag_ack, p.seq, ""), now);
+        transmit(&f.table, &f.wire, now);
+        try testing.expectEqual(State.established, f.table.conns[i].state);
+    }
+    _ = handle(&f.table, &f.wire, p.frame(&buf, flag_ack, p.seq, ""), now);
+    transmit(&f.table, &f.wire, now);
+    try testing.expectEqual(State.closed, f.table.conns[i].state);
+    try testing.expectEqual(flag_rst | flag_ack, f.wire.last().flags);
+    try testing.expectEqual(@as(u64, 1), f.table.total_deadlines);
+    try testing.expectEqual(@as(u64, 0), f.table.idle_deadlines);
+}
+
+test "pastDeadline: which deadline has passed, connect only while SYN-SENT, total before idle" {
+    var rx: [16]u8 = undefined;
+    var tx: [16]u8 = undefined;
+    var c: Conn = .{ .rx = &rx, .tx = &tx, .state = .syn_sent, .opened_at = 100, .heard_at = 100, .deadlines = .{ .connect_ns = 10, .idle_ns = 50, .total_ns = 80 } };
+    const D = ?tcp.Deadline;
+    try testing.expectEqual(@as(D, null), tcp.pastDeadline(&c, 109));
+    try testing.expectEqual(@as(D, .connect), tcp.pastDeadline(&c, 110));
+    try testing.expectEqual(@as(D, .connect), tcp.pastDeadline(&c, 200)); // all three passed
+    c.state = .established;
+    try testing.expectEqual(@as(D, null), tcp.pastDeadline(&c, 149));
+    try testing.expectEqual(@as(D, .idle), tcp.pastDeadline(&c, 150));
+    try testing.expectEqual(@as(D, .total), tcp.pastDeadline(&c, 180)); // both passed
+    c.heard_at = 170;
+    try testing.expectEqual(@as(D, null), tcp.pastDeadline(&c, 179));
+    c.deadlines = null; // an accepted connection: the host's to bound
+    try testing.expectEqual(@as(D, null), tcp.pastDeadline(&c, 1_000_000));
 }

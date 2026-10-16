@@ -55,6 +55,11 @@
 //! - **Our SYN-ACK, unanswered** (`syn_received`). Sent again at `rto_at`.
 //!   Bounded by: `max_retries`, as above; and, when the table is full, by the
 //!   next SYN, to which the oldest half-open older than `min_rto_ns` gives way.
+//! - **Our SYN, unanswered** (`syn_sent`). Sent again at `rto_at`, from
+//!   `syn_first_rto_ns` (25 ms), doubling. Bounded by: the connection's
+//!   `deadlines.connect_ns`, and `max_retries`.
+//! - **A connection of our own** (`deadlines`). Bounded by: its
+//!   `Deadlines`, after which it is let go (`pastDeadline`).
 //! - **The peer's FIN, after ours was acknowledged.** Bounded by:
 //!   `fin_wait_until` (`fin_wait_ns`, 30 s), then a reset.
 //! - **A reopened window the peer may not have seen** (`window_news`).
@@ -124,6 +129,10 @@ pub const first_rto_ns = timeouts.first_rto_ns;
 pub const max_rto_ns = timeouts.max_rto_ns;
 pub const max_retries = timeouts.max_retries;
 pub const dupacks_before_resend = timeouts.dupacks_before_resend;
+pub const syn_first_rto_ns = timeouts.syn_first_rto_ns;
+pub const Deadlines = timeouts.Deadlines;
+pub const Deadline = timeouts.Deadline;
+pub const pastDeadline = timeouts.pastDeadline;
 /// How long FIN-WAIT-2 waits for the peer's FIN. RFC 9293 sets no bound;
 /// Linux's `tcp_fin_timeout` is the same idea.
 pub const fin_wait_ns: u64 = 30 * ns_per_s;
@@ -323,6 +332,10 @@ pub const Conn = struct {
     /// the host serves oldest first and lets go of the quiet.
     opened_at: i96 = 0,
     heard_at: i96 = 0,
+    /// **A CONNECTION OF OUR OWN'S BOUNDS** (`connect`), measured from
+    /// `opened_at` and `heard_at`: null for an accepted one, which the host
+    /// bounds instead.
+    deadlines: ?Deadlines = null,
     /// Arrival order, breaking ties within a clock tick.
     serial: u64 = 0,
 
@@ -530,6 +543,11 @@ pub const Table = struct {
     connects_refused: u64 = 0,
     syn_sent_bad_acks: u64 = 0,
     simultaneous_opens_refused: u64 = 0,
+    /// Connections of our own let go at a deadline (`Deadlines`): not
+    /// established in time, the peer silent too long, or too long in all.
+    connect_deadlines: u64 = 0,
+    idle_deadlines: u64 = 0,
+    total_deadlines: u64 = 0,
     /// **THE NEXT EPHEMERAL PORT** (RFC 6056): seeded by the host, counted
     /// up from there, never reused while the run has others to give.
     ephemeral_next: u16 = ephemeral_first,
@@ -807,8 +825,10 @@ pub const Table = struct {
     /// ephemeral port of its own, ISS from the table's source, and the SYN,
     /// with our segment size: <SEQ=ISS><CTL=SYN>. The connection is
     /// SYN-SENT until the peer answers (`synSent`), and its SYN is sent
-    /// again by the retransmission timer. Null when no slot is free.
-    pub fn connect(self: *Table, wire: anytype, to: Remote, now: i96) ?usize {
+    /// again by the retransmission timer, first after `syn_first_rto_ns`.
+    /// It is let go at the first of its `deadlines` to pass. Null when no
+    /// slot is free.
+    pub fn connect(self: *Table, wire: anytype, to: Remote, deadlines: Deadlines, now: i96) ?usize {
         const slot = self.free(.initiated) orelse return null;
         const c = &self.conns[slot];
         c.reset();
@@ -819,8 +839,10 @@ pub const Table = struct {
         c.local_port = self.nextEphemeral();
         c.una = self.isn(); // ISS; SND.NXT is ISS + 1 once the SYN is out
         c.state = .syn_sent;
+        c.deadlines = deadlines;
         c.opened_at = now;
         c.heard_at = now;
+        c.rto_ns = syn_first_rto_ns;
         c.rto_at = now + c.rto_ns;
         self.connects += 1;
         self.arrivals += 1;
@@ -927,7 +949,11 @@ pub const Table = struct {
     /// Why a connection is given up on, for its count.
     /// `refused`: the peer answered our SYN with a reset (RFC 9293
     /// §3.10.7.3, "error: connection reset"), so nothing is sent back.
-    pub const Abandon = enum { silent_peer, fin_wait, slow_client, stream_behind, unfinished, refused };
+    /// `connect_deadline`, `idle_deadline`, `total_deadline`: a connection of
+    /// our own past one of its `Deadlines`. One still SYN-SENT is let go
+    /// with no reset (RFC 9293 §3.10.5, ABORT: "SYN-SENT STATE ... delete
+    /// the TCB"); one past it is reset, as any ABORT is.
+    pub const Abandon = enum { silent_peer, fin_wait, slow_client, stream_behind, unfinished, refused, connect_deadline, idle_deadline, total_deadline };
 
     /// Gives up on connection `i` with a reset, so a peer waiting for the
     /// rest of an answer, or for its handshake, does not wait out its timer.
@@ -938,9 +964,12 @@ pub const Table = struct {
             .stream_behind => self.abandoned_stream_behind +%= 1,
             .unfinished => self.abandoned_unfinished +%= 1,
             .refused => self.connects_refused +%= 1,
+            .connect_deadline => self.connect_deadlines +%= 1,
+            .idle_deadline => self.idle_deadlines +%= 1,
+            .total_deadline => self.total_deadlines +%= 1,
         }
         const c = &self.conns[i];
-        if (c.state != .closed and why != .refused) {
+        if (c.state != .closed and c.state != .syn_sent and why != .refused) {
             self.emit(wire, i, flag_rst | flag_ack, c.highest(), "");
         }
         c.reset();
@@ -980,6 +1009,15 @@ pub const Table = struct {
     }
 
     fn transmitOne(self: *Table, wire: anytype, i: usize, now: i96) void {
+        // A connection of our own past a deadline sends nothing more.
+        if (pastDeadline(&self.conns[i], now)) |which| {
+            props.reachable(@src(), "tcp: a connection of our own is let go at a deadline", .{ .conn = i, .which = which });
+            return self.abandon(wire, i, switch (which) {
+                .connect => .connect_deadline,
+                .idle => .idle_deadline,
+                .total => .total_deadline,
+            });
+        }
         self.announce(wire, i, now);
         const c = &self.conns[i];
         const expired = if (c.rto_at) |at| now >= at else false;
@@ -1579,8 +1617,8 @@ pub fn writeCounts(t: *const Table, w: *std.Io.Writer) std.Io.Writer.Error!void 
     try w.print("{d} resets from peers ({d} inexact ones challenged), {d} bad handshake ACKs reset; given up by the host: {d} clients that stopped taking a response, {d} streams too far behind, {d} closes of an unfinished handshake; ", .{
         t.resets_received, t.challenge_acks, t.bad_ack_resets, t.abandoned_slow_client, t.abandoned_stream_behind, t.abandoned_unfinished,
     });
-    try w.print("{d} connections of our own opened ({d} refused, {d} bad SYN-ACKs reset, {d} simultaneous opens dropped); ", .{
-        t.connects, t.connects_refused, t.syn_sent_bad_acks, t.simultaneous_opens_refused,
+    try w.print("{d} connections of our own opened ({d} refused, {d} bad SYN-ACKs reset, {d} simultaneous opens dropped; let go at a deadline: {d} not established, {d} idle, {d} too long in all); ", .{
+        t.connects, t.connects_refused, t.syn_sent_bad_acks, t.simultaneous_opens_refused, t.connect_deadlines, t.idle_deadlines, t.total_deadlines,
     });
     try w.print("{d} round trips measured, the newest {d} ns", .{ t.samples, t.measured_ns });
 }
