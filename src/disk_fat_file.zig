@@ -40,6 +40,13 @@ fn here() std.builtin.SourceLocation {
     return @src();
 }
 
+/// An entry's times: created, written and accessed, one moment.
+fn putStamp(e: *[dirent_size]u8, when: Dos) void {
+    putDos(e[14..18], when); // creation time, creation date
+    putLe16(e[18..20], when.date); // last access date
+    putDos(e[22..26], when); // write time, write date
+}
+
 /// The date to stamp on an entry being written now.
 pub fn stamp(self: *Volume) Dos {
     const clock = self.clock orelse return .none;
@@ -286,11 +293,7 @@ pub fn writeEntry(
     @memset(e, 0);
     @memcpy(e[0..11], &short);
     e[11] = attr;
-    // Created, written and accessed: one moment.
-    const when = self.stamp();
-    putDos(e[14..18], when); // creation time, creation date
-    putLe16(e[18..20], when.date); // last access date
-    putDos(e[22..26], when); // write time, write date
+    putStamp(e, self.stamp());
     putCluster(e, first);
     e[28] = @truncate(size);
     e[29] = @truncate(size >> 8);
@@ -435,15 +438,19 @@ pub fn makeDirIn(self: *Volume, dir_cluster: Cluster, name: []const u8) Error!Cl
         try self.writeSector(self.clusterSector(cluster) + s, self.scratch);
     }
 
-    // `..` spells the root as cluster zero.
+    // `..` spells the root as cluster zero. Both are dated as the folder's
+    // own entry is (metal-vmm QUEUE 218: they were left with no date).
     @memset(self.scratch, 0);
+    const when = self.stamp();
     const dot = self.scratch[0..dirent_size];
     @memcpy(dot[0..11], ".          ");
     dot[11] = attr_directory;
+    putStamp(dot, when);
     putCluster(dot, cluster);
     const dotdot = self.scratch[dirent_size..][0..dirent_size];
     @memcpy(dotdot[0..11], "..         ");
     dotdot[11] = attr_directory;
+    putStamp(dotdot, when);
     putCluster(dotdot, dir_cluster);
     try self.writeSector(self.clusterSector(cluster), self.scratch);
 

@@ -268,6 +268,34 @@ test "an entry is dated by the volume's clock, and a clock with no answer writes
     }
 }
 
+test "a folder made is dated by the volume's clock in its own entry and in its `.` and `..`, as a file is (metal-vmm QUEUE 218)" {
+    const Clocks = struct {
+        fn known() ?i64 {
+            return 1789641533;
+        }
+    };
+    const when = dirent.Dos.fromUnix(1789641533);
+    for (configs) |cfg| {
+        const d = try Disk.make("folder-dated", cfg.shape, cfg.cached);
+        defer d.deinit();
+        d.vol.clock = &Clocks.known;
+        const c = try d.vol.makePath("data/inner");
+        try testing.expectEqual(@as(i64, 1789641532), (try d.vol.open("data/inner")).mtime_unix);
+        const sector = d.bytes[@as(usize, d.vol.clusterSector(c)) * 512 ..][0..512];
+        for ([_][]const u8{ ".          ", "..         " }, 0..) |name, k| {
+            const e = sector[k * 32 ..][0..32];
+            try testing.expectEqualStrings(name, e[0..11]);
+            var want: [4]u8 = undefined;
+            dirent.putDos(&want, when);
+            try testing.expectEqualSlices(u8, &want, e[14..18]); // created
+            try testing.expectEqualSlices(u8, want[2..4], e[18..20]); // accessed
+            try testing.expectEqualSlices(u8, &want, e[22..26]); // written
+        }
+        const r = try d.check();
+        try r.expect(&.{});
+    }
+}
+
 test "a volume label in the root is passed over: a name after it is written, found and removed, and the check calls it clean" {
     for (configs) |cfg| {
         const d = try Disk.make("label", cfg.shape, cfg.cached);
