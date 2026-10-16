@@ -109,7 +109,7 @@ if [ "$want" != metal ]; then
     # unsharded run judged it over one (properties.zig's `on`).
     sim_args=(-Dseeds="$SEEDS" -Dcrowd-seeds="$CROWD_SEEDS" -Dfat-seeds="$FAT_SEEDS" -Dsweep-optimize=ReleaseSafe)
     shard_a="fat,fat_replays,regressions"
-    shard_b="tcp_plain,tcp_rough,tcp_crowd,page,pure,ready,drain,tcp_full,store,floor,durable,store_replays"
+    shard_b="tcp_plain,tcp_rough,tcp_crowd,page,pure,ready,drain,tcp_full,store,floor,durable,store_replays,tcp_pair"
     zig build properties "${sim_args[@]}" -Dsims="$shard_a" -Dsdk-jsonl="$OUT.sim-a.jsonl" > "$OUT.sim-a" 2>&1 &
     pid_a=$!
     zig build properties "${sim_args[@]}" -Dsims="$shard_b" -Dsdk-jsonl="$OUT.sim-b.jsonl" > "$OUT.sim-b" 2>&1 &

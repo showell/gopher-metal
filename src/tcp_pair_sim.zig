@@ -41,6 +41,7 @@ const proto = @import("proto.zig");
 const tcp = @import("tcp.zig");
 const invariants = @import("tcp_check.zig");
 const props = @import("coverage");
+const explore = @import("explore");
 
 // Every property in this file, in the catalog, called or not (COVERAGE.md).
 comptime {
@@ -617,6 +618,21 @@ pub fn runSeed(seed: u64) !void {
     const sim = try std.testing.allocator.create(Sim);
     defer std.testing.allocator.destroy(sim);
     sim.init(seed);
+    try sim.run();
+}
+
+/// **ONE RUN UNDER A TAPE** (the seed explorer, zig-coverage-sdk's
+/// explore.zig, as tcp_sim's `runWithIn`): every draw, the scenario's and
+/// the network's, comes from `tape`.
+pub fn runWithIn(gpa: std.mem.Allocator, io: std.Io, tape: *explore.Tape) !void {
+    _ = io;
+    const sim = try gpa.create(Sim);
+    defer gpa.destroy(sim);
+    sim.seed = tape.seed;
+    sim.prng = std.Random.DefaultPrng.init(tape.seed);
+    sim.rng = tape.random();
+    sim.sc = Scenario.choose(sim.rng);
+    sim.build();
     try sim.run();
 }
 

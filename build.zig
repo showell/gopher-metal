@@ -566,7 +566,7 @@ pub fn build(b: *std.Build) void {
     // **THE SOAK** (src/explore_soak.zig): the explorer and blind runs on the
     // simulators, round after round; overnight, through tools/soak.sh.
     const soak_opts = b.addOptions();
-    soak_opts.addOption([]const u8, "sims", b.option([]const u8, "soak-sims", "the simulators the soak runs: any of fat, store, tcp") orelse "fat,store,tcp");
+    soak_opts.addOption([]const u8, "sims", b.option([]const u8, "soak-sims", "the simulators the soak runs: any of fat, store, tcp, tcp_pair") orelse "fat,store,tcp,tcp_pair");
     soak_opts.addOption(u32, "runs", b.option(u32, "soak-runs", "runs per exploration in the soak") orelse 1000);
     soak_opts.addOption(u32, "rounds", b.option(u32, "soak-rounds", "rounds the soak makes") orelse 1000);
     soak_opts.addOption(u32, "hours", b.option(u32, "soak-hours", "no round of the soak starts after this many hours") orelse 7);
@@ -587,7 +587,7 @@ pub fn build(b: *std.Build) void {
             },
         }),
     });
-    b.step("soak", "the seed explorer and blind runs on fat, store and tcp, round after round (overnight; tools/soak.sh)").dependOn(&b.addRunArtifact(soak).step);
+    b.step("soak", "the seed explorer and blind runs on fat, store, tcp and tcp_pair, round after round (overnight; tools/soak.sh)").dependOn(&b.addRunArtifact(soak).step);
     // **THE SOAK'S BINARY, NOT RUN** (zig-out/bin/soak), for tools/soak.sh
     // to run detached. An ordinary program since metal-vmm QUEUE 106: as a
     // test, `zig build soak` held everything it printed until it exited.
@@ -612,6 +612,8 @@ pub fn build(b: *std.Build) void {
     // floor line only store_sim reaches comes at seed 5; 1,000 were 154 s.
     props_opts.addOption(u64, "store_seeds", b.option(u64, "store-seeds", "how many store_sim seeds `properties` sweeps") orelse 50);
     props_opts.addOption(u64, "durable_seeds", b.option(u64, "durable-seeds", "how many durable_sim seeds `properties` sweeps") orelse 1000);
+    // **300** (metal-vmm QUEUE 225, chunk 6): as `zig build test` runs, about 5 s.
+    props_opts.addOption(u64, "pair_seeds", b.option(u64, "pair-seeds", "how many tcp_pair_sim seeds `properties` sweeps") orelse 300);
     props_opts.addOption(u64, "ready_seeds", b.option(u64, "ready-seeds", "how many ready_sim seeds `properties` sweeps") orelse 300);
     // **20** (metal-vmm QUEUE 224, Steve's call): no floor line needs drain_sim.
     props_opts.addOption(u64, "drain_seeds", b.option(u64, "drain-seeds", "how many drain_sim seeds `properties` sweeps (each about a second in Debug)") orelse 20);

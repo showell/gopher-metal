@@ -2,7 +2,7 @@
 //! simulators, as Antithesis runs a system, with blind runs beside it as the
 //! control. A tool, not a gate; it is meant to run overnight, detached.
 //!
-//! No round starts once `-Dsoak-hours` have passed. Each round, for each simulator in `-Dsoak-sims` (fat, store, tcp), runs
+//! No round starts once `-Dsoak-hours` have passed. Each round, for each simulator in `-Dsoak-sims` (fat, store, tcp, tcp_pair), runs
 //! one exploration per column, all from the round's explorer seed and with
 //! the same budget (`-Dsoak-runs`), each from a clean catalog:
 //!   - **blind**: every run a fresh seed, as `properties` sweeps;
@@ -22,6 +22,7 @@ const explore = @import("explore");
 const fat_sim = @import("fat_sim.zig");
 const store_sim = @import("store_sim.zig");
 const tcp_sim = @import("tcp_sim.zig");
+const pair_sim = @import("tcp_pair_sim.zig");
 const options = @import("soak_options");
 
 /// What the simulators allocate from, and their `Io`: the program's, set in
@@ -50,10 +51,15 @@ fn runTcp(tape: *explore.Tape) anyerror!void {
     try tcp_sim.runWithIn(host_gpa, host_io, tape);
 }
 
+fn runPair(tape: *explore.Tape) anyerror!void {
+    try pair_sim.runWithIn(host_gpa, host_io, tape);
+}
+
 const all_sims = [_]Sim{
     .{ .name = "fat", .run = runFat, .files = &.{ "disk_fat.zig", "fat_sim.zig" } },
     .{ .name = "store", .run = runStore, .files = &.{ "store_sim.zig", "disk_fat.zig", "store.zig" } },
     .{ .name = "tcp", .run = runTcp, .files = &.{ "tcp.zig", "tcp_segment.zig", "tcp_arrives.zig", "tcp_timeouts.zig", "tcp_sim.zig", "tcp_check.zig" } },
+    .{ .name = "tcp_pair", .run = runPair, .files = &.{ "tcp.zig", "tcp_arrives.zig", "tcp_timeouts.zig", "tcp_pair_sim.zig", "tcp_check.zig" } },
 };
 
 const Column = struct { name: []const u8, options: explore.Options };
@@ -69,6 +75,13 @@ fn counted(site: *const coverage.Site, sim: Sim) bool {
     if (k != .sometimes and k != .reachable) return false;
     const file = std.fs.path.basename(std.mem.span(site.file));
     for (sim.files) |f| if (std.mem.eql(u8, file, f)) return true;
+    return false;
+}
+
+/// Whether `-Dsoak-sims` names `name` whole: "tcp" is not "tcp_pair".
+fn named(name: []const u8) bool {
+    var names = std.mem.tokenizeScalar(u8, options.sims, ',');
+    while (names.next()) |n| if (std.mem.eql(u8, n, name)) return true;
     return false;
 }
 
@@ -95,7 +108,7 @@ pub fn main(init: std.process.Init) !void {
         }
         const seed: u64 = options.seed + round;
         for (all_sims, &tallies) |sim, *tally| {
-            if (std.mem.indexOf(u8, options.sims, sim.name) == null) continue;
+            if (!named(sim.name)) continue;
             if (tally.sites.items.len == 0) {
                 var it = coverage.catalog();
                 while (it.next()) |site| if (counted(site, sim)) {
