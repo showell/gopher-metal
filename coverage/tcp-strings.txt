@@ -26,6 +26,7 @@ tcp: a segment from behind is answered, not taken
 tcp: a shut window is probed
 tcp: a silent peer is given up on
 tcp: a stuck half-open connection gives way to a new SYN
+tcp: a window reopens on an ACK of nothing new, and sending starts again at una
 tcp: after an ACK, what was sent lies within what is queued
 tcp: an ACK past every byte covers our FIN and nothing more
 tcp: an exact reset closes a connection

@@ -2743,3 +2743,165 @@ test "pastDeadline: which deadline has passed, connect only while SYN-SENT, tota
     c.deadlines = null; // an accepted connection: the host's to bound
     try testing.expectEqual(@as(D, null), tcp.pastDeadline(&c, 1_000_000));
 }
+
+// ── the RFC's words, held to the RFC (metal-vmm QUEUE 225, chunk 3b) ──────
+
+/// Whitespace collapsed to single spaces, so a quote rewrapped by a comment's
+/// indent still matches the text it was copied from.
+fn squeeze(gpa: std.mem.Allocator, text: []const u8) ![]u8 {
+    var out: std.ArrayList(u8) = .empty;
+    var space = false;
+    for (text) |b| {
+        if (std.ascii.isWhitespace(b)) {
+            space = true;
+            continue;
+        }
+        if (space and out.items.len > 0) try out.append(gpa, ' ');
+        space = false;
+        try out.append(gpa, b);
+    }
+    return out.toOwnedSlice(gpa);
+}
+
+/// The text of a quote line (`// > ...`, `/// > ...`, `//! > ...`), or null
+/// for a line that is not one.
+fn quoted(line: []const u8) ?[]const u8 {
+    const t = std.mem.trimStart(u8, line, " ");
+    const rest = if (std.mem.startsWith(u8, t, "/// ") or std.mem.startsWith(u8, t, "//! "))
+        t[4..]
+    else if (std.mem.startsWith(u8, t, "// "))
+        t[3..]
+    else
+        return null;
+    if (std.mem.eql(u8, rest, ">")) return "";
+    if (std.mem.startsWith(u8, rest, "> ")) return rest[2..];
+    return null;
+}
+
+/// The quotes in `source` not found word for word in any of `rfcs`
+/// (squeezed), and how many quotes there were.
+fn checkQuotes(gpa: std.mem.Allocator, source: []const u8, rfcs: []const []const u8, missing: *std.ArrayList([]const u8)) !usize {
+    var quotes: usize = 0;
+    var block: std.ArrayList(u8) = .empty;
+    defer block.deinit(gpa);
+    var lines = std.mem.splitScalar(u8, source, '\n');
+    while (true) {
+        const line = lines.next();
+        if (line) |l| if (quoted(l)) |q| {
+            try block.appendSlice(gpa, q);
+            try block.append(gpa, '\n');
+            continue;
+        };
+        if (block.items.len > 0) {
+            quotes += 1;
+            const want = try squeeze(gpa, block.items);
+            const found = for (rfcs) |r| {
+                if (std.mem.indexOf(u8, r, want) != null) break true;
+            } else false;
+            if (found) gpa.free(want) else try missing.append(gpa, want);
+            block.clearRetainingCapacity();
+        }
+        if (line == null) break;
+    }
+    return quotes;
+}
+
+test "every quote of an RFC in the tcp files is the RFC's own words (docs/rfc/)" {
+    const gpa = testing.allocator;
+    const io = testing.io;
+    const names = [_][]const u8{ "rfc9293", "rfc6298", "rfc5681", "rfc6056" };
+    var rfcs: [names.len][]u8 = undefined;
+    for (names, &rfcs) |n, *r| {
+        var path: [64]u8 = undefined;
+        const text = try std.Io.Dir.cwd().readFileAlloc(io, try std.fmt.bufPrint(&path, "docs/rfc/{s}.txt", .{n}), gpa, .unlimited);
+        defer gpa.free(text);
+        r.* = try squeeze(gpa, text);
+    }
+    defer for (rfcs) |r| gpa.free(r);
+    const files = [_][]const u8{ "src/tcp.zig", "src/tcp_arrives.zig", "src/tcp_timeouts.zig", "src/tcp_segment.zig" };
+    var missing: std.ArrayList([]const u8) = .empty;
+    defer {
+        for (missing.items) |m| gpa.free(m);
+        missing.deinit(gpa);
+    }
+    var quotes: usize = 0;
+    for (files) |f| {
+        const source = try std.Io.Dir.cwd().readFileAlloc(io, f, gpa, .unlimited);
+        defer gpa.free(source);
+        const before = missing.items.len;
+        quotes += try checkQuotes(gpa, source, &.{ rfcs[0], rfcs[1], rfcs[2], rfcs[3] }, &missing);
+        for (missing.items[before..]) |m| std.debug.print("{s}: a quote not in docs/rfc/: \"{s}\"\n", .{ f, m });
+    }
+    try testing.expectEqual(@as(usize, 0), missing.items.len);
+    // Not vacuous: the quotes are there to be checked.
+    try testing.expect(quotes >= 10);
+}
+
+test "the quote check finds a word changed" {
+    const gpa = testing.allocator;
+    var missing: std.ArrayList([]const u8) = .empty;
+    defer {
+        for (missing.items) |m| gpa.free(m);
+        missing.deinit(gpa);
+    }
+    const rfc = "Fifth, if neither of the SYN or RST bits is set, then drop the segment and return.";
+    const good = "    // > Fifth, if neither of the SYN or RST bits is set, then drop the\n    // > segment and return.\n";
+    const bad = "    // > Fifth, if neither of the SYN or RST bits is set, then keep the\n    // > segment and return.\n";
+    try testing.expectEqual(@as(usize, 1), try checkQuotes(gpa, good, &.{rfc}, &missing));
+    try testing.expectEqual(@as(usize, 0), missing.items.len);
+    try testing.expectEqual(@as(usize, 1), try checkQuotes(gpa, bad, &.{rfc}, &missing));
+    try testing.expectEqual(@as(usize, 1), missing.items.len);
+}
+
+// ── a window that shuts with bytes in flight, and reopens (QUEUE 227) ─────
+
+test "a window that shuts with bytes in flight and refuses its probes: once it reopens, the rest arrives within a few round trips (metal-vmm QUEUE 227)" {
+    // long.sh's rough `shut-window` case, small: the peer takes some,
+    // shuts its window with segments still on the way (lost to it, having
+    // no room), refuses each one-byte probe, and later opens again with an
+    // ACK that acknowledges nothing. 0a cut what follows to one segment past
+    // the refused probe byte, which the peer drops as ahead of a hole.
+    var f: Fixture = .{};
+    f.init();
+    var p = Peer{ .ip = .{ 10, 0, 2, 2 }, .port = 40000, .window = 1600 };
+    const i = try p.connect(&f.table, &f.wire, 0);
+    const total = 2000; // the fixture's send buffer holds 2048
+    var body: [total]u8 = undefined;
+    for (&body, 0..) |*b, k| b.* = @truncate(k *% 7 +% 1);
+    try testing.expectEqual(@as(usize, total), f.table.queue(i, &body));
+    const base = p.ack; // the byte numbered 0
+    transmit(&f.table, &f.wire, 0);
+    // It takes one segment and shuts; the rest of the 1600 is lost to it.
+    p.window = 0;
+    _ = p.ackUpTo(&f.table, &f.wire, base +% 536, 2 * ms);
+    var now: i96 = 2 * ms;
+    for (0..3) |_| {
+        now = f.table.conns[i].rto_at.?;
+        transmit(&f.table, &f.wire, now);
+        _ = p.ackUpTo(&f.table, &f.wire, base +% 536, now + 1 * ms); // refused
+    }
+    try testing.expect(f.table.probes >= 3);
+    // It opens again: an ACK of nothing new, with room.
+    const reopened = now + 50 * ms;
+    p.window = 8000;
+    _ = p.ackUpTo(&f.table, &f.wire, base +% 536, reopened);
+    // A peer that takes each segment at the next byte, and acknowledges it
+    // a millisecond later; one ahead of the next byte is dropped and
+    // answered with an ACK of what it has.
+    var got: u32 = 536;
+    var seen = f.wire.count;
+    now = reopened;
+    while (got < total) : (now += 1 * ms) {
+        try testing.expect(now - reopened <= 30 * ms); // a few round trips
+        transmit(&f.table, &f.wire, now);
+        var answer = false;
+        while (seen < f.wire.count) : (seen += 1) {
+            const s = f.wire.at(seen);
+            if (s.payload.len == 0) continue;
+            answer = true;
+            if (s.seq == base +% got) got += @intCast(s.payload.len);
+        }
+        if (answer) _ = p.ackUpTo(&f.table, &f.wire, base +% got, now + 1 * ms);
+    }
+    try testing.expectEqual(@as(u64, 0), f.table.given_up);
+}

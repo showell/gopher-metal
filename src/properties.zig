@@ -31,6 +31,7 @@ const page_sim = @import("page_sim.zig");
 const pure_sim = @import("pure_sim.zig");
 const ready_sim = @import("ready_sim.zig");
 const drain_sim = @import("drain_sim.zig");
+const pair_sim = @import("tcp_pair_sim.zig");
 const durable_sim = @import("durable_sim.zig");
 const floor_sim = @import("floor_sim.zig");
 const store_sim = @import("store_sim.zig");
@@ -43,7 +44,7 @@ var jsonl: std.ArrayList(u8) = .empty;
 /// runs, events (sim_events.zig) and seconds, summed over its seeds, and its
 /// nanoseconds an event, printed at the end with the whole run's seconds,
 /// so the long tier can tell the build's time from the run's (long.sh).
-const Sim = enum { tcp_plain, tcp_rough, tcp_crowd, fat, page, pure, ready, drain, tcp_full, store, floor, durable, fat_replays, store_replays, regressions, failed_before };
+const Sim = enum { tcp_plain, tcp_rough, tcp_crowd, fat, page, pure, ready, drain, tcp_full, store, floor, durable, fat_replays, store_replays, regressions, failed_before, tcp_pair };
 var spent = std.EnumArray(Sim, u64).initFill(0);
 var runs = std.EnumArray(Sim, u64).initFill(0);
 /// Each simulator's natural unit, as sim_events.zig lists them.
@@ -202,6 +203,11 @@ test "the properties over a sweep of seeds" {
         if (!ok) failed_seeds += 1;
         at.always(@src(), ok, "drain_sim: every oracle holds for every seed", .{ .seed = seed });
     }
+    for (1..count(.tcp_pair, options.pair_seeds) + 1) |seed| {
+        const ok = timed(.tcp_pair, pair_sim.runSeed, seed);
+        if (!ok) failed_seeds += 1;
+        at.always(@src(), ok, "tcp_pair_sim: every oracle holds for every seed", .{ .seed = seed });
+    }
     for (1..count(.tcp_full, options.full_seeds) + 1) |seed| {
         const ok = timed(.tcp_full, sim.runFullSeed, seed);
         if (!ok) failed_seeds += 1;
@@ -268,6 +274,7 @@ test "the properties over a sweep of seeds" {
                 .store => timed(.failed_before, store_sim.runSeed, e.seed),
                 .floor => timed(.failed_before, floor_sim.runSeed, e.seed),
                 .durable => timed(.failed_before, durable_sim.runSeed, e.seed),
+                .tcp_pair => timed(.failed_before, pair_sim.runSeed, e.seed),
                 .fat_replays, .store_replays, .regressions, .failed_before => {
                     std.debug.print("coverage/seeds-that-failed.txt: {s} is not a simulator's seeds\n", .{e.simulator});
                     return error.NoSuchSimulator;
