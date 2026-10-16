@@ -796,7 +796,7 @@ QUICK = bool(os.environ.get("JUDGE_QUICK"))
 # silently complete run.
 GATES = ["cases", "members", "uids", "caps", "lynrummy", "streams-linux", "streams-metal", "budget", "churn",
          "bulk", "uploads", "lagging", "concurrent",
-         "damaged", "endurance", "stamina", "admin-reset", "throttle", "retire", "secret"]
+         "damaged", "endurance", "stamina", "admin-reset", "throttle", "retire", "secret", "shale-background"]
 # The boots that exist to be long. The quick tier leaves them out; asking for
 # one by name still runs it.
 LONG = {"endurance", "stamina"}
@@ -2604,6 +2604,106 @@ def secret_failures(elf, linux_bin, content, pristine, work, mnt, gopher_root, r
     return len(failures)
 
 
+# **A SIGNED SHALE SCRIPT, SIGNED HERE** (metal-vmm QUEUE 222): Python's
+# standard library has no Ed25519, so node signs, as Dog Park's gate does.
+SIGN_JS = r"""
+const { generateKeyPairSync, sign, createPrivateKey } = require("node:crypto");
+const [what, a, b] = process.argv.slice(1);
+if (what === "keygen") {
+  const { publicKey, privateKey } = generateKeyPairSync("ed25519");
+  console.log(Buffer.from(publicKey.export({ format: "jwk" }).x, "base64url").toString("hex"));
+  console.log(privateKey.export({ format: "pem", type: "pkcs8" }).replace(/\n/g, "|"));
+} else {
+  const key = createPrivateKey(a.replace(/\|/g, "\n"));
+  const signed = require("node:fs").readFileSync(0);
+  process.stdout.write("shale-signature " + sign(null, signed, key).toString("hex") + "\n" + signed);
+}
+"""
+
+
+def shale_node(*args, stdin=b""):
+    got = subprocess.run(["node", "-e", SIGN_JS, *args], input=stdin, capture_output=True)
+    if got.returncode != 0:
+        raise RuntimeError(f"node could not sign: {got.stderr.decode().strip()}")
+    return got.stdout.decode()
+
+
+def shale_background_failures(elf, gopher_root, work, report) -> int:
+    """**A BACKGROUND SHALE RUN ON METAL, BESIDE REQUESTS** (metal-vmm QUEUE
+    222): lynrummy.com's route, as Dog Park's (tools/metal_gate.mjs). A
+    signed `mode=background` script of 9,000 store reads (a slice each) is
+    answered at once (202); while it runs, a second is refused (503 busy),
+    the home page is answered, and GET /admin/script says it is running; the
+    kernel steps it between requests and on idle turns until GET
+    /admin/script says it finished, with what it printed."""
+    label = "a background Shale run"
+    failures = []
+    expect = lambda ok, what: None if ok else failures.append(what)
+    try:
+        pub, priv = shale_node("keygen").split("\n")[:2]
+    except (OSError, RuntimeError) as e:
+        report(f"FAIL  {label}: {e}")
+        return 1
+    # The admin's (uid 1's) API key, as angry-gopher keeps one: `<uid>-<secret>`.
+    api_key = "1-" + "5ca1ab1e" * 8
+    scratch = tempfile.mkdtemp(dir=work)
+    root = os.path.join(scratch, "content")
+    stage(root, gopher_root)
+    write(root, "auth/1/api-key", api_key)
+    write(root, "auth/shale.conf", f"public_key = {pub}\ntarget = judge.example\n")
+    write(root, "auth/shale/sequence", "0\n")
+    image = os.path.join(scratch, "disk.img")
+    build_disk(image, root, os.path.join(scratch, "mnt"))
+    set_request_limit(image, 400, os.path.join(scratch, "mnt"), idle_timeout_ms=60000)
+    qemu, port, serial = start_kernel(elf, image, scratch)
+    bearer = [f"Authorization: Bearer {api_key}"]
+    # 9,000 of the background budget's 10,000 reads (admin_script.zig): on
+    # Linux the run takes about 0.1 s, so both envelopes are signed before
+    # the first is posted, or the run is over before the second arrives.
+    source = 'local n = 0\nfor i = 1, 9000 do if exists("players/1/name") then n = n + 1 end end\nprint("found", n)\n'
+
+    def envelope(seq):
+        signed = f"shale-1 target=judge.example sequence={seq} expires={int(time.time()) + 600} mode=background\n{source}"
+        return shale_node("sign", priv, stdin=signed.encode())
+
+    def post(seq, signed):
+        return ask(port, step(f"a background script, {seq}", "POST", "/admin/script", None, signed, headers=bearer), scratch, patience=60)
+
+    def state():
+        return ask(port, step("the background run's state", "GET", "/admin/script", None, headers=bearer), scratch, patience=60)
+
+    try:
+        envelopes = {seq: envelope(seq) for seq in (1, 2)}
+        first = post(1, envelopes[1])
+        expect(first["status"] == 202, f"POST a signed background script answered {first['status']}, not 202: {first['body'][:300]!r}")
+        second = post(2, envelopes[2])
+        expect(second["status"] == 503 and b"refused (busy)" in second["body"],
+               f"a second background script while one runs answered {second['status']}, not 503 busy: {second['body'][:300]!r}")
+        home = ask(port, step("the home page, beside the run", "GET", "/"), scratch, patience=60)
+        expect(home["status"] == 200, f"the home page, beside a background run, answered {home['status']}")
+        seen_running, deadline, last = False, time.time() + 120, b""
+        while time.time() < deadline:
+            last = state()["body"]
+            if b" running: " not in last:
+                break
+            seen_running = True
+            time.sleep(0.2)
+        expect(seen_running, "the background run was never seen running: it finished before any request beside it")
+        expect(last.startswith(b"background seq=1 finished: "), f"the background run did not finish in 120 s: {last[:300]!r}")
+        expect(b"found\t9000\n" in last, f"the background run did not print what it found: {last[:300]!r}")
+    finally:
+        use_up_requests(qemu, port, 400)
+        code, log = finish_kernel(qemu, serial)
+        shutil.rmtree(scratch, ignore_errors=True)
+    expect(code == 1, f"the kernel exited {code}, not at its request limit")
+    for f in failures:
+        report(f"FAIL  {label}: {f}")
+    if not failures:
+        report(f"ok    {label}: answered at once, a second refused while it ran, the site answered beside it, "
+               "stepped by the kernel to its end, its output read back")
+    return len(failures)
+
+
 def upload_failures(elf, linux_bin, content, pristine, work, mnt, report) -> int:
     """The same uploads to the machine and to Linux, and their answers compared.
     The stored file's name is random on both sides, so what is compared is the
@@ -3417,6 +3517,9 @@ def main() -> int:
     if running("budget"):
         failures += budget_failures(elf, pristine, work, mnt, print)
         lap("stream budget")
+    if running("shale-background"):
+        failures += shale_background_failures(elf, gopher_root, work, print)
+        lap("a background Shale run")
     if running("churn"):
         failures += churn_failures(elf, pristine, work, mnt, print)
         lap("stream churn")

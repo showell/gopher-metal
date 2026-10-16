@@ -347,6 +347,16 @@ these steps. Once, after the release that carries it:
    sends it. Each request runs once: a replay, an older number, one past
    its expiry (10 minutes by default) or for another target is refused.
 
+5. **A long read, in the background** (from v32, metal-vmm QUEUE 222):
+   `zig build shale-sign -- background topics.shale lynrummy.com` signs a
+   `mode=background` run. It is answered at once (202, with its number),
+   only reads (up to 10,000 reads, against an atomic run's 500), and is
+   stepped a slice at a time between requests, so the site answers beside
+   it. `GET /admin/script` (the same API key) says whether it is running
+   or how the last one ended, with what it printed. One runs at a time: a
+   second is refused (503 busy) while one runs, and
+   `zig build shale-sign -- kill lynrummy.com` ends it.
+
 Explore first with a script that only reads (it changes nothing), then
 send the one that changes. Every run is logged under `auth/shale/` on the
 volume (the log, and each run's source by its number). Changing the key is
