@@ -298,7 +298,11 @@ commits, tagged `vN` in this repo. By hand, in this order:
    kernel, and the site's own files with a config naming the data volume
    (`droplet/volume-serial`). It refuses unless both trees are clean and both
    verdicts are PASS for exactly this code. `RELEASE_UNGATED=1` overrides
-   that, for an emergency, and says so loudly.
+   that, for an emergency, and says so loudly. The disk itself is laid out
+   by **`droplet/app_image.py <kernel.elf> <site-dir> <conf> <out.img>`**,
+   any application's builder (Dog Park's too): the kernel in partition 1,
+   the site folder and the conf in partition 2, with `--disk-mib`, `--fat`
+   and `--label` for the site filesystem.
 3. **gzip it** and put it where DigitalOcean can fetch it.
 4. **Steve imports it as a custom image** and rebuilds the droplet from it.
    The data volume stays attached and untouched.
