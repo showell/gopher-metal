@@ -385,7 +385,7 @@ fn coverageLine(line: []const u8) void {
 pub fn kmain() noreturn {
     serial.init();
     interrupts.install();
-    serial.put("zig-metal-unikernel: angry-gopher's route table, with no Linux under it\n");
+    serial.put("zig-metal-unikernel: " ++ (if (@hasDecl(app.hosting, "name")) app.hosting.name else "angry-gopher") ++ "'s route table, with no Linux under it\n");
     if (gm_build.coverage) {
         coverage_door_found = metal.port.inb(coverage_door) == coverage_door_answer;
         metal.coverage.sink = coverageLine;

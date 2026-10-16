@@ -16,7 +16,8 @@ host takes two modules: the library, `webbox`, and the application's root,
 `app`, which exports `site` (its `Site(App)`: `start`, `route`, the body
 rule's two questions, `bodyLimit` and `uploader`) and `hosting` (what only it
 can say: its data's name, its largest whole read, its setup's report in
-words). Linux is zig-webbox's `linux_host.zig` (`Server(S).run`, which
+words, and, optionally, its `name` for metal's boot banner, "<name>'s route
+table", which says "angry-gopher" when none is declared). Linux is zig-webbox's `linux_host.zig` (`Server(S).run`, which
 angry-gopher's `server.zig` calls with its names and settings), with
 `linux_durable.zig` beside it; metal is `probe/gopher.zig`. Three calls:
 
