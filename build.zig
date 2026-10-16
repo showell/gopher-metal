@@ -592,6 +592,7 @@ pub fn build(b: *std.Build) void {
     // is a proof of concept (a `sometimes` never met is a gap, not a bug).
     const props_opts = b.addOptions();
     props_opts.addOption(bool, "trace_reach", b.option(bool, "trace-reach", "`properties` prints, for each floor line, the simulators that reach it and the first seed each did (measuring, slower)") orelse false);
+    props_opts.addOption([]const u8, "sims", b.option([]const u8, "sims", "only these simulators, comma-separated, as properties.zig names them (a shard of the sweep; long.sh)") orelse "");
     props_opts.addOption(u64, "seeds", b.option(u64, "seeds", "how many tcp_sim seeds `properties` sweeps") orelse 100);
     // Every seed runs as a crowd too, unless asked for fewer: revival
     // (tcp.zig) made item 24's crowd seeds green (tcp_sim.zig, `crowd_red`).

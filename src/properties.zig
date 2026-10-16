@@ -58,6 +58,22 @@ fn awake() u64 {
     return @intCast(std.Io.Clock.now(.awake, std.testing.io).nanoseconds);
 }
 
+/// **A SHARD OF THE SWEEP** (metal-vmm QUEUE 224.4, `-Dsims=fat,fat_replays`):
+/// only the simulators named, so two shards run side by side on two cores;
+/// each writes its JSONL and zig-coverage-sdk's report.py judges the floor
+/// over both (long.sh). Empty, every simulator.
+fn on(k: Sim) bool {
+    if (options.sims.len == 0) return true;
+    var names = std.mem.tokenizeScalar(u8, options.sims, ',');
+    while (names.next()) |name| if (std.mem.eql(u8, name, @tagName(k))) return true;
+    return false;
+}
+
+/// `n` seeds of `k`, or none in a shard without it.
+fn count(k: Sim, n: anytype) @TypeOf(n) {
+    return if (on(k)) n else 0;
+}
+
 /// `run(seed)` timed into `sim`'s total: whether every oracle held.
 fn timed(sim_: Sim, comptime run: anytype, seed: u64) bool {
     const from = awake();
@@ -133,21 +149,32 @@ test "the properties over a sweep of seeds" {
     defer at.on_broken = at.failTest;
     at.declare();
 
+    {
+        var names = std.mem.tokenizeScalar(u8, options.sims, ',');
+        while (names.next()) |name| if (std.meta.stringToEnum(Sim, name) == null) {
+            std.debug.print("-Dsims: no simulator {s}\n", .{name});
+            return error.NoSuchSimulator;
+        };
+    }
     const began = awake();
     var failed_seeds: usize = 0;
-    for (1..options.seeds + 1) |seed| {
-        const ok = timed(.tcp_plain, sim.runSeed, seed);
-        if (!ok) failed_seeds += 1;
-        at.always(@src(), ok, "tcp_sim: every oracle holds for every seed", .{ .seed = seed });
-        const rough_ok = timed(.tcp_rough, sim.runRoughSeed, seed);
-        if (!rough_ok) failed_seeds += 1;
-        at.always(@src(), rough_ok, "tcp_sim: every oracle holds for every rough seed", .{ .seed = seed });
-        if (seed > options.crowd_seeds) continue;
+    for (1..@max(count(.tcp_plain, options.seeds), count(.tcp_rough, options.seeds), count(.tcp_crowd, @min(options.seeds, options.crowd_seeds))) + 1) |seed| {
+        if (on(.tcp_plain)) {
+            const ok = timed(.tcp_plain, sim.runSeed, seed);
+            if (!ok) failed_seeds += 1;
+            at.always(@src(), ok, "tcp_sim: every oracle holds for every seed", .{ .seed = seed });
+        }
+        if (on(.tcp_rough)) {
+            const rough_ok = timed(.tcp_rough, sim.runRoughSeed, seed);
+            if (!rough_ok) failed_seeds += 1;
+            at.always(@src(), rough_ok, "tcp_sim: every oracle holds for every rough seed", .{ .seed = seed });
+        }
+        if (seed > options.crowd_seeds or !on(.tcp_crowd)) continue;
         const crowd_ok = timed(.tcp_crowd, sim.runCrowdSeed, seed);
         if (!crowd_ok) failed_seeds += 1;
         at.always(@src(), crowd_ok, "tcp_sim: every oracle holds for every crowd seed", .{ .seed = seed });
     }
-    for (1..options.fat_seeds + 1) |seed| {
+    for (1..count(.fat, options.fat_seeds) + 1) |seed| {
         const ok = timed(.fat, fat_sim.runSeed, seed);
         if (!ok) failed_seeds += 1;
         at.always(@src(), ok, "fat_sim: every oracle holds for every seed, both FAT paths", .{ .seed = seed });
@@ -155,42 +182,42 @@ test "the properties over a sweep of seeds" {
         if (!probed) failed_seeds += 1;
         at.always(@src(), probed, "fat_sim: every oracle holds for every seed with probes", .{ .seed = seed });
     }
-    for (1..options.page_seeds + 1) |seed| {
+    for (1..count(.page, options.page_seeds) + 1) |seed| {
         const ok = timed(.page, page_sim.runSeed, seed);
         if (!ok) failed_seeds += 1;
         at.always(@src(), ok, "page_sim: every oracle holds for every seed", .{ .seed = seed });
     }
-    for (1..options.pure_seeds + 1) |seed| {
+    for (1..count(.pure, options.pure_seeds) + 1) |seed| {
         const ok = timed(.pure, pure_sim.runSeed, seed);
         if (!ok) failed_seeds += 1;
         at.always(@src(), ok, "pure_sim: every oracle holds for every seed", .{ .seed = seed });
     }
-    for (1..options.ready_seeds + 1) |seed| {
+    for (1..count(.ready, options.ready_seeds) + 1) |seed| {
         const ok = timed(.ready, ready_sim.runSeed, seed);
         if (!ok) failed_seeds += 1;
         at.always(@src(), ok, "ready_sim: every oracle holds for every seed", .{ .seed = seed });
     }
-    for (1..options.drain_seeds + 1) |seed| {
+    for (1..count(.drain, options.drain_seeds) + 1) |seed| {
         const ok = timed(.drain, drain_sim.runSeed, seed);
         if (!ok) failed_seeds += 1;
         at.always(@src(), ok, "drain_sim: every oracle holds for every seed", .{ .seed = seed });
     }
-    for (1..options.full_seeds + 1) |seed| {
+    for (1..count(.tcp_full, options.full_seeds) + 1) |seed| {
         const ok = timed(.tcp_full, sim.runFullSeed, seed);
         if (!ok) failed_seeds += 1;
         at.always(@src(), ok, "tcp_sim: every oracle holds for a crowd the size of the kernel's table", .{ .seed = seed });
     }
-    for (1..options.store_seeds + 1) |seed| {
+    for (1..count(.store, options.store_seeds) + 1) |seed| {
         const ok = timed(.store, store_sim.runSeed, seed);
         if (!ok) failed_seeds += 1;
         at.always(@src(), ok, "store_sim: every oracle holds for every seed", .{ .seed = seed });
     }
-    for (1..options.floor_seeds + 1) |seed| {
+    for (1..count(.floor, options.floor_seeds) + 1) |seed| {
         const ok = timed(.floor, floor_sim.runSeed, seed);
         if (!ok) failed_seeds += 1;
         at.always(@src(), ok, "floor_sim: every oracle holds for every seed", .{ .seed = seed });
     }
-    for (1..options.durable_seeds + 1) |seed| {
+    for (1..count(.durable, options.durable_seeds) + 1) |seed| {
         const ok = timed(.durable, durable_sim.runSeed, seed);
         if (!ok) failed_seeds += 1;
         at.always(@src(), ok, "durable_sim: every oracle holds for every seed", .{ .seed = seed });
@@ -201,12 +228,12 @@ test "the properties over a sweep of seeds" {
     // (1,000 TCP and 300 FAT seeds): four FAT tapes and two store tapes, the
     // replays `zig build test` keeps and three more, where the 40 and 20
     // before were 42 s of the run (metal-vmm QUEUE B38, 224).
-    for (1..5) |seed| {
+    for (1..count(.fat_replays, 4) + 1) |seed| {
         const ok = timed(.fat_replays, fat_sim.replaysExactly, seed);
         if (!ok) failed_seeds += 1;
         at.always(@src(), ok, "fat_sim: a run under a tape replays exactly", .{ .seed = seed });
     }
-    for (1..3) |seed| {
+    for (1..count(.store_replays, 2) + 1) |seed| {
         const ok = timed(.store_replays, store_sim.replaysExactly, seed);
         if (!ok) failed_seeds += 1;
         at.always(@src(), ok, "store_sim: a run under a tape replays exactly", .{ .seed = seed });
@@ -223,6 +250,7 @@ test "the properties over a sweep of seeds" {
                 std.debug.print("coverage/seeds-that-failed.txt: no simulator {s}\n", .{e.simulator});
                 return error.NoSuchSimulator;
             };
+            if (!on(which)) continue;
             const ok = switch (which) {
                 .tcp_plain => timed(.failed_before, sim.runSeed, e.seed),
                 .tcp_rough => timed(.failed_before, sim.runRoughSeed, e.seed),
@@ -250,7 +278,7 @@ test "the properties over a sweep of seeds" {
         }
     }
     // Every sweep, whatever its size: they are the regression tests.
-    for (fat_sim.regressions) |seed| {
+    for (fat_sim.regressions[0..count(.regressions, fat_sim.regressions.len)]) |seed| {
         const ok = timed(.regressions, fat_sim.runSeed, seed);
         if (!ok) failed_seeds += 1;
         at.always(@src(), ok, "fat_sim: every regression seed holds", .{ .seed = seed });

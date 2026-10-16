@@ -102,20 +102,39 @@ lap() { echo "time: $1 $(( $(date +%s) - began )) s"; began=$(date +%s); }
 if [ "$want" != metal ]; then
     echo "── the simulators: $SEEDS TCP seeds, plain and rough, and $FAT_SEEDS FAT seeds, against coverage/floor-sim.txt"
     # ReleaseSafe: a sweep this long is nearly all running (build.zig).
-    zig build properties -Dseeds="$SEEDS" -Dcrowd-seeds="$CROWD_SEEDS" -Dfat-seeds="$FAT_SEEDS" -Dsweep-optimize=ReleaseSafe \
-        -Dfloor=coverage/floor-sim.txt > "$OUT.sim" 2>&1
-    code=$?
-    grep -E 'runs failed|not satisfied|^ *(FAIL|FLOOR|STALE)|floor .*under' "$OUT.sim" | sed 's/^ *//'
+    # **TWO SHARDS, SIDE BY SIDE** (metal-vmm QUEUE 224.4): the FAT's (the
+    # largest) and everything else, a core each, each writing its JSONL;
+    # zig-coverage-sdk's report.py judges the floor over both, as the
+    # unsharded run judged it over one (properties.zig's `on`).
+    sim_args=(-Dseeds="$SEEDS" -Dcrowd-seeds="$CROWD_SEEDS" -Dfat-seeds="$FAT_SEEDS" -Dsweep-optimize=ReleaseSafe)
+    shard_a="fat,fat_replays,regressions"
+    shard_b="tcp_plain,tcp_rough,tcp_crowd,page,pure,ready,drain,tcp_full,store,floor,durable,store_replays"
+    zig build properties "${sim_args[@]}" -Dsims="$shard_a" -Dsdk-jsonl="$OUT.sim-a.jsonl" > "$OUT.sim-a" 2>&1 &
+    pid_a=$!
+    zig build properties "${sim_args[@]}" -Dsims="$shard_b" -Dsdk-jsonl="$OUT.sim-b.jsonl" > "$OUT.sim-b" 2>&1 &
+    pid_b=$!
+    wait $pid_a; code_a=$?
+    wait $pid_b; code_b=$?
+    cat "$OUT.sim-a" "$OUT.sim-b" > "$OUT.sim"
+    grep -E 'runs failed|^ *FAIL' "$OUT.sim" | sed 's/^ *//'
     # A failure the lines above don't name (a build error) says itself.
-    if [ $code != 0 ] && ! grep -qE 'runs failed|not satisfied|^ *(FAIL|FLOOR|STALE)|floor .*under' "$OUT.sim"; then
-        echo "the simulators did not run to a verdict ($OUT.sim):"; grep -E 'error' "$OUT.sim" | head -5
-    fi
-    [ $code = 0 ] || failed+=(sim)
+    for shard in a b; do
+        c=$code_a; [ $shard = b ] && c=$code_b
+        if [ $c != 0 ] && ! grep -qE 'runs failed|^ *FAIL' "$OUT.sim-$shard"; then
+            echo "the simulators' shard $shard did not run to a verdict ($OUT.sim-$shard):"; grep -E 'error' "$OUT.sim-$shard" | head -5
+        fi
+    done
+    { [ $code_a = 0 ] && [ $code_b = 0 ]; } || failed+=(sim)
+    python3 "$SDK/tools/report.py" "$OUT.sim-a.jsonl" "$OUT.sim-b.jsonl" --floor coverage/floor-sim.txt > "$OUT.sim-floor" 2>&1
+    code=$?
+    grep -E '^(FAIL|FLOOR|STALE|SILENT)' "$OUT.sim-floor"
+    echo "the simulators' floor (both shards, report.py): $([ $code = 0 ] && echo reached || echo "NOT reached, $OUT.sim-floor")"
+    [ $code = 0 ] || failed+=(sim-floor)
     # **THE BUILD APART FROM THE RUN** (metal-vmm QUEUE 224.1): each
     # simulator's seconds as properties.zig printed them, and the build's as
-    # the phase's time less the run's.
-    grep '^ *time: sim ' "$OUT.sim" | sed 's/^ *//'
-    run_s=$(sed -n 's/^ *time: sim run \([0-9]*\).*/\1/p' "$OUT.sim")
+    # the phase's time less the longer shard's run.
+    grep '^ *time: sim ' "$OUT.sim" | grep -v ' 0 runs' | sed 's/^ *//'
+    run_s=$(sed -n 's/^ *time: sim run \([0-9]*\).*/\1/p' "$OUT.sim" | sort -n | tail -1)
     [ -n "$run_s" ] && echo "time: simulator build $(( $(date +%s) - began - run_s )) s"
     lap "simulator"
 
