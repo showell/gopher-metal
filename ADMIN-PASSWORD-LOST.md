@@ -46,7 +46,7 @@ It asks for the new password twice, and hashes it here. The image then
 carries `admin_password_reset = Steve <hash>` in its zig-metal-unikernel.conf.
 Only the hash is in the image, and nothing goes into the repository.
 
-**2. Deploy it** as any image (README.md, "A deploy").
+**2. Deploy it** as any image (DEPLOY.md, "A lynrummy.com release").
 
 **3. Watch the boot.** It must say:
 

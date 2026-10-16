@@ -309,84 +309,34 @@ SDK's, and a hash of every application and library file the kernel compiles
 (`tools/verdicts.py` calls that hash the **content id**). The quick tier and a
 partial `long.sh` record nothing.
 
-### A deploy
+### Deploying
 
-A **release** is one boot image, built from this repo and the applications'
-commits, tagged `vN` in this repo. By hand, in this order:
-
-1. **Both gates pass** for the exact code: `./gates.sh` and `./long.sh`.
-2. **`droplet/chat.py <out.img>`** builds the boot image: the boot loader, the
-   kernel, and the site's own files with a config naming the data volume
-   (`droplet/volume-serial`). It refuses unless both trees are clean and both
-   verdicts are PASS for exactly this code. `RELEASE_UNGATED=1` overrides
-   that, for an emergency, and says so loudly. The disk itself is laid out
-   by **`droplet/app_image.py <kernel.elf> <site-dir> <conf> <out.img>`**,
-   any application's builder (Dog Park's too): the kernel in partition 1,
-   the site folder and the conf in partition 2, with `--disk-mib`, `--fat`
-   and `--label` for the site filesystem.
-3. **gzip it** and put it where DigitalOcean can fetch it.
-4. **Steve imports it as a custom image** and rebuilds the droplet from it.
-   The data volume stays attached and untouched.
-5. **Tag the commit** `vN`.
-
-**The way back** is the previous tag's image: rebuild the droplet from it. The
-last resort, moving the site back to Linux, is in [`CUTOVER.md`](CUTOVER.md),
-"The way back"; it needs the data copied off the volume first, or everything
-written since the cutover is lost.
-
-### Release notes: the script route (metal-vmm QUEUE 200; serving since v30)
-
-`POST /admin/script` runs a signed Shale script on the live site
-(angry-gopher's `admin_script.zig`, zig-webbox's `script_route.zig`). It is
-refused until a key is set, so a release with it changes nothing until
-these steps. Once, after the release that carries it:
-
-1. **On the box, make the key pair** (zig-webbox checkout):
-   `zig build shale-sign -- keygen`. The private key is
-   `~/.shale_signing_key`, mode 600; the program never prints it. It prints
-   the public key's line, `public_key = <64 hex>`; `-- pubkey` prints it
-   again.
-2. **On the site, set it**: sign in as the admin, open `/admin/script-key`,
-   paste the 64 hex digits, leave the target `lynrummy.com`, type the admin
-   password, Set. (On Linux the same file can be written by hand instead:
-   `<auth>/shale.conf` with `public_key = <hex>` and `target = <name>`.)
-3. **The admin's API key** is the first lock: the one `/admin/host` takes
-   (`/admin`, the admin's row, Generate), kept on the box as
-   `SHALE_ADMIN_KEY` in the environment.
-4. **A script**: `zig build shale-sign -- sign topics.shale lynrummy.com`
-   writes `topics.shale.<sequence>.req` and prints the `curl` line that
-   sends it. Each request runs once: a replay, an older number, one past
-   its expiry (10 minutes by default) or for another target is refused.
-
-5. **A long read, in the background** (from v32, metal-vmm QUEUE 222):
-   `zig build shale-sign -- background topics.shale lynrummy.com` signs a
-   `mode=background` run. It is answered at once (202, with its number),
-   only reads (up to 10,000 reads, against an atomic run's 500), and is
-   stepped a slice at a time between requests, so the site answers beside
-   it. `GET /admin/script` (the same API key) says whether it is running
-   or how the last one ended, with what it printed. One runs at a time: a
-   second is refused (503 busy) while one runs, and
-   `zig build shale-sign -- kill lynrummy.com` ends it.
-
-Explore first with a script that only reads (it changes nothing), then
-send the one that changes. Every run is logged under `auth/shale/` on the
-volume (the log, and each run's source by its number). Changing the key is
-step 2 again; the old key's scripts are refused from then on.
+**[`DEPLOY.md`](DEPLOY.md) is how we operate both sites**: the machines,
+where the secrets live, a release step by step (the checks, the image, the
+owner's steps, the tag), the way back, Shale scripts and a new site's key,
+prod's Caddy, Dog Park, and running your own copies.
 
 [`CUTOVER.md`](CUTOVER.md) is the record of the move from Linux on 2026-10-04,
 with the tools it used, backups, and the way back.
 `droplet/new_volume.py` builds a new, empty data volume.
 
-## Where it stands (2026-10-16)
+## Where it stands
 
-**Serving: tag `v30`**, deployed 2026-10-14: this repo at `1d8642c`,
-angry-gopher at `2e560b2b`, zig-webbox at `92ea157`. The way back is `v29`.
-`master` may be ahead of `v30`; what serves is always a tag, never a branch.
-The tag's message (`git show v30 --no-patch`) has the image's checksum. The
-script route's key is set (2026-10-14); its first three runs are in metal-vmm's FEEDBACK (2026-10-14, "v30 serves").
+**What serves is always a tag, never a branch, and this README does not
+name it**, since a number written here goes stale with the next release.
+To find it:
 
-- **served**: in v30, on lynrummy.com.
-- **master**: on `master`, newer than v30, not served yet.
+- the newest release: `git tag -l 'v*' --sort=-v:refname | head -1`, and
+  its note, `git show <tag> --no-patch` (the date, the image's checksum,
+  the commits it was built from, what is new);
+- what lynrummy.com actually runs: `curl -s https://lynrummy.com/version`
+  names angry-gopher's commit; `/admin/host` (the admin's key, DEPLOY.md)
+  names this repo's; `git tag --points-at <commit>` turns either into a tag;
+- the way back is the tag before it. `master` may be ahead of the serving
+  tag: `git log <tag>..master` is what has not shipped.
+
+- **served**: in the serving tag, on lynrummy.com.
+- **master**: on `master`, newer than the serving tag, not served yet.
 - **test only**: exists for the checks, never deployed.
 - **unmeasured**: built, but the number a reader would want has not been taken.
 
@@ -397,12 +347,13 @@ script route's key is set (2026-10-14); its first three runs are in metal-vmm's 
 | the screen | served | everything the log says also goes to VGA text, which DigitalOcean's console shows |
 | interrupts, and resting when idle | served | on the PCI machine a droplet is, the card wakes it (MSI-X), else a 1 ms timer. On the MMIO test machines it polls instead |
 | virtio network, disk and SCSI volume drivers | served | over PCI on the droplet; over MMIO in tests |
-| DHCP, ARP, TCP | served | up to 256 connections; the peer's window and segment size respected, lost segments resent, silent peers given up on. Segments that arrive out of order are not kept |
+| DHCP, ARP, TCP | served | up to 256 connections; the peer's window and segment size respected, lost segments resent (the oldest first, RFC 6298 5.4), silent peers given up on; segments that arrive ahead of a gap are held (up to four pieces a connection). Each place it departs from the RFCs says why, in `DEPARTS (reason):` lines |
+| a TCP client: connect, ARP requests, one HTTP fetch | test only | in the served image but called by no route; `probe/fetch.elf` is the client kernel, judged against Linux (`native/judge_native.py`) and against this kernel's server on metal-vmm's pair mode (metal-vmm `pair.sh`, tier 3) |
 | HTTP | served | `std.http.Server`, unmodified |
 | FAT16 and FAT32, read and write | served | long names, folders, append, replace, delete; checked by `fsck` and by Linux reading what it wrote. Production's volume is FAT32 |
 | clocks and entropy | served | the CMOS real-time clock; the TSC's rate measured against the PIT; random bytes from virtio-rng where the machine has one, and RDRAND |
 | angry-gopher's whole site | served | every route, judged equal to the Linux build, including chat's live streams and uploads |
-| another repository's application as a kernel | served | Dog Park, on dogpark.lynrummy.com since 2026-10-16: dog-park's image `ab222a2`, built with this repo at `67faf97` (`master`, newer than v30), through `addAppKernel` and `droplet/app_image.py`; one disk, no volume. This repo neither builds nor judges any application but angry-gopher (an application is not this repo's test of itself); Dog Park's own QEMU gate and droplet rehearsal check its image |
+| another repository's application as a kernel | served | Dog Park, on dogpark.lynrummy.com since 2026-10-16, built through `addAppKernel` and `droplet/app_image.py` (dog-park's DEPLOY.md says which image serves); one disk, no volume. This repo neither builds nor judges any application but angry-gopher (an application is not this repo's test of itself); Dog Park's own QEMU gate and droplet rehearsal check its image |
 | file contents kept in memory | served | after their first read, write-through (`page_cache_mib`, 64 MiB by default) |
 | large disk requests | served | a run of contiguous clusters is one request of up to 1 MiB (the least of the disk's, the controller's and our own limit) |
 | the FAT written a sector at a time | served | v29's measured disk requests for a 1.8 MB, 10 MB and 100 MB upload: 59, 26 and 115 (v28: 93, 218 and 2,017) |

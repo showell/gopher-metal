@@ -23,7 +23,7 @@ The others explain a step, or are for another day:
 | [droplet/RESTART-TEST.md](droplet/RESTART-TEST.md) | the console test that would let it be turned on | another day, not the cutover's |
 | [SECRET-LEAK.md](SECRET-LEAK.md) | what to do if a backup or the session secret leaks | if it happens |
 | [ADMIN-PASSWORD-LOST.md](ADMIN-PASSWORD-LOST.md) | the way back in when the admin password is lost, on prod and on metal | if it happens |
-| [README.md](README.md), "A deploy" | building and deploying a new boot image | step 9, and every deploy after |
+| [DEPLOY.md](DEPLOY.md), "A lynrummy.com release" | building and deploying a new boot image | step 9, and every deploy after |
 
 Placeholders, not real addresses: `<prod>` is the lynrummy.com droplet,
 `<metal>` the zig-metal-unikernel droplet's private address, `<box>` the dev
@@ -254,7 +254,7 @@ replaced). That is `/dev/sdX`. It is not the boot disk, which is smaller.
 ### 9. Rebuild the droplet from the new image
 
 Import `boot.img.gz` as a custom image, and rebuild the zig-metal-unikernel
-droplet from it (README, "A deploy", steps 2-3). The volume stays attached
+droplet from it (DEPLOY.md, "A lynrummy.com release", steps 3-4). The volume stays attached
 and is not touched.
 
 - GO: the droplet's console shows the boot.
