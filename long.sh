@@ -77,7 +77,8 @@ export WEBBOX_ROOT
 # names it; raising this, or moving the line, is a commit.
 SEEDS="${SEEDS:-1000}"
 CROWD_SEEDS="${CROWD_SEEDS:-500}"
-FAT_SEEDS="${FAT_SEEDS:-300}"
+# 150 (Steve's call, 224): fat_sim's two floor lines of its own come by seed 113.
+FAT_SEEDS="${FAT_SEEDS:-150}"
 LATENCY_US="${LATENCY_US:-5000}"
 VOLUME_SEEDS="${VOLUME_SEEDS:-100}"
 # A page, a large one (many frames), and a form.
@@ -93,7 +94,7 @@ VERDICT_PAIR="$(python3 tools/verdicts.py ids)" || exit 2
 export VERDICT_PAIR
 python3 tools/verdicts.py pair
 keeps_verdict=no
-[ "$want" = all ] && [ "$SEEDS" -ge 1000 ] && [ "$CROWD_SEEDS" -ge 500 ] && [ "$FAT_SEEDS" -ge 300 ] && keeps_verdict=yes
+[ "$want" = all ] && [ "$SEEDS" -ge 1000 ] && [ "$CROWD_SEEDS" -ge 500 ] && [ "$FAT_SEEDS" -ge 150 ] && keeps_verdict=yes
 
 failed=()
 began=$(date +%s)
@@ -327,7 +328,7 @@ fi
 
 if [ ${#failed[@]} = 0 ]; then
     if [ $keeps_verdict = yes ]; then python3 tools/verdicts.py record long PASS
-    else echo "no verdict kept: only a whole run ($want) at full size (SEEDS>=1000, CROWD_SEEDS>=500, FAT_SEEDS>=300) keeps one"; fi
+    else echo "no verdict kept: only a whole run ($want) at full size (SEEDS>=1000, CROWD_SEEDS>=500, FAT_SEEDS>=150) keeps one"; fi
     echo "LONG: PASS"
 else
     [ $keeps_verdict = yes ] && python3 tools/verdicts.py record long FAIL

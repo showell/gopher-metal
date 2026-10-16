@@ -602,10 +602,13 @@ pub fn build(b: *std.Build) void {
     props_opts.addOption(u64, "pure_seeds", b.option(u64, "pure-seeds", "how many pure_sim seeds `properties` sweeps") orelse 200);
     props_opts.addOption(u64, "full_seeds", b.option(u64, "full-seeds", "how many tcp_sim seeds `properties` runs as a crowd the size of the kernel's table") orelse 20);
     props_opts.addOption(u64, "floor_seeds", b.option(u64, "floor-seeds", "how many floor_sim seeds `properties` sweeps") orelse 1000);
-    props_opts.addOption(u64, "store_seeds", b.option(u64, "store-seeds", "how many store_sim seeds `properties` sweeps") orelse 1000);
+    // **50, BY MEASUREMENT** (metal-vmm QUEUE 224, Steve's call): the one
+    // floor line only store_sim reaches comes at seed 5; 1,000 were 154 s.
+    props_opts.addOption(u64, "store_seeds", b.option(u64, "store-seeds", "how many store_sim seeds `properties` sweeps") orelse 50);
     props_opts.addOption(u64, "durable_seeds", b.option(u64, "durable-seeds", "how many durable_sim seeds `properties` sweeps") orelse 1000);
     props_opts.addOption(u64, "ready_seeds", b.option(u64, "ready-seeds", "how many ready_sim seeds `properties` sweeps") orelse 300);
-    props_opts.addOption(u64, "drain_seeds", b.option(u64, "drain-seeds", "how many drain_sim seeds `properties` sweeps (each about a second in Debug)") orelse 100);
+    // **20** (metal-vmm QUEUE 224, Steve's call): no floor line needs drain_sim.
+    props_opts.addOption(u64, "drain_seeds", b.option(u64, "drain-seeds", "how many drain_sim seeds `properties` sweeps (each about a second in Debug)") orelse 20);
     props_opts.addOption([]const u8, "sdk_jsonl", b.option([]const u8, "sdk-jsonl", "where `properties` writes its JSONL") orelse "");
     // The floor (coverage/floor-sim.txt, COVERAGE.md): what the long tier
     // must reach. Unset, a MISS is reported and never fails the step.

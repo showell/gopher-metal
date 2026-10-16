@@ -188,6 +188,15 @@ const Sim = struct {
     step: usize = 0,
     path_buf: [256]u8 = undefined,
     path2_buf: [256]u8 = undefined,
+    /// **WHAT THE LAST OPERATION TOUCHED** (metal-vmm QUEUE 224.4, Steve's
+    /// (b)): its paths, copied, a directory's standing for everything under
+    /// it. `verify` reads those files back at once; every file only on every
+    /// `read_all_every`th operation, the last, a step with a probe, and in a
+    /// scenario that verifies seldom (`check_every` above 1).
+    touched_buf: [2][256]u8 = undefined,
+    touched: [2][]const u8 = .{ "", "" },
+    touched_n: usize = 0,
+    probed_now: bool = false,
     bytes: []u8,
     /// The first oracle that failed, if any.
     broken: ?[]const u8 = null,
@@ -326,8 +335,11 @@ const Sim = struct {
         while (s.step < s.sc.ops and s.broken == null) : (s.step += 1) {
             ev.count += 1;
             const full = s.full;
+            s.touched_n = 0;
+            s.probed_now = false;
             try s.turn();
             if (s.probeRandom()) |p| if (s.broken == null and p.uintLessThan(u8, 3) == 0) {
+                s.probed_now = true;
                 try s.probe(p);
                 if (s.failed_disk) break;
             };
@@ -378,6 +390,7 @@ const Sim = struct {
         switch (op) {
             .write => {
                 const path = join(s.pickDir(), s.pickName(&s.path2_buf), &s.path_buf);
+                s.touch(path);
                 const bytes = s.content(s.size());
                 const old = s.model.files.get(path);
                 if (vol.writeFile(path, bytes)) {
@@ -397,6 +410,7 @@ const Sim = struct {
             },
             .append => {
                 const path = join(s.pickDir(), s.pickName(&s.path2_buf), &s.path_buf);
+                s.touch(path);
                 const bytes = s.content(@max(1, s.size()));
                 const old = s.model.files.get(path) orelse {
                     if (vol.writeInto(path, 0, bytes)) {
@@ -418,6 +432,7 @@ const Sim = struct {
             },
             .remove => {
                 const path = join(s.pickDir(), s.pickName(&s.path2_buf), &s.path_buf);
+                s.touch(path);
                 if (vol.remove(path)) {
                     if (!s.model.files.contains(path)) return s.fault("a remove of a file that is not there succeeded");
                     s.model.dropFile(path);
@@ -432,6 +447,8 @@ const Sim = struct {
                 const from = join(dir, s.pickName(&name_a), &s.path_buf);
                 const to = join(dir, s.pickName(&name_b), &s.path2_buf);
                 if (std.mem.eql(u8, from, to)) return;
+                s.touch(from);
+                s.touch(to);
                 const old_from = s.model.files.get(from);
                 const old_to = s.model.files.get(to);
                 if (vol.rename(from, to)) {
@@ -453,6 +470,7 @@ const Sim = struct {
             },
             .mkdir => {
                 const dir = dirs[s.rng.uintLessThan(usize, dirs.len)];
+                s.touch(dir);
                 if (vol.makePath(dir)) |_| {
                     try s.model.addParents(dir);
                     try s.model.addDir(dir);
@@ -465,6 +483,7 @@ const Sim = struct {
             },
             .remove_tree => {
                 const dir = dirs[s.rng.uintLessThan(usize, dirs.len)];
+                s.touch(dir);
                 vol.removeTree(dir) catch |e| return s.fault(@errorName(e));
                 try s.model.dropTree(dir);
             },
@@ -915,6 +934,21 @@ const Sim = struct {
         props.reachable(@src(), "fat_sim: what a stop leaves is judged", .{ .held = s.cached });
     }
 
+    /// Every file read back on this many operations (and see `touched`).
+    const read_all_every = 16;
+
+    fn touch(s: *Sim, path: []const u8) void {
+        const n = @min(path.len, s.touched_buf[s.touched_n].len);
+        @memcpy(s.touched_buf[s.touched_n][0..n], path[0..n]);
+        s.touched[s.touched_n] = s.touched_buf[s.touched_n][0..n];
+        s.touched_n += 1;
+    }
+
+    /// Whether `path` is one the last operation touched, or under one.
+    fn wasTouched(s: *const Sim, path: []const u8) bool {
+        return underAny(s.touched[0..s.touched_n], path);
+    }
+
     fn verify(s: *Sim) !void {
         const d = s.disk;
         const r = try d.check();
@@ -925,8 +959,10 @@ const Sim = struct {
         if (d.vol.free_clusters != d.free()) return s.fault("the kept free count is not the FAT's");
         if ((try d.vol.countFreeAgain()) != d.free()) return s.fault("the volume's recount is not the FAT's");
         if (!d.fatsAgree()) return s.fault("the FAT copies differ");
+        const read_all = s.sc.check_every > 1 or s.step % read_all_every == 0 or s.step + 1 == s.sc.ops or s.probed_now;
         var f = s.model.files.iterator();
         while (f.next()) |e| {
+            if (!read_all and !s.wasTouched(e.key_ptr.*)) continue;
             const got = d.read(e.key_ptr.*) catch return s.fault("a file the model holds does not open");
             defer s.gpa.free(got);
             if (!std.mem.eql(u8, got, e.value_ptr.*)) return s.fault("a file reads back other bytes than were written");
@@ -938,6 +974,25 @@ const Sim = struct {
         }
     }
 };
+
+/// Whether `path` is one of `touched`, or a file under one of them.
+fn underAny(touched: []const []const u8, path: []const u8) bool {
+    for (touched) |t| {
+        if (std.mem.eql(u8, path, t)) return true;
+        if (path.len > t.len and std.mem.startsWith(u8, path, t) and path[t.len] == '/') return true;
+    }
+    return false;
+}
+
+test "fat_sim: a file is touched when an operation names it, or a directory above it, and only then" {
+    const touched = [_][]const u8{ "a/b.txt", "docs" };
+    try std.testing.expect(underAny(&touched, "a/b.txt"));
+    try std.testing.expect(underAny(&touched, "docs/x/y.md"));
+    try std.testing.expect(!underAny(&touched, "a/b.txt2"));
+    try std.testing.expect(!underAny(&touched, "docsx/y.md"));
+    try std.testing.expect(!underAny(&touched, "a/c.txt"));
+    try std.testing.expect(!underAny(&.{}, "a/b.txt"));
+}
 
 /// Runs one seed with the FAT on the disk and with it held in memory; an
 /// error, with the operation that failed printed, if any oracle fails.
