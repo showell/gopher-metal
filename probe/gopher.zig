@@ -882,6 +882,9 @@ fn nextReady(io: Io, wire: *stream.Wire, table: *tcp.Table, now: i96) ?usize {
     for (table.conns, 0..) |*c, i| {
         _ = drains.of(i, c.serial);
         if (c.claimed) continue;
+        // **THE HOST SERVES WHAT IT ACCEPTED**: a connection this machine
+        // opened is its client's (tcp.zig's Role), never a request to answer.
+        if (c.role == .initiated) continue;
         if (c.state != .established) {
             // Gone before its turn: what its body held, given back.
             if (!c.open()) drains.release(i);

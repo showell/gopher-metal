@@ -47,7 +47,7 @@ const Wire = struct {
         self.count += 1;
     }
 
-    const Seg = struct { dst_port: u16, seq: u32, ack: u32, flags: u8, window: u16, options: []const u8, payload: []const u8 };
+    const Seg = struct { src_port: u16, dst_port: u16, seq: u32, ack: u32, flags: u8, window: u16, options: []const u8, payload: []const u8 };
 
     fn last(self: *Wire) Seg {
         return self.at(self.count - 1);
@@ -58,6 +58,7 @@ const Wire = struct {
         const t = pkt.payload;
         const offset = @as(usize, t[12] >> 4) * 4;
         return .{
+            .src_port = proto.readBe16(t[0..2]),
             .dst_port = proto.readBe16(t[2..4]),
             .seq = proto.readBe32(t[4..8]),
             .ack = proto.readBe32(t[8..12]),
@@ -75,15 +76,16 @@ const Wire = struct {
     }
 
     /// The window in the last segment, other than a reset, this machine
-    /// sent to `ip`:`port`, or null if it has sent none.
-    fn lastWindowTo(self: *Wire, ip: [4]u8, port: u16) ?u16 {
+    /// sent from `from` to `ip`:`port`, or null if it has sent none. All
+    /// four name the connection: two of ours may share the peer's half.
+    fn lastWindowTo(self: *Wire, ip: [4]u8, port: u16, from: u16) ?u16 {
         var k = self.count;
         while (k > 0) {
             k -= 1;
             const pkt = proto.parseIpv4(self.frames[k][0..self.lens[k]]) orelse continue;
             if (!std.mem.eql(u8, &pkt.dst_ip, &ip)) continue;
             const s = self.at(k);
-            if (s.dst_port != port or s.flags & flag_rst != 0) continue;
+            if (s.dst_port != port or s.src_port != from or s.flags & flag_rst != 0) continue;
             return s.window;
         }
         return null;
@@ -126,7 +128,7 @@ fn verify(table: *Table, wire: *Wire, now: i96, phase: invariants.Phase) void {
     // What the table believes it told each peer is what the wire carried.
     for (table.conns, 0..) |*c, i| {
         if (c.state == .closed) continue;
-        const said = wire.lastWindowTo(c.peer_ip, c.peer_port) orelse continue;
+        const said = wire.lastWindowTo(c.peer_ip, c.peer_port, c.local_port) orelse continue;
         if (said != c.told_wnd) {
             std.debug.panic("TCP invariant broken {s}, connection {d}, at {d} ns: told_wnd is {d}, but the last segment sent said {d}", .{
                 @tagName(phase), i, now, c.told_wnd, said,
@@ -157,6 +159,8 @@ const Peer = struct {
     window: u16 = 8192,
     /// The segment size its SYN says, if it says one.
     mss: ?u16 = null,
+    /// Our port it sends to: the table's, or one of our own connections'.
+    to_port: u16 = 80,
 
     fn frame(self: *const Peer, buf: []u8, flags: u8, seq: u32, data: []const u8) []const u8 {
         var options: [4]u8 = undefined;
@@ -166,7 +170,7 @@ const Peer = struct {
         const frame_len = proto.writeIpv4(buf, client_mac, server_mac, self.ip, server_ip, proto.proto_tcp, len + data.len);
         const t = buf[segment_at..][0 .. len + data.len];
         @memcpy(t[0..2], &proto.be16(self.port));
-        @memcpy(t[2..4], &proto.be16(80));
+        @memcpy(t[2..4], &proto.be16(self.to_port));
         @memcpy(t[4..8], &proto.be32(seq));
         @memcpy(t[8..12], &proto.be32(self.ack));
         t[12] = @intCast((len / 4) << 4);
@@ -2379,4 +2383,47 @@ test "ackCheck: the handshake's ACK names ISS + 1; after it, new, duplicate, or 
             return e;
         };
     }
+}
+
+test "two connections to one ip:80 from two of our ports are two connections: a segment goes to the one its port names (metal-vmm QUEUE 225, chunk 4)" {
+    var f: Fixture = .{};
+    f.init();
+    const site = [4]u8{ 10, 0, 2, 2 };
+    // Two connections this machine opened to the same site's port 80, as
+    // `connect` will (chunk 5a): set up by hand here.
+    for ([_]u16{ 50000, 50001 }, 0..) |port, k| {
+        const c = &f.table.conns[k];
+        c.* = .{ .rx = c.rx, .tx = c.tx, .state = .established, .role = .initiated, .peer_ip = site, .peer_port = 80, .local_port = port, .rcv_nxt = 7000, .una = 9000 };
+    }
+    // The site answers the second of them.
+    var p = Peer{ .ip = site, .port = 80, .seq = 7000, .ack = 9000, .to_port = 50001 };
+    var buf: [1600]u8 = undefined;
+    const r = handle(&f.table, &f.wire, p.frame(&buf, flag_psh | flag_ack, p.seq, "HTTP/1.1 200 OK"), 1 * ms);
+    try testing.expectEqual(@as(usize, 1), r.index);
+    try testing.expectEqual(@as(usize, 0), f.table.conns[0].pending().len);
+    try testing.expectEqualStrings("HTTP/1.1 200 OK", f.table.conns[1].pending());
+    // Its acknowledgement goes out from the second connection's own port.
+    try testing.expectEqual(@as(u16, 80), f.wire.last().dst_port);
+    try testing.expectEqual(@as(u16, 50001), f.wire.last().src_port);
+    // A port that is neither the table's nor one of its connections' is
+    // not for us.
+    p.to_port = 50002;
+    const before = f.table.passed.not_for_us;
+    _ = handle(&f.table, &f.wire, p.frame(&buf, flag_ack, p.seq, ""), 2 * ms);
+    try testing.expectEqual(before + 1, f.table.passed.not_for_us);
+}
+
+test "the slot kept for this machine's own connections is never taken by an accepted one (metal-vmm QUEUE 225, chunk 4)" {
+    var f: Fixture = .{};
+    f.init();
+    f.table.reserved_for_initiated = 1;
+    // Four slots: three peers connect, the fourth is refused.
+    for (0..3) |k| {
+        var p = Peer{ .ip = .{ 10, 0, 2, @intCast(10 + k) }, .port = 40000 };
+        _ = try p.connect(&f.table, &f.wire, 0);
+    }
+    var q = Peer{ .ip = .{ 10, 0, 2, 20 }, .port = 40000 };
+    var buf: [1600]u8 = undefined;
+    _ = handle(&f.table, &f.wire, q.frame(&buf, flag_syn, q.seq, ""), 0);
+    try testing.expectEqual(@as(u64, 1), f.table.refused);
 }

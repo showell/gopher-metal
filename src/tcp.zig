@@ -199,12 +199,23 @@ pub const PeerMachine = machine.Machine(.{
     .edges = &.{.{ .from = .open, .on = .fin_received, .to = .finished }},
 });
 
+/// **WHO OPENED THE CONNECTION** (RFC 9293 §3.10.1, OPEN): the peer, to
+/// the port the table listens on (`accepted`, a passive OPEN), or this
+/// machine (`initiated`, an active OPEN, from a port of its own). The host
+/// serves only what it accepted.
+pub const Role = enum { accepted, initiated };
+
 pub const Conn = struct {
     state: State = .closed,
-    // The remote half of the socket pair; the local half is the table's.
+    role: Role = .accepted,
+    // The remote half of the socket pair.
     peer_ip: [4]u8 = proto.ip_any,
     peer_mac: [6]u8 = proto.mac_broadcast,
     peer_port: u16 = 0,
+    /// The local half's port: the table's own for an accepted connection, an
+    /// ephemeral one for an initiated one. (The local address is the
+    /// table's.) A connection is found by all four (`Table.find`).
+    local_port: u16 = 0,
 
     /// RCV.NXT. There is no IRS field; the SYN sets this to IRS + 1.
     rcv_nxt: u32 = 0,
@@ -484,8 +495,14 @@ pub const ackCheck = arrives.ackCheck;
 pub const Table = struct {
     local_ip: [4]u8,
     local_mac: [6]u8,
+    /// The port the table listens on (LISTEN, a passive OPEN).
     port: u16,
     conns: []Conn,
+    /// **SLOTS KEPT FOR THIS MACHINE'S OWN CONNECTIONS** (metal-vmm QUEUE
+    /// 225, chunk 4; one, decided): an accepted connection never takes the
+    /// last this many free slots (`free`). Zero, the server alone, is the
+    /// table as it always was.
+    reserved_for_initiated: usize = 0,
     /// Scratch for one outgoing frame.
     out: []u8,
     /// The ISN source. It must be unpredictable: a guessable ISN lets an
@@ -569,18 +586,40 @@ pub const Table = struct {
         return n;
     }
 
-    fn find(self: *Table, ip: [4]u8, port: u16) ?usize {
+    /// **THE CONNECTION A SEGMENT IS FOR**, by the socket pair whole: the
+    /// peer's address and port and our port (RFC 9293 §3.10.7). Two polls of
+    /// one site's port 80 from two of our ports are two connections, one of
+    /// them maybe still closing.
+    fn find(self: *Table, ip: [4]u8, port: u16, local_port: u16) ?usize {
         for (self.conns, 0..) |c, i| {
-            if (c.state != .closed and c.peer_port == port and eql(&c.peer_ip, &ip)) return i;
+            if (c.state != .closed and c.peer_port == port and c.local_port == local_port and eql(&c.peer_ip, &ip)) return i;
         }
         return null;
     }
 
-    fn free(self: *Table) ?usize {
+    /// A free slot for a connection of `role`. **ONE IS KEPT FOR THIS
+    /// MACHINE'S OWN** (`reserved_for_initiated`): an accepted connection
+    /// takes a slot only while more than that many are free, so a flood of
+    /// SYNs cannot starve the connections this machine opens.
+    fn free(self: *Table, role: Role) ?usize {
+        var first: ?usize = null;
+        var n: usize = 0;
         for (self.conns, 0..) |c, i| {
-            if (c.state == .closed and !c.claimed) return i;
+            if (c.state == .closed and !c.claimed) {
+                if (first == null) first = i;
+                n += 1;
+            }
         }
-        return null;
+        if (role == .accepted and n <= self.reserved_for_initiated) return null;
+        return first;
+    }
+
+    /// Whether a connection this machine opened has `port` as its own.
+    fn initiatedOn(self: *const Table, port: u16) bool {
+        for (self.conns) |c| {
+            if (c.state != .closed and c.role == .initiated and c.local_port == port) return true;
+        }
+        return false;
     }
 
     /// **A FULL TABLE GIVES WAY TO A NEW SYN AT ITS OLDEST STUCK HALF-OPEN.**
@@ -629,6 +668,7 @@ pub const Table = struct {
             .mac = c.peer_mac,
             .ip = c.peer_ip,
             .port = c.peer_port,
+            .from = c.local_port,
         }, flags, seq, c.rcv_nxt, w, payload);
     }
 
@@ -671,9 +711,10 @@ pub const Table = struct {
     /// half-open's (almost certainly a flood's: an ACK proves its sender is
     /// real, a half-open proves nothing). Null with neither.
     fn revive(self: *Table, e: Revivable, now: i96) ?usize {
-        const slot = self.free() orelse self.oldestHalfOpen(now) orelse return null;
+        const slot = self.free(.accepted) orelse self.oldestHalfOpen(now) orelse return null;
         const c = &self.conns[slot];
         c.reset();
+        c.local_port = self.port;
         c.peer_ip = e.ip;
         c.peer_mac = e.mac;
         c.peer_port = e.port;
@@ -693,12 +734,14 @@ pub const Table = struct {
         return slot;
     }
 
-    const Peer = struct { mac: [6]u8, ip: [4]u8, port: u16 };
+    /// Where a segment goes: the peer's address and port, and `from`, our
+    /// port it is sent from.
+    const Peer = struct { mac: [6]u8, ip: [4]u8, port: u16, from: u16 };
 
     /// Builds and sends one segment to `to`. A SYN carries our MSS.
     fn segment(self: *Table, wire: anytype, to: Peer, flags: u8, seq: u32, ack_number: u32, window: u16, payload: []const u8) void {
         const s: Segment = .{
-            .src_port = self.port,
+            .src_port = to.from,
             .dst_port = to.port,
             .seq = seq,
             .ack = ack_number,
@@ -1072,7 +1115,8 @@ pub const Table = struct {
         const t = pkt.payload;
         // DEPARTS: a segment to a port nobody listens on is dropped silently,
         // where CLOSED (RFC 9293 §3.10.7.1) answers it with a reset.
-        if (proto.readBe16(t[2..4]) != self.port) {
+        const dst_port = proto.readBe16(t[2..4]);
+        if (dst_port != self.port and !self.initiatedOn(dst_port)) {
             self.passed.not_for_us +%= 1;
             return .{ .event = .nothing };
         }
@@ -1090,7 +1134,7 @@ pub const Table = struct {
         const window = seg.window;
         const data = seg.data;
 
-        var found = self.find(pkt.src_ip, src_port);
+        var found = self.find(pkt.src_ip, src_port, dst_port);
 
         // DEPARTS: RST is checked first, before the sequence number's
         // acceptability (RFC 9293 §3.10.7.4 checks the sequence first, then
@@ -1140,18 +1184,24 @@ pub const Table = struct {
             }
         }
 
-        // The table is LISTEN (RFC 9293 §3.10.7.2): a SYN for no connection
-        // opens one if there is a slot; anything else is refused.
+        // The table is LISTEN (RFC 9293 §3.10.7.2) on its own port: a SYN for
+        // no connection opens one if there is a slot; anything else is
+        // refused. A port of this machine's own connections listens for
+        // nothing: what is not for one of them is dropped, as for no port.
         const i = found orelse {
+            if (dst_port != self.port) {
+                self.passed.not_for_us +%= 1;
+                return .{ .event = .nothing };
+            }
             // DEPARTS: a segment with neither SYN nor ACK is answered with a
             // reset (`refuse`, RST|ACK, as CLOSED answers it), where LISTEN
             // (RFC 9293 §3.10.7.2, fourth) drops it.
             if (flags & flag_syn == 0 or flags & flag_ack != 0) {
                 props.reachable(@src(), "tcp: a segment for no connection is refused", null);
-                self.refuse(wire, .{ .mac = pkt.src_mac, .ip = pkt.src_ip, .port = src_port }, seq, number, flags, data.len);
+                self.refuse(wire, .{ .mac = pkt.src_mac, .ip = pkt.src_ip, .port = src_port, .from = dst_port }, seq, number, flags, data.len);
                 return .{ .event = .nothing };
             }
-            const slot = self.free() orelse self.oldestHalfOpen(now) orelse {
+            const slot = self.free(.accepted) orelse self.oldestHalfOpen(now) orelse {
                 self.refused += 1;
                 props.reachable(@src(), "tcp: a SYN finds the table full, and nothing to give way", null);
                 return .{ .event = .nothing };
@@ -1161,6 +1211,7 @@ pub const Table = struct {
             c.peer_ip = pkt.src_ip;
             c.peer_mac = pkt.src_mac;
             c.peer_port = src_port;
+            c.local_port = self.port;
             c.rcv_nxt = seq +% 1; // their SYN takes one
             c.wl1 = seq;
             c.una = self.isn();
@@ -1255,7 +1306,7 @@ pub const Table = struct {
                 // An unacceptable ACK draws <SEQ=SEG.ACK><CTL=RST> (RFC 9293
                 // §3.10.7.4, SYN-RECEIVED).
                 self.bad_ack_resets +%= 1;
-                self.segment(wire, .{ .mac = c.peer_mac, .ip = c.peer_ip, .port = c.peer_port }, flag_rst, number, 0, 0, "");
+                self.segment(wire, .{ .mac = c.peer_mac, .ip = c.peer_ip, .port = c.peer_port, .from = c.local_port }, flag_rst, number, 0, 0, "");
                 return .{ .event = .nothing };
             }
             c.una = number;
