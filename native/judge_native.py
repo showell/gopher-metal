@@ -28,11 +28,14 @@ boot to ask before, and takes seconds here:
                 code (`FETCH_ONLY=1` runs these alone)
 
 Exit 0 when every check passes."""
+import functools
 import hashlib
+import http.server
 import os
 import socket
 import struct
 import random
+import socketserver
 import subprocess
 import sys
 import threading
@@ -395,10 +398,19 @@ def check_loss():
 
 
 class LinuxServers:
-    """What gm-fetch asks, on Linux's side of the TAP: `python3 -m
-    http.server` with a 2-byte /tiny and a 300 KB /big; nothing on 8001
+    """What gm-fetch asks, on Linux's side of the TAP: Python's HTTP server,
+    in this process, with a 2-byte /tiny and a 300 KB /big; nothing on 8001
     (refused); on 8002 a server that takes the request and never answers
-    (idle); on 8003 one that answers a byte every 500 ms (total)."""
+    (idle); on 8003 one that answers a byte every 500 ms (total).
+
+    **LISTENING BEFORE THE CONSTRUCTOR RETURNS.** It was `python3 -m
+    http.server` as a subprocess, polled until it answered, and twice in
+    five runs on the box (2026-10-16) it had not listened in 5 s, saying
+    nothing: a process's start-up, and HTTPServer.server_bind's reverse
+    lookup of its own address (socket.getfqdn), are both outside our
+    control. In-process, bound and listening in `__init__`, and with
+    server_bind's lookup skipped, there is no start-up race left to lose.
+    Every byte still crosses Linux's own TCP."""
 
     def __init__(self):
         self.www = os.path.join(HERE, "..", "zig-out", "fetch-www")
@@ -407,12 +419,20 @@ class LinuxServers:
             f.write(b"ok")
         with open(os.path.join(self.www, "big"), "wb") as f:
             f.write(pattern(300_000))
-        # Its stderr is kept, so a server that never listens says why (it
-        # failed to start once on the box, 2026-10-16, with nothing to read).
-        self.http_err = os.path.join(self.www, "..", "fetch-http.err")
-        with open(self.http_err, "wb") as err:
-            self.http = subprocess.Popen([sys.executable, "-m", "http.server", "8000", "--bind", LINUX],
-                                         cwd=self.www, stdout=subprocess.DEVNULL, stderr=err)
+        class Quiet(http.server.SimpleHTTPRequestHandler):
+            def log_message(self, *args):
+                pass
+
+        class Bound(http.server.ThreadingHTTPServer):
+            daemon_threads = True
+
+            def server_bind(self):
+                # TCPServer's bind only: HTTPServer's adds getfqdn.
+                socketserver.TCPServer.server_bind(self)
+                self.server_name, self.server_port = self.server_address[:2]
+
+        self.http = Bound((LINUX, 8000), functools.partial(Quiet, directory=self.www))
+        threading.Thread(target=self.http.serve_forever, daemon=True).start()
         self.stop_now = threading.Event()
         self.socks = []
         for port, serve in ((8002, self._mute), (8003, self._trickle)):
@@ -423,19 +443,6 @@ class LinuxServers:
             ls.settimeout(0.2)
             self.socks.append(ls)
             threading.Thread(target=self._accept, args=(ls, serve), daemon=True).start()
-        deadline = time.time() + 5
-        while time.time() < deadline:
-            try:
-                socket.create_connection((LINUX, 8000), timeout=0.5).close()
-                return
-            except OSError:
-                time.sleep(0.05)
-        # Never left behind: an orphan would hold port 8000 for the next run.
-        self.http.kill()
-        self.http.wait()
-        with open(self.http_err) as f:
-            said = f.read().strip()
-        raise RuntimeError(f"python3 -m http.server never listened in 5 s; it said: {said or '(nothing)'}")
 
     def _accept(self, ls, serve):
         while not self.stop_now.is_set():
@@ -466,8 +473,8 @@ class LinuxServers:
         self.stop_now.set()
         for ls in self.socks:
             ls.close()
-        self.http.terminate()
-        self.http.wait()
+        self.http.shutdown()
+        self.http.server_close()
 
 
 def fetch(port, path, **env):
