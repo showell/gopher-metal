@@ -38,6 +38,27 @@ const options = @import("tcp_properties_options");
 
 var jsonl: std.ArrayList(u8) = .empty;
 
+/// **WHERE THE SWEEP'S TIME GOES** (metal-vmm QUEUE 224.1): each simulator's
+/// seconds, summed over its seeds, printed at the end with the whole run's,
+/// so the long tier can tell the build's time from the run's (long.sh).
+const Sim = enum { tcp_plain, tcp_rough, tcp_crowd, fat, page, pure, ready, drain, tcp_full, store, floor, durable, replays, regressions };
+var spent = std.EnumArray(Sim, u64).initFill(0);
+
+fn seconds(ns: u64) f64 {
+    return @as(f64, @floatFromInt(ns)) / std.time.ns_per_s;
+}
+
+fn awake() u64 {
+    return @intCast(std.Io.Clock.now(.awake, std.testing.io).nanoseconds);
+}
+
+/// `run(seed)` timed into `sim`'s total: whether every oracle held.
+fn timed(sim_: Sim, comptime run: anytype, seed: u64) bool {
+    const from = awake();
+    defer spent.getPtr(sim_).* += awake() - from;
+    return if (run(seed)) true else |_| false;
+}
+
 fn keep(line: []const u8) void {
     jsonl.appendSlice(std.testing.allocator, line) catch @panic("out of memory for the JSONL");
 }
@@ -53,64 +74,65 @@ test "the properties over a sweep of seeds" {
     defer at.on_broken = at.failTest;
     at.declare();
 
+    const began = awake();
     var failed_seeds: usize = 0;
     for (1..options.seeds + 1) |seed| {
-        const ok = if (sim.runSeed(seed)) true else |_| false;
+        const ok = timed(.tcp_plain, sim.runSeed, seed);
         if (!ok) failed_seeds += 1;
         at.always(@src(), ok, "tcp_sim: every oracle holds for every seed", .{ .seed = seed });
-        const rough_ok = if (sim.runRoughSeed(seed)) true else |_| false;
+        const rough_ok = timed(.tcp_rough, sim.runRoughSeed, seed);
         if (!rough_ok) failed_seeds += 1;
         at.always(@src(), rough_ok, "tcp_sim: every oracle holds for every rough seed", .{ .seed = seed });
         if (seed > options.crowd_seeds) continue;
-        const crowd_ok = if (sim.runCrowdSeed(seed)) true else |_| false;
+        const crowd_ok = timed(.tcp_crowd, sim.runCrowdSeed, seed);
         if (!crowd_ok) failed_seeds += 1;
         at.always(@src(), crowd_ok, "tcp_sim: every oracle holds for every crowd seed", .{ .seed = seed });
     }
     for (1..options.fat_seeds + 1) |seed| {
-        const ok = if (fat_sim.runSeed(seed)) true else |_| false;
+        const ok = timed(.fat, fat_sim.runSeed, seed);
         if (!ok) failed_seeds += 1;
         at.always(@src(), ok, "fat_sim: every oracle holds for every seed, both FAT paths", .{ .seed = seed });
-        const probed = if (fat_sim.runProbeSeed(seed)) true else |_| false;
+        const probed = timed(.fat, fat_sim.runProbeSeed, seed);
         if (!probed) failed_seeds += 1;
         at.always(@src(), probed, "fat_sim: every oracle holds for every seed with probes", .{ .seed = seed });
     }
     for (1..options.page_seeds + 1) |seed| {
-        const ok = if (page_sim.runSeed(seed)) true else |_| false;
+        const ok = timed(.page, page_sim.runSeed, seed);
         if (!ok) failed_seeds += 1;
         at.always(@src(), ok, "page_sim: every oracle holds for every seed", .{ .seed = seed });
     }
     for (1..options.pure_seeds + 1) |seed| {
-        const ok = if (pure_sim.runSeed(seed)) true else |_| false;
+        const ok = timed(.pure, pure_sim.runSeed, seed);
         if (!ok) failed_seeds += 1;
         at.always(@src(), ok, "pure_sim: every oracle holds for every seed", .{ .seed = seed });
     }
     for (1..options.ready_seeds + 1) |seed| {
-        const ok = if (ready_sim.runSeed(seed)) true else |_| false;
+        const ok = timed(.ready, ready_sim.runSeed, seed);
         if (!ok) failed_seeds += 1;
         at.always(@src(), ok, "ready_sim: every oracle holds for every seed", .{ .seed = seed });
     }
     for (1..options.drain_seeds + 1) |seed| {
-        const ok = if (drain_sim.runSeed(seed)) true else |_| false;
+        const ok = timed(.drain, drain_sim.runSeed, seed);
         if (!ok) failed_seeds += 1;
         at.always(@src(), ok, "drain_sim: every oracle holds for every seed", .{ .seed = seed });
     }
     for (1..options.full_seeds + 1) |seed| {
-        const ok = if (sim.runFullSeed(seed)) true else |_| false;
+        const ok = timed(.tcp_full, sim.runFullSeed, seed);
         if (!ok) failed_seeds += 1;
         at.always(@src(), ok, "tcp_sim: every oracle holds for a crowd the size of the kernel's table", .{ .seed = seed });
     }
     for (1..options.store_seeds + 1) |seed| {
-        const ok = if (store_sim.runSeed(seed)) true else |_| false;
+        const ok = timed(.store, store_sim.runSeed, seed);
         if (!ok) failed_seeds += 1;
         at.always(@src(), ok, "store_sim: every oracle holds for every seed", .{ .seed = seed });
     }
     for (1..options.floor_seeds + 1) |seed| {
-        const ok = if (floor_sim.runSeed(seed)) true else |_| false;
+        const ok = timed(.floor, floor_sim.runSeed, seed);
         if (!ok) failed_seeds += 1;
         at.always(@src(), ok, "floor_sim: every oracle holds for every seed", .{ .seed = seed });
     }
     for (1..options.durable_seeds + 1) |seed| {
-        const ok = if (durable_sim.runSeed(seed)) true else |_| false;
+        const ok = timed(.durable, durable_sim.runSeed, seed);
         if (!ok) failed_seeds += 1;
         at.always(@src(), ok, "durable_sim: every oracle holds for every seed", .{ .seed = seed });
     }
@@ -120,22 +142,27 @@ test "the properties over a sweep of seeds" {
     // code, and at 300 seeds its two runs a seed were 600 more runs, the
     // whole of the long tier's slowdown since v21 (metal-vmm QUEUE B38).
     for (1..41) |seed| {
-        const ok = if (fat_sim.replaysExactly(seed)) true else |_| false;
+        const ok = timed(.replays, fat_sim.replaysExactly, seed);
         if (!ok) failed_seeds += 1;
         at.always(@src(), ok, "fat_sim: a run under a tape replays exactly", .{ .seed = seed });
     }
     // And a store run, the 20 seeds `zig build test` ran (QUEUE 136).
     for (1..21) |seed| {
-        const ok = if (store_sim.replaysExactly(seed)) true else |_| false;
+        const ok = timed(.replays, store_sim.replaysExactly, seed);
         if (!ok) failed_seeds += 1;
         at.always(@src(), ok, "store_sim: a run under a tape replays exactly", .{ .seed = seed });
     }
     // Every sweep, whatever its size: they are the regression tests.
     for (fat_sim.regressions) |seed| {
-        const ok = if (fat_sim.runSeed(seed)) true else |_| false;
+        const ok = timed(.regressions, fat_sim.runSeed, seed);
         if (!ok) failed_seeds += 1;
         at.always(@src(), ok, "fat_sim: every regression seed holds", .{ .seed = seed });
     }
+
+    // Each simulator's seconds, then the run's (long.sh takes the build's
+    // as its lap less this).
+    for (std.enums.values(Sim)) |k| std.debug.print("time: sim {t} {d:.1} s\n", .{ k, seconds(spent.get(k)) });
+    std.debug.print("time: sim run {d:.1} s\n", .{seconds(awake() - began)});
 
     var buf: [64 * 1024]u8 = undefined;
     var w: std.Io.Writer = .fixed(&buf);

@@ -104,6 +104,12 @@ if [ "$want" != metal ]; then
         echo "the simulators did not run to a verdict ($OUT.sim):"; grep -E 'error' "$OUT.sim" | head -5
     fi
     [ $code = 0 ] || failed+=(sim)
+    # **THE BUILD APART FROM THE RUN** (metal-vmm QUEUE 224.1): each
+    # simulator's seconds as properties.zig printed them, and the build's as
+    # the phase's time less the run's.
+    grep '^ *time: sim ' "$OUT.sim" | sed 's/^ *//'
+    run_s=$(sed -n 's/^ *time: sim run \([0-9]*\).*/\1/p' "$OUT.sim")
+    [ -n "$run_s" ] && echo "time: simulator build $(( $(date +%s) - began - run_s )) s"
     lap "simulator"
 
     # **THE FAULT SWEEPS WHOLE** (metal-vmm QUEUE 198.11): tier 0 stops a
