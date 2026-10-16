@@ -41,8 +41,6 @@ const our_mac = [6]u8{ 0x02, 0x67, 0x6d, 0x00, 0x00, 0x02 };
 const slots = 2;
 const rx_bytes = 16 * 1024;
 const tx_bytes = 4 * 1024;
-/// How often an unanswered ARP request is asked again.
-const arp_every_ns: i96 = 100 * std.time.ns_per_ms;
 
 var conns: [slots]tcp.Conn = undefined;
 var rx: [slots][rx_bytes]u8 = undefined;
@@ -169,16 +167,12 @@ fn deadlineArg(args: []const []const u8, name: []const u8) u64 {
     fail("no {s}=N: the deadlines have no defaults", .{name});
 }
 
-/// **HOW THE CONNECTION ENDED**, from the counter the table moved when it
-/// let it go.
-fn ended(t: *const tcp.Table, before: tcp.Table) fetch.Outcome {
-    if (t.connects_refused != before.connects_refused) return .refused;
-    if (t.connect_deadlines != before.connect_deadlines) return .connect_deadline;
-    if (t.idle_deadlines != before.idle_deadlines) return .idle_deadline;
-    if (t.total_deadlines != before.total_deadlines) return .total_deadline;
-    if (t.given_up != before.given_up) return .given_up;
-    return .reset;
-}
+/// The body, as `fetch.Client` hands it over: to stdout.
+const Stdout = struct {
+    pub fn body(_: *Stdout, bytes: []const u8) void {
+        writeOut(bytes);
+    }
+};
 
 pub fn main(init: std.process.Init.Minimal) !void {
     var env = try std.process.Environ.createMap(init.environ, std.heap.page_allocator);
@@ -219,25 +213,14 @@ pub fn main(init: std.process.Init.Minimal) !void {
     table.reserved_for_initiated = 1;
     table.ephemeral_next = @intCast(tcp.ephemeral_first + isn() % (0xFFFF - tcp.ephemeral_first));
 
-    var request_buf: [512]u8 = undefined;
-    var host_buf: [32]u8 = undefined;
-    const host = std.fmt.bufPrint(&host_buf, "{d}.{d}.{d}.{d}", .{ server_ip[0], server_ip[1], server_ip[2], server_ip[3] }) catch unreachable;
-    const request = fetch.writeRequest(&request_buf, host, path) catch fail("the path is too long", .{});
-
     const began = now();
     began_at = began;
     trace = env.get("GM_TRACE") != null;
-    var cache: arp.Cache = .{};
-    var asked_at: ?i96 = null;
-    var slot: ?usize = null;
-    var queued: usize = 0;
-    var answer: fetch.Answer = .{};
-    var finished = false;
-    var before: tcp.Table = undefined;
-    var outcome: ?fetch.Outcome = null;
+    var client = fetch.Client.init(.{ .ip = server_ip, .port = port, .path = path }, deadlines, our_ip, our_mac, began) catch fail("the path is too long", .{});
+    var sink: Stdout = .{};
 
     var frame: [2048]u8 = undefined;
-    while (outcome == null) {
+    const o = while (true) {
         var fds = [_]linux.pollfd{.{ .fd = fd, .events = linux.POLL.IN, .revents = 0 }};
         _ = linux.poll(&fds, 1, 1);
         const t = now();
@@ -245,15 +228,6 @@ pub fn main(init: std.process.Init.Minimal) !void {
             const rc = linux.read(fd, &frame, frame.len);
             if (linux.errno(rc) != .SUCCESS or rc == 0) break;
             const f = frame[0..rc];
-            if (arp.parse(f)) |p| {
-                cache.observe(p, our_ip);
-                if (p.op == .request and std.mem.eql(u8, &p.target_ip, &our_ip)) {
-                    var reply: [64]u8 = undefined;
-                    const n = arp.writeReply(&reply, our_mac, our_ip, .{ .sender_mac = p.sender_mac, .sender_ip = p.sender_ip, .target_ip = p.target_ip });
-                    wire.send(reply[0..n]);
-                }
-                continue;
-            }
             if (isTcp(f)) {
                 const nth = tcp_received;
                 tcp_received += 1;
@@ -267,44 +241,11 @@ pub fn main(init: std.process.Init.Minimal) !void {
                 };
                 traceFrame("in ", f, "");
             }
-            _ = table.handle(&wire, f, t);
+            client.arrived(&table, &wire, f, t);
         }
-
-        if (slot == null) {
-            // **WHO HAS THE SERVER'S ADDRESS?** Asked every 100 ms, within
-            // the connect deadline; then the connection.
-            if (cache.lookup(server_ip)) |mac| {
-                before = table;
-                slot = table.connect(&wire, .{ .mac = mac, .ip = server_ip, .port = port }, deadlines, t) orelse fail("no slot for the connection", .{});
-            } else if (t - began >= @as(i96, @intCast(deadlines.connect_ns))) {
-                outcome = .no_arp;
-            } else if (asked_at == null or t - asked_at.? >= arp_every_ns) {
-                var ask: [64]u8 = undefined;
-                wire.send(ask[0..arp.writeRequest(&ask, our_mac, our_ip, server_ip)]);
-                asked_at = t;
-            }
-        }
-
-        if (slot) |i| {
-            const c = &table.conns[i];
-            if (c.state == .established and queued < request.len) queued += table.queue(i, request[queued..]);
-            const pending = c.pending();
-            if (pending.len > 0) {
-                const body = answer.feed(pending);
-                writeOut(body);
-                if (c.consumeReopens(pending.len)) table.ack(&wire, i);
-            }
-            if (c.peerDone() and !finished and c.state == .established) {
-                table.finish(i);
-                finished = true;
-            }
-            table.transmit(&wire, t);
-            if (table.conns[i].state == .closed) {
-                outcome = if (finished or c.peerDone()) answer.outcome() else ended(&table, before);
-            }
-        } else table.transmit(&wire, t);
-    }
-    const o = outcome.?;
+        if (client.turn(&table, &wire, t, &sink)) |done| break done;
+    };
+    const answer = &client.answer;
     std.debug.print("fetch: {s} after {d} ms: status {d}, {d} of {?d} body bytes; " ++
         "{d} frames sent ({d} not sent on purpose), {d} retransmits, {d} segments held ahead of a hole\n", .{
         @tagName(o),     @divTrunc(now() - began, std.time.ns_per_ms), answer.status,

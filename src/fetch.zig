@@ -4,6 +4,9 @@
 //! bytes handed in, and the outcome is a value, each with its exit code.
 
 const std = @import("std");
+const tcp = @import("tcp.zig");
+const arp = @import("arp.zig");
+const proto = @import("proto.zig");
 
 /// **HOW A FETCH ENDS**, one exit code each, so a judge reads the outcome
 /// from the status alone. 1 is the program's own: it could not start.
@@ -119,6 +122,126 @@ pub fn writeRequest(out: []u8, host: []const u8, path: []const u8) ![]u8 {
     return std.fmt.bufPrint(out, "GET {s} HTTP/1.1\r\nHost: {s}\r\nConnection: close\r\n\r\n", .{ path, host });
 }
 
+/// What a fetch is to: the server's address and port, and the path asked.
+pub const Target = struct { ip: [4]u8, port: u16, path: []const u8 };
+
+/// How often an unanswered ARP request is asked again.
+pub const arp_every_ns: i96 = 100 * std.time.ns_per_ms;
+
+/// The table's counters a connection's end moves, each to its outcome.
+const Ends = struct {
+    refused: u64,
+    connect: u64,
+    idle: u64,
+    total: u64,
+    given_up: u64,
+
+    fn of(t: *const tcp.Table) Ends {
+        return .{ .refused = t.connects_refused, .connect = t.connect_deadlines, .idle = t.idle_deadlines, .total = t.total_deadlines, .given_up = t.given_up };
+    }
+};
+
+/// **ONE GET, AS A MACHINE MAKES IT** (chunks 8 and 9): who has the
+/// server's address (ARP, every `arp_every_ns` until the connect deadline),
+/// the connection (`Table.connect`), the request, the answer read as it
+/// comes, our FIN after the server's, and how it ended. Pure: frames come in
+/// through `arrived`, go out through the caller's `wire`, and the time is the
+/// caller's; the body goes to the caller's `sink` (anything with
+/// `body([]const u8)`).
+pub const Client = struct {
+    target: Target,
+    deadlines: tcp.Deadlines,
+    our_ip: [4]u8,
+    our_mac: [6]u8,
+    request_buf: [512]u8 = undefined,
+    request_len: usize = 0,
+    queued: usize = 0,
+    cache: arp.Cache = .{},
+    asked_at: ?i96 = null,
+    began: i96,
+    slot: ?usize = null,
+    answer: Answer = .{},
+    finished: bool = false,
+    before: Ends = undefined,
+    outcome: ?Outcome = null,
+
+    pub fn init(target: Target, deadlines: tcp.Deadlines, our_ip: [4]u8, our_mac: [6]u8, now: i96) error{NoSpaceLeft}!Client {
+        var c: Client = .{ .target = target, .deadlines = deadlines, .our_ip = our_ip, .our_mac = our_mac, .began = now };
+        var host: [16]u8 = undefined;
+        const ip = target.ip;
+        const name = std.fmt.bufPrint(&host, "{d}.{d}.{d}.{d}", .{ ip[0], ip[1], ip[2], ip[3] }) catch unreachable;
+        c.request_len = (try writeRequest(&c.request_buf, name, target.path)).len;
+        return c;
+    }
+
+    /// **A FRAME ARRIVED.** ARP is ours: it teaches the cache, and a request
+    /// for our address is answered. Anything else is the table's.
+    pub fn arrived(self: *Client, table: *tcp.Table, wire: anytype, frame: []const u8, now: i96) void {
+        if (arp.parse(frame)) |p| {
+            self.cache.observe(p, self.our_ip);
+            if (p.op == .request and std.mem.eql(u8, &p.target_ip, &self.our_ip)) {
+                var reply: [64]u8 = undefined;
+                const n = arp.writeReply(&reply, self.our_mac, self.our_ip, .{ .sender_mac = p.sender_mac, .sender_ip = p.sender_ip, .target_ip = p.target_ip });
+                wire.send(reply[0..n]);
+            }
+            return;
+        }
+        _ = table.handle(wire, frame, now);
+    }
+
+    /// **ONE TURN**, then the table's `transmit`: the outcome once it is
+    /// known, else null.
+    pub fn turn(self: *Client, table: *tcp.Table, wire: anytype, now: i96, sink: anytype) ?Outcome {
+        if (self.outcome) |o| return o;
+        const i = self.slot orelse {
+            if (self.cache.lookup(self.target.ip)) |mac| {
+                self.before = Ends.of(table);
+                self.slot = table.connect(wire, .{ .mac = mac, .ip = self.target.ip, .port = self.target.port }, self.deadlines, now) orelse {
+                    self.outcome = .connect_deadline; // no slot: it never connects
+                    return self.outcome;
+                };
+            } else if (now - self.began >= @as(i96, @intCast(self.deadlines.connect_ns))) {
+                self.outcome = .no_arp;
+                return self.outcome;
+            } else if (self.asked_at == null or now - self.asked_at.? >= arp_every_ns) {
+                var ask: [64]u8 = undefined;
+                wire.send(ask[0..arp.writeRequest(&ask, self.our_mac, self.our_ip, self.target.ip)]);
+                self.asked_at = now;
+            }
+            table.transmit(wire, now);
+            return null;
+        };
+        const c = &table.conns[i];
+        const request = self.request_buf[0..self.request_len];
+        if (c.state == .established and self.queued < request.len) self.queued += table.queue(i, request[self.queued..]);
+        const pending = c.pending();
+        if (pending.len > 0) {
+            sink.body(self.answer.feed(pending));
+            if (c.consumeReopens(pending.len)) table.ack(wire, i);
+        }
+        if (c.peerDone() and !self.finished and c.state == .established) {
+            table.finish(i);
+            self.finished = true;
+        }
+        table.transmit(wire, now);
+        if (table.conns[i].state == .closed) {
+            self.outcome = if (self.finished) self.answer.outcome() else self.ended(table);
+        }
+        return self.outcome;
+    }
+
+    /// How the connection ended, from the counter the table moved.
+    fn ended(self: *const Client, t: *const tcp.Table) Outcome {
+        const now = Ends.of(t);
+        if (now.refused != self.before.refused) return .refused;
+        if (now.connect != self.before.connect) return .connect_deadline;
+        if (now.idle != self.before.idle) return .idle_deadline;
+        if (now.total != self.before.total) return .total_deadline;
+        if (now.given_up != self.before.given_up) return .given_up;
+        return .reset;
+    }
+};
+
 // ── tests ──────────────────────────────────────────────────────────────────
 
 const testing = std.testing;
@@ -177,4 +300,125 @@ test "how an answer ends: short, long, not a 200, no length, not HTTP, a head to
 test "the request asks for the path and for the server to close" {
     var buf: [128]u8 = undefined;
     try testing.expectEqualStrings("GET /big HTTP/1.1\r\nHost: 10.77.0.1\r\nConnection: close\r\n\r\n", try writeRequest(&buf, "10.77.0.1", "/big"));
+}
+
+// ── the client against the kernel's own server, in one process ────────────
+
+const Loop = struct {
+    /// Frames on the way, each to `to_server` or to the client, in order.
+    frames: [64][1600]u8 = undefined,
+    lens: [64]usize = undefined,
+    to_server: [64]bool = undefined,
+    n: usize = 0,
+
+    const End = struct {
+        loop: *Loop,
+        server: bool,
+        pub fn send(self: *End, frame: []const u8) void {
+            const l = self.loop;
+            if (l.n == l.frames.len) return; // full: lost, as a wire would
+            @memcpy(l.frames[l.n][0..frame.len], frame);
+            l.lens[l.n] = frame.len;
+            l.to_server[l.n] = !self.server;
+            l.n += 1;
+        }
+    };
+};
+
+const Sink = struct {
+    got: [64]u8 = undefined,
+    len: usize = 0,
+    pub fn body(self: *Sink, bytes: []const u8) void {
+        @memcpy(self.got[self.len..][0..bytes.len], bytes);
+        self.len += bytes.len;
+    }
+};
+
+const Server = enum { answers, short, mute, deaf, absent };
+
+fn testIsn() u32 {
+    return 77_000;
+}
+
+/// One fetch against the kernel's own table as the server, `how` it
+/// behaves, a millisecond a step: the outcome, and what the sink got.
+fn against(how: Server, sink: *Sink) !Outcome {
+    const server_ip = [4]u8{ 10, 0, 2, 15 };
+    const server_mac = [6]u8{ 2, 0, 0, 0, 0, 15 };
+    const client_ip = [4]u8{ 10, 0, 2, 16 };
+    const client_mac = [6]u8{ 2, 0, 0, 0, 0, 16 };
+    var s_rx: [2][2048]u8 = undefined;
+    var s_tx: [2][2048]u8 = undefined;
+    var c_rx: [2][2048]u8 = undefined;
+    var c_tx: [2][2048]u8 = undefined;
+    var s_conns: [2]tcp.Conn = .{ .{ .rx = &s_rx[0], .tx = &s_tx[0] }, .{ .rx = &s_rx[1], .tx = &s_tx[1] } };
+    var c_conns: [2]tcp.Conn = .{ .{ .rx = &c_rx[0], .tx = &c_tx[0] }, .{ .rx = &c_rx[1], .tx = &c_tx[1] } };
+    var s_out: [1600]u8 = undefined;
+    var c_out: [1600]u8 = undefined;
+    var server = tcp.Table.init(server_ip, server_mac, 80, &s_conns, &s_out, testIsn);
+    var client = tcp.Table.init(client_ip, client_mac, 7, &c_conns, &c_out, testIsn);
+    client.reserved_for_initiated = 1;
+    var loop: Loop = .{};
+    var to_s: Loop.End = .{ .loop = &loop, .server = false };
+    var to_c: Loop.End = .{ .loop = &loop, .server = true };
+    const deadlines: tcp.Deadlines = .{ .connect_ns = 150 * std.time.ns_per_ms, .idle_ns = 1 * std.time.ns_per_s, .total_ns = 3 * std.time.ns_per_s };
+    var f = try Client.init(.{ .ip = server_ip, .port = 80, .path = "/x" }, deadlines, client_ip, client_mac, 0);
+    var answered = false;
+    var now: i96 = 0;
+    while (now < 10 * std.time.ns_per_s) : (now += std.time.ns_per_ms) {
+        // Deliver what is on the way, in order.
+        var k: usize = 0;
+        const due = loop.n;
+        var held: [64][1600]u8 = undefined;
+        var held_lens: [64]usize = undefined;
+        var held_to: [64]bool = undefined;
+        for (0..due) |j| {
+            held[j] = loop.frames[j];
+            held_lens[j] = loop.lens[j];
+            held_to[j] = loop.to_server[j];
+        }
+        loop.n = 0;
+        while (k < due) : (k += 1) {
+            const frame = held[k][0..held_lens[k]];
+            if (held_to[k]) {
+                if (how == .absent) continue;
+                if (arp.parseRequest(frame)) |req| {
+                    var reply: [64]u8 = undefined;
+                    to_c.send(reply[0..arp.writeReply(&reply, server_mac, server_ip, req)]);
+                    continue;
+                }
+                if (how == .deaf) continue;
+                _ = server.handle(&to_c, frame, now);
+            } else f.arrived(&client, &to_s, frame, now);
+        }
+        // The server's program: the request whole, then its answer.
+        for (server.conns, 0..) |*c, i| {
+            if (c.state != .established or answered) continue;
+            if (std.mem.indexOf(u8, c.pending(), "\r\n\r\n") == null) continue;
+            answered = true;
+            c.consume(c.pending().len);
+            switch (how) {
+                .answers => _ = server.queue(i, "HTTP/1.1 200 OK\r\ncontent-length: 5\r\n\r\nhello"),
+                .short => _ = server.queue(i, "HTTP/1.1 200 OK\r\ncontent-length: 9\r\n\r\nhello"),
+                .mute => continue,
+                .deaf, .absent => unreachable,
+            }
+            server.finish(i);
+        }
+        server.transmit(&to_c, now);
+        if (f.turn(&client, &to_s, now, sink)) |o| return o;
+    }
+    return error.NeverEnded;
+}
+
+test "the client against the kernel's own server: a 200, no ARP, the connect and idle deadlines, a short answer" {
+    var sink: Sink = .{};
+    try testing.expectEqual(Outcome.ok, try against(.answers, &sink));
+    try testing.expectEqualStrings("hello", sink.got[0..sink.len]);
+    sink = .{};
+    try testing.expectEqual(Outcome.no_arp, try against(.absent, &sink));
+    try testing.expectEqual(Outcome.connect_deadline, try against(.deaf, &sink));
+    try testing.expectEqual(Outcome.idle_deadline, try against(.mute, &sink));
+    sink = .{};
+    try testing.expectEqual(Outcome.short_answer, try against(.short, &sink));
 }
