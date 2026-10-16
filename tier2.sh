@@ -5,6 +5,9 @@
 # since 198.8 their own default is ../zig-metal-unikernel/probe).
 # Needs metal-vmm beside this checkout (or METAL_VMM) and /dev/kvm; its
 # check.sh compares each guest against QEMU too.
+#
+# **SKIP="word …"** leaves slow steps out (tools/skip_lib.sh): vmm-check, vmm-same.
+# A run with a skip ends NOT A PASS, exit 3, and keeps no verdict.
 TIER="tier 2"
 source "$(dirname "${BASH_SOURCE[0]}")/tools/tier_lib.sh"
 need zig qemu-system-x86_64 mkfs.vfat

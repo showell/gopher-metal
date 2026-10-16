@@ -5,11 +5,14 @@
 #
 #   SKIP="tcp-traces probes" ./gates.sh
 #
+# Each script's header lists its own words.
+#
 # - **The words are the steps' names**, the ones each prints when it fails
 #   (`STEPS` below). A word that names no step stops the run before
 #   anything runs (exit 2): a typo never "skips" nothing quietly.
 # - **Each skipped step says so where it would have run** (`SKIPPED <name>:
-#   NOT RUN`), and the last line says so again: `PASS, but NOT RUN: …`.
+#   NOT RUN`), and the last line says so again, never leading with PASS:
+#   `NOT A PASS: every step that ran passed; NOT RUN: …`.
 # - **A run with a skip exits 3, never 0**, and records no verdict
 #   (tools/verdicts.py refuses while SKIP is set). Only a whole run passes.
 #
@@ -18,7 +21,18 @@
 
 STEPS="test tcp-traces native probes droplet-boot droplet-hello screen vmm-check vmm-same webbox-test vmm-pc vmm-timeouts gopher-judges sim fault-sweeps lossy rough native-full volume-sweep fat16-judge"
 
-SKIP="${SKIP:-}"
+# **NOTHING NARROWS A JUDGE BEHIND THE GATES' BACK** (the second cold
+# review, 2026-10-16): JUDGE_QUICK left in a shell silently dropped
+# judge_native's loss check and the chat judges' long gates, and a full
+# verdict was kept. A gate refuses them; SKIP is the way to narrow, and it
+# says so. Inside, a script sets them on the one command that wants them.
+for v in JUDGE_QUICK JUDGE_ONLY; do
+    if [ -n "${!v:-}" ]; then echo "$v is set ('${!v}'): a gate run judges whole; unset it, or name what to leave out with SKIP"; exit 2; fi
+done
+
+# Spaces only: words split by tabs or newlines would pass the check below
+# and then match nothing.
+SKIP="$(echo ${SKIP:-})"
 for word in $SKIP; do
     case " $STEPS " in
         *" $word "*) ;;
@@ -44,6 +58,6 @@ skip() {
 # step ran; otherwise exit 3, naming what did not.
 passed() {
     if [ ${#not_run[@]} = 0 ]; then echo "$1: PASS"; exit 0; fi
-    echo "$1: PASS, but NOT RUN: ${not_run[*]}"
+    echo "$1: NOT A PASS: every step that ran passed; NOT RUN: ${not_run[*]}"
     exit 3
 }

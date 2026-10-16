@@ -292,8 +292,10 @@ and still have reasonable confidence in a change that tier 0 passes.
 `gates.sh` or `long.sh`; the words are in `tools/skip_lib.sh`). It is built
 against the false pass: a word that names no step stops the run before it
 starts, each skipped step prints `SKIPPED <name>: NOT RUN`, the last line
-says `PASS, but NOT RUN: …`, the exit code is 3, never 0, and no verdict is
-kept. To run one probe or one chat-judge gate, `probe/run.sh` takes words
+says `NOT A PASS: every step that ran passed; NOT RUN: …`, the exit code
+is 3, never 0, and no verdict is kept. A half of `long.sh`, or a knob below
+its full size, ends the same way. `JUDGE_QUICK` or `JUDGE_ONLY` left set
+stops a gate before it starts: they narrow a judge silently. To run one probe or one chat-judge gate, `probe/run.sh` takes words
 too.
 
 Each script's header says what it runs and why. `./release-check.sh <dir>`

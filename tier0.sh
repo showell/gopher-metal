@@ -10,6 +10,9 @@
 # happens to have the sibling beside it.
 #
 # What it does not check is named at the end, with the tier that does.
+#
+# **SKIP="word …"** leaves slow steps out (tools/skip_lib.sh): test, tcp-traces.
+# A run with a skip ends NOT A PASS, exit 3, and keeps no verdict.
 TIER="tier 0"
 source "$(dirname "${BASH_SOURCE[0]}")/tools/tier_lib.sh"
 need zig python3

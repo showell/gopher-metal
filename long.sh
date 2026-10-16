@@ -6,6 +6,12 @@
 #                             sweep of the real kernel
 #   SEEDS=10000 ./long.sh     more seeds, for hunting
 #   ./long.sh sim | metal     one half
+#   SKIP="word …" ./long.sh   leaves steps out (tools/skip_lib.sh): sim,
+#                             fault-sweeps, lossy, rough, native-full,
+#                             volume-sweep, fat16-judge
+#
+# Only a whole run at full size passes (exit 0) and keeps a verdict; a half,
+# a knob cut, or a skip ends NOT A PASS, exit 3, naming what was cut.
 #
 # 1. **The simulators** (`zig build properties`, ReleaseSafe): TCP's plain and
 #    rough seeds and FAT's, with `coverage/floor-sim.txt` as their floor:
@@ -409,9 +415,20 @@ fi  # fat16-judge
 fi
 
 if [ ${#failed[@]} = 0 ]; then
-    if [ $keeps_verdict = yes ]; then python3 tools/verdicts.py record long PASS
-    else echo "no verdict kept: only a whole run ($want) at full size, every knob at its default and nothing skipped, keeps one"; fi
-    passed LONG
+    if [ $keeps_verdict = yes ]; then python3 tools/verdicts.py record long PASS; passed LONG; fi
+    # **A PARTIAL RUN IS NOT A PASS** (the second cold review): one half,
+    # or a knob below its full size, ends as a skip does, exit 3, saying
+    # what was cut.
+    cut=""
+    [ "$want" != all ] && cut="$cut only the $want half;"
+    [ "$SEEDS" -lt 1000 ] || [ "$CROWD_SEEDS" -lt 500 ] || [ "$FAT_SEEDS" -lt 150 ] && cut="$cut fewer simulator seeds;"
+    [ "$VOLUME_SEEDS" -lt 100 ] && cut="$cut VOLUME_SEEDS=$VOLUME_SEEDS;"
+    [ "$LATENCY_US" != 5000 ] && cut="$cut LATENCY_US=$LATENCY_US;"
+    [ "$ROUTES" != "/ /steve-resume.pdf /login/full" ] && cut="$cut ROUTES='$ROUTES';"
+    [ ${#not_run[@]} -gt 0 ] && cut="$cut NOT RUN: ${not_run[*]};"
+    echo "no verdict kept"
+    echo "LONG: NOT A PASS: every step that ran passed; a partial run:${cut%;}"
+    exit 3
 else
     [ $keeps_verdict = yes ] && python3 tools/verdicts.py record long FAIL
     echo "LONG: FAIL (${failed[*]})${not_run[*]:+, and NOT RUN: ${not_run[*]}}"

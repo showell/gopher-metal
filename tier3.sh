@@ -19,6 +19,9 @@
 #
 # **THE CHAT JUDGE RUNS FAT32 HERE, FAT16 IN long.sh** (QUEUE.md item 88):
 # prod's data is a FAT32 volume.
+#
+# **SKIP="word …"** leaves slow steps out (tools/skip_lib.sh): webbox-test, vmm-pc, vmm-timeouts, gopher-judges.
+# A run with a skip ends NOT A PASS, exit 3, and keeps no verdict.
 TIER="tier 3"
 source "$(dirname "${BASH_SOURCE[0]}")/tools/tier_lib.sh"
 need zig python3 qemu-system-x86_64 mkfs.vfat sgdisk mcopy curl
@@ -27,6 +30,8 @@ case "$mode" in
     full | quick) ;;
     *) echo "usage: ./tier3.sh [quick]"; exit 2 ;;
 esac
+# A quick run says it was quick, on its last line too.
+[ "$mode" = quick ] && TIER="tier 3 quick (gopher.elf and one story, not tier 3)"
 
 # **WHICH CODE THIS RUN JUDGES** (tools/verdicts.py): every checkout, printed,
 # and one the build cannot take refused. gates.sh computes it first, so the

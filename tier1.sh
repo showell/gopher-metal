@@ -8,8 +8,8 @@
 # which fails). The droplet's boots use KVM; ACCEL=tcg runs them without.
 #
 # **SKIP="word …"** leaves slow steps out (tools/skip_lib.sh): native,
-# probes, droplet-boot, droplet-hello, screen. A run with a skip exits 3,
-# never 0, and keeps no verdict.
+# probes, droplet-boot, droplet-hello, screen. A run with a skip ends NOT A
+# PASS, exit 3, and keeps no verdict.
 TIER="tier 1"
 source "$(dirname "${BASH_SOURCE[0]}")/tools/tier_lib.sh"
 need zig python3 qemu-system-x86_64 mkfs.vfat fsck.vfat sgdisk mcopy curl as ld
