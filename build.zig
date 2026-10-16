@@ -639,6 +639,30 @@ pub fn build(b: *std.Build) void {
             },
         }),
     });
+    // **THE TCP TABLE'S GOLDEN TRACES** (metal-vmm QUEUE 225, chunk 1):
+    // src/tcp_traces.zig against coverage/tcp-traces.txt, ReleaseSafe.
+    const traces_opts = b.addOptions();
+    traces_opts.addOption(bool, "write", b.option(bool, "tcp-traces-write", "write coverage/tcp-traces.txt again instead of checking it") orelse false);
+    const traces = b.addTest(.{
+        .name = "tcp-traces",
+        .filters = &.{"the golden traces"},
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/tcp_traces.zig"),
+            .target = b.graph.host,
+            .optimize = .ReleaseSafe,
+            .imports = &.{
+                .{ .name = "tcp_traces_options", .module = traces_opts.createModule() },
+                .{ .name = "coverage", .module = coverage },
+                .{ .name = "plant_options", .module = plant_options },
+                .{ .name = "coverage_catalog", .module = coverage_catalog },
+                .{ .name = "explore", .module = explore },
+            },
+        }),
+    });
+    const traces_run = b.addRunArtifact(traces);
+    traces_run.has_side_effects = true;
+    b.step("tcp-traces", "tcp_sim's golden traces (coverage/tcp-traces.txt), checked; -Dtcp-traces-write writes them").dependOn(&traces_run.step);
+
     const props_run = b.addRunArtifact(props);
     props_run.has_side_effects = true;
     b.step("properties", "the coverage properties over a sweep of tcp_sim, fat_sim, page_sim and pure_sim seeds").dependOn(&props_run.step);

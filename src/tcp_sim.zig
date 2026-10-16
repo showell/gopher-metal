@@ -1835,7 +1835,7 @@ fn runCrowded(sim: *Sim) !void {
     };
 }
 
-pub const Mode = enum { plain, rough, crowd };
+pub const Mode = enum { plain, rough, crowd, full };
 
 /// One seed's run in `mode` with the revival ring at `cap` (null: the
 /// kernel's): whether every oracle held, the frames' trace, and how often
@@ -1850,6 +1850,7 @@ pub fn traceOf(seed: u64, mode: Mode, cap: ?u16) !struct { ok: bool, trace: u64,
         .plain => sim.init(seed),
         .rough => sim.initRough(seed),
         .crowd => sim.initCrowd(seed),
+        .full => sim.initFull(seed),
     }
     sim.quiet = true;
     const ok = if (sim.run()) true else |_| false;
@@ -2036,4 +2037,54 @@ test "what arrives out of order is counted: ahead of the next byte, and from beh
     // seeds a segment arrives ahead of a lost one, and a resend from behind.
     try std.testing.expect(ahead > 0);
     try std.testing.expect(behind > 0);
+}
+
+// **THE FLOORS KEY ON THESE STRINGS** (metal-vmm QUEUE 225, chunk 1): every
+// `tcp: ` property in the coverage catalog, against coverage/tcp-strings.txt,
+// so the tcp.zig reshaping (chunks 2-4) cannot rename one by accident and
+// leave a floor line naming nothing. A string changed on purpose is changed
+// in the file, and in any floor that names it, in the same commit.
+test "every tcp: property string is the one the floors know, and none is missing or new" {
+    const coverage = @import("coverage");
+    const io = std.testing.io;
+    const gpa = std.testing.allocator;
+    var have: std.ArrayList([]const u8) = .empty;
+    defer have.deinit(gpa);
+    var it = coverage.catalog();
+    while (it.next()) |site| {
+        const m = std.mem.span(site.message);
+        if (!std.mem.startsWith(u8, m, "tcp: ")) continue;
+        for (have.items) |h| {
+            if (std.mem.eql(u8, h, m)) break;
+        } else try have.append(gpa, m);
+    }
+    std.mem.sort([]const u8, have.items, {}, struct {
+        fn lt(_: void, a: []const u8, b: []const u8) bool {
+            return std.mem.lessThan(u8, a, b);
+        }
+    }.lt);
+    const text = try std.Io.Dir.cwd().readFileAlloc(io, "coverage/tcp-strings.txt", gpa, .unlimited);
+    defer gpa.free(text);
+    var want: std.ArrayList([]const u8) = .empty;
+    defer want.deinit(gpa);
+    var lines = std.mem.splitScalar(u8, text, '\n');
+    while (lines.next()) |l| if (l.len > 0 and l[0] != '#') try want.append(gpa, l);
+    var wrong: usize = 0;
+    for (want.items) |w| {
+        for (have.items) |h| {
+            if (std.mem.eql(u8, h, w)) break;
+        } else {
+            wrong += 1;
+            std.debug.print("tcp-strings.txt names no property: {s}\n", .{w});
+        }
+    }
+    for (have.items) |h| {
+        for (want.items) |w| {
+            if (std.mem.eql(u8, h, w)) break;
+        } else {
+            wrong += 1;
+            std.debug.print("a tcp: property not in tcp-strings.txt: {s}\n", .{h});
+        }
+    }
+    try std.testing.expectEqual(@as(usize, 0), wrong);
 }

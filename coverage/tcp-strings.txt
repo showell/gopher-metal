@@ -1,0 +1,35 @@
+# **EVERY `tcp: ` PROPERTY STRING** (metal-vmm QUEUE 225, chunk 1): what
+# tcp_sim.zig's strings test holds the catalog to, sorted, one a line. The
+# floors key on these; a string changed on purpose is changed here, and in
+# any floor naming it, in the same commit.
+tcp: a SYN finds the table full, and nothing to give way
+tcp: a backed-off RTO stays under the cap
+tcp: a caller consumes no more than is pending
+tcp: a connection's timeouts stay within its retries
+tcp: a damaged segment is dropped
+tcp: a given-way half-open is revived by its client's ACK
+tcp: a lost SYN-ACK is sent again
+tcp: a measured RTO is within its bounds
+tcp: a peer names a segment size under the least, and is sent the least
+tcp: a peer sends past the window and only what fits is taken
+tcp: a reopened window is announced again
+tcp: a reopened window said again has its clock
+tcp: a revival finds no slot, and the ACK is dropped
+tcp: a round trip comes in faster than the estimate
+tcp: a segment arrives ahead of the next expected byte
+tcp: a segment for no connection is refused
+tcp: a segment from behind is answered, not taken
+tcp: a shut window is probed
+tcp: a silent peer is given up on
+tcp: a stuck half-open connection gives way to a new SYN
+tcp: after an ACK, what was sent lies within what is queued
+tcp: an ACK past every byte covers our FIN and nothing more
+tcp: an exact reset closes a connection
+tcp: an inexact reset in the window draws a challenge ACK
+tcp: backoff reaches the RTO cap
+tcp: duplicate ACKs are counted to the resend and no further
+tcp: half-open connections stay within the table
+tcp: slots in use stay within the table
+tcp: the timer goes back to the oldest unacknowledged byte
+tcp: three duplicate ACKs resend at once
+tcp: what is outstanding has its retransmission timer
