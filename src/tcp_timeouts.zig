@@ -100,7 +100,8 @@ pub fn fold(c: *Conn, rtt: u64) void {
 /// **THE OLDEST SEGMENT AGAIN** (RFC 6298 (5.4): "Retransmit the earliest
 /// segment that has not been acknowledged by the TCP receiver"), after a
 /// timeout or three duplicate ACKs: no further past `una` than one segment
-/// (`recovery`), and at least one byte, so a shut window's probe fits too.
+/// (`recovery`), and at least one byte. A shut window's timeout does not
+/// come here: it owes a probe, not a recovery (tcp.zig, QUEUE 227).
 pub fn recover(c: *Conn) void {
     c.recovery = @max(1, @min(@as(usize, c.mss), c.high));
 }

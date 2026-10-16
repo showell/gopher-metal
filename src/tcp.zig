@@ -1060,10 +1060,13 @@ pub const Table = struct {
             // **THE OLDEST SEGMENT AGAIN** (RFC 6298 (5.4): "Retransmit the
             // earliest segment that has not been acknowledged by the TCP
             // receiver"): from `una`, and no further than one segment until
-            // the peer acknowledges it (`recovery`). The one-byte probe of a
-            // shut window fits in it too.
+            // the peer acknowledges it (`recovery`).
+            // **A SHUT WINDOW IS NOT A LOSS** (metal-vmm QUEUE 227): its
+            // timeout is the persist timer's, and owes a probe, not a
+            // recovery; what the window refused goes again whole when it
+            // opens.
             c.sent = 0;
-            timeouts.recover(c);
+            if (c.wnd != 0) timeouts.recover(c);
             if (c.fin.is(.sent)) c.fin.fire(.timed_out);
             c.timed_at = null; // Karn: no telling which copy is answered
             self.retransmits += 1;
@@ -1096,7 +1099,20 @@ pub const Table = struct {
                 }
                 self.probes += 1;
                 props.reachable(@src(), "tcp: a shut window is probed", .{ .conn = i });
-                n = 1;
+                // **A PROBE IS A QUESTION, NOT A SEND** (metal-vmm QUEUE
+                // 227): its byte is `high`'s, so an ACK that takes it counts,
+                // but not `sent`'s, since a shut window takes nothing (RFC
+                // 9293 §3.4: "when the receive window is zero no segments
+                // should be acceptable except ACK segments"). Counted as
+                // sent, a refused probe left a hole at `una` when the window
+                // opened, which only a later, backed-off timeout filled. It
+                // is never timed: its byte goes again, in the probe after it
+                // or the segment that follows the opening (Karn).
+                const seq = c.una +% @as(u32, @intCast(c.sent));
+                self.emit(wire, i, flag_psh | flag_ack, seq, c.tx[c.tx_start + c.sent ..][0..1]);
+                c.high = @max(c.high, c.sent + 1);
+                if (c.rto_at == null) c.rto_at = now + c.rto_ns;
+                break;
             }
             probe = .none;
             const first_time = c.sent + n > c.high;
