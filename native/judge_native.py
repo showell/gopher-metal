@@ -407,8 +407,12 @@ class LinuxServers:
             f.write(b"ok")
         with open(os.path.join(self.www, "big"), "wb") as f:
             f.write(pattern(300_000))
-        self.http = subprocess.Popen([sys.executable, "-m", "http.server", "8000", "--bind", LINUX],
-                                     cwd=self.www, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        # Its stderr is kept, so a server that never listens says why (it
+        # failed to start once on the box, 2026-10-16, with nothing to read).
+        self.http_err = os.path.join(self.www, "..", "fetch-http.err")
+        with open(self.http_err, "wb") as err:
+            self.http = subprocess.Popen([sys.executable, "-m", "http.server", "8000", "--bind", LINUX],
+                                         cwd=self.www, stdout=subprocess.DEVNULL, stderr=err)
         self.stop_now = threading.Event()
         self.socks = []
         for port, serve in ((8002, self._mute), (8003, self._trickle)):
@@ -426,7 +430,12 @@ class LinuxServers:
                 return
             except OSError:
                 time.sleep(0.05)
-        raise RuntimeError("python3 -m http.server never listened")
+        # Never left behind: an orphan would hold port 8000 for the next run.
+        self.http.kill()
+        self.http.wait()
+        with open(self.http_err) as f:
+            said = f.read().strip()
+        raise RuntimeError(f"python3 -m http.server never listened in 5 s; it said: {said or '(nothing)'}")
 
     def _accept(self, ls, serve):
         while not self.stop_now.is_set():

@@ -7,6 +7,7 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$HERE"
 
 failed=()
+source "$HERE/tools/skip_lib.sh"
 # Each step's time, printed as "time: <step> <seconds> s", so where a run's
 # minutes go is read off the output rather than guessed.
 t=$SECONDS
@@ -41,7 +42,7 @@ need() {
 # The tier's last line: PASS, or FAIL naming each step. Its exit code is
 # the verdict.
 verdict() {
-    if [ ${#failed[@]} = 0 ]; then echo "$TIER: PASS"; exit 0; fi
-    echo "$TIER: FAIL (${failed[*]})"
+    if [ ${#failed[@]} = 0 ]; then passed "$TIER"; fi
+    echo "$TIER: FAIL (${failed[*]})${not_run[*]:+, and NOT RUN: ${not_run[*]}}"
     exit 1
 }

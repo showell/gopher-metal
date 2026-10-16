@@ -192,6 +192,11 @@ def record(tier: str, outcome: str) -> int:
     if tier not in TIERS or outcome not in ("PASS", "FAIL"):
         print(f"usage: verdicts.py record {'|'.join(TIERS)} PASS|FAIL")
         return 2
+    # **A SKIP IS NO PASS** (tools/skip_lib.sh): a run that left a step out
+    # keeps no verdict, PASS or FAIL, so no release can stand on it.
+    if os.environ.get("SKIP", "").strip():
+        print(f"no verdict kept: SKIP={os.environ['SKIP']!r} left steps out")
+        return 2
     ours, theirs, problem = current_pair()
     if problem:
         print(f"no verdict kept: {problem}")

@@ -46,6 +46,8 @@ run_tier() {
     "./$script" "$@"
     local code=$?
     echo "time: $script $((SECONDS - start)) s since the gates began"
+    # 3: every step that ran passed, and SKIP left some out; go on, and say so.
+    if [ "$code" = 3 ]; then return; fi
     if [ "$code" != 0 ]; then
         [ "$mode" = full ] && python3 tools/verdicts.py record gates FAIL
         echo "GATES${label}: FAIL (${script%.sh}${*:+ $*})"
@@ -57,10 +59,13 @@ run_tier tier0.sh
 run_tier tier1.sh
 if [ "$mode" = quick ]; then
     run_tier tier3.sh quick
+    [ -n "$SKIP" ] && { echo "GATES quick: PASS, but NOT RUN: $SKIP (as SKIP asked)"; exit 3; }
     echo "GATES quick: PASS"
     exit 0
 fi
 run_tier tier2.sh
 run_tier tier3.sh
+# **A SKIP IS NO PASS** (tools/skip_lib.sh): no verdict, and exit 3.
+[ -n "$SKIP" ] && { echo "GATES: PASS, but NOT RUN: $SKIP (as SKIP asked)"; exit 3; }
 python3 tools/verdicts.py record gates PASS
 echo "GATES: PASS"

@@ -275,18 +275,26 @@ cheapest first, and stops at the first one that fails.
 
 | tier | install | what it proves | about |
 |---|---|---|---|
-| `./tier0.sh` | zig 0.16, Python 3, and the SDK beside this checkout | the unit tests and short simulator runs; this repo's kernels and host programs type-check; `zig fmt` and the lints. No QEMU, no other repo, no network, no root. Run it on every change | ~2-3 min (1m40s with everything compiled) |
-| `./tier1.sh` | + QEMU, dosfstools, gdisk, mtools, curl, binutils, `sudo -n` for loop mounts; KVM for the droplet boots (or `ACCEL=tcg`) | each test kernel ("probe") boots and works on virtual hardware; the judges' own tests; the droplet's boot loader and image | ~45 s of probes, then the droplet boots |
+| `./tier0.sh` | zig 0.16, Python 3, and the SDK beside this checkout | the unit tests and short simulator runs; this repo's kernels and host programs type-check; `zig fmt` and the lints; tcp_sim's golden traces. No QEMU, no other repo, no network, no root. Run it on every change | ~2-3 min (91 s of tests and 56 s of traces, measured 2026-10-16) |
+| `./tier1.sh` | + QEMU, dosfstools, gdisk, mtools, curl, binutils, `sudo -n` for loop mounts and the TAP device; KVM for the droplet boots (or `ACCEL=tcg`) | tcp.zig against Linux's own TCP, as server and as client (the native judge, quick, ~25 s, first); each test kernel ("probe") boots and works on virtual hardware; the judges' own tests; the droplet's boot loader and image | ~25 s native, ~45 s of probes, then the droplet boots |
 | `./tier2.sh` | + metal-vmm beside this checkout, and /dev/kvm | metal-vmm runs this checkout's probe kernels the same as QEMU does, and the same twice | minutes |
 | `./tier3.sh` | + zig-webbox and angry-gopher beside this checkout | the library's tests and the limits it copies; the unit tests' pinned body rule is still the library's; gopher.elf type-checks, builds and is judged against its Linux build on QEMU's microvm and the droplet-shaped machine; the PC-shaped machine's rests and the timeouts on metal-vmm | ~20 min |
 | `zig build properties` | as tier 0 | the simulators over many seeds, judged by their coverage properties: zig alone, but not in tier 0 for its time (20 min in Debug, 5 with `-Dsweep-optimize=ReleaseSafe`); long.sh runs it at 1,000 TCP seeds, 500 of them crowded (the smallest count that reaches its floor, metal-vmm QUEUE 224) | 5-20 min |
-| `zig build tcp-traces` | as tier 0 | tcp_sim's golden traces: the hash of every frame for 803 worlds (seeds 1-200 of each peer, and the regressions), against `coverage/tcp-traces.txt`, so reshaping tcp.zig leaves the wire as it was; `-Dtcp-traces-write` writes them again, and the commit says why (metal-vmm QUEUE 225) | ~25 s, built |
+| `zig build tcp-traces` | as tier 0 (it runs it) | tcp_sim's golden traces: the hash of every frame for 803 worlds (seeds 1-200 of each peer, and the regressions), against `coverage/tcp-traces.txt`, so reshaping tcp.zig leaves the wire as it was; `-Dtcp-traces-write` writes them again, and the commit says why (metal-vmm QUEUE 225) | ~25 s, built |
 | `./gates.sh quick` | as tier 3 | tiers 0 and 1, then gopher.elf and one chat-judge story | |
 | `./gates.sh` | as tier 3 | tiers 0 to 3, for a batch | |
-| `./long.sh` | as tier 3 | before every release: the simulators at 1,000 seeds; the FAT16 judge; the real kernel on metal-vmm losing each packet it sends in turn, facing a misbehaving client, and under 100 seeded fault schedules over the network and disks, every run still serving the right page | longest |
+| `./long.sh` | as tier 3 | before every release: the simulators at 1,000 seeds; the FAT16 judge; the native judge whole, its loss check included; the real kernel on metal-vmm losing a sample of the packets it sends in turn, facing a misbehaving client, and under 100 seeded fault schedules over the network and disks, every run still serving the right page | longest |
 
 A developer can defer every test against angry-gopher (tier 3)
 and still have reasonable confidence in a change that tier 0 passes.
+
+**Skipping a slow step:** `SKIP="tcp-traces probes" ./gates.sh` (any tier,
+`gates.sh` or `long.sh`; the words are in `tools/skip_lib.sh`). It is built
+against the false pass: a word that names no step stops the run before it
+starts, each skipped step prints `SKIPPED <name>: NOT RUN`, the last line
+says `PASS, but NOT RUN: …`, the exit code is 3, never 0, and no verdict is
+kept. To run one probe or one chat-judge gate, `probe/run.sh` takes words
+too.
 
 Each script's header says what it runs and why. `./release-check.sh <dir>`
 runs the two in order, the long tier only after the gates pass, detached,

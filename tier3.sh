@@ -65,7 +65,9 @@ zig build pinned "${ZIG_SIBLINGS[@]}" 2>&1 | grep pinned
 zig build check-apps "${ZIG_SIBLINGS[@]}" 2>&1 | grep -E "error|NOT type-checked"
 [ "${PIPESTATUS[0]}" = 0 ] || failed+=(check-apps)
 # The library's own tests, on its Linux host.
-(cd "$WEBBOX_ROOT" && zig build test 2>&1 | tail -5; exit "${PIPESTATUS[0]}") || failed+=(webbox-test)
+if ! skip webbox-test; then
+    (cd "$WEBBOX_ROOT" && zig build test 2>&1 | tail -5; exit "${PIPESTATUS[0]}") || failed+=(webbox-test)
+fi
 lap "limits, pinned, check-apps, zig-webbox's tests"
 
 # **THE SITE VOLUME, FROM THIS CHECKOUT** (tools/site_volume.py): what
@@ -81,8 +83,12 @@ lap "the site volume"
 # what a setting governs, proved by moving it.
 export GUESTS="$HERE/probe"
 (cd "$VMM" && zig build 2>&1 | tail -5; exit "${PIPESTATUS[0]}") || failed+=(vmm-build)
-(cd "$VMM" && SITE="$SITE_VOLUME" ./pc_vs_microvm.sh all 2>&1 | tail -2; exit "${PIPESTATUS[0]}") || failed+=(vmm-pc)
-(cd "$VMM" && SITE="$SITE_VOLUME" ./timeouts.sh 2>&1 | tail -3; exit "${PIPESTATUS[0]}") || failed+=(vmm-timeouts)
+if ! skip vmm-pc; then
+    (cd "$VMM" && SITE="$SITE_VOLUME" ./pc_vs_microvm.sh all 2>&1 | tail -2; exit "${PIPESTATUS[0]}") || failed+=(vmm-pc)
+fi
+if ! skip vmm-timeouts; then
+    (cd "$VMM" && SITE="$SITE_VOLUME" ./timeouts.sh 2>&1 | tail -3; exit "${PIPESTATUS[0]}") || failed+=(vmm-timeouts)
+fi
 lap "metal-vmm rests and timeouts"
 
 # ── the two FAT32 chat judges ────────────────────────────────────────────────
@@ -104,22 +110,24 @@ report() {  # report TAG: the verdict line and, on a failure, every line after i
     { [ "$code" = 0 ] && echo "$v" | grep -q "^PASS gopher"; } || failed+=("gopher-$tag")
     cp "$HOME/build/zig-metal-unikernel/probe-$tag/gopher.verdict" "$VERDICTS/gopher-$tag.verdict" 2>/dev/null
 }
-(cd "$GOPHER_ROOT/zig-server" && zig build) > "$VERDICTS/linux-build.txt" 2>&1
-if [ "${GATES_PARALLEL:-1}" = 1 ]; then
-    judge microvm & judge droplet & wait
-    for machine in microvm droplet; do report $machine; done
-    lap "gopher judges, microvm and droplet side by side (FAT32)"
-else
-    for machine in microvm droplet; do
-        judge $machine
-        report $machine
-        lap "gopher judge, $machine (FAT32)"
-    done
-fi
-echo "FAT16 chat judge: in long.sh, before every release"
+if ! skip gopher-judges; then
+    (cd "$GOPHER_ROOT/zig-server" && zig build) > "$VERDICTS/linux-build.txt" 2>&1
+    if [ "${GATES_PARALLEL:-1}" = 1 ]; then
+        judge microvm & judge droplet & wait
+        for machine in microvm droplet; do report $machine; done
+        lap "gopher judges, microvm and droplet side by side (FAT32)"
+    else
+        for machine in microvm droplet; do
+            judge $machine
+            report $machine
+            lap "gopher judge, $machine (FAT32)"
+        done
+    fi
+    echo "FAT16 chat judge: in long.sh, before every release"
 
-# **A CHECK SKIPPED IS NO PASS**: a chat judge that could not run a check
-# says SKIPPED, and the tier fails, naming each.
-skipped=$(cat "$VERDICTS"/gopher-*.run 2>/dev/null | grep "SKIPPED" || true)
-if [ -n "$skipped" ]; then echo "$skipped"; failed+=(skipped); fi
+    # **A CHECK SKIPPED IS NO PASS**: a chat judge that could not run a check
+    # says SKIPPED, and the tier fails, naming each.
+    skipped=$(cat "$VERDICTS"/gopher-*.run 2>/dev/null | grep "SKIPPED" || true)
+    if [ -n "$skipped" ]; then echo "$skipped"; failed+=(skipped); fi
+fi
 verdict

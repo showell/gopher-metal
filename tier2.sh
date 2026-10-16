@@ -16,7 +16,13 @@ zig build kernels 2>&1 | grep error
 [ "${PIPESTATUS[0]}" = 0 ] || failed+=(kernels)
 # **metal-vmm IS BUILT HERE**: its scripts run whatever binary is on disk.
 (cd "$VMM" && zig build 2>&1 | tail -5; exit "${PIPESTATUS[0]}") || failed+=(vmm-build)
-(cd "$VMM" && ./check.sh 2>&1 | tail -2; exit "${PIPESTATUS[0]}") || failed+=(vmm-check)
-(cd "$VMM" && ./same.sh 2>&1 | tail -2; exit "${PIPESTATUS[0]}") || failed+=(vmm-same)
-lap "metal-vmm build, check and same"
+lap "metal-vmm build"
+if ! skip vmm-check; then
+    (cd "$VMM" && ./check.sh 2>&1 | tail -2; exit "${PIPESTATUS[0]}") || failed+=(vmm-check)
+    lap "metal-vmm check"
+fi
+if ! skip vmm-same; then
+    (cd "$VMM" && ./same.sh 2>&1 | tail -2; exit "${PIPESTATUS[0]}") || failed+=(vmm-same)
+    lap "metal-vmm same"
+fi
 verdict

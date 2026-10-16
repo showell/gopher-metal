@@ -63,6 +63,7 @@
 set -u
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$HERE"
+source "$HERE/tools/skip_lib.sh"
 VMM="${METAL_VMM:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/metal-vmm}"
 SDK="${COVERAGE_SDK:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/zig-coverage-sdk}"
 # **THE SITE VOLUME IS THIS CHECKOUT'S** (tools/site_volume.py), built below
@@ -96,13 +97,19 @@ VERDICT_PAIR="$(python3 tools/verdicts.py ids)" || exit 2
 export VERDICT_PAIR
 python3 tools/verdicts.py pair
 keeps_verdict=no
-[ "$want" = all ] && [ "$SEEDS" -ge 1000 ] && [ "$CROWD_SEEDS" -ge 500 ] && [ "$FAT_SEEDS" -ge 150 ] && keeps_verdict=yes
+# **EVERY KNOB AT ITS FULL SIZE, OR NO VERDICT** (the box's ergonomics
+# review, 2026-10-16): seeds alone let `ROUTES=/ VOLUME_SEEDS=1` record a
+# PASS for a run that did less than the tier. And no step skipped.
+[ "$want" = all ] && [ "$SEEDS" -ge 1000 ] && [ "$CROWD_SEEDS" -ge 500 ] && [ "$FAT_SEEDS" -ge 150 ] \
+    && [ "$VOLUME_SEEDS" -ge 100 ] && [ "$LATENCY_US" = 5000 ] && [ "$ROUTES" = "/ /steve-resume.pdf /login/full" ] \
+    && [ -z "$SKIP" ] && keeps_verdict=yes
 
 failed=()
 began=$(date +%s)
 lap() { echo "time: $1 $(( $(date +%s) - began )) s"; began=$(date +%s); }
 
 if [ "$want" != metal ]; then
+if ! skip sim; then  # (SKIP=sim, tools/skip_lib.sh)
     echo "── the simulators: $SEEDS TCP seeds, plain and rough, and $FAT_SEEDS FAT seeds, against coverage/floor-sim.txt"
     # ReleaseSafe: a sweep this long is nearly all running (build.zig).
     # **TWO SHARDS, SIDE BY SIDE** (metal-vmm QUEUE 224.4): the FAT's (the
@@ -140,9 +147,11 @@ if [ "$want" != metal ]; then
     run_s=$(sed -n 's/^ *time: sim run \([0-9]*\).*/\1/p' "$OUT.sim" | sort -n | tail -1)
     [ -n "$run_s" ] && echo "time: simulator build $(( $(date +%s) - began - run_s )) s"
     lap "simulator"
+fi  # sim
 
     # **THE FAULT SWEEPS WHOLE** (metal-vmm QUEUE 198.11): tier 0 stops a
     # FAT operation at a sample of its requests; here, at every one.
+if ! skip fault-sweeps; then  # (SKIP=fault-sweeps, tools/skip_lib.sh)
     echo "── the FAT's fault and lie sweeps, every request"
     zig build test -Dtest-file=src/disk_fat_faults_test.zig -Dfault-sweep-full > "$OUT.faults" 2>&1
     code=$?
@@ -155,6 +164,7 @@ if [ "$want" != metal ]; then
     grep -E "error|failed" "$OUT.fatlong" | head -5
     [ $code = 0 ] || failed+=(fat-long)
     lap "fault sweeps"
+fi  # fault-sweeps
 fi
 
 if [ "$want" != sim ]; then
@@ -218,6 +228,7 @@ if [ "$want" != sim ]; then
         done
     }
 
+if ! skip lossy; then  # (SKIP=lossy, tools/skip_lib.sh)
     lost_pages=0
     for route in $ROUTES; do
         # Frame 9999 is never sent: the unhurt run, whose page every other
@@ -272,6 +283,7 @@ if [ "$want" != sim ]; then
         fi
     done
     lap "lossy sweep"
+fi  # lossy
 
     # **THE PEER MISBEHAVES**, one run per way (metal-vmm's KNOBS.md, "The peer:
     # a worse client"). A client that stays (`page`) must still get the
@@ -285,6 +297,7 @@ if [ "$want" != sim ]; then
     # inside the 2 s a guest that has served its last request gives its
     # connections before it stops; a longer one is cut by that stop, which
     # only a request limit causes (the site has none).
+if ! skip rough; then  # (SKIP=rough, tools/skip_lib.sh)
     cp "$SITE" "$OUT/two.img"
     printf 'requests = 2\nidle_timeout_ms = 10000\n' > "$OUT/two.conf"
     mcopy -o -i "$OUT/two.img@@1M" "$OUT/two.conf" ::/zig-metal-unikernel.conf || { echo "mcopy (mtools) could not write the two-request volume"; exit 2; }
@@ -335,23 +348,50 @@ ahead          one /                 page PEER_REQUEST=$OUT/req1k PEER_MSS=100 P
 EOF
     [ -z "$rough_bad" ] || failed+=("metal rough:$rough_bad")
     lap "rough peer"
+fi  # rough
 
+if ! skip native-full; then  # (SKIP=native-full, tools/skip_lib.sh)
+    # **LINUX AS THE WITNESS, WHOLE** (the box, 2026-10-16): tier 1 runs
+    # judge_native quick; here it runs whole, its loss check waiting out
+    # real retransmission timers on both sides (5% toward the table, 1 in
+    # 13 from it, a seed printed). About 35 s. Needs `sudo -n` (the TAP).
+    echo "── tcp.zig against Linux's TCP, natively, whole (loss included)"
+    if ! zig build native > "$OUT.native-build" 2>&1; then
+        echo "  the native build failed: $OUT.native-build"; failed+=(native-full)
+    elif python3 native/judge_native.py > "$OUT.native" 2>&1; then
+        echo "  $(tail -1 "$OUT.native")"
+    else
+        grep "^FAIL" "$OUT.native"; echo "  $(tail -1 "$OUT.native")"; failed+=(native-full)
+    fi
+    lap "native, whole"
+fi  # native-full
+if ! skip volume-sweep; then  # (SKIP=volume-sweep, tools/skip_lib.sh)
     echo "── seeded fault schedules with a volume attached: $VOLUME_SEEDS seeds (metal-vmm's sweep.sh)"
     VOLUME_SITE="$SITE" SITE="$SITE" KERNEL="$COUNTED" "$VMM/sweep.sh" 1 "$VOLUME_SEEDS" > "$OUT/volume-sweep" 2>&1
     code=$?
     grep -iE '^[0-9]+ seeds:|FAULT_SEED=[0-9]+: FAIL|nothing can be judged' "$OUT/volume-sweep"
     [ $code = 0 ] || { echo "  the volume sweep failed (exit $code): $OUT/volume-sweep"; failed+=(volume-sweep); }
     lap "volume sweep"
-    python3 "$SDK/tools/report.py" "$OUT/sdk.jsonl" --floor coverage/floor-metal.txt > "$OUT/report" 2>&1
-    code=$?
-    grep -E '^(FAIL|FLOOR|STALE)|^[0-9]+ runs|under the floor' "$OUT/report"
-    [ $code = 0 ] || failed+=(metal-floor)
+fi  # volume-sweep
+    # **THE METAL FLOOR NEEDS ALL THREE** (lossy, rough, volume-sweep): with
+    # one skipped, a miss would be the skip's, and a pass would be a lie
+    # about the floor, so it is not judged, and says so.
+    if [[ " ${not_run[*]} " =~ " lossy " || " ${not_run[*]} " =~ " rough " || " ${not_run[*]} " =~ " volume-sweep " ]]; then
+        not_run+=(metal-floor)
+        echo "SKIPPED metal-floor: NOT RUN (a run it needs was skipped)"
+    else
+        python3 "$SDK/tools/report.py" "$OUT/sdk.jsonl" --floor coverage/floor-metal.txt > "$OUT/report" 2>&1
+        code=$?
+        grep -E '^(FAIL|FLOOR|STALE)|^[0-9]+ runs|under the floor' "$OUT/report"
+        [ $code = 0 ] || failed+=(metal-floor)
+    fi
 
     # **THE FAT16 CHAT JUDGE** (moved here from gates.sh, the gates essay's
     # item 6): the whole chat story on QEMU's microvm with the data on FAT16,
     # every run. **LAST, BEING QEMU** (Steve, 2026-10-11: find things
     # quickly), on gopher.elf as a release builds it, which the coverage
     # build above put back (224.5: no build here, it was a cache hit).
+if ! skip fat16-judge; then  # (SKIP=fat16-judge, tools/skip_lib.sh)
     echo "── the chat judge on FAT16 (microvm), its write path"
     # **ITS WRITE PATH ONLY** (metal-vmm QUEUE 224.7): the gates that write,
     # append and rewrite (uploads, churn, bulk), quick. FAT16 matters again
@@ -364,15 +404,16 @@ EOF
     sed -n '/^\(PASS\|FAIL\|    \) *gopher/,$p' "$OUT.fat16"
     { [ "$code" = 0 ] && grep -q "^PASS gopher" "$OUT.fat16"; } || failed+=(fat16-judge)
     lap "chat judge, FAT16"
+fi  # fat16-judge
 
 fi
 
 if [ ${#failed[@]} = 0 ]; then
     if [ $keeps_verdict = yes ]; then python3 tools/verdicts.py record long PASS
-    else echo "no verdict kept: only a whole run ($want) at full size (SEEDS>=1000, CROWD_SEEDS>=500, FAT_SEEDS>=150) keeps one"; fi
-    echo "LONG: PASS"
+    else echo "no verdict kept: only a whole run ($want) at full size, every knob at its default and nothing skipped, keeps one"; fi
+    passed LONG
 else
     [ $keeps_verdict = yes ] && python3 tools/verdicts.py record long FAIL
-    echo "LONG: FAIL (${failed[*]})"
+    echo "LONG: FAIL (${failed[*]})${not_run[*]:+, and NOT RUN: ${not_run[*]}}"
     exit 1
 fi
