@@ -457,18 +457,19 @@ FAT_KIND = os.environ.get("FAT", "32")
 
 
 def build_disk(image: str, content: str, mnt: str, size: int = 64 << 20,
-               fat: str = None, cluster_sectors: int = None) -> None:
+               fat: str = None, cluster_sectors: int = None, label: str = "GOPHER") -> None:
     """A GPT disk of `size` bytes whose first partition is FAT16 (or FAT32
-    with FAT=32, or `fat`), holding `content`. `cluster_sectors` is
-    mkfs.vfat's -s: by default its own choice on FAT16, and 1 on FAT32,
-    which a small judge's disk needs to reach FAT32's 65,525 clusters."""
+    with FAT=32, or `fat`), holding `content`, its volume label `label`.
+    `cluster_sectors` is mkfs.vfat's -s: by default its own choice on FAT16,
+    and 1 on FAT32, which a small judge's disk needs to reach FAT32's 65,525
+    clusters."""
     fat = fat or FAT_KIND
     spc = cluster_sectors or (1 if fat == "32" else None)
     with open(image, "wb") as f:
         f.truncate(size)
     run(["sgdisk", "-o", "-n", f"1:{PART_FIRST}:0", "-t", "1:0700", "-c", "1:gopher", image])
     blocks = (partition_last(image) - PART_FIRST + 1) // 2
-    run(["mkfs.vfat", "-F", fat, "-S", "512", *(["-s", str(spc)] if spc else []), "-n", "GOPHER",
+    run(["mkfs.vfat", "-F", fat, "-S", "512", *(["-s", str(spc)] if spc else []), "-n", label,
          "--offset", str(PART_FIRST), image, str(blocks)])
     disk_put(image, mnt, content)
 

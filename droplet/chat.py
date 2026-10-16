@@ -44,6 +44,8 @@ sys.path.insert(0, os.path.join(ROOT, "probe"))
 import judge_gopher as judge  # noqa: E402
 sys.path.insert(0, os.path.join(ROOT, "tools"))
 import verdicts  # noqa: E402
+sys.path.insert(0, HERE)
+import app_image  # noqa: E402
 
 GOPHER_ROOT = os.environ.get("GOPHER_ROOT", os.path.normpath(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "..", "angry-gopher")))
 ELF = os.path.join(ROOT, "probe", "gopher.elf")
@@ -127,18 +129,13 @@ def main() -> int:
         # A connection that makes no progress for ten seconds is let go, as in
         # the judge; no `requests` line, so the machine never stops on its own;
         # only the private card, where prod's Caddy reaches it; and the volume.
-        with open(os.path.join(content, "zig-metal-unikernel.conf"), "w") as f:
+        conf = os.path.join(work, "zig-metal-unikernel.conf")
+        with open(conf, "w") as f:
             f.write(f"idle_timeout_ms = 10000\ncard = private\nvolume = {serial}\n"
                     + f"trusted_proxy = {proxy}\n"
                     + (admin_reset_line(reset) if reset else ""))
-        disk = os.path.join(work, "site.img")
-        judge.build_disk(disk, content, os.path.join(work, "mnt"))
-        last = judge.partition_last(disk)
-        site = os.path.join(work, "site.fat")
-        with open(disk, "rb") as f, open(site, "wb") as v:
-            f.seek(judge.PART_FIRST * judge.SECTOR)
-            v.write(f.read((last - judge.PART_FIRST + 1) * judge.SECTOR))
-        subprocess.run([os.path.join(HERE, "image.sh"), ELF, out, site], check=True)
+        # The disk, laid out as any application's (droplet/app_image.py).
+        app_image.build(ELF, content, conf, out)
     print(f"chat.py: {out}, {os.path.getsize(out) >> 20} MB, serving volume {serial}"
           + (f", believing X-Forwarded-For from {proxy}" if proxy else ", believing no X-Forwarded-For")
           + (f"; it resets the password of uid 1 if uid 1 is {reset!r}, at its first boot: "
