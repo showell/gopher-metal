@@ -239,6 +239,16 @@ pub const Conn = struct {
     /// The most bytes past `una` ever on the wire, so an ACK of bytes sent
     /// before `sent` was rewound still counts.
     high: usize = 0,
+    /// **RECOVERING FROM A LOSS** (RFC 6298 (5.4); metal-vmm QUEUE 225,
+    /// chunk 0a): how many bytes past `una` may be on the wire, or null when
+    /// not recovering. A timeout or a fast retransmit sets it to one segment,
+    /// so only the oldest is sent again; each acknowledgement of `acked`
+    /// bytes makes it `(recovery - acked) + 2 * acked`, doubling it each
+    /// round trip, until it covers `high` and sending is as before. A go-back
+    /// of the whole window instead phase-locked with a loss of every 13th
+    /// frame: each timeout resent the same window, and the same frame was
+    /// lost again, until the retries ran out (the native judge, 2026-10-16).
+    recovery: ?usize = null,
     /// SND.UNA. In SYN-RECEIVED it is ISS; there is no ISS field.
     una: u32 = 0,
     fin: FinMachine = .{},
@@ -847,10 +857,13 @@ pub const Table = struct {
         var probe: enum { none, owed } = .none;
         if (expired) {
             if (!backoff(c, now)) return self.giveUp(wire, i);
-            // **GO BACK.** Everything from `una` is sent again; the peer
-            // drops what it has. RFC 6298 (5.4) asks only for the oldest
-            // segment.
+            // **THE OLDEST SEGMENT AGAIN** (RFC 6298 (5.4): "Retransmit the
+            // earliest segment that has not been acknowledged by the TCP
+            // receiver"): from `una`, and no further than one segment until
+            // the peer acknowledges it (`recovery`). The one-byte probe of a
+            // shut window fits in it too.
             c.sent = 0;
+            c.recovery = @max(1, @min(@as(usize, c.mss), c.high));
             if (c.fin.is(.sent)) c.fin.fire(.timed_out);
             c.timed_at = null; // Karn: no telling which copy is answered
             self.retransmits += 1;
@@ -867,8 +880,13 @@ pub const Table = struct {
         }
 
         while (c.queued() > c.sent) {
+            // While recovering, nothing past `una + recovery`: checked before
+            // the window rule, so a cap reached is never taken for a shut
+            // window and probed past.
+            if (c.recovery) |cap| if (c.sent >= cap) break;
             const usable = if (c.wnd > c.sent) c.wnd - c.sent else 0;
             var n = @min(c.queued() - c.sent, usable, c.mss);
+            if (c.recovery) |cap| n = @min(n, cap - c.sent);
             if (n == 0) {
                 // **A SHUT WINDOW IS PROBED WHEN THE TIMER RUNS OUT** (RFC
                 // 9293 §3.8.6.1), with one byte; the answer carries the window.
@@ -1038,6 +1056,13 @@ pub const Table = struct {
             c.sent = 0;
         }
 
+        // **RECOVERY GROWS BY TWICE WHAT WAS ACKNOWLEDGED** (RFC 6298 (5.4)'s
+        // one segment, then doubling each round trip), and ends once it
+        // covers all that was sent (`high`, after this ACK).
+        if (c.recovery) |cap| {
+            const grown = (cap -| advance) + 2 * @as(usize, advance);
+            c.recovery = if (grown >= c.high) null else grown;
+        }
         c.retries = 0;
         self.measure(c, number, now);
         if (c.srtt_ns == 0) c.rto_ns = first_rto_ns;

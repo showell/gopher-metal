@@ -804,7 +804,8 @@ test "what is not acknowledged in time is sent again, oldest first, and the wait
     try testing.expectEqual(from, f.wire.count); // not yet
     transmit(&f.table, &f.wire, 50 * ms + rto);
     var sizes: [8]usize = undefined;
-    try testing.expectEqualSlices(usize, &.{ 536, 64 }, f.wire.sizesSince(from, &sizes));
+    // The oldest segment alone (RFC 6298 (5.4)), not the go-back's 536 + 64.
+    try testing.expectEqualSlices(usize, &.{536}, f.wire.sizesSince(from, &sizes));
     try testing.expectEqualSlices(u8, body[100..636], f.wire.at(from).payload);
     try testing.expectEqual(p.ack, f.wire.at(from).seq);
     try testing.expectEqual(@as(u64, 1), f.table.retransmits);
@@ -813,13 +814,73 @@ test "what is not acknowledged in time is sent again, oldest first, and the wait
     transmit(&f.table, &f.wire, 50 * ms + 3 * rto - 1);
     try testing.expectEqual(from, f.wire.count); // the wait is twice as long now
     transmit(&f.table, &f.wire, 50 * ms + 3 * rto);
-    try testing.expectEqual(from + 2, f.wire.count);
+    try testing.expectEqual(from + 1, f.wire.count);
 
     // Progress resets the wait.
     _ = p.ackUpTo(&f.table, &f.wire, p.ack +% 600, 100 * ms + 3 * rto);
     try testing.expectEqual(@as(usize, 0), f.table.conns[i].queued());
     try testing.expectEqual(@as(u8, 0), f.table.conns[i].retries);
     try testing.expectEqual(first_rto_ns, f.table.conns[i].rto_ns);
+}
+
+test "a timeout sends only the oldest segment, and each acknowledgement lets twice as much follow (RFC 6298 (5.4); metal-vmm QUEUE 225, chunk 0a)" {
+    var f: Fixture = .{};
+    f.init();
+    var p = Peer{ .ip = .{ 10, 0, 2, 2 }, .port = 40000 };
+    const i = try p.connect(&f.table, &f.wire, 0);
+    var body: [2000]u8 = undefined;
+    _ = f.table.queue(i, pattern(&body));
+    var sizes: [8]usize = undefined;
+    var from = f.wire.count;
+    transmit(&f.table, &f.wire, 0);
+    try testing.expectEqualSlices(usize, &.{ 536, 536, 536, 392 }, f.wire.sizesSince(from, &sizes));
+
+    // Nothing is acknowledged: the timeout sends the oldest segment alone,
+    // where a go-back sent all four.
+    from = f.wire.count;
+    transmit(&f.table, &f.wire, rto);
+    try testing.expectEqualSlices(usize, &.{536}, f.wire.sizesSince(from, &sizes));
+    try testing.expectEqual(p.ack, f.wire.at(from).seq);
+    // Nor does a later turn send more before an acknowledgement.
+    from = f.wire.count;
+    transmit(&f.table, &f.wire, rto + 1 * ms);
+    try testing.expectEqual(from, f.wire.count);
+
+    // Its acknowledgement lets two follow, theirs the rest.
+    _ = p.ackUpTo(&f.table, &f.wire, p.ack +% 536, rto + 10 * ms);
+    from = f.wire.count;
+    transmit(&f.table, &f.wire, rto + 10 * ms);
+    try testing.expectEqualSlices(usize, &.{ 536, 536 }, f.wire.sizesSince(from, &sizes));
+    _ = p.ackUpTo(&f.table, &f.wire, p.ack +% 1072, rto + 20 * ms);
+    from = f.wire.count;
+    transmit(&f.table, &f.wire, rto + 20 * ms);
+    try testing.expectEqualSlices(usize, &.{392}, f.wire.sizesSince(from, &sizes));
+    try testing.expectEqual(@as(?usize, null), f.table.conns[i].recovery);
+}
+
+test "a full but live peer is probed after every timeout, recovering or not, and never given up on (RFC 6298 (5.4); metal-vmm QUEUE 225, chunk 0a)" {
+    var f: Fixture = .{};
+    f.init();
+    var p = Peer{ .ip = .{ 10, 0, 2, 2 }, .port = 40000, .window = 1000 };
+    const i = try p.connect(&f.table, &f.wire, 0);
+    var body: [1500]u8 = undefined;
+    _ = f.table.queue(i, pattern(&body));
+    transmit(&f.table, &f.wire, 0);
+    // The peer takes the first segment and is full.
+    p.window = 0;
+    _ = p.ackUpTo(&f.table, &f.wire, p.ack +% 536, 5 * ms);
+    var now: i96 = 5 * ms;
+    for (0..3 * max_retries) |_| {
+        // Each timeout probes with one byte, which the peer takes, still full.
+        const from = f.wire.count;
+        now = f.table.conns[i].rto_at.?;
+        transmit(&f.table, &f.wire, now);
+        try testing.expectEqual(from + 1, f.wire.count);
+        try testing.expectEqual(@as(usize, 1), f.wire.last().payload.len);
+        _ = p.ackUpTo(&f.table, &f.wire, p.ack +% 1, now + 1 * ms);
+    }
+    try testing.expectEqual(@as(u64, 0), f.table.given_up);
+    try testing.expect(f.table.conns[i].state != .closed);
 }
 
 test "a peer that never answers is reset after the last timeout" {

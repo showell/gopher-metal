@@ -98,6 +98,9 @@ const tx_bytes = 8192;
 /// The client's receive buffer: what it advertises when it has read
 /// everything.
 const client_buffer: usize = 4096;
+/// The most a scenario may give the client (`Scenario.client_buffer`): its
+/// buffers are this big, and it uses `buffer` of them.
+const client_buffer_max: usize = 16 * 1024;
 /// The segment size the client says, and sends.
 const client_mss: u32 = 1000;
 /// A crowd's most slots and clients (`Crowd`). A plain seed's table has 2
@@ -160,6 +163,16 @@ const Scenario = struct {
     /// frame at this 0-based index among all frames the table sends the client,
     /// once. Null for the random scenarios, which lose by `loss`.
     drop_nth_to_client: ?u64 = null,
+    /// **EVERY NTH FRAME TO THE CLIENT LOST** (metal-vmm QUEUE 225, chunk
+    /// 0a): the 13th, the 26th, and so on of the frames the table sends the
+    /// client, as the native judge's `GM_LOSE_SENT=13` drops them.
+    drop_every_to_client: ?u64 = null,
+    /// Where in its count of `drop_every_to_client` the first frame falls,
+    /// so a sweep can try every alignment of the loss against the window.
+    drop_every_phase: u64 = 0,
+    /// The client's receive buffer, so its window (at most
+    /// `client_buffer_max`).
+    client_buffer: usize = client_buffer,
 
     /// A fixed scenario for the item-96 sweep: a few-KB answer the host closes
     /// after, clean except for one dropped frame to the client, with ACKs
@@ -371,6 +384,10 @@ const Network = struct {
                 self.lost += 1;
                 return;
             }
+            if (sc.drop_every_to_client) |every| if ((nth + 1 + sc.drop_every_phase) % every == 0) {
+                self.lost += 1;
+                return;
+            };
         }
         if (now < sc.lossy_until and rng.float(f64) < sc.loss) {
             self.lost += 1;
@@ -481,8 +498,10 @@ const Client = struct {
 
     /// Bytes ahead of a hole, by their offset from RCV.NXT, waiting for it
     /// to fill; and where the table's FIN is, once one has been seen.
-    held: [client_buffer]u8 = undefined,
-    held_mask: [client_buffer]bool = @splat(false),
+    held: [client_buffer_max]u8 = undefined,
+    held_mask: [client_buffer_max]bool = @splat(false),
+    /// Its receive buffer: the scenario's `client_buffer`.
+    buffer: usize = client_buffer,
     fin_at: ?u32 = null,
 
     const base_rto_ns: i96 = 300 * ns_per_ms;
@@ -497,11 +516,11 @@ const Client = struct {
 
     /// Whether anything is held past a hole.
     fn holding(self: *const Client) bool {
-        return std.mem.indexOfScalar(bool, &self.held_mask, true) != null;
+        return std.mem.indexOfScalar(bool, self.held_mask[0..self.buffer], true) != null;
     }
 
     fn window(self: *const Client) u32 {
-        return @intCast(@min(client_buffer - self.unread, 0xFFFF));
+        return @intCast(@min(self.buffer - self.unread, 0xFFFF));
     }
 
     /// Bytes of the request sent so far, at `snd_nxt`.
@@ -665,7 +684,7 @@ const Client = struct {
                 // Receiver-side silly-window avoidance: a window update once
                 // it has grown by a segment or half the buffer.
                 const grown = self.window() -| self.told_wnd;
-                if (self.state != .syn_sent and grown >= @min(client_mss, client_buffer / 2)) self.sendAck(sim);
+                if (self.state != .syn_sent and grown >= @min(client_mss, self.buffer / 2)) self.sendAck(sim);
             }
         }
 
@@ -867,9 +886,9 @@ const Client = struct {
                 self.received += n;
                 self.unread += n;
                 self.rcv_nxt +%= @intCast(n);
-                std.mem.copyForwards(u8, self.held[0 .. client_buffer - n], self.held[n..]);
-                std.mem.copyForwards(bool, self.held_mask[0 .. client_buffer - n], self.held_mask[n..]);
-                @memset(self.held_mask[client_buffer - n ..], false);
+                std.mem.copyForwards(u8, self.held[0 .. self.buffer - n], self.held[n..self.buffer]);
+                std.mem.copyForwards(bool, self.held_mask[0 .. self.buffer - n], self.held_mask[n..self.buffer]);
+                @memset(self.held_mask[self.buffer - n .. self.buffer], false);
                 if (had_hole or self.holding()) at_once = true; // a hole filled, or one left
             }
             if (data.len > skip and skip + (room -| at) < data.len) at_once = true; // some did not fit
@@ -1357,6 +1376,8 @@ const Sim = struct {
         self.table = tcp.Table.init(server_ip, server_mac, 80, self.conns[0..self.slots], &self.out, simIsn);
         if (revival_cap) |cap| self.table.revival_cap = cap;
         self.client = Client.init(self.rng.int(u32));
+        std.debug.assert(self.sc.client_buffer <= client_buffer_max);
+        self.client.buffer = self.sc.client_buffer;
         self.client.request_len = self.sc.request_len;
         self.client.answer_len = self.sc.answer_len;
         self.client.half_close = self.sc.half_close;
@@ -1894,7 +1915,11 @@ const rough_red = [_]u64{ 11277, 11529, 13514, 16190, 20063, 20615, 22509, 25720
 // seed still fails without it. **6307 LEFT WITH KARN ON THE SYN-ACK**: a
 // SYN-ACK sent again is no longer timed, so its first RTO is not the whole
 // timeout, and without the ring it passes too.
-const crowd_red = [_]u64{ 640, 1281, 1452, 1872, 1961, 2305, 2870, 4362, 6606, 7546, 8003, 8575, 9366, 9769, 9951 };
+// **FOUR LEFT WITH RFC 6298 (5.4)** (640, 1961, 2870, 6606; metal-vmm QUEUE
+// 225, chunk 0a): a timeout sends one segment again, not the window, so each
+// crowd's frames change, and these four pass with the ring off as well as
+// on. None witnesses the ring any more; the eleven left still fail without it.
+const crowd_red = [_]u64{ 1281, 1452, 1872, 2305, 4362, 7546, 8003, 8575, 9366, 9769, 9951 };
 
 test "a crowd the size of the kernel's table: every oracle holds, and the table fills" {
     // **ONE IN TIER 0** (metal-vmm QUEUE 198.12): 1.7 s in Debug each
@@ -1951,6 +1976,30 @@ test "every client's slot in one pass is each client's own lookup's: a crowd and
         sim.slots_checked = 0;
         try runCrowded(sim);
         try std.testing.expect(sim.slots_checked.? > 160);
+    }
+}
+
+test "every 13th frame to the client lost, against a window of 13 segments: the table recovers, never phase-locked (RFC 6298 (5.4); metal-vmm QUEUE 225, chunk 0a)" {
+    // The native judge's GM_LOSE_SENT=13 against a go-back: each timeout
+    // resent the same 13-segment window, so with the loss aligned on its
+    // head the same frame was lost every time, until the retries ran out
+    // (`given_up`). Sending only the oldest segment after a timeout breaks
+    // the lock. Every alignment of the loss against the window is tried.
+    for ([_]usize{ 60_000, 13 * client_mss * 3 }) |answer| {
+        for (0..13) |phase| {
+            const sim = try std.testing.allocator.create(Sim);
+            defer std.testing.allocator.destroy(sim);
+            var sc = Scenario.fixed(answer, null, true);
+            sc.drop_every_to_client = 13;
+            sc.drop_every_phase = phase;
+            sc.client_buffer = 13 * client_mss;
+            sim.initScenario(225_000 + answer, sc);
+            sim.run() catch |e| {
+                std.debug.print("every 13th frame lost, answer {d} B, phase {d}: the table did not recover (given up {d})\n", .{ answer, phase, sim.table.given_up });
+                return e;
+            };
+            try std.testing.expectEqual(@as(u64, 0), sim.table.given_up);
+        }
     }
 }
 
