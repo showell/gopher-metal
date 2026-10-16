@@ -88,14 +88,18 @@ fn here() std.builtin.SourceLocation {
     return @src();
 }
 
-pub const header_len: usize = 20;
+/// RFC 9293 §3.1's segment, read and written (tcp_segment.zig).
+const tcp_segment = @import("tcp_segment.zig");
+pub const Segment = tcp_segment.Segment;
+pub const Ctl = tcp_segment.Ctl;
+pub const header_len = tcp_segment.header_len;
 pub const segment_at: usize = proto.eth_header_len + proto.ip_header_len;
 
-pub const flag_fin: u8 = 0x01;
-pub const flag_syn: u8 = 0x02;
-pub const flag_rst: u8 = 0x04;
-pub const flag_psh: u8 = 0x08;
-pub const flag_ack: u8 = 0x10;
+pub const flag_fin = tcp_segment.flag_fin;
+pub const flag_syn = tcp_segment.flag_syn;
+pub const flag_rst = tcp_segment.flag_rst;
+pub const flag_psh = tcp_segment.flag_psh;
+pub const flag_ack = tcp_segment.flag_ack;
 
 /// The MSS for a peer whose SYN names none (RFC 9293 §3.7.1).
 pub const default_mss: u16 = 536;
@@ -481,6 +485,59 @@ pub const Revivable = struct {
     told_wnd: u16 = 0,
 };
 
+// ── The pure decisions of SEGMENT ARRIVES (metal-vmm QUEUE 225, chunk 2):
+// each says what a segment means for a connection, and `Table` acts on the
+// answer. Each has a table-driven test (tcp_test.zig).
+
+/// **IS THE SEGMENT ACCEPTABLE?** (RFC 9293 §3.10.7.4, first check), by its
+/// first sequence number only:
+/// - `next`: it is RCV.NXT, the byte expected, and is taken;
+/// - `ahead`: past RCV.NXT inside the window we advertise, so acceptable to
+///   the RFC, but this table takes only the next byte (its ACK and window
+///   still count);
+/// - `behind`: at or before RCV.NXT, a resend of what was taken;
+/// - `beyond`: past the window, or half the circle away.
+/// DEPARTS: the RFC also accepts a segment that starts behind and runs past
+/// RCV.NXT, and trims it; here it is `behind`, and the peer resends.
+pub const Acceptability = enum { next, ahead, behind, beyond };
+
+pub fn acceptability(c: *const Conn, seq: u32) Acceptability {
+    if (seq == c.rcv_nxt) return .next;
+    if (c.ahead(seq)) return .ahead;
+    return if (sq.atOrAfter(c.rcv_nxt, seq)) .behind else .beyond;
+}
+
+/// **A RESET MUST NAME RCV.NXT EXACTLY** (RFC 9293 §3.10.7.4, second check,
+/// after RFC 5961 §3): `exact` closes the connection; `challenge`, one
+/// elsewhere in the window, draws a challenge ACK, which a genuine peer
+/// answers with an exact reset; `ignore`, one outside it, changes nothing.
+pub const ResetCheck = enum { exact, challenge, ignore };
+
+pub fn resetCheck(c: *const Conn, seq: u32) ResetCheck {
+    if (seq == c.rcv_nxt) return .exact;
+    if (c.ahead(seq)) return .challenge;
+    return .ignore;
+}
+
+/// **THE ACK FIELD** (RFC 9293 §3.10.7.4, fifth check):
+/// - in SYN-RECEIVED, `new` when it is ISS + 1, which completes the
+///   handshake, and `reset_it` otherwise ("form a reset segment
+///   <SEQ=SEG.ACK><CTL=RST>");
+/// - in a synchronized state, `new` when it acknowledges bytes past
+///   SND.UNA, `duplicate` when it is SND.UNA, and `ignore` when it names
+///   what was never sent, or is from before SND.UNA (a wrap past `highest`).
+/// DEPARTS: the RFC answers an ACK of something never sent with an ACK and
+/// drops the segment; here only its ACK is ignored (`acknowledge`).
+pub const AckCheck = enum { reset_it, ignore, duplicate, new };
+
+pub fn ackCheck(c: *const Conn, number: u32) AckCheck {
+    if (c.state == .syn_received) return if (number == c.una +% 1) .new else .reset_it;
+    const flight = sq.offset(c.una, c.highest());
+    const advance = sq.offset(c.una, number);
+    if (advance > flight) return .ignore;
+    return if (advance == 0) .duplicate else .new;
+}
+
 pub const Table = struct {
     local_ip: [4]u8,
     local_mac: [6]u8,
@@ -697,8 +754,16 @@ pub const Table = struct {
 
     /// Builds and sends one segment to `to`. A SYN carries our MSS.
     fn segment(self: *Table, wire: anytype, to: Peer, flags: u8, seq: u32, ack_number: u32, window: u16, payload: []const u8) void {
-        const options: []const u8 = if (flags & flag_syn != 0) &mss_option else &.{};
-        const len = header_len + options.len;
+        const s: Segment = .{
+            .src_port = self.port,
+            .dst_port = to.port,
+            .seq = seq,
+            .ack = ack_number,
+            .ctl = Ctl.of(flags),
+            .window = window,
+            .options = if (flags & flag_syn != 0) &mss_option else &.{},
+            .data = payload,
+        };
         const frame_len = proto.writeIpv4(
             self.out,
             self.local_mac,
@@ -706,21 +771,10 @@ pub const Table = struct {
             self.local_ip,
             to.ip,
             proto.proto_tcp,
-            len + payload.len,
+            s.len(),
         );
-
-        const t = self.out[segment_at..][0 .. len + payload.len];
-        @memcpy(t[0..2], &proto.be16(self.port));
-        @memcpy(t[2..4], &proto.be16(to.port));
-        @memcpy(t[4..8], &proto.be32(seq));
-        @memcpy(t[8..12], &proto.be32(ack_number));
-        t[12] = @intCast((len / 4) << 4);
-        t[13] = flags;
-        @memcpy(t[14..16], &proto.be16(window));
-        @memcpy(t[16..18], &proto.be16(0)); // the checksum, over a zeroed checksum
-        @memcpy(t[18..20], &proto.be16(0)); // no urgent pointer
-        @memcpy(t[header_len..len], options);
-        @memcpy(t[len..], payload);
+        const t = self.out[segment_at..][0..s.len()];
+        s.write(t);
         @memcpy(t[16..18], &proto.be16(proto.pseudoChecksum(self.local_ip, to.ip, proto.proto_tcp, t)));
 
         wire.send(self.out[0..frame_len]);
@@ -1018,20 +1072,20 @@ pub const Table = struct {
     /// ESTABLISHED: SND.UNA < SEG.ACK =< SND.NXT moves `una`, and SND.WL1/WL2
     /// decide whether `wnd` moves. True if this ACK covers our FIN.
     fn acknowledge(self: *Table, c: *Conn, seq: u32, number: u32, window: u16, now: i96) bool {
-        const flight = sq.offset(c.una, c.highest());
+        const check = ackCheck(c, number);
         const advance = sq.offset(c.una, number);
         // An ACK of something never sent, or an old one (wrapping to a huge
         // advance), is ignored, window included. The RFC also drops and
         // answers a segment that acknowledges what was never sent; here only
         // its ACK is ignored.
-        if (advance > flight) return false;
+        if (check == .ignore) return false;
         const updated = sq.after(seq, c.wl1) or (seq == c.wl1 and !sq.after(c.wl2, number));
         if (updated) {
             c.wnd = window;
             c.wl1 = seq;
             c.wl2 = number;
         }
-        if (advance == 0) return false;
+        if (check == .duplicate) return false;
 
         const bytes = @min(advance, c.queued());
         c.tx_start += bytes;
@@ -1106,14 +1160,13 @@ pub const Table = struct {
             return .{ .event = .nothing };
         }
 
-        const src_port = proto.readBe16(t[0..2]);
-        const seq = proto.readBe32(t[4..8]);
-        const number = proto.readBe32(t[8..12]);
-        const flags = t[13];
-        const window = proto.readBe16(t[14..16]);
-        const offset = @as(usize, t[12] >> 4) * 4;
-        if (offset < header_len or offset > t.len) return .{ .event = .nothing };
-        const data = t[offset..];
+        const seg = Segment.parse(t) orelse return .{ .event = .nothing };
+        const src_port = seg.src_port;
+        const seq = seg.seq;
+        const number = seg.ack;
+        const flags = seg.ctl.byte();
+        const window = seg.window;
+        const data = seg.data;
 
         var found = self.find(pkt.src_ip, src_port);
 
@@ -1123,15 +1176,19 @@ pub const Table = struct {
             // genuine peer answers with an exact reset; others are ignored.
             const i = found orelse return .{ .event = .nothing };
             const c = &self.conns[i];
-            props.sometimes(@src(), seq == c.rcv_nxt, "tcp: an exact reset closes a connection", null);
-            props.sometimes(@src(), seq != c.rcv_nxt and c.ahead(seq), "tcp: an inexact reset in the window draws a challenge ACK", null);
-            if (seq == c.rcv_nxt) {
-                self.resets_received +%= 1;
-                return self.close(i);
-            }
-            if (c.ahead(seq)) {
-                self.challenge_acks +%= 1;
-                self.emit(wire, i, flag_ack, c.highest(), "");
+            const check = resetCheck(c, seq);
+            props.sometimes(@src(), check == .exact, "tcp: an exact reset closes a connection", null);
+            props.sometimes(@src(), check == .challenge, "tcp: an inexact reset in the window draws a challenge ACK", null);
+            switch (check) {
+                .exact => {
+                    self.resets_received +%= 1;
+                    return self.close(i);
+                },
+                .challenge => {
+                    self.challenge_acks +%= 1;
+                    self.emit(wire, i, flag_ack, c.highest(), "");
+                },
+                .ignore => {},
             }
             return .{ .event = .nothing };
         }
@@ -1179,7 +1236,7 @@ pub const Table = struct {
             c.rcv_nxt = seq +% 1; // their SYN takes one
             c.wl1 = seq;
             c.una = self.isn();
-            const named = parseMss(t[header_len..offset]) orelse default_mss;
+            const named = parseMss(seg.options) orelse default_mss;
             if (named < min_mss) props.reachable(@src(), "tcp: a peer names a segment size under the least, and is sent the least", .{ .named = named });
             c.mss = std.math.clamp(named, min_mss, our_mss);
             c.wnd = window;
@@ -1229,9 +1286,10 @@ pub const Table = struct {
         // drops the segment whole: ACKs are cumulative, and a peer repeating
         // its FIN after ours was acknowledged would otherwise wait on a timer
         // for nothing. (WL1/WL2 keep it from setting the window.)
-        const early = c.ahead(seq);
+        const acceptable = acceptability(c, seq);
+        const early = acceptable == .ahead;
         props.sometimes(@src(), early, "tcp: a segment arrives ahead of the next expected byte", null);
-        if (seq != c.rcv_nxt and !early) {
+        if (acceptable == .behind or acceptable == .beyond) {
             // A resend of what was taken (a bare ACK carries nothing to count).
             if (data.len > 0 or flags & flag_fin != 0) self.arrived_behind +%= 1;
             props.reachable(@src(), "tcp: a segment from behind is answered, not taken", .{ .conn = i });
@@ -1240,7 +1298,7 @@ pub const Table = struct {
             // forged one set SND.WL1 to a sequence the peer never reaches,
             // after which the window rule rejects every genuine update.
             // At or before rcv_nxt; half the circle away is neither, and not behind.
-            const behind = sq.atOrAfter(c.rcv_nxt, seq);
+            const behind = acceptable == .behind;
             const done = behind and c.state != .syn_received and
                 self.acknowledge(c, seq, number, window, now);
             self.emit(wire, i, flag_ack, c.highest(), "");
@@ -1256,7 +1314,7 @@ pub const Table = struct {
                 self.emit(wire, i, flag_ack, c.highest(), "");
                 return .{ .event = .nothing };
             }
-            if (number != c.una +% 1) {
+            if (ackCheck(c, number) == .reset_it) {
                 // An unacceptable ACK draws <SEQ=SEG.ACK><CTL=RST> (RFC 9293
                 // §3.10.7.4, SYN-RECEIVED).
                 self.bad_ack_resets +%= 1;

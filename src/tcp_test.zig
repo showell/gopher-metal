@@ -2307,3 +2307,76 @@ test "frames passed over are counted by why: damaged IP header, fragment, not TC
     try testing.expectEqual(@as(u64, 1), f.table.passed.malformed_ip);
     try testing.expectEqual(@as(usize, 0), f.table.inUse());
 }
+
+// ── The pure decisions of SEGMENT ARRIVES (metal-vmm QUEUE 225, chunk 2):
+// a row each, near zero and across the half-circle, where `<` would do what
+// `sq.after` must.
+
+test "acceptability: the next byte, ahead in the window, behind, and beyond it (RFC 9293 §3.10.7.4, first check)" {
+    var rx: [1000]u8 = undefined;
+    var tx: [16]u8 = undefined;
+    const Row = struct { rcv_nxt: u32, seq: u32, want: tcp.Acceptability };
+    const rows = [_]Row{
+        .{ .rcv_nxt = 5000, .seq = 5000, .want = .next },
+        .{ .rcv_nxt = 5000, .seq = 5001, .want = .ahead },
+        .{ .rcv_nxt = 5000, .seq = 5999, .want = .ahead }, // the window's last byte
+        .{ .rcv_nxt = 5000, .seq = 6000, .want = .beyond }, // its right edge, outside
+        .{ .rcv_nxt = 5000, .seq = 4999, .want = .behind },
+        .{ .rcv_nxt = 5000, .seq = @as(u32, 5000) -% 0x7FFF_FFFF, .want = .behind },
+        .{ .rcv_nxt = 5000, .seq = @as(u32, 5000) +% 0x8000_0000, .want = .beyond }, // half the circle: not behind
+        .{ .rcv_nxt = 0xFFFF_FFF0, .seq = 0x10, .want = .ahead }, // across zero
+        .{ .rcv_nxt = 0x10, .seq = 0xFFFF_FFF0, .want = .behind }, // back across zero
+    };
+    for (rows) |r| {
+        const c: Conn = .{ .rx = &rx, .tx = &tx, .rcv_nxt = r.rcv_nxt, .state = .established };
+        testing.expectEqual(r.want, tcp.acceptability(&c, r.seq)) catch |e| {
+            std.debug.print("acceptability: rcv_nxt {x}, seq {x}\n", .{ r.rcv_nxt, r.seq });
+            return e;
+        };
+    }
+}
+
+test "resetCheck: exact at RCV.NXT, a challenge elsewhere in the window, ignored outside it (RFC 9293 §3.10.7.4, after RFC 5961)" {
+    var rx: [1000]u8 = undefined;
+    var tx: [16]u8 = undefined;
+    const Row = struct { rcv_nxt: u32, seq: u32, want: tcp.ResetCheck };
+    const rows = [_]Row{
+        .{ .rcv_nxt = 5000, .seq = 5000, .want = .exact },
+        .{ .rcv_nxt = 5000, .seq = 5001, .want = .challenge },
+        .{ .rcv_nxt = 5000, .seq = 5999, .want = .challenge },
+        .{ .rcv_nxt = 5000, .seq = 6000, .want = .ignore },
+        .{ .rcv_nxt = 5000, .seq = 4999, .want = .ignore },
+        .{ .rcv_nxt = 0xFFFF_FFFF, .seq = 0, .want = .challenge }, // across zero
+    };
+    for (rows) |r| {
+        const c: Conn = .{ .rx = &rx, .tx = &tx, .rcv_nxt = r.rcv_nxt, .state = .established };
+        testing.expectEqual(r.want, tcp.resetCheck(&c, r.seq)) catch |e| {
+            std.debug.print("resetCheck: rcv_nxt {x}, seq {x}\n", .{ r.rcv_nxt, r.seq });
+            return e;
+        };
+    }
+}
+
+test "ackCheck: the handshake's ACK names ISS + 1; after it, new, duplicate, or never sent (RFC 9293 §3.10.7.4, fifth check)" {
+    var rx: [16]u8 = undefined;
+    var tx: [16]u8 = undefined;
+    const Row = struct { state: State, una: u32, high: usize, number: u32, want: tcp.AckCheck };
+    const rows = [_]Row{
+        .{ .state = .syn_received, .una = 100, .high = 0, .number = 101, .want = .new },
+        .{ .state = .syn_received, .una = 100, .high = 0, .number = 100, .want = .reset_it }, // ISS itself
+        .{ .state = .syn_received, .una = 100, .high = 0, .number = 102, .want = .reset_it },
+        .{ .state = .established, .una = 100, .high = 50, .number = 100, .want = .duplicate },
+        .{ .state = .established, .una = 100, .high = 50, .number = 101, .want = .new },
+        .{ .state = .established, .una = 100, .high = 50, .number = 150, .want = .new }, // all of it
+        .{ .state = .established, .una = 100, .high = 50, .number = 151, .want = .ignore }, // never sent
+        .{ .state = .established, .una = 100, .high = 50, .number = 99, .want = .ignore }, // from before SND.UNA
+        .{ .state = .established, .una = 0xFFFF_FFF0, .high = 0x20, .number = 0x08, .want = .new }, // across zero
+    };
+    for (rows) |r| {
+        const c: Conn = .{ .rx = &rx, .tx = &tx, .state = r.state, .una = r.una, .high = r.high };
+        testing.expectEqual(r.want, tcp.ackCheck(&c, r.number)) catch |e| {
+            std.debug.print("ackCheck: {t}, una {x}, high {d}, number {x}\n", .{ r.state, r.una, r.high, r.number });
+            return e;
+        };
+    }
+}
