@@ -29,7 +29,8 @@
 //!
 //! **THE SMALL TCP**, allowed because this box sits behind Caddy on a private
 //! network: no congestion control, no SACK, no window scaling, no delayed
-//! ACK; segments are taken in order only. It does have fast retransmit.
+//! ACK. Segments ahead of a hole are held, a few a connection, in the
+//! receive buffer itself (`tcp_held.zig`). It does have fast retransmit.
 //!
 //! **PURE, SO IT IS TESTED ON THE HOST.** Frames go out through the caller's
 //! `wire` (anything with `send([]const u8)`), the ISN comes from a function
@@ -67,14 +68,18 @@
 //!   at `update_at`, doubling. Bounded by: the peer sending data or its FIN,
 //!   the window shutting again, or `max_retries` repeats, after which the
 //!   debt lapses.
+//! - **Bytes held ahead of a hole** (`held`, past `end`). Bounded by: the
+//!   peer, whose timer resends the hole; until then they cost nothing but
+//!   room the window already promised.
 //! - **Bytes received, not yet read** (`rx[start..end]`), in custody for the
 //!   reader. Bounded by: the host (probe/gopher.zig serves a connection once
 //!   its request is whole, and lets go of one silent for `idle_ns`). While
 //!   the buffer is full the window is shut and the peer's persist timer waits.
 //!
 //! **NOT QUEUED AT ALL**, so nothing is left waiting: an ACK (every in-order
-//! segment is acknowledged as it is taken), a segment ahead (dropped and
-//! re-acknowledged; the peer's timer resends it), and a SYN that finds no
+//! segment is acknowledged as it is taken), a segment ahead that finds
+//! the held pieces full (dropped and re-acknowledged; the peer resends it),
+//! and a SYN that finds no
 //! free slot and no stuck half-open to replace (dropped and counted; the
 //! peer's SYN timer retries).
 
@@ -124,6 +129,8 @@ pub const ephemeral_first: u16 = 49152;
 // **THE RETRANSMISSION CLOCK AND ITS BOUNDS** (RFC 6298, RFC 5681;
 // tcp_timeouts.zig).
 const timeouts = @import("tcp_timeouts.zig");
+/// **WHAT ARRIVED AHEAD OF A HOLE** (tcp_held.zig, metal-vmm QUEUE 226).
+const held_queue = @import("tcp_held.zig");
 pub const min_rto_ns = timeouts.min_rto_ns;
 pub const first_rto_ns = timeouts.first_rto_ns;
 pub const max_rto_ns = timeouts.max_rto_ns;
@@ -241,6 +248,11 @@ pub const Conn = struct {
     rx: []u8,
     start: usize = 0,
     end: usize = 0,
+    /// **HELD AHEAD OF A HOLE** (RFC 9293 §3.10.7.4, SHLD-31; metal-vmm
+    /// QUEUE 226): the pieces past RCV.NXT already in `rx`, past `end`, at
+    /// their own places, and a FIN behind them. Delivered when the hole
+    /// fills.
+    held: held_queue.Held = .{},
 
     /// **QUEUED AND NOT YET ACKNOWLEDGED: `tx[tx_start..tx_end]`**, in our
     /// custody until the peer acknowledges them. `tx[tx_start]` is the byte
@@ -351,11 +363,17 @@ pub const Conn = struct {
         props.always(@src(), n <= self.end - self.start, "tcp: a caller consumes no more than is pending", .{ .n = n, .pending = self.end - self.start });
         self.start += @min(n, self.end - self.start);
         if (self.start == self.end) {
+            // Everything read: back to the buffer's start, and the pieces
+            // held past `end` with it.
+            const ahead_len = self.held.extent();
+            std.mem.copyForwards(u8, self.rx[0..ahead_len], self.rx[self.end .. self.end + ahead_len]);
             self.start = 0;
             self.end = 0;
         } else if (self.start > self.rx.len / 2) {
+            // The pieces held past `end` move with it.
             const len = self.end - self.start;
-            std.mem.copyForwards(u8, self.rx[0..len], self.rx[self.start..self.end]);
+            const ahead_len = self.held.extent();
+            std.mem.copyForwards(u8, self.rx[0 .. len + ahead_len], self.rx[self.start .. self.end + ahead_len]);
             self.start = 0;
             self.end = len;
         }
@@ -543,6 +561,12 @@ pub const Table = struct {
     connects_refused: u64 = 0,
     syn_sent_bad_acks: u64 = 0,
     simultaneous_opens_refused: u64 = 0,
+    /// **HELD AHEAD OF A HOLE** (`holdAhead`, QUEUE 226): segments held,
+    /// bytes delivered from the held pieces once a hole filled, and segments
+    /// dropped because the pieces were full.
+    held_segments: u64 = 0,
+    held_delivered: u64 = 0,
+    held_refused_full: u64 = 0,
     /// Connections of our own let go at a deadline (`Deadlines`): not
     /// established in time, the peer silent too long, or too long in all.
     connect_deadlines: u64 = 0,
@@ -1573,7 +1597,8 @@ pub const Table = struct {
         //
         // - **the next** (`seq == rcv_nxt`): acceptable, and taken;
         // - **ahead** (`c.ahead(seq)`): acceptable, so its ACK and window
-        //   count, but its data and FIN are dropped and re-acknowledged;
+        //   count, and its data and FIN are held until the hole before them
+        //   fills (`holdAhead`, QUEUE 226), and re-acknowledged;
         // - **from behind** (a repeated FIN, a keepalive) or beyond the
         //   window: not acceptable, and answered with an ACK.
         //
@@ -1664,9 +1689,15 @@ pub const Table = struct {
         }
 
         if (early) {
-            // Ahead: re-acknowledge, asking for the next byte.
+            // **AHEAD: HELD, AND RE-ACKNOWLEDGED AT ONCE** (metal-vmm QUEUE
+            // 226), the duplicate ACK asking for the next byte. RFC 5681 §4.2:
+            // > Out-of-order data segments SHOULD be acknowledged immediately, in
+            // > order to accelerate loss recovery.  To trigger the fast retransmit
+            // > algorithm, the receiver SHOULD send an immediate duplicate ACK when
+            // > it receives a data segment above a gap in the sequence space.  To
             if (data.len > 0 or flags & flag_fin != 0) {
                 self.arrived_ahead +%= 1;
+                self.holdAhead(c, seq, data, flags & flag_fin != 0);
                 self.emit(wire, i, flag_ack, c.highest(), "");
             }
             return self.settle(i, event, fin_acknowledged, now);
@@ -1738,6 +1769,20 @@ pub const Table = struct {
             c.end += n;
             c.rcv_nxt +%= @intCast(n);
             if (n > 0) c.heard();
+            // **WHAT IT MAKES WHOLE IS TAKEN TOO**, and the one ACK below
+            // names the new RCV.NXT. RFC 5681 §4.2:
+            // > provide feedback to senders recovering from losses, the receiver
+            // > SHOULD send an immediate ACK when it receives a data segment that
+            // > fills in all or part of a gap in the sequence space.
+            if (n > 0 and !c.held.empty()) {
+                const more = c.held.advance(@intCast(n));
+                if (more > 0) {
+                    c.end += more;
+                    c.rcv_nxt +%= more;
+                    self.held_delivered +%= more;
+                    props.reachable(@src(), "tcp: a hole filled delivers what was held behind it", .{ .bytes = more });
+                }
+            }
             self.emit(wire, i, flag_ack, c.highest(), "");
             if (n > 0 and event == .nothing) event = .data;
             if (n < data.len) return self.settle(i, event, fin_acknowledged, now);
@@ -1758,7 +1803,15 @@ pub const Table = struct {
         // when the peer's FIN arrives (`close`).
         // DEPARTS: text and a FIN in one segment draw two ACKs, the text's
         // and the FIN's, where RFC 9293 §3.10.7.4 sends one after both.
-        if (flags & flag_fin != 0 and !c.peerDone() and seq +% @as(u32, @intCast(data.len)) == c.rcv_nxt) {
+        // A FIN held ahead (`holdAhead`) is taken when the bytes before it
+        // are: by this segment's text, or by what that text made whole.
+        const fin_here = flags & flag_fin != 0 and seq +% @as(u32, @intCast(data.len)) == c.rcv_nxt;
+        const fin_held = c.held.finReached();
+        if (fin_held) {
+            c.held.fin_at = null;
+            props.reachable(@src(), "tcp: a FIN held ahead is taken once the bytes before it are", null);
+        }
+        if ((fin_here or fin_held) and !c.peerDone()) {
             c.rcv_nxt +%= 1; // their FIN takes one
             c.peer_half.fire(.fin_received);
             self.emit(wire, i, flag_ack, c.highest(), "");
@@ -1767,6 +1820,35 @@ pub const Table = struct {
         }
 
         return self.settle(i, event, fin_acknowledged, now);
+    }
+
+    /// **A SEGMENT AHEAD OF A HOLE, HELD** (metal-vmm QUEUE 226): its bytes
+    /// into the receive buffer at their own place past RCV.NXT, as far as
+    /// the room we advertise reaches, and noted in `held`; a FIN behind
+    /// them, if all of them fit. One that touches no piece when
+    /// `held_queue.max_pieces` are held is dropped as before 226, counted.
+    fn holdAhead(self: *Table, c: *Conn, seq: u32, data: []const u8, fin: bool) void {
+        if (c.peerDone()) return; // nothing comes after the peer's FIN
+        const off = seq -% c.rcv_nxt;
+        const room = c.room();
+        if (off >= room) return;
+        const fit: u32 = @intCast(@min(data.len, room - off));
+        if (fit > 0) {
+            switch (c.held.add(off, fit)) {
+                .held => {
+                    @memcpy(c.rx[c.end + off ..][0..fit], data[0..fit]);
+                    self.held_segments +%= 1;
+                    props.reachable(@src(), "tcp: a segment ahead of a hole is held", .{ .off = off, .len = fit });
+                },
+                .repeat => {},
+                .full => {
+                    self.held_refused_full +%= 1;
+                    props.reachable(@src(), "tcp: a segment ahead finds the held pieces full, and is dropped", null);
+                    return;
+                },
+            }
+        }
+        if (fin and fit == data.len) c.held.fin_at = off + fit;
     }
 
     /// Reports `event`, unless our FIN was just acknowledged: then the
@@ -1829,6 +1911,9 @@ pub fn writeCounts(t: *const Table, w: *std.Io.Writer) std.Io.Writer.Error!void 
     try w.print("{d} segments arrived ahead of the next byte (one before them lost or late), {d} from behind (resends), {d} past the window; ", .{
         t.arrived_ahead, t.arrived_behind, t.past_window,
     });
+    try w.print("{d} segments held ahead of a hole, {d} bytes delivered from them, {d} dropped with the held pieces full; ", .{
+        t.held_segments, t.held_delivered, t.held_refused_full,
+    });
     try w.print("{d} resets from peers ({d} inexact ones challenged), {d} bad handshake ACKs reset; given up by the host: {d} clients that stopped taking a response, {d} streams too far behind, {d} closes of an unfinished handshake; ", .{
         t.resets_received, t.challenge_acks, t.bad_ack_resets, t.abandoned_slow_client, t.abandoned_stream_behind, t.abandoned_unfinished,
     });
@@ -1856,7 +1941,7 @@ test "tcp: the host page's line says every count the table keeps, each by its ow
             n += 1;
         }
     }
-    var buf: [1024]u8 = undefined;
+    var buf: [2048]u8 = undefined;
     var w: std.Io.Writer = .fixed(&buf);
     try writeCounts(&t, &w);
     const line = w.buffered();

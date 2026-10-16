@@ -214,9 +214,10 @@ thing under test: the table's client (`connect`) against its server, 300
 seeds in `zig build test`, each with single chosen losses under the metal
 `Deadlines`, random loss under the production ones, or a peer that makes one
 deadline fire. Its first run found what neither peer alone shows: the table
-takes segments in order only, so between two tables a reordering path
-stalls on the doubled RTO (the file's last test). Its paths are first in,
-first out, as metal-vmm's pair is, until that is decided.
+took segments in order only, so between two tables a reordering path
+stalled on the doubled RTO. Since metal-vmm QUEUE 226 the table holds
+segments ahead of a hole (`tcp_held.zig`), and half the pair sim's jittered
+seeds reorder.
 
 ## 4. Small-scope exhaustive exploration
 

@@ -1921,8 +1921,10 @@ const rough_red = [_]u64{ 11277, 11529, 13514, 16190, 20063, 20615, 22509, 25720
 // crowd's frames change, and these four pass with the ring off as well as
 // on. None witnesses the ring any more. **FOUR MORE WITH FAST RETRANSMIT
 // SENDING ONE SEGMENT** (4362, 8003, 8575, 9366; chunk 0b), the same way.
-// The seven left still fail without it.
-const crowd_red = [_]u64{ 1281, 1452, 1872, 2305, 7546, 9769, 9951 };
+// **TWO MORE WITH THE HELD PIECES** (2305, 9769; metal-vmm QUEUE 226): a
+// segment ahead of a hole is held, not dropped, so these crowds pass with
+// the ring off as well as on. The five left still fail without it.
+const crowd_red = [_]u64{ 1281, 1452, 1872, 7546, 9951 };
 
 test "a crowd the size of the kernel's table: every oracle holds, and the table fills" {
     // **ONE IN TIER 0** (metal-vmm QUEUE 198.12): 1.7 s in Debug each

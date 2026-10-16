@@ -218,8 +218,10 @@ with its window probed, and one that pauses just over it is let go.
 **The loss switch loses only what this machine sends**
 (`lose_one_sent_in`). Losing what arrives as well made each 40 KB request
 take 20 s and two of them time out — not the send side's doing: this TCP
-takes received segments in order only, so one lost segment throws away every
-one behind it, and the peer recovers each hole on its own timer.
+took received segments in order only then, so one lost segment threw away
+every one behind it, and the peer recovered each hole on its own timer.
+Since metal-vmm QUEUE 226 it holds what arrives ahead of a hole
+(`tcp_held.zig`).
 
 **The slow-reader gate needs a 4 MB answer.** A loopback client with a 2 KB
 receive buffer still lets its sender queue 1.36 MB, and slirp holds more;

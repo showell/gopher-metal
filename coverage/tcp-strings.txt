@@ -2,6 +2,7 @@
 # tcp_sim.zig's strings test holds the catalog to, sorted, one a line. The
 # floors key on these; a string changed on purpose is changed here, and in
 # any floor naming it, in the same commit.
+tcp: a FIN held ahead is taken once the bytes before it are
 tcp: a SYN finds the table full, and nothing to give way
 tcp: a backed-off RTO stays under the cap
 tcp: a caller consumes no more than is pending
@@ -11,6 +12,7 @@ tcp: a connection of our own is refused by the peer's reset
 tcp: a connection's timeouts stay within its retries
 tcp: a damaged segment is dropped
 tcp: a given-way half-open is revived by its client's ACK
+tcp: a hole filled delivers what was held behind it
 tcp: a lost SYN is sent again
 tcp: a lost SYN-ACK is sent again
 tcp: a measured RTO is within its bounds
@@ -20,6 +22,8 @@ tcp: a reopened window is announced again
 tcp: a reopened window said again has its clock
 tcp: a revival finds no slot, and the ACK is dropped
 tcp: a round trip comes in faster than the estimate
+tcp: a segment ahead finds the held pieces full, and is dropped
+tcp: a segment ahead of a hole is held
 tcp: a segment arrives ahead of the next expected byte
 tcp: a segment for no connection is refused
 tcp: a segment from behind is answered, not taken

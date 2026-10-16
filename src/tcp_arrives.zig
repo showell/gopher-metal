@@ -60,14 +60,15 @@ const sq = @import("seq.zig").Seq(u32);
 ///
 /// Here, by its first sequence number only:
 /// - `next`: it is RCV.NXT, the byte expected, and is taken;
-/// - `ahead`: past RCV.NXT inside the window we advertise, so acceptable to
-///   the RFC, but this table takes only the next byte (its ACK and window
-///   still count);
+/// - `ahead`: past RCV.NXT inside the window we advertise: acceptable, its
+///   ACK and window count, and its bytes are held until the hole before
+///   them fills (`Table.holdAhead`);
 /// - `behind`: at or before RCV.NXT, a resend of what was taken;
 /// - `beyond`: past the window, or half the circle away.
 /// DEPARTS: the RFC also accepts a segment that starts behind and runs past
-/// RCV.NXT, and trims it; here it is `behind`, and the peer resends. And a
-/// segment `ahead` is not held for later (SHLD-31): its sender resends it.
+/// RCV.NXT, and trims it; here it is `behind`, and the peer resends. A
+/// segment `ahead` is held for later (SHLD-31; tcp_held.zig, metal-vmm
+/// QUEUE 226).
 pub const Acceptability = enum { next, ahead, behind, beyond };
 
 pub fn acceptability(c: *const Conn, seq: u32) Acceptability {

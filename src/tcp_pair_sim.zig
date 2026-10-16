@@ -1,9 +1,10 @@
 //! **TWO TABLES TALKING** (metal-vmm QUEUE 225, chunk 6; docs/TWO-KERNELS.md):
 //! the kernel's TCP as a client (`Table.connect`) against the kernel's TCP
 //! as a server, on one virtual clock, through a network that loses,
-//! duplicates and delays, with jitter. Each direction is first in, first
-//! out, as metal-vmm's pair is; reordered, two kernels miss the metal
-//! bounds (the last test says why, and stays until that changes). tcp_sim.zig holds the table to a client
+//! duplicates and delays, with jitter, which may reorder frames (half the
+//! jittered seeds) or keep each direction first in, first out, as
+//! metal-vmm's pair does. Reordering needed the segments ahead of a hole
+//! held (metal-vmm QUEUE 226): before, two kernels missed the metal bounds. tcp_sim.zig holds the table to a client
 //! written from the RFCs; this holds it to itself, which is what two
 //! kernels on one machine will be.
 //!
@@ -106,7 +107,7 @@ const Scenario = struct {
     jitter_ns: i96,
     /// Whether the jitter may reorder frames, or each direction stays
     /// first in, first out (as metal-vmm's pair does) with the jitter only
-    /// spacing frames out. See the reordering test at the end.
+    /// spacing frames out.
     reorder: bool = false,
     duplicate: f64,
     deadlines: tcp.Deadlines,
@@ -165,6 +166,8 @@ const Scenario = struct {
                 if (sc.fires == .total) sc.answer_len = 100;
             },
         }
+        // Drawn after the rest, so a seed's other choices are as they were.
+        sc.reorder = sc.jitter_ns > 0 and rng.boolean();
         return sc;
     }
 };
@@ -642,8 +645,9 @@ pub const Forced = struct {
     losses: ?[2]?Loss = null,
     /// The client's SYN waits this long first (`Scenario.syn_rto_plant`).
     syn_rto_ns: ?u64 = null,
-    /// The jitter may reorder frames.
-    reorder: bool = false,
+    /// The jitter reorders frames (true) or keeps each way first in, first
+    /// out (false); null, as the seed chose.
+    reorder: ?bool = null,
 };
 
 /// Seed `seed`'s world with `forced` on it, and whether every oracle held.
@@ -663,7 +667,7 @@ pub fn passes(seed: u64, forced: Forced) !bool {
         sim.sc.losses = l;
     }
     sim.sc.syn_rto_plant = forced.syn_rto_ns;
-    sim.sc.reorder = forced.reorder;
+    if (forced.reorder) |r| sim.sc.reorder = r;
     sim.build();
     sim.quiet = true;
     return if (sim.run()) true else |_| false;
@@ -701,14 +705,12 @@ test "a lost SYN-ACK is recovered by the client's next SYN, inside the connect b
     for (1..21) |seed| try std.testing.expect(try passes(seed, .{ .losses = syn_ack_lost }));
 }
 
-test "reordered, two kernels miss the metal bounds: the receiver drops what arrives ahead (a finding, metal-vmm QUEUE 225 chunk 6)" {
-    // tcp.zig takes segments in order only and drops one ahead of a hole.
-    // Two segments of a recovering window that swap places leave one
-    // duplicate ACK where three resend at once, so every round ends on the
-    // timer, and Karn's rule leaves the backed-off RTO doubled: seed 2 moves
-    // 41 KB of 195 KB in 3 s. Through a first-in, first-out path (the
-    // default, and metal-vmm's pair) it completes in the bounds. The day the
-    // table holds segments ahead, this test fails and goes.
-    try std.testing.expect(try passes(2, .{}));
-    try std.testing.expect(!try passes(2, .{ .reorder = true }));
+test "reordered, two kernels stay inside the metal bounds: segments ahead of a hole are held (metal-vmm QUEUE 226)" {
+    // Before 226, tcp.zig dropped a segment ahead of a hole: two segments of
+    // a recovering window that swapped places left one duplicate ACK where
+    // three resend, every round ended on the timer, and seed 2 moved 41 KB
+    // of 195 KB in 3 s. Held, the hole's resend makes everything behind it
+    // whole at once.
+    try std.testing.expect(try passes(2, .{ .reorder = false }));
+    try std.testing.expect(try passes(2, .{ .reorder = true }));
 }

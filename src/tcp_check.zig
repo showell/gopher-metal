@@ -39,6 +39,7 @@ pub const Rule = enum {
 
     // ── safety ──────────────────────────────────────────────────────────────
     rx_out_of_bounds,
+    held_past_the_room,
     tx_out_of_bounds,
     sent_past_high_or_queue,
     closing_disagrees_with_fin,
@@ -67,6 +68,7 @@ pub const Rule = enum {
             .closed_holds_a_deadline => "a free slot still has a deadline armed",
             .closed_holds_bytes => "a free slot still holds bytes",
             .rx_out_of_bounds => "the receive buffer's start and end are out of order or past its end",
+            .held_past_the_room => "a piece held ahead of a hole lies past the receive buffer's room",
             .tx_out_of_bounds => "the send queue's start and end are out of order or past its end",
             .sent_past_high_or_queue => "sent <= high <= queued() does not hold",
             .closing_disagrees_with_fin => "the state is closing exactly when our FIN is queued, sent or acknowledged, and here it is not",
@@ -122,12 +124,13 @@ pub fn checkConn(c: *const Conn, now: i96, phase: Phase) ?Rule {
 fn free(c: *const Conn) ?Rule {
     if (c.rto_at != null or c.deadlines != null or c.fin_wait_until != null or c.update_at != null or c.window_news != .none)
         return .closed_holds_a_deadline;
-    if (c.queued() != 0 or c.start != 0 or c.end != 0) return .closed_holds_bytes;
+    if (c.queued() != 0 or c.start != 0 or c.end != 0 or !c.held.empty()) return .closed_holds_bytes;
     return null;
 }
 
 fn safety(c: *const Conn) ?Rule {
     if (!(c.start <= c.end and c.end <= c.rx.len)) return .rx_out_of_bounds;
+    if (c.held.extent() > c.rx.len - c.end) return .held_past_the_room;
     if (!(c.tx_start <= c.tx_end and c.tx_end <= c.tx.len)) return .tx_out_of_bounds;
     if (!(c.sent <= c.high and c.high <= c.queued())) return .sent_past_high_or_queue;
     if ((c.state == .closing) != (!c.fin.is(.none))) return .closing_disagrees_with_fin;
@@ -402,4 +405,16 @@ test "a connection of our own past one of its deadlines after a turn is a deadli
     c = conn(&rx, &tx);
     c.deadlines = .{ .connect_ns = 1, .idle_ns = 1, .total_ns = 1 };
     try testing.expectEqual(@as(?Rule, .closed_holds_a_deadline), checkConn(&c, 0, .after_handle));
+}
+
+test "a piece held past the receive buffer's room is out of bounds (metal-vmm QUEUE 226)" {
+    var rx: [64]u8 = undefined;
+    var tx: [64]u8 = undefined;
+    var c = conn(&rx, &tx);
+    c.state = .established;
+    c.end = 40;
+    _ = c.held.add(10, 14); // to 24 past `end`: exactly the room
+    try testing.expectEqual(@as(?Rule, null), checkConn(&c, 0, .after_handle));
+    _ = c.held.add(20, 5); // to 25: one past it
+    try testing.expectEqual(@as(?Rule, .held_past_the_room), checkConn(&c, 0, .after_handle));
 }

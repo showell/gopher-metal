@@ -2774,7 +2774,7 @@ test "every quote of an RFC in the tcp files is the RFC's own words (docs/rfc/)"
         r.* = try squeeze(gpa, text);
     }
     defer for (rfcs) |r| gpa.free(r);
-    const files = [_][]const u8{ "src/tcp.zig", "src/tcp_arrives.zig", "src/tcp_timeouts.zig", "src/tcp_segment.zig" };
+    const files = [_][]const u8{ "src/tcp.zig", "src/tcp_arrives.zig", "src/tcp_timeouts.zig", "src/tcp_segment.zig", "src/tcp_held.zig" };
     var missing: std.ArrayList([]const u8) = .empty;
     defer {
         for (missing.items) |m| gpa.free(m);
@@ -2860,4 +2860,105 @@ test "a window that shuts with bytes in flight and refuses its probes: once it r
         if (answer) _ = p.ackUpTo(&f.table, &f.wire, base +% got, now + 1 * ms);
     }
     try testing.expectEqual(@as(u64, 0), f.table.given_up);
+}
+
+// ── segments held ahead of a hole (metal-vmm QUEUE 226) ────────────────────
+
+/// Sends `data` at `off` bytes past the peer's next byte, as is, and
+/// answers the table's ACK.
+fn sendAt(f: *Fixture, p: *const Peer, off: u32, flags: u8, data: []const u8, now: i96) Wire.Seg {
+    var buf: [1600]u8 = undefined;
+    _ = handle(&f.table, &f.wire, p.frame(&buf, flags, p.seq +% off, data), now);
+    return f.wire.last();
+}
+
+test "a segment ahead of a hole is held, and the one that fills the hole delivers both, with one ACK of the new RCV.NXT" {
+    var f: Fixture = .{};
+    f.init();
+    var p = Peer{ .ip = .{ 10, 0, 2, 2 }, .port = 40000 };
+    const i = try p.connect(&f.table, &f.wire, 0);
+    const c = &f.table.conns[i];
+    // "world" arrives first, ahead of "hello ".
+    const dup = sendAt(&f, &p, 6, flag_psh | flag_ack, "world", 1 * ms);
+    try testing.expectEqual(p.seq, dup.ack); // a duplicate ACK, asking for the hole
+    try testing.expectEqual(@as(usize, 0), c.pending().len);
+    try testing.expectEqual(@as(u64, 1), f.table.held_segments);
+    const from = f.wire.count;
+    const ack = sendAt(&f, &p, 0, flag_psh | flag_ack, "hello ", 2 * ms);
+    try testing.expectEqual(from + 1, f.wire.count); // one ACK
+    try testing.expectEqual(p.seq +% 11, ack.ack);
+    try testing.expectEqualStrings("hello world", c.pending());
+    try testing.expectEqual(@as(u64, 5), f.table.held_delivered);
+    try testing.expect(c.held.empty());
+}
+
+test "pieces that overlap what is held, or each other, are delivered once" {
+    var f: Fixture = .{};
+    f.init();
+    var p = Peer{ .ip = .{ 10, 0, 2, 2 }, .port = 40000 };
+    const i = try p.connect(&f.table, &f.wire, 0);
+    const c = &f.table.conns[i];
+    const text = "0123456789abcdefghij";
+    _ = sendAt(&f, &p, 10, flag_ack, text[10..15], 1 * ms);
+    _ = sendAt(&f, &p, 12, flag_ack, text[12..20], 2 * ms); // overlaps, runs on
+    _ = sendAt(&f, &p, 13, flag_ack, text[13..16], 3 * ms); // a repeat
+    _ = sendAt(&f, &p, 4, flag_ack, text[4..11], 4 * ms); // reaches into it
+    try testing.expectEqual(@as(usize, 0), c.pending().len);
+    _ = sendAt(&f, &p, 0, flag_ack, text[0..6], 5 * ms); // overlaps the next
+    try testing.expectEqualStrings(text, c.pending());
+    try testing.expectEqual(p.seq +% 20, c.rcv_nxt);
+}
+
+test "a FIN held ahead is taken only once every byte before it is" {
+    var f: Fixture = .{};
+    f.init();
+    var p = Peer{ .ip = .{ 10, 0, 2, 2 }, .port = 40000 };
+    const i = try p.connect(&f.table, &f.wire, 0);
+    const c = &f.table.conns[i];
+    _ = sendAt(&f, &p, 5, flag_fin | flag_ack, "tail", 1 * ms);
+    try testing.expect(!c.peerDone());
+    var buf: [1600]u8 = undefined;
+    const r = handle(&f.table, &f.wire, p.frame(&buf, flag_ack, p.seq, "head "), 2 * ms);
+    try testing.expectEqual(Event.peer_done, r.event);
+    try testing.expect(c.peerDone());
+    try testing.expectEqualStrings("head tail", c.pending());
+    try testing.expectEqual(p.seq +% 10, c.rcv_nxt); // the FIN takes one
+    try testing.expectEqual(p.seq +% 10, f.wire.last().ack);
+}
+
+test "a fifth piece apart from four held is dropped and counted; one that touches them is still held" {
+    var f: Fixture = .{};
+    f.init();
+    var p = Peer{ .ip = .{ 10, 0, 2, 2 }, .port = 40000 };
+    const i = try p.connect(&f.table, &f.wire, 0);
+    const c = &f.table.conns[i];
+    for ([_]u32{ 2, 6, 10, 14 }) |off| _ = sendAt(&f, &p, off, flag_ack, "x", 1 * ms);
+    try testing.expectEqual(@as(u8, 4), c.held.n);
+    _ = sendAt(&f, &p, 18, flag_ack, "x", 2 * ms);
+    try testing.expectEqual(@as(u64, 1), f.table.held_refused_full);
+    _ = sendAt(&f, &p, 3, flag_ack, "yyy", 3 * ms); // 3..6, joining 2 and 6
+    try testing.expectEqual(@as(u8, 3), c.held.n);
+    try testing.expectEqual(@as(u64, 1), f.table.held_refused_full);
+}
+
+test "what is held moves with the buffer when the reader's bytes are let go" {
+    var f: Fixture = .{};
+    f.init();
+    var p = Peer{ .ip = .{ 10, 0, 2, 2 }, .port = 40000 };
+    const i = try p.connect(&f.table, &f.wire, 0);
+    const c = &f.table.conns[i];
+    // 40 bytes read up to `end`, then a piece held 5 past it.
+    var forty: [40]u8 = undefined;
+    @memset(&forty, 'a');
+    _ = p.write(&f.table, &f.wire, &forty, 1 * ms);
+    _ = sendAt(&f, &p, 5, flag_ack, "HELD", 2 * ms);
+    // Most of it read: the buffer compacts, past half (`consume`).
+    c.consume(38);
+    _ = sendAt(&f, &p, 0, flag_ack, "fills", 3 * ms);
+    try testing.expectEqualStrings("aafillsHELD", c.pending());
+    // All of it read: back to the start, with a new piece held.
+    _ = sendAt(&f, &p, 13, flag_ack, "LATER", 4 * ms);
+    c.consume(c.pending().len);
+    _ = sendAt(&f, &p, 9, flag_ack, "then", 5 * ms);
+    try testing.expectEqualStrings("thenLATER", c.pending());
 }
