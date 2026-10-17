@@ -63,7 +63,11 @@ The image compiles angry-gopher's `zig-server/src` and zig-webbox's `src`
 from their sibling checkouts, so a release names three commits, plus
 zig-coverage-sdk's, which the verdicts also key on.
 
-1. **Merge** what ships into each repo's master, and push.
+1. **Merge** what ships into each repo's master, and push. Then build
+   angry-gopher's site files that git does not track:
+   `~/showell_repos/angry-gopher/ops/build_downloads` (the Safari downloads;
+   every site disk, the gates' and the image's, copies `downloads/`, and
+   both refuse without it).
 2. **The checks**, on the code as committed, detached. **Nothing in the
    four checkouts is edited while they run**, and each attempt gets a
    fresh folder (the summary is appended to):
