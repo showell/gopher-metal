@@ -4,8 +4,9 @@ metal-vmm QUEUE 228.1, and the part of 228.3 that shapes it. **Status:
 design after three cold reviews** (the box, 2026-10-17), waiting on Steve's
 two decisions (below), both now taken. **Built so far:** chunk 1 (the pure
 decisions, `src/sleep.zig`, and webbox's `Wake`) and chunk 2 (the sleep on
-metal, `longest_rest_ms`, the sleeper, metal-vmm's `sleeps.sh`) and chunk 3
-(the real-timer check, `droplet/sleeps.py`; rests classified by handler). An idle
+metal, `longest_rest_ms`, the sleeper, metal-vmm's `sleeps.sh`) chunk 3
+(the real-timer check, `droplet/sleeps.py`; rests classified by handler) and
+chunk 4 (Linux's between thread on a doorbell). An idle
 gopher.elf's 60 s went from 307,564 exits to 6,781, and from 37,605 halts to
 8.
 
@@ -206,17 +207,24 @@ checks the total deadline between reads. Its result is published atomically,
 `result()` reads it under the turn, and its end kicks `between`. A host that
 stops waits for at most one fetch's total deadline.
 
-## Linux's between thread
+## Linux's between thread (chunk 4, done)
 
-Today `betweenLoop` sleeps `between_idle_ms` (50 ms) when there is nothing to
-do: the Linux twin of the 1 ms slice.
-- **It sleeps until the wake**, on a futex. It reads a generation counter
-  before calling `between`, then waits with `Futex.timedWait(&gen, seen,
-  at - now)`.
-- **A handler's end, a fetch's end and `stop` each kick it**:
-  `gen +%= 1; wake`. A kick that lands between "decide to sleep" and "wait"
-  has changed the counter, so the wait returns at once.
-- A `bool` site keeps today's 50 ms loop.
+webbox's `betweenLoop` used to sleep `between_idle_ms` (50 ms) when there was
+nothing to do: the Linux twin of the 1 ms slice. Now (zig-webbox `01a18aa`):
+- **it sleeps until the wake**, on a doorbell: it reads the bell's count
+  before calling `between`, then `futexWaitTimeout` until `.at`'s time on
+  the awake clock, or `futexWait` for `.idle`;
+- **every handler's end rings the bell, and so does a stop.** A ring that
+  lands between "decide to sleep" and "wait" has changed the count, so the
+  wait returns at once;
+- **a `bool` site's false is `.idle` on Linux too**: called again after
+  each request, as on metal. The 50 ms poll is gone.
+
+Tested by counts: no call before the wake and one at it; a handler's end
+wakes a far wake; a stop ends the thread at once; a request that starts a
+run wakes an idle thread and the run is stepped. Red with the handler's ring
+left out, and with the old poll. Dog Park's check, a background Shale run on
+the Linux host included, passes on it.
 
 ## Testing, fast to slow
 
