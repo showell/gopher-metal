@@ -312,5 +312,5 @@ why the drivers here are written against the same doors.
 
 The plan this all started from is
 [angry-gopher without Linux](https://github.com/showell/essay-repl-server/blob/master/notes/angry-gopher-without-linux.md), and the move
-to a DigitalOcean droplet
+to a DigitalOcean droplet is
 [gopher chat on a droplet](https://github.com/showell/essay-repl-server/blob/master/notes/gopher-chat-on-a-droplet.md).
