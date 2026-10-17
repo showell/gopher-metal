@@ -277,7 +277,7 @@ alignment checked against page indices rather than addresses, which failed
 every 64 KB-aligned request on a region that did not happen to start on that
 boundary.
 
-## Speed against Linux (v4, 2026-10-01)
+## Speed against Linux, as last measured
 
 How fast, measured before the cutover (the same pages from both sites,
 alternating, 40 rounds; first byte, median / 90th percentile; 2026-10-01, v4:
@@ -299,33 +299,8 @@ One run, on one evening: DigitalOcean's neighbours vary.
 
 ## The files
 
-| where | what |
-|---|---|
-| `src/boot.zig` | the PVH note, the long-mode stub, and the page tables |
-| `src/serial.zig` | COM1 and QEMU's exit door: the whole console |
-| `src/virtio.zig` | the MMIO transport, the virtqueue, and the block device |
-| `src/net.zig` | virtio-net: frames out, frames in |
-| `src/proto.zig` | ethernet, IPv4 and UDP — enough to carry a datagram |
-| `src/dhcp.zig` | DISCOVER, OFFER, REQUEST, ACK |
-| `src/gpt.zig` | where the partition starts, because sector 0 is not the filesystem |
-| `src/disk_fat.zig` | FAT16 and FAT32: mount a volume, walk a directory, read a file, write one (the `Volume` and its mount here; the FAT, chains, directories, files, removes and the check in `disk_fat_fat`, `_chain`, `_dir`, `_file`, `_remove` and `_check.zig` beside it) |
-| `src/arp.zig` | answering "who has this address?", which is what makes one reachable |
-| `src/tcp.zig` | a table of connections: handshake, windows, retransmission, close |
-| `src/stream.zig` | that connection as a `std.Io.Reader` and a `std.Io.Writer` |
-| `src/io.zig` | `Io.Dir`, `Io.Clock`, `Io.Mutex`, `Io.Group` — the surface the application calls |
-| `src/page_cache.zig` | the data's files kept whole in memory after their first read, write-through, below the application (the retired zig-metal-unikernel queue, item 87); `page_cache_mib` in `zig-metal-unikernel.conf`, 64 by default |
-| `src/interrupts.zig` | the IDT, the local APIC timer, and resting until a frame or the timer |
-| `src/port.zig`, `src/tsc.zig` | x86 port I/O, and the timestamp counter |
-| `src/pit.zig` | the interval timer, used once: to measure the TSC's rate |
-| `src/rtc.zig` | the CMOS clock — the device half, and a pure half with host tests |
-| `src/wallclock.zig` | both of those, in the order a host needs them |
-| `src/*_sim.zig`, `src/properties.zig` | the simulators and the properties over them |
-| `probe/*.zig` | one kernel each; a root file with a `kmain` |
-| `probe/link.ld` | the layout — the note first, and `.bss` treated as unwritten |
-| `probe/run.sh` | boots each under `-M microvm`, maps QEMU's exit code back to the guest's |
-| `probe/judge_*.py` | the outside verdicts: the host's clock, a raw FAT16 parse, the Linux build of angry-gopher, and the ladder's, the replace probe's and the soak's |
-| `droplet/` | the loader, the image builder, the release and cutover tools |
-| `tools/verdicts.py` | which commit pair a gate judged, and the release rule |
+The README's "Where things are" is the map of the repo; each file's header
+says what it holds.
 
 ## What lives elsewhere
 
@@ -336,8 +311,6 @@ floor and this repo are two implementations of the same device set, which is
 why the drivers here are written against the same doors.
 
 The plan this all started from is
-[`notes/angry-gopher-without-linux.md`](http://143.244.172.148:9100/notes/angry-gopher-without-linux.md).
-Parked 2026-09-18 with everything green, for want of a machine we could run
-it on; unparked 2026-10-01 when the target became a DigitalOcean droplet,
-booted from a custom image
-([gopher chat on a droplet](http://143.244.172.148:9100/notes/gopher-chat-on-a-droplet.md)).
+[angry-gopher without Linux](https://github.com/showell/essay-repl-server/blob/master/notes/angry-gopher-without-linux.md), and the move
+to a DigitalOcean droplet
+[gopher chat on a droplet](https://github.com/showell/essay-repl-server/blob/master/notes/gopher-chat-on-a-droplet.md).
