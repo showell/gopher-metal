@@ -2,7 +2,7 @@
 
 How we run our two sites from the dev box: the machines, where the secrets
 live, a release step by step, the way back, Shale scripts, prod's Caddy,
-and the dev box's own servers. This is the operator's doc, specific to our
+backups, and the dev box's own servers. This is the operator's doc, specific to our
 setup; the README says what the kernel is. [`CUTOVER.md`](CUTOVER.md) is
 the record of the 2026-10-04 move from Linux; dog-park's
 [`DEPLOY.md`](https://github.com/showell/dog-park/blob/main/DEPLOY.md) is
@@ -89,8 +89,8 @@ zig-coverage-sdk's, which the verdicts also key on.
        gzip -k vN.img && sha256sum vN.img.gz
 
    **Name it `vN.img.gz`, short:** DigitalOcean's import screen cuts long
-   names off. (v31 and before had long names; the previous release's image
-   lives in DigitalOcean's Custom Images, so nothing need be kept here.)
+   names off. The previous release's image lives in DigitalOcean's Custom
+   Images, so nothing need be kept here.
    `droplet/app_image.py` lays the disk out, and is any application's
    builder (Dog Park's too).
 4. **Hand the owner** the URL (`http://<the dev box's public address>:9301/vN.img.gz`),
@@ -118,11 +118,11 @@ zig-coverage-sdk's, which the verdicts also key on.
      non-zero: expected, once.** Run it again; every other line must be OK.
 6. **Tag** the released commit `vN`, annotated, in zig-metal-unikernel and
    in angry-gopher, and push the tags. The message is the release note;
-   `git show v31 --no-patch` is the model: the date, the image and its
+   the previous tag's (`git show <previous tag> --no-patch`) is the model: the date, the image and its
    sha256, the three commits, where the passing checks' logs are, what is
    new. **What serves is the tag**; master may be ahead of it.
-7. **The README's "Where it stands"**: the serving tag and the way back.
-   Commit and push.
+7. **Nothing in the README changes**: the tag is the record (README,
+   "Where it stands").
 8. **After it serves:** a read-only Shale script or two (below), and
    `ops/knocks` (angry-gopher) for the access logs.
 
@@ -134,13 +134,49 @@ step 4's snapshot covers a release that wrote something bad.
 `CUTOVER.md`'s Linux restart is the last resort only: its data is frozen
 at the 2026-10-04 cutover, so every write since would be lost.
 
+## Backups
+
+Two kinds, for two kinds of loss. **No routine schedule is set up:** both
+are taken by hand.
+
+- **A DigitalOcean volume snapshot** (Volumes → the volume → Take
+  snapshot), by the owner, before every release (step 4). It restores the
+  whole volume: the answer to the droplet or the volume being gone.
+  DigitalOcean's scheduled backups are a droplet feature and do not cover
+  volumes.
+- **A `/admin/backup` tar**, the answer to "I need yesterday's data back",
+  and the only copy that leaves DigitalOcean. **`droplet/backup.sh`** takes
+  it on prod, over the private network:
+
+      droplet/backup.sh http://10.100.0.4 [DIR]
+
+  It asks for the admin password (never on a command line or in the
+  environment), fetches the tar, checks it is whole with
+  `droplet/check_backup.py` (a tar cut short still lists cleanly, so this
+  is the only proof), encrypts it with a passphrase it also asks for
+  (`age -p`), keeps the newest `GOPHER_BACKUP_KEEP` (7) and shreds the
+  rest. **It never leaves a plaintext tar**, even on failure. The admin
+  password is not stored on prod, so this cannot be a cron.
+
+**Every tar holds the session secret and every password hash.** Keep only
+the `.age`, keep the passphrase away from the backups (a password manager),
+and keep the backups off the droplet. A leaked one: `SECRET-LEAK.md`.
+
+**Restoring.** A snapshot: restore the volume in the console, then check
+`/admin/host`'s disk report. A tar: decrypt it (`age -d`), check it whole,
+unpack it, and build a volume image from the tree with
+`droplet/build_volume.py <tree> <out.img> --fat 32 --gib 16`, as the
+cutover did (`MIGRATION.md`). The new volume has a new FAT serial, so
+`droplet/volume-serial` and the boot image change too. Restoring a tar onto
+metal has not been run end to end.
+
 ## Shale scripts: looking inside a droplet
 
 A signed script sent to `/admin/script` runs on the droplet and prints
 what it found.
 - **On lynrummy.com:** `sign` makes an atomic run (500 store reads,
-  answered in the response). **From v32**, `background` makes a run
-  stepped between requests (10,000 reads), read back with a `GET`.
+  answered in the response); `background` makes a run stepped between
+  requests (10,000 reads), read back with a `GET`.
 - **On Dog Park:** background only.
 - **The cookbook:** zig-webbox's `src/script/examples/` (lynrummy.com),
   dog-park's `tools/shale/`.
@@ -155,8 +191,8 @@ curl -sS -H "Authorization: Bearer $(cat ~/.gopher_api_key)" https://lynrummy.co
 - **`shale-sign`** picks the key by the target name (lynrummy.com's,
   or `~/.shale_signing_key.<target>`).
 - **The request** is good for 10 minutes and runs once.
-- **For Dog Park**, the target is `dogpark.lynrummy.com` and the key is
-  `~/.dogpark_admin_key`.
+- **For Dog Park**, the target is `dogpark.lynrummy.com` and
+  `SHALE_ADMIN_KEY` is `$(cat ~/.dogpark_admin_key)`.
 - **One background run at a time.** `shale-sign kill <target>` writes a
   `kill.<sequence>.req` that is sent the same way, and ends the run going.
 - Every run is logged under `auth/shale/` on the site's disk.
