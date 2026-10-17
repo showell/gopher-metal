@@ -86,7 +86,6 @@ CASES = [
     case("index", "GET", "/"),
     case("index as a player", "GET", "/", P1),
     case("driving (embedded)", "GET", "/driving"),
-    case("tutorial (embedded)", "GET", "/tutorial"),
     case("chess index", "GET", "/chess"),
     case("resume (markdown from the volume)", "GET", "/steve-resume"),
     case("resume pdf (27 KB from the volume)", "GET", "/steve-resume.pdf"),
@@ -1778,7 +1777,7 @@ def parse_raw_response(raw: bytes) -> dict:
 # prove equal to Linux, so a difference here is about holding connections, not
 # about the page.
 CONCURRENT_PATHS = ["/", "/steve-resume.pdf", "/nope", "/login", "/chat",
-                    "/tutorial", "/driving", "/admin"]
+                    "/chess", "/driving", "/admin"]
 CONNECTIONS_LINE = re.compile(r"connections: at most (\d+) at once, (\d+) turned away")
 
 

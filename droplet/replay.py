@@ -136,7 +136,7 @@ def label(n: int, target: str) -> str:
 
 # angry-gopher's first path segments (router.zig), the only words printed.
 ROUTES = {"", "driving", "delivery", "chess", "puzzles", "game", "chat", "channel", "settings",
-          "tutorial", "admin", "gallery", "downloads", "steve-resume", "steve-resume.pdf",
+          "admin", "gallery", "downloads", "steve-resume", "steve-resume.pdf",
           "safari_download", "login", "logout", "play", "favicon.ico", "robots.txt", "version"}
 
 
@@ -218,7 +218,7 @@ def self_test(binary: str) -> int:
     log = [
         caddy_line("/"),
         caddy_line("/driving"),
-        caddy_line("/tutorial?v=zig"),
+        caddy_line("/driving?v=zig"),
         caddy_line("/steve-resume"),
         caddy_line(f"/chat/c/1_2/{secret_word}"),       # a redirect to log in, on both
         caddy_line("/"),                                # again: asked again, unless --unique

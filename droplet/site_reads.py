@@ -11,7 +11,7 @@ pages N times, and reads the kernel's own line for each request:
 each, per page, leaving out each page's first two (the first read of a
 file, and warm-up).
 
-The pages: /tutorial is embedded in the binary (no file); the others read a
+The pages: /driving is embedded in the binary (no file); the others read a
 file from the boot disk (pages/home.txt, the resume, its PDF, the Safari
 page). Under TCG the times are slow and only comparable to each other;
 the box measures for real on the droplet.
@@ -34,7 +34,7 @@ import build_volume  # noqa: E402
 import judge_gopher as G  # noqa: E402
 
 GOPHER_ROOT = os.environ.get("GOPHER_ROOT", os.path.normpath(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "..", "angry-gopher")))
-PAGES = ["/tutorial", "/steve-resume", "/", "/steve-resume.pdf", "/safari_download"]
+PAGES = ["/driving", "/steve-resume", "/", "/steve-resume.pdf", "/safari_download"]
 LINE = re.compile(r"request \d+: GET (\S+) -> [^\n]*\n\s+waited \d+ us, answered in (\d+) us, "
                   r"(\d+) disk requests taking (\d+) us")
 
