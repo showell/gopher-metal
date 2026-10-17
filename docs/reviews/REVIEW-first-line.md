@@ -1,7 +1,7 @@
 # Review: the boot that printed its first line and stopped
 
-QUEUE.md item 41, in REVIEW-interrupts.md's shape. README, "Known and
-open": one boot printed `gopher-metal: angry-gopher's route table, with no
+Old QUEUE.md item 41, in REVIEW-interrupts.md's shape. From the README's
+list of known and open problems of the day: one boot printed `gopher-metal: angry-gopher's route table, with no
 Linux under it` and then nothing for a minute. That was 1 of 27, and has
 not been reproduced.
 
