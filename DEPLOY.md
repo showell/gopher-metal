@@ -67,7 +67,10 @@ zig-coverage-sdk's, which the verdicts also key on.
    angry-gopher's site files that git does not track:
    `~/showell_repos/angry-gopher/ops/build_downloads` (the Safari downloads;
    every site disk, the gates' and the image's, copies `downloads/`, and
-   both refuse without it).
+   both refuse without it). Then **angry-gopher's own checks**,
+   `~/showell_repos/angry-gopher/ops/check_zig`: its lints, its unit tests
+   and zig-webbox's, which the gates below do not run (they judge metal
+   against Linux). It must pass before step 2.
 2. **The checks**, on the code as committed, detached. **Nothing in the
    four checkouts is edited while they run**, and each attempt gets a
    fresh folder (the summary is appended to):
