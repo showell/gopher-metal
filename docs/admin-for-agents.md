@@ -149,7 +149,8 @@ From the top:
      far more often than frames arrive is a device interrupting with
      nothing to say: an interrupt storm, which looks like a busy
      processor otherwise. Each is read off the interrupt's own handler.
-   - **Sleeps**: the rests of a machine with nothing in motion, which
+   - **Sleeps** (only from the release that has the sleep:
+     `git tag --contains 42bb498`): the rests of a machine with nothing in motion, which
      last until the application's next wake or `longest_rest_ms` (10 s)
      (docs/designs/DESIGN-sleep.md): how many, how many the card ended,
      how many ran the whole longest rest, how many neither ended, and

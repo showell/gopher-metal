@@ -40,8 +40,17 @@ a wall-clock read before the clock is set), `rng`, `memory`
 kernel: one GET with tcp.zig's `connect` to `python3 -m http.server` on the
 host (10.0.2.2 to the guest), its outcome the exit code (`src/fetch.zig`;
 `probe/judge_fetch.py` judges QEMU's code and the body's hash: a 200, 300 KB,
-refused, no ARP, and a command line without its deadlines). A run looks like this
-(an excerpt):
+refused, no ARP, and a command line without its deadlines).
+
+**The sleeper** (`probe/sleeper/`, `zig build sleeper`, into
+`probe/sleeper.elf`) is not a probe but a tiny application built through
+`addAppKernel`: it only wakes, every `period_ms`, and writes a line each
+time. It is the test of a sleeping kernel
+([DESIGN-sleep.md](designs/DESIGN-sleep.md)): `droplet/sleeps.py` (tier 1)
+times it on a real timer under KVM, and metal-vmm's `sleeps.sh` (tier 3) in
+the machine's own time. `probe/run.sh` does not boot it.
+
+A run of `probe/run.sh` looks like this (an excerpt):
 
 ```
 PASS block |   wrote and read back sector 65535: 512 bytes match
