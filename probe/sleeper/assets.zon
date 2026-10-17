@@ -1,0 +1,3 @@
+// The sleeper serves nothing but its own lines: no files compiled in, no
+// directories laid onto its disk.
+.{}

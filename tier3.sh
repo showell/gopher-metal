@@ -20,7 +20,7 @@
 # **THE CHAT JUDGE RUNS FAT32 HERE, FAT16 IN long.sh** (QUEUE.md item 88):
 # prod's data is a FAT32 volume.
 #
-# **SKIP="word …"** leaves slow steps out (tools/skip_lib.sh): webbox-test, vmm-pc, pair, vmm-timeouts, gopher-judges.
+# **SKIP="word …"** leaves slow steps out (tools/skip_lib.sh): webbox-test, vmm-pc, pair, sleeps, vmm-timeouts, gopher-judges.
 # A run with a skip ends NOT A PASS, exit 3, and keeps no verdict.
 TIER="tier 3"
 source "$(dirname "${BASH_SOURCE[0]}")/tools/tier_lib.sh"
@@ -101,6 +101,15 @@ if ! skip pair; then
     (cd "$VMM" && GUESTS="$HERE/probe" SITE="$SITE_VOLUME" ./pair.sh > "$VERDICTS/pair.txt" 2>&1) || failed+=(pair)
     grep -E "FAIL|NOT RUN|^time|^PAIR" "$VERDICTS/pair.txt"
     lap "pair: two kernels talking"
+fi
+# **A KERNEL THAT SLEEPS** (docs/designs/DESIGN-sleep.md, sleeps.sh): an
+# idle gopher.elf's cost, the sleeper's hour of 60 s wakes, the longest rest
+# at 6 ms and 10 s alike, and a request waking a sleep; about 2 s.
+if ! skip sleeps; then
+    zig build sleeper > "$VERDICTS/sleeper-build.txt" 2>&1 || failed+=(sleeps)
+    (cd "$VMM" && GUESTS="$HERE/probe" SITE="$SITE_VOLUME" ./sleeps.sh > "$VERDICTS/sleeps.txt" 2>&1) || failed+=(sleeps)
+    grep -E "FAIL|NOT RUN|^time|^SLEEPS" "$VERDICTS/sleeps.txt"
+    lap "sleeps: a kernel that sleeps"
 fi
 if ! skip vmm-timeouts; then
     (cd "$VMM" && SITE="$SITE_VOLUME" ./timeouts.sh 2>&1 | tail -3; exit "${PIPESTATUS[0]}") || failed+=(vmm-timeouts)

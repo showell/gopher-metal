@@ -721,6 +721,7 @@ pub fn kmain() noreturn {
         open_now = table.inUse();
         busiest = @max(busiest, open_now);
         const arrived = stream.pump(&wire, &table, lease.address);
+        sleeps.turned(arrived != null);
         const now = Io.awakeNs() orelse 0;
         if (arrived != null) idle_work.busy(now);
         if (nextReady(io, &wire, &table, now)) |pick| {
@@ -739,16 +740,18 @@ pub fn kmain() noreturn {
                 serial.drain(console_budget);
                 continue;
             }
-            // Then the application's work between requests, a slice a turn
-            // while it says there is more: a request that arrives meanwhile
-            // is served first, on the next turn.
-            if (between.wake == .more) {
+            // Then the application's work between requests: a slice a turn
+            // while it says there is more, and once the time it asked for has
+            // come. A request that arrives meanwhile is served first, on the
+            // next turn; and the network turns before any rest, for what the
+            // call queued.
+            if (Sleep.betweenDue(now, between.wake, false)) {
                 betweenSlice(io);
                 continue;
             }
             // Then idle work, a step, once nothing has arrived for a while.
             if (idle_work.turn(now, awakeNow)) continue;
-            if (arrived == null) interrupts.rest();
+            if (arrived == null) restOrSleep(&table, now, conf.longest_rest_ns);
             continue;
         }
         // What this request used of its heap, BEFORE the reset: the same
@@ -1879,6 +1882,9 @@ fn logRequest(number: u64, at_unix_ms: ?i64, what: []const u8, outcome: []const 
 ///     page_cache_mib = N      memory for the data's files read whole
 ///                             (`page_cache.zig`), 64 when absent; 0 keeps
 ///                             none, every read from the disk, as before
+///     longest_rest_ms = N     the longest a quiescent machine sleeps before
+///                             it looks again, 10000 when absent (sleep.zig);
+///                             a few ms in a test exercises the same path
 ///     page_cache_largest_kib = N
 ///                             the largest file the cache keeps, in KiB; 4096
 ///                             (4 MiB) when absent, at most 10240 (chat's image
@@ -1924,6 +1930,10 @@ const Config = struct {
     /// `largest`). Default 4 MiB; the box raises it toward chat's 10 MiB image
     /// cap once prod's picture sizes are measured.
     page_cache_largest_kib: u32 = page_cache_largest_kib_default,
+    /// **THE LONGEST A QUIESCENT MACHINE SLEEPS** (sleep.zig): the
+    /// application's wake when sooner. Every rest has a deadline, and this
+    /// bounds what a lost interrupt can cost. `longest_rest_ms`.
+    longest_rest_ns: u64 = default_longest_rest_ms * std.time.ns_per_ms,
     /// The admin's password reset, kept here because the text it was read
     /// from is freed: the name, and the 60-byte hash.
     reset_name: [64]u8 = undefined,
@@ -2033,12 +2043,18 @@ fn readConfig(io: Io, alloc: std.mem.Allocator) Config {
                 serial.fail(config_path ++ ": `page_cache_largest_kib` is a number of KiB");
             if (conf.page_cache_largest_kib == 0) serial.fail(config_path ++ ": `page_cache_largest_kib` is 0 — set `page_cache_mib = 0` to keep no files, not a zero cap");
             if (conf.page_cache_largest_kib > app.hosting.cache_largest_most >> 10) serial.fail(config_path ++ ": `page_cache_largest_kib` past " ++ std.fmt.comptimePrint("{d}", .{app.hosting.cache_largest_most >> 10}) ++ " is more than the application's largest file worth keeping (app.hosting.cache_largest_most), so no file reaches it");
+        } else if (std.mem.eql(u8, key, "longest_rest_ms")) {
+            const ms = configNumber(u64, value) catch
+                serial.fail(config_path ++ ": `longest_rest_ms` is not a number");
+            if (ms == 0) serial.fail(config_path ++ ": a longest rest of zero would never rest");
+            if (ms > std.time.ms_per_day) serial.fail(config_path ++ ": `longest_rest_ms` past a day is no bound on a lost interrupt");
+            conf.longest_rest_ns = ms * std.time.ns_per_ms;
         } else if (std.mem.eql(u8, key, "trusted_proxy")) {
             const a = std.Io.net.Ip4Address.parse(value, 0) catch
                 serial.fail(config_path ++ ": `trusted_proxy` is an IPv4 address: 10.0.0.2");
             conf.trusted_proxy = a.bytes;
         } else {
-            serial.fail(config_path ++ ": the keys are `requests`, `idle_timeout_ms`, `streams`, `keepalive_ms`, `lose_one_sent_in`, `card`, `volume`, `trusted_proxy`, `page_cache_mib`, `page_cache_largest_kib` and `admin_password_reset`");
+            serial.fail(config_path ++ ": the keys are `requests`, `idle_timeout_ms`, `streams`, `keepalive_ms`, `lose_one_sent_in`, `card`, `volume`, `trusted_proxy`, `page_cache_mib`, `page_cache_largest_kib`, `longest_rest_ms` and `admin_password_reset`");
         }
     }
     if (!said_anything) serial.fail(config_path ++ " is present but says nothing");
@@ -2127,6 +2143,63 @@ const volume_check_names = [2][]const u8{ "the boot disk's check", "the volume's
 
 fn awakeNow() i96 {
     return Io.awakeNs() orelse 0;
+}
+
+/// **THE QUIESCENT MACHINE SLEEPS** (docs/designs/DESIGN-sleep.md, phase 1):
+/// nothing in motion, so only the application's wake can be due, and the
+/// machine halts until it, at most `longest_ns`. Otherwise a slice, as it
+/// always has. Coverage kernels count quiescence a second way, from the
+/// arrays rather than the counters, at every sleep.
+fn restOrSleep(table: *const tcp.Table, now: i96, longest_ns: u64) void {
+    longest_rest_ms_now = longest_ns / std.time.ns_per_ms;
+    const still = metal.sleep.quiescent(.{
+        .conns_in_use = table.inUse(),
+        .held = held_now,
+        .draining = draining_now,
+        .drains_holding = drainsHolding(),
+        .console_pending = serial.pending(),
+        .unflushed = Io.unflushed(),
+        .fetching = false,
+        .wants_more = between.wake == .more,
+    });
+    switch (Sleep.next(now, still, between.wake, interrupts.slice_ns, longest_ns)) {
+        .turn => {},
+        .until => |u| if (u.by == .slice) interrupts.rest() else {
+            if (coverage_checks) checkQuiescence();
+            const ended = interrupts.restUntil(Io.tscAt(u.at));
+            sleeps.slept(u.by, ended == .device);
+        },
+    }
+}
+
+/// The application's wake, decided over webbox's `Wake`.
+const Sleep = metal.sleep.Over(webbox.site.Wake);
+var sleeps: metal.sleep.Sleeps = .{};
+/// The longest rest in force, for /admin/host.
+var longest_rest_ms_now: u64 = default_longest_rest_ms;
+const default_longest_rest_ms = 10_000;
+
+fn drainsHolding() usize {
+    var n: usize = 0;
+    for (&drains.waits) |*w| {
+        if (w.holds()) n += 1;
+    }
+    return n;
+}
+
+/// **QUIESCENCE, COUNTED A SECOND WAY** (a cold review of DESIGN-sleep.md):
+/// the held streams and the draining responses from their arrays, where
+/// the predicate read their counters. Two computations of one fact.
+fn checkQuiescence() void {
+    var held_seen: usize = 0;
+    for (held) |h| {
+        if (h != null) held_seen += 1;
+    }
+    var draining_seen: usize = 0;
+    for (draining) |d| {
+        if (d != null) draining_seen += 1;
+    }
+    metal.coverage.always(@src(), held_seen == 0 and draining_seen == 0, "sleep: a quiescent machine holds no stream and drains no response, by the arrays as by the counters", .{ .held = held_seen, .draining = draining_seen });
 }
 
 /// A volume's idle check, as /admin/host says it.
@@ -2282,6 +2355,11 @@ fn metalFacts(io: Io, alloc: std.mem.Allocator) anyerror![]const webbox.host_fac
     // **WAKES** (193, gap 11): a device that interrupts endlessly shows as
     // wakes by a device far past the frames that came.
     if (interrupts.armed()) try add(&facts, alloc, "rests", "{d}, {d} of them ended early by a device", .{ interrupts.rests.rests, interrupts.rests.woken_by_device });
+    // **SLEEPS** (sleep.zig): the quiescent machine's long rests, and a wake
+    // that came without its interrupt.
+    if (interrupts.armed()) try add(&facts, alloc, "sleeps", "{d} while quiescent, {d} ended by a device, {d} by the longest rest ({d} ms), {d} missed wakes (a frame waiting after the timer ended one)", .{
+        sleeps.sleeps, sleeps.by_device, sleeps.by_longest, longest_rest_ms_now, sleeps.missed,
+    });
     if (turning) |t| try add(&facts, alloc, "frames refused (too long to send)", "{d}", .{t.wire.nic.oversized});
     // **A RESPONSE CUT OFF BEHIND ITS SPILL** (198.1): the connection went
     // while part of the response still waited to be sent.

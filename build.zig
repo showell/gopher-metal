@@ -233,6 +233,19 @@ pub fn build(b: *std.Build) void {
     const gopher_step = b.step("gopher", "the real server, compiled from angry-gopher's checkout as it is now");
     gopher_step.dependOn(&gopher_copy.step);
 
+    // **THE SLEEPER** (probe/sleeper/, docs/designs/DESIGN-sleep.md): an
+    // application that only wakes, every `period_ms`, and writes a line
+    // each time; the test of a sleeping kernel, through the same API.
+    const sleeper = appKernel(b, b, .{
+        .name = "sleeper.elf",
+        .module = b.createModule(.{ .root_source_file = b.path("probe/sleeper/sleeper.zig") }),
+        .assets = b.path("probe/sleeper/assets.zon"),
+        .optimize = optimize,
+    });
+    const sleeper_copy = b.addUpdateSourceFiles();
+    sleeper_copy.addCopyFileToSource(sleeper.getEmittedBin(), "probe/sleeper.elf");
+    b.step("sleeper", "the sleeper (probe/sleeper/): an application that only wakes, the test of a sleeping kernel").dependOn(&sleeper_copy.step);
+
     // **EVERY KERNEL TYPE-CHECKED, ON EVERY `zig build test`** (metal-vmm
     // B34): a field renamed in src/ broke gopher.elf (b4463a9) and native
     // (140's Fin) with every unit test green, since no test compiles a

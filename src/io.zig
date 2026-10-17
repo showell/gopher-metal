@@ -34,6 +34,7 @@ const PageCache = @import("page_cache.zig").PageCache;
 const disk_fat = @import("disk_fat.zig");
 const rng = @import("rng.zig");
 const tsc = @import("tsc.zig");
+const sleep = @import("sleep.zig");
 
 /// **THE VALUE THREADED THROUGH EVERY CALL IS THIS MODULE ITSELF.** On Linux it
 /// carries an event loop; here there is one machine and one disk, so it carries
@@ -996,6 +997,23 @@ pub fn awakeNs() ?i96 {
 pub fn ticksToNs(ticks: u64) i96 {
     if (tsc_hz == 0) @panic(clock_unset_msg);
     return @intCast(@divTrunc(@as(i128, ticks) * 1_000_000_000, @as(i128, tsc_hz)));
+}
+
+/// **THE TSC VALUE AT `awake_ns` ON THE AWAKE CLOCK** (sleep.zig): a rest's
+/// deadline, counted from the boot's base, rounded up, never 0.
+pub fn tscAt(awake_ns: i96) u64 {
+    if (tsc_hz == 0) @panic(clock_unset_msg);
+    return sleep.deadlineTicks(tsc_base, tsc_hz, awake_ns);
+}
+
+/// Whether a volume has writes not yet flushed: the machine does not sleep
+/// on them (sleep.zig's `Facts.unflushed`).
+pub fn unflushed() bool {
+    for ([_]?disk_fat.Volume{ site, data }) |maybe| {
+        const v = maybe orelse continue;
+        if (v.blk.unflushed) return true;
+    }
+    return false;
 }
 
 /// sinceBoot is nanoseconds since startClock().

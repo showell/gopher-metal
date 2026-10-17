@@ -46,7 +46,48 @@ pub const Rest = union(enum) {
     /// Do not rest: something is due already.
     turn,
     /// Rest until this time on the awake clock, or a frame.
-    until: i96,
+    until: Until,
+};
+
+pub const Until = struct {
+    at: i96,
+    /// What chose `at`.
+    by: enum {
+        /// A busy machine's slice.
+        slice,
+        /// The application's wake.
+        wake,
+        /// The longest rest, sooner than the application's wake.
+        longest,
+    },
+};
+
+/// **WHAT THE MACHINE'S SLEEPS DID**, for /admin/host: every quiescent rest,
+/// those a device ended, those the longest rest ended, and of those **a
+/// missed wake**: the timer ended it, and the next turn of the network took
+/// a frame, one that came without its interrupt. A slice's rests are
+/// `rest_count`'s.
+pub const Sleeps = struct {
+    sleeps: u64 = 0,
+    by_device: u64 = 0,
+    by_longest: u64 = 0,
+    missed: u64 = 0,
+    /// The last sleep was the longest rest, ended by the timer: the next
+    /// turn decides whether it missed a wake.
+    watching: bool = false,
+
+    pub fn slept(self: *Sleeps, by: @FieldType(Until, "by"), by_device: bool) void {
+        self.sleeps += 1;
+        if (by_device) self.by_device += 1;
+        if (by == .longest and !by_device) self.by_longest += 1;
+        self.watching = by == .longest and !by_device;
+    }
+
+    /// A turn of the network after a sleep: whether it took a frame.
+    pub fn turned(self: *Sleeps, took_frame: bool) void {
+        if (self.watching and took_frame) self.missed += 1;
+        self.watching = false;
+    }
 };
 
 /// The decisions over the application's answer, `Wake` (zig-webbox's
@@ -58,11 +99,11 @@ pub fn Over(comptime Wake: type) type {
         /// until the application's wake, at most `longest_ns`. A wake
         /// already due is a turn.
         pub fn next(now: i96, quiet: bool, wake: Wake, slice_ns: u64, longest_ns: u64) Rest {
-            if (!quiet) return .{ .until = now + slice_ns };
-            const longest = now + longest_ns;
+            if (!quiet) return .{ .until = .{ .at = now + slice_ns, .by = .slice } };
+            const longest: Until = .{ .at = now + longest_ns, .by = .longest };
             return switch (wake) {
                 .more => .turn,
-                .at => |at| if (at <= now) .turn else .{ .until = @min(at, longest) },
+                .at => |at| if (at <= now) .turn else if (at < longest.at) .{ .until = .{ .at = at, .by = .wake } } else .{ .until = longest },
                 .idle => .{ .until = longest },
             };
         }
@@ -131,19 +172,39 @@ fn with(f: Facts, comptime field: std.meta.FieldEnum(Facts), value: @FieldType(F
 
 test "sleep: a busy machine rests a slice, whatever the application asked" {
     const now: i96 = 5 * s;
-    try testing.expectEqual(Rest{ .until = now + ms }, next(now, false, .{ .at = now + 60 * s }, ms, 10 * s));
-    try testing.expectEqual(Rest{ .until = now + ms }, next(now, false, .idle, ms, 10 * s));
+    try testing.expectEqual(Rest{ .until = .{ .at = now + ms, .by = .slice } }, next(now, false, .{ .at = now + 60 * s }, ms, 10 * s));
+    try testing.expectEqual(Rest{ .until = .{ .at = now + ms, .by = .slice } }, next(now, false, .idle, ms, 10 * s));
 }
 
 test "sleep: a quiescent machine rests until the application's wake, never past the longest rest" {
     const now: i96 = 5 * s;
-    try testing.expectEqual(Rest{ .until = now + 6 * ms }, next(now, true, .{ .at = now + 6 * ms }, ms, 10 * s));
-    try testing.expectEqual(Rest{ .until = now + 10 * s }, next(now, true, .{ .at = now + 60 * s }, ms, 10 * s));
-    try testing.expectEqual(Rest{ .until = now + 10 * s }, next(now, true, .idle, ms, 10 * s));
+    try testing.expectEqual(Rest{ .until = .{ .at = now + 6 * ms, .by = .wake } }, next(now, true, .{ .at = now + 6 * ms }, ms, 10 * s));
+    try testing.expectEqual(Rest{ .until = .{ .at = now + 10 * s, .by = .longest } }, next(now, true, .{ .at = now + 60 * s }, ms, 10 * s));
+    try testing.expectEqual(Rest{ .until = .{ .at = now + 10 * s, .by = .longest } }, next(now, true, .idle, ms, 10 * s));
     // The longest rest is a setting: 6 ms is the same path as 10 s.
-    try testing.expectEqual(Rest{ .until = now + 6 * ms }, next(now, true, .{ .at = now + 60 * s }, ms, 6 * ms));
+    try testing.expectEqual(Rest{ .until = .{ .at = now + 6 * ms, .by = .longest } }, next(now, true, .{ .at = now + 60 * s }, ms, 6 * ms));
     // Far past 60 h: still the longest rest, no overflow.
-    try testing.expectEqual(Rest{ .until = now + 10 * s }, next(now, true, .{ .at = std.math.maxInt(i96) }, ms, 10 * s));
+    try testing.expectEqual(Rest{ .until = .{ .at = now + 10 * s, .by = .longest } }, next(now, true, .{ .at = std.math.maxInt(i96) }, ms, 10 * s));
+}
+
+test "sleep: a wake exactly at the longest rest is the longest rest's" {
+    const now: i96 = 5 * s;
+    try testing.expectEqual(Rest{ .until = .{ .at = now + 10 * s, .by = .longest } }, next(now, true, .{ .at = now + 10 * s }, ms, 10 * s));
+    try testing.expectEqual(Rest{ .until = .{ .at = now + 10 * s - 1, .by = .wake } }, next(now, true, .{ .at = now + 10 * s - 1 }, ms, 10 * s));
+}
+
+test "sleep: a missed wake is a longest rest the timer ended, after which a frame was waiting" {
+    var z: Sleeps = .{};
+    z.slept(.longest, false);
+    z.turned(true); // missed
+    z.slept(.longest, true); // a device ended it: its frame was announced
+    z.turned(true);
+    z.slept(.wake, false); // the application's own time: a frame then is chance
+    z.turned(true);
+    z.slept(.longest, false);
+    z.turned(false);
+    z.turned(true); // a later turn's frame is not the sleep's
+    try testing.expectEqual(Sleeps{ .sleeps = 4, .by_device = 1, .by_longest = 2, .missed = 1, .watching = false }, z);
 }
 
 test "sleep: a wake already due is a turn, not a rest" {

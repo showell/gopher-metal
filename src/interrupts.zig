@@ -15,8 +15,10 @@
 //! What wakes it:
 //!   - the network card, by MSI-X (virtio.zig routes its queues to `wake_vector`);
 //!   - the local APIC's timer in TSC-deadline mode, at most `slice_ns` after
-//!     the halt, so the timers the TCP table and the streams keep are looked at
-//!     at least that often.
+//!     the halt (`rest`), so the timers the TCP table and the streams keep are
+//!     looked at at least that often; or, when the main loop finds the machine
+//!     quiescent, at the deadline it chose (`restUntil`, sleep.zig), which
+//!     the config's longest rest bounds.
 //!
 //! Every interrupt handler is the same three instructions: tell the local APIC
 //! it was handled (end of interrupt), and return. The work is all done by the
@@ -32,8 +34,9 @@
 //!
 //! - **The machine itself, halted in `rest`.** Woken by the network card
 //!   (MSI-X, `wake_vector`) or by the APIC timer. Bounded by: `slice_ns`
-//!   (1 ms) — `rest` writes the timer's deadline before every halt, so no
-//!   halt is ever without one. Before `arm`, and on a card that cannot
+//!   (1 ms) — `rest` writes the timer's deadline before every halt — or, for
+//!   the main loop's quiescent rest, the deadline `restUntil` is handed, at
+//!   most `longest_rest_ms` away. No halt is ever without one. Before `arm`, and on a card that cannot
 //!   interrupt (mmio), `rest` is one `pause` and nothing halts.
 //! - **An interrupt raised while interrupts are off**, which is always,
 //!   outside `rest`'s one instruction. Held by the local APIC and taken by
@@ -409,14 +412,45 @@ pub fn rest() void {
         asm volatile ("pause");
         return;
     }
-    const deadline = tsc.read() +% slice_ticks;
+    _ = halt(tsc.read() +% slice_ticks);
+}
+
+/// What ended a rest.
+pub const Ended = enum {
+    /// Its deadline: the timer.
+    deadline,
+    /// A device's interrupt, before the deadline.
+    device,
+};
+
+/// **REST UNTIL A DEADLINE THE CALLER CHOSE** (sleep.zig): `deadline` is a
+/// TSC value (io.zig's `tscAt`), never 0. Only the main loop's quiescent
+/// rest comes here; every wait inside a serve rests a slice (`rest`).
+/// Before `arm`, one `pause`, as `rest`.
+pub fn restUntil(deadline: u64) Ended {
+    if (slice_ticks == 0) {
+        asm volatile ("pause");
+        return .deadline;
+    }
+    return halt(deadline);
+}
+
+/// The halt itself, until `deadline` or a device. A device that ends it
+/// early leaves the deadline armed, and a timer that fires later, during
+/// work, would end the next rest at once and be counted as a device's: so
+/// an early end disarms it (0, SDM §11.5.4.1).
+fn halt(deadline: u64) Ended {
     wrmsrDeadline(deadline);
     asm volatile (
         \\sti
         \\hlt
         \\cli
         ::: .{ .memory = true });
-    rests.note(deadline, tsc.read());
+    const woke = tsc.read();
+    rests.note(deadline, woke);
+    const early = @as(i64, @bitCast(woke -% deadline)) < 0;
+    if (early) wrmsrDeadline(0);
+    return if (early) .device else .deadline;
 }
 
 /// Every rest, and those a device ended before the slice did (193, gap 11).

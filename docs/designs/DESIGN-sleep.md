@@ -2,7 +2,11 @@
 
 metal-vmm QUEUE 228.1, and the part of 228.3 that shapes it. **Status:
 design after three cold reviews** (the box, 2026-10-17), waiting on Steve's
-two decisions (below). Code so far: `apic_rule.ticksOf` (`b9d5d15`).
+two decisions (below), both now taken. **Built so far:** chunk 1 (the pure
+decisions, `src/sleep.zig`, and webbox's `Wake`) and chunk 2 (the sleep on
+metal, `longest_rest_ms`, the sleeper, metal-vmm's `sleeps.sh`). An idle
+gopher.elf's 60 s went from 307,564 exits to 6,781, and from 37,605 halts to
+8.
 
 ## What it is for
 
@@ -23,7 +27,7 @@ and 5.3 s of wall time, about 88 µs a rest; the longest halt 0.8 ms.
 
 ## Decisions for Steve
 
-1. **The longest rest: `longest_rest_ms` in the config, 10 s by default**
+1. **The longest rest: `longest_rest_ms` in the config, 10 s by default** (decided)
    (Steve, 2026-10-17: "Why can't the cap be configured for testing? ...
    if we get a 6ms wait working, we can get a 60s wait working"). Tests set
    it to a few ms, so the cap's path is exercised in real time in a fraction
