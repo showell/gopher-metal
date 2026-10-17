@@ -412,7 +412,7 @@ pub fn rest() void {
         asm volatile ("pause");
         return;
     }
-    _ = halt(tsc.read() +% slice_ticks);
+    _ = halt(tsc.read() +% slice_ticks, .leave);
 }
 
 /// What ended a rest.
@@ -432,14 +432,18 @@ pub fn restUntil(deadline: u64) Ended {
         asm volatile ("pause");
         return .deadline;
     }
-    return halt(deadline);
+    return halt(deadline, .disarm);
 }
 
-/// The halt itself, until `deadline` or a device. A device that ends it
-/// early leaves the deadline armed, and a timer that fires later, during
-/// work, would end the next rest at once and be counted as a device's: so
-/// an early end disarms it (0, SDM §11.5.4.1).
-fn halt(deadline: u64) Ended {
+/// What a halt a device ended early does with its deadline. A slice's is at
+/// most 1 ms off, and the next rest writes its own over it: left, which
+/// saves a busy server an MSR write a frame. A sleep's can be 10 s off, and
+/// firing during later work it would end the next rest at once, counted as
+/// a device's: disarmed (0, SDM §11.5.4.1).
+const EarlyDeadline = enum { leave, disarm };
+
+/// The halt itself, until `deadline` or a device.
+fn halt(deadline: u64, early_deadline: EarlyDeadline) Ended {
     wrmsrDeadline(deadline);
     asm volatile (
         \\sti
@@ -449,7 +453,7 @@ fn halt(deadline: u64) Ended {
     const woke = tsc.read();
     rests.note(deadline, woke);
     const early = @as(i64, @bitCast(woke -% deadline)) < 0;
-    if (early) wrmsrDeadline(0);
+    if (early and early_deadline == .disarm) wrmsrDeadline(0);
     return if (early) .device else .deadline;
 }
 

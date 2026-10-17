@@ -2,12 +2,19 @@
 //! The test of a sleeping kernel: its `between` asks to be woken every
 //! `period_ms`, and each wake appends one line to `wakes.txt` in its data:
 //!
-//!     wake 3 due 180000000000 at 180000000412 unix 1789000180
+//!     wake 3 due 180000000000 at 180000000412 unix 1789000180 lost 0
 //!
 //! `due` is when it asked to be woken and `at` when it was, both on the awake
 //! clock in nanoseconds, so a judge reads how late each wake was from the
 //! disk afterwards. It schedules from `due`, not from when it woke, so
-//! lateness never accumulates. Its one page, `/`, is the lines.
+//! lateness never accumulates (webbox's `periodAfter`). `lost` counts the
+//! lines before it that could not be written. Its one page, `/`, is the
+//! lines, while they are under 1 MiB (about nine days at 60 s; a test app's
+//! life is minutes).
+//!
+//! No tier runs a test of this file: it is an application, built only as a
+//! kernel. What it does is judged by metal-vmm's sleeps.sh from its lines,
+//! `period_ms = 5000` read from its conf included.
 //!
 //! The period is `period_ms = N` in `sleeper.conf` in its data folder, 60000
 //! when there is none: a test chooses it, the code does not.
@@ -39,6 +46,8 @@ var period_ns: i96 = default_period_ms * std.time.ns_per_ms;
 /// once.
 var due: ?i96 = null;
 var count: u64 = 0;
+/// Lines that could not be written.
+var lost: u64 = 0;
 /// For a line's path and text: a wake holds nothing past its call.
 var scratch: [4096]u8 = undefined;
 
@@ -74,18 +83,12 @@ pub fn between(io: Io, now: webbox.site.Now) webbox.site.Wake {
     if (now.awake_ns < at) return .{ .at = at };
     count += 1;
     var fba = std.heap.FixedBufferAllocator.init(&scratch);
-    const line = std.fmt.allocPrint(fba.allocator(), "wake {d} due {d} at {d} unix {d}\n", .{ count, at, now.awake_ns, now.unix_s }) catch unreachable;
-    _ = webbox.store.append(io, fba.allocator(), wakes_path, line) catch {};
-    due = nextDue(at, period_ns, now.awake_ns);
+    const line = std.fmt.allocPrint(fba.allocator(), "wake {d} due {d} at {d} unix {d} lost {d}\n", .{ count, at, now.awake_ns, now.unix_s, lost }) catch unreachable;
+    _ = webbox.store.append(io, fba.allocator(), wakes_path, line) catch {
+        lost += 1;
+    };
+    due = webbox.site.periodAfter(at, period_ns, now.awake_ns);
     return .{ .at = due.? };
-}
-
-/// The wake after one due at `at`: a period on from it, or, past a wake
-/// missed whole, the first period boundary after `now`.
-fn nextDue(at: i96, period: i96, now: i96) i96 {
-    const next = at + period;
-    if (next > now) return next;
-    return at + period * (@divFloor(now - at, period) + 1);
 }
 
 pub fn bodyLimit(_: []const u8) u64 {
@@ -98,20 +101,4 @@ pub fn routes(req: *std.http.Server.Request, io: Io, alloc: std.mem.Allocator, _
         else => return e,
     };
     try req.respond(text, .{ .extra_headers = &.{.{ .name = "content-type", .value = "text/plain" }} });
-}
-
-test "sleeper: the period is read from its conf, and nothing else is one" {
-    try std.testing.expectEqual(@as(?u64, 500), periodOf("period_ms = 500\n"));
-    try std.testing.expectEqual(@as(?u64, 60000), periodOf("period_ms=60000"));
-    try std.testing.expectEqual(@as(?u64, null), periodOf("period_ms = 0"));
-    try std.testing.expectEqual(@as(?u64, null), periodOf("period = 5"));
-    try std.testing.expectEqual(@as(?u64, null), periodOf("period_ms = five"));
-}
-
-test "sleeper: the next wake is a period on from the last one due, never from when it woke" {
-    const s = std.time.ns_per_s;
-    try std.testing.expectEqual(@as(i96, 120 * s), nextDue(60 * s, 60 * s, 60 * s + 400));
-    // Woken late past a whole period: the next boundary after now.
-    try std.testing.expectEqual(@as(i96, 240 * s), nextDue(60 * s, 60 * s, 200 * s));
-    try std.testing.expectEqual(@as(i96, 180 * s), nextDue(60 * s, 60 * s, 120 * s));
 }

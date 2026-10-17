@@ -56,6 +56,15 @@ pub const Idle = struct {
         self.len += 1;
     }
 
+    /// **WHEN THE QUIET GATE OPENS** (sleep.zig): `quiet_ns` after the
+    /// machine was last busy, while there are tasks; a sleeping machine
+    /// wakes then so they get their step. What a task waits for after that
+    /// (an hourly check) its `resting` hides, and the longest rest bounds.
+    pub fn gateAt(self: *const Idle) ?i96 {
+        if (self.len == 0) return null;
+        return self.last_busy + self.quiet_ns;
+    }
+
     /// Something arrived, or a request was served, at `now`.
     pub fn busy(self: *Idle, now: i96) void {
         self.last_busy = now;
@@ -128,6 +137,15 @@ test "idle: no step until nothing has arrived for quiet_ns, then one step a turn
     try testing.expect(!idle.turn(quiet, Fake.clock));
     try testing.expectEqual(@as(u64, 3), idle.steps);
     try testing.expectEqual(@as(u64, 3), a.task.steps);
+}
+
+test "idle: the quiet gate opens quiet_ns after the last busy moment, and only with tasks" {
+    var idle: Idle = .{};
+    try testing.expectEqual(@as(?i96, null), idle.gateAt());
+    var a: Fake = .{ .left = 1 };
+    try idle.add(a.init("a"));
+    idle.busy(3 * std.time.ns_per_s);
+    try testing.expectEqual(@as(?i96, 3 * std.time.ns_per_s + 200 * std.time.ns_per_ms), idle.gateAt());
 }
 
 test "idle: tasks take turns, and one resting costs the others nothing" {

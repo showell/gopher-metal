@@ -4,8 +4,9 @@
 //! `between` must be called, and the TSC deadline a rest writes.
 //!
 //! **Quiescent** is nothing in motion: no connection open, no stream held,
-//! nothing draining or being read, no console backlog, no write left
-//! unflushed, no fetch running, and the application not asking for more.
+//! nothing draining or being read, no console backlog, no fetch running,
+//! and the application not asking for more. (A write left unflushed is the
+//! loop's to flush before it sleeps, probe/gopher.zig's `restOrSleep`.)
 //! Then only the application's wake can be due, and the machine rests until
 //! it, never longer than `longest_rest`. Otherwise it rests a slice, as it
 //! always has: TCP's, the streams' and the drains' clocks are looked at
@@ -26,8 +27,6 @@ pub const Facts = struct {
     drains_holding: usize,
     /// Console lines waiting for idle turns.
     console_pending: usize,
-    /// A volume with writes not yet flushed.
-    unflushed: bool,
     /// The application's own fetch, running (it holds no slot while it asks
     /// ARP for its server).
     fetching: bool,
@@ -37,7 +36,7 @@ pub const Facts = struct {
 
 pub fn quiescent(f: Facts) bool {
     return f.conns_in_use == 0 and f.held == 0 and f.draining == 0 and
-        f.drains_holding == 0 and f.console_pending == 0 and !f.unflushed and
+        f.drains_holding == 0 and f.console_pending == 0 and
         !f.fetching and !f.wants_more;
 }
 
@@ -57,6 +56,9 @@ pub const Until = struct {
         slice,
         /// The application's wake.
         wake,
+        /// Idle work's quiet gate opening (idle.zig's `quiet_ns` after the
+        /// machine was last busy): its tasks get their step.
+        idle_work,
         /// The longest rest, sooner than the application's wake.
         longest,
     },
@@ -72,6 +74,8 @@ pub const Sleeps = struct {
     by_device: u64 = 0,
     by_longest: u64 = 0,
     missed: u64 = 0,
+    /// Flushes before a sleep that failed (the machine slept anyway).
+    flush_failed: u64 = 0,
     /// The last sleep was the longest rest, ended by the timer: the next
     /// turn decides whether it missed a wake.
     watching: bool = false,
@@ -96,15 +100,19 @@ pub const Sleeps = struct {
 pub fn Over(comptime Wake: type) type {
     return struct {
         /// The next rest from `now`: a slice unless quiescent, and then
-        /// until the application's wake, at most `longest_ns`. A wake
-        /// already due is a turn.
-        pub fn next(now: i96, quiet: bool, wake: Wake, slice_ns: u64, longest_ns: u64) Rest {
+        /// until the earliest of the application's wake and idle work's
+        /// gate (`idle_gate`, when it opens after `now`), at most
+        /// `longest_ns`. A wake already due is a turn.
+        pub fn next(now: i96, quiet: bool, wake: Wake, idle_gate: ?i96, slice_ns: u64, longest_ns: u64) Rest {
             if (!quiet) return .{ .until = .{ .at = now + slice_ns, .by = .slice } };
-            const longest: Until = .{ .at = now + longest_ns, .by = .longest };
+            var soonest: Until = .{ .at = now + longest_ns, .by = .longest };
+            if (idle_gate) |g| if (g > now and g < soonest.at) {
+                soonest = .{ .at = g, .by = .idle_work };
+            };
             return switch (wake) {
                 .more => .turn,
-                .at => |at| if (at <= now) .turn else if (at < longest.at) .{ .until = .{ .at = at, .by = .wake } } else .{ .until = longest },
-                .idle => .{ .until = longest },
+                .at => |at| if (at <= now) .turn else if (at < soonest.at) .{ .until = .{ .at = at, .by = .wake } } else .{ .until = soonest },
+                .idle => .{ .until = soonest },
             };
         }
 
@@ -147,7 +155,6 @@ const still: Facts = .{
     .draining = 0,
     .drains_holding = 0,
     .console_pending = 0,
-    .unflushed = false,
     .fetching = false,
     .wants_more = false,
 };
@@ -159,7 +166,6 @@ test "sleep: quiescent only when nothing is in motion, and each thing in motion 
     try testing.expect(!quiescent(with(still, .draining, @as(usize, 1))));
     try testing.expect(!quiescent(with(still, .drains_holding, @as(usize, 1))));
     try testing.expect(!quiescent(with(still, .console_pending, @as(usize, 3))));
-    try testing.expect(!quiescent(with(still, .unflushed, true)));
     try testing.expect(!quiescent(with(still, .fetching, true)));
     try testing.expect(!quiescent(with(still, .wants_more, true)));
 }
@@ -172,25 +178,25 @@ fn with(f: Facts, comptime field: std.meta.FieldEnum(Facts), value: @FieldType(F
 
 test "sleep: a busy machine rests a slice, whatever the application asked" {
     const now: i96 = 5 * s;
-    try testing.expectEqual(Rest{ .until = .{ .at = now + ms, .by = .slice } }, next(now, false, .{ .at = now + 60 * s }, ms, 10 * s));
-    try testing.expectEqual(Rest{ .until = .{ .at = now + ms, .by = .slice } }, next(now, false, .idle, ms, 10 * s));
+    try testing.expectEqual(Rest{ .until = .{ .at = now + ms, .by = .slice } }, next(now, false, .{ .at = now + 60 * s }, null, ms, 10 * s));
+    try testing.expectEqual(Rest{ .until = .{ .at = now + ms, .by = .slice } }, next(now, false, .idle, null, ms, 10 * s));
 }
 
 test "sleep: a quiescent machine rests until the application's wake, never past the longest rest" {
     const now: i96 = 5 * s;
-    try testing.expectEqual(Rest{ .until = .{ .at = now + 6 * ms, .by = .wake } }, next(now, true, .{ .at = now + 6 * ms }, ms, 10 * s));
-    try testing.expectEqual(Rest{ .until = .{ .at = now + 10 * s, .by = .longest } }, next(now, true, .{ .at = now + 60 * s }, ms, 10 * s));
-    try testing.expectEqual(Rest{ .until = .{ .at = now + 10 * s, .by = .longest } }, next(now, true, .idle, ms, 10 * s));
+    try testing.expectEqual(Rest{ .until = .{ .at = now + 6 * ms, .by = .wake } }, next(now, true, .{ .at = now + 6 * ms }, null, ms, 10 * s));
+    try testing.expectEqual(Rest{ .until = .{ .at = now + 10 * s, .by = .longest } }, next(now, true, .{ .at = now + 60 * s }, null, ms, 10 * s));
+    try testing.expectEqual(Rest{ .until = .{ .at = now + 10 * s, .by = .longest } }, next(now, true, .idle, null, ms, 10 * s));
     // The longest rest is a setting: 6 ms is the same path as 10 s.
-    try testing.expectEqual(Rest{ .until = .{ .at = now + 6 * ms, .by = .longest } }, next(now, true, .{ .at = now + 60 * s }, ms, 6 * ms));
+    try testing.expectEqual(Rest{ .until = .{ .at = now + 6 * ms, .by = .longest } }, next(now, true, .{ .at = now + 60 * s }, null, ms, 6 * ms));
     // Far past 60 h: still the longest rest, no overflow.
-    try testing.expectEqual(Rest{ .until = .{ .at = now + 10 * s, .by = .longest } }, next(now, true, .{ .at = std.math.maxInt(i96) }, ms, 10 * s));
+    try testing.expectEqual(Rest{ .until = .{ .at = now + 10 * s, .by = .longest } }, next(now, true, .{ .at = std.math.maxInt(i96) }, null, ms, 10 * s));
 }
 
 test "sleep: a wake exactly at the longest rest is the longest rest's" {
     const now: i96 = 5 * s;
-    try testing.expectEqual(Rest{ .until = .{ .at = now + 10 * s, .by = .longest } }, next(now, true, .{ .at = now + 10 * s }, ms, 10 * s));
-    try testing.expectEqual(Rest{ .until = .{ .at = now + 10 * s - 1, .by = .wake } }, next(now, true, .{ .at = now + 10 * s - 1 }, ms, 10 * s));
+    try testing.expectEqual(Rest{ .until = .{ .at = now + 10 * s, .by = .longest } }, next(now, true, .{ .at = now + 10 * s }, null, ms, 10 * s));
+    try testing.expectEqual(Rest{ .until = .{ .at = now + 10 * s - 1, .by = .wake } }, next(now, true, .{ .at = now + 10 * s - 1 }, null, ms, 10 * s));
 }
 
 test "sleep: a missed wake is a longest rest the timer ended, after which a frame was waiting" {
@@ -207,11 +213,24 @@ test "sleep: a missed wake is a longest rest the timer ended, after which a fram
     try testing.expectEqual(Sleeps{ .sleeps = 4, .by_device = 1, .by_longest = 2, .missed = 1, .watching = false }, z);
 }
 
+test "sleep: idle work's gate, when it opens before the wake and the longest rest, ends the rest" {
+    const now: i96 = 5 * s;
+    const gate = now + 200 * ms;
+    try testing.expectEqual(Rest{ .until = .{ .at = gate, .by = .idle_work } }, next(now, true, .idle, gate, ms, 10 * s));
+    try testing.expectEqual(Rest{ .until = .{ .at = gate, .by = .idle_work } }, next(now, true, .{ .at = now + 60 * s }, gate, ms, 10 * s));
+    // The wake first: the wake's.
+    try testing.expectEqual(Rest{ .until = .{ .at = now + 100 * ms, .by = .wake } }, next(now, true, .{ .at = now + 100 * ms }, gate, ms, 10 * s));
+    // A gate already open is no deadline: its steps were taken, or it rests.
+    try testing.expectEqual(Rest{ .until = .{ .at = now + 10 * s, .by = .longest } }, next(now, true, .idle, now, ms, 10 * s));
+    // A busy machine slices whatever the gate.
+    try testing.expectEqual(Rest{ .until = .{ .at = now + ms, .by = .slice } }, next(now, false, .idle, gate, ms, 10 * s));
+}
+
 test "sleep: a wake already due is a turn, not a rest" {
     const now: i96 = 5 * s;
-    try testing.expectEqual(Rest.turn, next(now, true, .{ .at = now }, ms, 10 * s));
-    try testing.expectEqual(Rest.turn, next(now, true, .{ .at = now - 1 }, ms, 10 * s));
-    try testing.expectEqual(Rest.turn, next(now, true, .more, ms, 10 * s));
+    try testing.expectEqual(Rest.turn, next(now, true, .{ .at = now }, null, ms, 10 * s));
+    try testing.expectEqual(Rest.turn, next(now, true, .{ .at = now - 1 }, null, ms, 10 * s));
+    try testing.expectEqual(Rest.turn, next(now, true, .more, null, ms, 10 * s));
 }
 
 test "sleep: between is due when it asked for more, when its time comes, and when its fetch ends; never before" {

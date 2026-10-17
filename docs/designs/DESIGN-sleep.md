@@ -59,8 +59,6 @@ again until the same second 60. A machine busy at second 60 still calls
 - `table.inUse() == 0`: every slot closed and unclaimed (tcp.zig:657);
 - `held_now == 0`, `draining_now == 0`, and no drain slot `holds()`;
 - `serial.pending() == 0`;
-- neither volume `unflushed`: an Observatory line written in `between` is
-  on the disk before the machine sleeps;
 - the application did not say `.more`;
 - the host's fetch is not running (during ARP the client holds no slot).
 
@@ -69,9 +67,21 @@ rest: quiescence recomputed from the arrays (every `conns[i]`, `held[]`,
 `draining[]`, `drains.waits`) instead of the counters, and required to agree.
 Two computations of one fact, gated against each other.
 
-**Idle work is left out of the minimum, on purpose.** Its tasks are hourly
-and per-minute, and the cap makes one at most 10 s late. A task with a tighter
-time would need `Outcome.resting` to carry its time; none has one today.
+**A write is flushed before the machine sleeps.** A response's send flushes
+(`Io.durable`), but a line written in `between` has no response behind it,
+and on a volume with a write cache it would wait for the next request. So
+`restOrSleep` flushes a quiescent machine's unflushed writes, then sleeps. A
+flush that fails is counted on /admin/host and the machine sleeps anyway: a
+retry every slice would not make it hold. (Round 4's review: it was in the
+predicate, so one wake's line on prod's volume kept the machine on its slice
+until a request.)
+
+**Idle work's quiet gate is in the minimum; its tasks' own times are not.**
+`idle.turn` steps a task only once nothing has been busy for `quiet_ns`
+(200 ms), so a machine that went quiescent sooner wakes when that gate opens
+(`Idle.gateAt`). What a task then waits for (an hourly check) its `resting`
+hides; the cap makes it at most 10 s late. A task with a tighter time would
+need `Outcome.resting` to carry it; none has one today.
 
 An Observatory between polls is quiescent; its 40 ms fetch runs on today's
 1 ms slice. A machine holding a stream or a kept-alive connection keeps the
@@ -270,6 +280,16 @@ Builds are their own number; the times are test wall time.
 | 7 | Dog Park's `/version` (228.2) | dog-park | unit + its gates | <1 s new |
 | 8 | The Observatory (228.3): schedule, Linux against a stalling server, pair mode against dogpark.elf | observatory | tier 0, Linux, metal-vmm | ~5 s |
 
+## Open after chunk 2
+
+- **What ended a rest is read off the clock, not the handler.** `halt`
+  compares the time it woke with its deadline. On KVM a timer delivered a
+  hair early reads as a device's wake, and the missed-wake count goes blind;
+  and a timer that fires between the halt and the read is mis-sorted the
+  other way. The fix is a counter in the timer's and the card's handlers
+  (they share one stub today), read before and after. Chunk 3, where QEMU
+  shows a real timer, is where it is measured.
+
 ## Phase 2, for later
 
 Halt until the earliest of all seventeen deadlines even when busy, when a busy
@@ -330,3 +350,17 @@ It found:
 - how a test Observatory run ends.
 
 All taken, except the two decisions for Steve.
+
+**Round 4** (a cold review of chunk 2's code) found:
+- the flush (above);
+- sleeps.sh passing on unchecked runs: exits unread, an empty number
+  read as no failure, and no halt bound, so a kernel that never slept but
+  woke on time passed;
+- the mid-sleep request landing next to a longest rest's end;
+- the 6 ms and 10 s comparison proving little;
+- idle work's gate;
+- an unarmed machine's pauses counted as sleeps;
+- a disarm write on every slice;
+- the sleeper's swallowed write failures.
+
+All taken but the rest's classification (open, above).
