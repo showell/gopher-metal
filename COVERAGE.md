@@ -21,9 +21,12 @@ module that compiles one imports `"coverage"` and `"coverage_catalog"`.
   (the SDK's README).
 - **Three tiers, one set of properties.** `zig build test` runs eight
   plain and eight rough TCP seeds and eight FAT seeds; `zig build
-  properties` 100 of each kind of TCP seed, 20 FAT seeds and the FAT
-  regression seeds, in about a minute; `./long.sh` 10,000 TCP and 300 FAT
-  seeds and the real kernel's lossy sweep, in about ten. Each reads the same
+  properties` 100 of each kind of TCP seed (each also run as a crowd), 20
+  FAT seeds and the FAT regression seeds (`build.zig`'s `-Dseeds`,
+  `-Dfat-seeds` defaults), in 20 minutes in Debug and 5 with
+  `-Dsweep-optimize=ReleaseSafe`; `./long.sh` its `SEEDS` TCP seeds
+  (`CROWD_SEEDS` of them crowded) and `FAT_SEEDS` FAT seeds, and the real
+  kernel's lossy sweep, in about ten. Each reads the same
   properties with a bigger budget.
 - **Debug for test code** (Steve, 2026-10-05): it builds in a fraction of
   the time. A sweep is nearly all running, about three times slower in
@@ -68,8 +71,10 @@ any serial log, such as a droplet's.
     SEEDS=50000 ./long.sh
     ./long.sh sim | metal  # one half
 
-- **The simulators** (ReleaseSafe): 10,000 TCP seeds, plain and rough, and
-  300 FAT seeds, against `coverage/floor-sim.txt` (`zig build properties
+- **The simulators** (ReleaseSafe): `SEEDS` TCP seeds, plain and rough
+  (`CROWD_SEEDS` of them also crowded), and `FAT_SEEDS` FAT seeds (the
+  defaults are at the top of `long.sh`, each with the measurement that
+  chose it), against `coverage/floor-sim.txt` (`zig build properties
   -Dfloor=...`).
 - **The real kernel**, gopher.elf built `-Dcoverage`, on metal-vmm's
   PC-shaped machine (`TRANSPORT=pci`: halting between frames and woken by
