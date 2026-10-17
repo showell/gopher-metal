@@ -243,6 +243,14 @@ pub const PeerMachine = machine.Machine(.{
 /// serves only what it accepted.
 pub const Role = enum { accepted, initiated };
 
+/// How a connection ended: closed cleanly (both FINs), reset by its peer, or
+/// given up on by this machine, and why (`Table.Abandon`).
+pub const End = union(enum) { closed, reset_by_peer, abandoned: Table.Abandon };
+
+/// A slot's last connection's end, and whose it was: its role and local port
+/// (an initiated connection's port is its own, so a client knows its own).
+pub const Ended = struct { role: Role, local_port: u16, how: End };
+
 pub const Conn = struct {
     state: State = .closed,
     role: Role = .accepted,
@@ -366,6 +374,12 @@ pub const Conn = struct {
     deadlines: ?Deadlines = null,
     /// Arrival order, breaking ties within a clock tick.
     serial: u64 = 0,
+    /// **HOW THE SLOT'S LAST CONNECTION ENDED**, kept past its reset (and
+    /// past the slot's next connection, until that one ends): what a client
+    /// of its own reads to say how its fetch ended (fetch.zig), by the role
+    /// and port it had. The table's counters are the whole table's: another
+    /// connection given up meanwhile moves them too.
+    ended: ?Ended = null,
 
     pub fn pending(self: *const Conn) []u8 {
         return self.rx[self.start..self.end];
@@ -457,7 +471,13 @@ pub const Conn = struct {
         const rx = self.rx;
         const tx = self.tx;
         const claimed = self.claimed;
-        self.* = .{ .rx = rx, .tx = tx, .claimed = claimed };
+        const ended = self.ended;
+        self.* = .{ .rx = rx, .tx = tx, .claimed = claimed, .ended = ended };
+    }
+
+    /// Notes how this connection ended, before its reset.
+    fn noteEnd(self: *Conn, how: End) void {
+        self.ended = .{ .role = self.role, .local_port = self.local_port, .how = how };
     }
 
     /// The peer has finished: its FIN arrived.
@@ -1029,6 +1049,7 @@ pub const Table = struct {
         if (c.state != .closed and c.state != .syn_sent and why != .refused) {
             self.emit(wire, i, flag_rst | flag_ack, c.highest(), "");
         }
+        c.noteEnd(.{ .abandoned = why });
         c.reset();
     }
 
@@ -1442,7 +1463,7 @@ pub const Table = struct {
             switch (check) {
                 .exact => {
                     self.resets_received +%= 1;
-                    return self.close(i);
+                    return self.close(i, .reset_by_peer);
                 },
                 .challenge => {
                     self.challenge_acks +%= 1;
@@ -1855,7 +1876,7 @@ pub const Table = struct {
             c.rcv_nxt +%= 1; // their FIN takes one
             c.peer_half.fire(.fin_received);
             self.emit(wire, i, flag_ack, c.highest(), "");
-            if (c.fin.is(.acknowledged)) return self.close(i);
+            if (c.fin.is(.acknowledged)) return self.close(i, .closed);
             return .{ .event = .peer_done, .index = i };
         }
 
@@ -1897,12 +1918,13 @@ pub const Table = struct {
     fn settle(self: *Table, i: usize, event: Event, fin_acknowledged: bool, now: i96) Result {
         if (!fin_acknowledged) return .{ .event = event, .index = i };
         const c = &self.conns[i];
-        if (c.peerDone()) return self.close(i);
+        if (c.peerDone()) return self.close(i, .closed);
         c.fin_wait_until = now + fin_wait_ns;
         return .{ .event = event, .index = i };
     }
 
-    fn close(self: *Table, i: usize) Result {
+    fn close(self: *Table, i: usize, how: End) Result {
+        self.conns[i].noteEnd(how);
         self.conns[i].reset();
         return .{ .event = .closed, .index = i };
     }

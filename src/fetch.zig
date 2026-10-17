@@ -128,19 +128,6 @@ pub const Target = struct { ip: [4]u8, port: u16, path: []const u8 };
 /// How often an unanswered ARP request is asked again.
 pub const arp_every_ns: i96 = 100 * std.time.ns_per_ms;
 
-/// The table's counters a connection's end moves, each to its outcome.
-const Ends = struct {
-    refused: u64,
-    connect: u64,
-    idle: u64,
-    total: u64,
-    given_up: u64,
-
-    fn of(t: *const tcp.Table) Ends {
-        return .{ .refused = t.connects_refused, .connect = t.connect_deadlines, .idle = t.idle_deadlines, .total = t.total_deadlines, .given_up = t.given_up };
-    }
-};
-
 /// **ONE GET, AS A MACHINE MAKES IT** (chunks 8 and 9): who has the
 /// server's address (ARP, every `arp_every_ns` until the connect deadline),
 /// the connection (`Table.connect`), the request, the answer read as it
@@ -148,6 +135,14 @@ const Ends = struct {
 /// through `arrived`, go out through the caller's `wire`, and the time is the
 /// caller's; the body goes to the caller's `sink` (anything with
 /// `body([]const u8)`).
+///
+/// **IN A TABLE SHARED WITH A SERVER** (the bare-metal host, DESIGN-sleep.md
+/// chunk 5) the host's own turn of the network hands the table every frame
+/// and calls `transmit`, so the client takes only ARP (`learned`) and its own
+/// step (`step`). Its connection is known by its role and its own port, never
+/// by its slot alone: a reset and a stranger's SYN in one batch can hand the
+/// slot to someone else. How it ended is the slot's record (`Conn.ended`), not
+/// the table's counters, which every connection moves.
 pub const Client = struct {
     target: Target,
     deadlines: tcp.Deadlines,
@@ -160,9 +155,10 @@ pub const Client = struct {
     asked_at: ?i96 = null,
     began: i96,
     slot: ?usize = null,
+    /// The connection's own port, once it has one.
+    local_port: u16 = 0,
     answer: Answer = .{},
     finished: bool = false,
-    before: Ends = undefined,
     outcome: ?Outcome = null,
 
     pub fn init(target: Target, deadlines: tcp.Deadlines, our_ip: [4]u8, our_mac: [6]u8, now: i96) error{NoSpaceLeft}!Client {
@@ -178,7 +174,7 @@ pub const Client = struct {
     /// for our address is answered. Anything else is the table's.
     pub fn arrived(self: *Client, table: *tcp.Table, wire: anytype, frame: []const u8, now: i96) void {
         if (arp.parse(frame)) |p| {
-            self.cache.observe(p, self.our_ip);
+            self.learned(p);
             if (p.op == .request and std.mem.eql(u8, &p.target_ip, &self.our_ip)) {
                 var reply: [64]u8 = undefined;
                 const n = arp.writeReply(&reply, self.our_mac, self.our_ip, .{ .sender_mac = p.sender_mac, .sender_ip = p.sender_ip, .target_ip = p.target_ip });
@@ -189,17 +185,30 @@ pub const Client = struct {
         _ = table.handle(wire, frame, now);
     }
 
+    /// An ARP packet the host's turn of the network saw: the cache learns.
+    pub fn learned(self: *Client, p: arp.Packet) void {
+        self.cache.observe(p, self.our_ip);
+    }
+
     /// **ONE TURN**, then the table's `transmit`: the outcome once it is
-    /// known, else null.
+    /// known, else null. For a table the client has to itself.
     pub fn turn(self: *Client, table: *tcp.Table, wire: anytype, now: i96, sink: anytype) ?Outcome {
+        const o = self.step(table, wire, now, sink);
+        table.transmit(wire, now);
+        return o;
+    }
+
+    /// **ONE STEP**, with no `transmit`: in a table shared with a server,
+    /// the host's turn of the network transmits.
+    pub fn step(self: *Client, table: *tcp.Table, wire: anytype, now: i96, sink: anytype) ?Outcome {
         if (self.outcome) |o| return o;
         const i = self.slot orelse {
             if (self.cache.lookup(self.target.ip)) |mac| {
-                self.before = Ends.of(table);
                 self.slot = table.connect(wire, .{ .mac = mac, .ip = self.target.ip, .port = self.target.port }, self.deadlines, now) orelse {
                     self.outcome = .connect_deadline; // no slot: it never connects
                     return self.outcome;
                 };
+                self.local_port = table.conns[self.slot.?].local_port;
             } else if (now - self.began >= @as(i96, @intCast(self.deadlines.connect_ns))) {
                 self.outcome = .no_arp;
                 return self.outcome;
@@ -208,10 +217,13 @@ pub const Client = struct {
                 wire.send(ask[0..arp.writeRequest(&ask, self.our_mac, self.our_ip, self.target.ip)]);
                 self.asked_at = now;
             }
-            table.transmit(wire, now);
             return null;
         };
         const c = &table.conns[i];
+        if (!self.mine(c)) {
+            self.outcome = self.ended(c);
+            return self.outcome;
+        }
         const request = self.request_buf[0..self.request_len];
         if (c.state == .established and self.queued < request.len) self.queued += table.queue(i, request[self.queued..]);
         const pending = c.pending();
@@ -223,22 +235,35 @@ pub const Client = struct {
             table.finish(i);
             self.finished = true;
         }
-        table.transmit(wire, now);
-        if (table.conns[i].state == .closed) {
-            self.outcome = if (self.finished) self.answer.outcome() else self.ended(table);
-        }
-        return self.outcome;
+        return null;
     }
 
-    /// How the connection ended, from the counter the table moved.
-    fn ended(self: *const Client, t: *const tcp.Table) Outcome {
-        const now = Ends.of(t);
-        if (now.refused != self.before.refused) return .refused;
-        if (now.connect != self.before.connect) return .connect_deadline;
-        if (now.idle != self.before.idle) return .idle_deadline;
-        if (now.total != self.before.total) return .total_deadline;
-        if (now.given_up != self.before.given_up) return .given_up;
-        return .reset;
+    /// The slot still holds this client's connection.
+    fn mine(self: *const Client, c: *const tcp.Conn) bool {
+        return c.state != .closed and c.role == .initiated and c.local_port == self.local_port;
+    }
+
+    /// **HOW THE CONNECTION ENDED**, from the slot's record of it. A record
+    /// that is not ours (the slot taken and ended again before this step) is
+    /// a connection lost without a word: a reset.
+    fn ended(self: *const Client, c: *const tcp.Conn) Outcome {
+        const e = c.ended orelse return .reset;
+        if (e.role != .initiated or e.local_port != self.local_port) return .reset;
+        return switch (e.how) {
+            .closed => if (self.finished) self.answer.outcome() else .reset,
+            .reset_by_peer => .reset,
+            .abandoned => |why| switch (why) {
+                .refused => .refused,
+                .connect_deadline => .connect_deadline,
+                .idle_deadline => .idle_deadline,
+                .total_deadline => .total_deadline,
+                .silent_peer => .given_up,
+                // Our FIN sent and the peer's FIN-WAIT-2 timer ran out: the
+                // answer was whole, or it was not.
+                .fin_wait => if (self.finished) self.answer.outcome() else .reset,
+                .slow_client, .stream_behind, .unfinished => .reset,
+            },
+        };
     }
 };
 
@@ -377,7 +402,21 @@ const Sink = struct {
     }
 };
 
-const Server = enum { answers, short, mute, deaf, absent };
+const Server = enum {
+    answers,
+    short,
+    mute,
+    deaf,
+    absent,
+    /// The request answered with a reset.
+    resets,
+    /// A reset, and in the same batch a stranger's SYN to the client's
+    /// machine, which takes the slot the reset freed.
+    resets_then_stranger,
+    /// A reset, while another of the client's table's connections is given
+    /// up on (its `given_up` count moves).
+    resets_beside_a_give_up,
+};
 
 fn testIsn() u32 {
     return 77_000;
@@ -399,6 +438,13 @@ fn against(how: Server, sink: *Sink) !Outcome {
     var s_out: [1600]u8 = undefined;
     var c_out: [1600]u8 = undefined;
     var server = tcp.Table.init(server_ip, server_mac, 80, &s_conns, &s_out, testIsn);
+    // A third machine, at the server's address, whose SYN the client's
+    // machine accepts (it listens on 7).
+    var x_rx: [1][2048]u8 = undefined;
+    var x_tx: [1][2048]u8 = undefined;
+    var x_conns: [1]tcp.Conn = .{.{ .rx = &x_rx[0], .tx = &x_tx[0] }};
+    var x_out: [1600]u8 = undefined;
+    var stranger = tcp.Table.init(server_ip, server_mac, 9, &x_conns, &x_out, testIsn);
     var client = tcp.Table.init(client_ip, client_mac, 7, &c_conns, &c_out, testIsn);
     client.reserved_for_initiated = 1;
     var loop: Loop = .{};
@@ -444,6 +490,15 @@ fn against(how: Server, sink: *Sink) !Outcome {
                 .answers => _ = server.queue(i, "HTTP/1.1 200 OK\r\ncontent-length: 5\r\n\r\nhello"),
                 .short => _ = server.queue(i, "HTTP/1.1 200 OK\r\ncontent-length: 9\r\n\r\nhello"),
                 .mute => continue,
+                .resets, .resets_then_stranger, .resets_beside_a_give_up => {
+                    server.abandon(&to_c, i, .unfinished);
+                    if (how == .resets_then_stranger) {
+                        _ = stranger.connect(&to_c, .{ .mac = client_mac, .ip = client_ip, .port = 7 }, deadlines, now);
+                        stranger.transmit(&to_c, now);
+                    }
+                    if (how == .resets_beside_a_give_up) client.given_up += 1;
+                    continue;
+                },
                 .deaf, .absent => unreachable,
             }
             server.finish(i);
@@ -464,6 +519,17 @@ test "the client against the kernel's own server: a 200, no ARP, the connect and
     try testing.expectEqual(Outcome.idle_deadline, try against(.mute, &sink));
     sink = .{};
     try testing.expectEqual(Outcome.short_answer, try against(.short, &sink));
+}
+
+test "a fetch reset by its server is a reset, though a stranger takes its slot in the same batch (DESIGN-sleep.md chunk 5)" {
+    var sink: Sink = .{};
+    try testing.expectEqual(Outcome.reset, try against(.resets, &sink));
+    try testing.expectEqual(Outcome.reset, try against(.resets_then_stranger, &sink));
+}
+
+test "a fetch's end is its own connection's, not the table's: another given up meanwhile does not make a reset a give-up (DESIGN-sleep.md chunk 5)" {
+    var sink: Sink = .{};
+    try testing.expectEqual(Outcome.reset, try against(.resets_beside_a_give_up, &sink));
 }
 
 test "a command line: target and deadlines, the leading word optional, no default deadline" {
