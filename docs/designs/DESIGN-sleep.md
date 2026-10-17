@@ -28,10 +28,11 @@ and 5.3 s of wall time, about 88 µs a rest; the longest halt 0.8 ms.
    if we get a 6ms wait working, we can get a 60s wait working"). Tests set
    it to a few ms, so the cap's path is exercised in real time in a fraction
    of a second; production keeps 10 s. See "Every rest is bounded".
-2. **How a test Observatory run ends.** The Observatory prints a line every
-   poll, so metal-vmm never sees it go idle. Proposed: a config value
-   `polls = N` (stop after N polls, unset in production), as chat's
-   `requests = N` ends a judge's run today.
+2. **How a test Observatory run ends** (Steve, 2026-10-17: decided). Not a
+   setting in the app: metal-vmm's `GUEST_S=s` ends a run cleanly after `s`
+   seconds of guest time, as `PATIENCE_S` ends a quiet one. The test decides
+   how long it watches; the app is what ships. (The Observatory is never
+   quiet: it prints and writes every poll, so patience never ends it.)
 
 ## Phase 1: sleep long only when the machine is quiescent
 
