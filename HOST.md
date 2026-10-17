@@ -1,8 +1,9 @@
 # The host: what Linux and metal both promise the application
 
-*2026-10-07. The contract between angry-gopher's route table and the host it
-runs on, Linux or metal; beside STORE.md, which is the data's part of it.
-Essay: notes/the-other-doors.md. Steve's decisions of 2026-10-07 are marked.*
+*The contract between an application's route table and the host it runs
+on, Linux or metal; beside STORE.md, which is the data's part of it.
+Essay: [the other doors](https://github.com/showell/essay-repl-server/blob/master/notes/the-other-doors.md). Steve's decisions are
+marked.*
 
 **The aim is that Linux and metal agree** (Steve: no second tenant is in
 view). Every rule here exists so that something which works on a laptop
@@ -19,19 +20,21 @@ can say: its data's name, its largest whole read, its setup's report in
 words, and, optionally, its `name` for metal's boot banner, "<name>'s route
 table", which says "angry-gopher" when none is declared). Linux is zig-webbox's `linux_host.zig` (`Server(S).run`, which
 angry-gopher's `server.zig` calls with its names and settings), with
-`linux_durable.zig` beside it; metal is `probe/gopher.zig`. Three calls:
+`linux_durable.zig` beside it; metal is `probe/gopher.zig`. Four calls:
 
 1. `mem_meter.init(base)`: the process-lifetime allocator, before anything
    else.
 2. `start(io, Host)`: once, before the first request. Everything the host
    supplies is in one `Host`: where the data is, how to read its free space,
-   the trusted proxy, and the host's own facts and log. The setup is done in
+   the trusted proxy, the host's own facts and log, and its fetch. The setup is done in
    the one right order, and the answer is the `Hub` live streams publish
    through.
 3. Per request, `route`, then serve the stream it answered, if any
    (zig-webbox's `bus.zig`: `bus.serveKept` for a host with a task per
    connection, `bus.nextFrame` for a host with one loop; `bus.drop` ends it
    either way).
+4. Between handlers, `between`, when the application's wake says so
+   (below, "Between handlers, and the host's fetch").
 
 ## One handler at a time *(Steve, 2026-10-07)*
 
@@ -74,7 +77,7 @@ and a slow handler is a bug on metal already.
 
 ## Durability
 
-**No response leaves before the writes ahead of it are durable** (v18). The
+**No response leaves before the writes ahead of it are durable.** The
 application never flushes; the host flushes at the one moment that matters,
 before any byte of a response or of a kept stream's frame goes out. A failed
 flush is logged and counted, the response still goes, and the next one
@@ -167,12 +170,49 @@ next task a step when it would otherwise rest and nothing has arrived for
 200 ms (`src/idle.zig`); `/admin/host` says the steps, the overruns, and each
 task's state.
 
-- **Today it is the host's alone:** the one task is each volume's check,
+- **It is the host's alone:** the one task is each volume's check,
   asked again while the machine serves (`src/idle_check.zig`), reading and
-  writing nothing else. A write under a check starts it again.
-- **Not yet in the contract:** the application cannot queue a task, and
-  Linux runs none. When the application has one (search's index, built
-  lazily), the router declares it as it declares a kept stream, and Linux
-  runs it under the same turn when no request waits.
+  writing nothing else. A write under a check starts it again. Linux runs
+  no idle task.
+- **The application's own work between requests is `between`** (below),
+  not an idle task.
 - **A task that writes** would need the fault testing a request gets; the
-  first tasks only read.
+  one task only reads.
+
+## Between handlers, and the host's fetch
+
+**The application's work between requests** is its site's `between`
+(zig-webbox `site.zig`, `Site.between`): called under the turn, one slice
+at a time, so a request that arrives waits at most one slice. It is handed
+two clocks (`Now`: the awake clock and Unix seconds) and answers when it
+next needs a turn (`Wake`, zig-webbox `wake.zig`):
+
+- `.more`: call again on the next free turn;
+- `.at`: nothing before this time on the awake clock, unless a request
+  comes first;
+- `.idle`: nothing until a request, or the end of the application's fetch.
+
+An application with no `between` is `.idle`. An older one that answers
+`bool` (angry-gopher's background Shale run) is `.more` or `.idle`.
+
+- **Metal** calls it from its one loop (`probe/gopher.zig`,
+  `betweenSlice`), and a quiescent machine sleeps until the wake, at most
+  `longest_rest_ms` (docs/designs/DESIGN-sleep.md).
+- **Linux** calls it on a thread of its own (zig-webbox `linux_host.zig`,
+  `betweenLoop`), once before the first connection is accepted, then after
+  each call it lets a waiting handler go first and sleeps until the wake or
+  a doorbell that every handler's end rings.
+
+**The host's fetch** (zig-webbox `host_fetch.zig`): one HTTP GET at a
+time, which the application starts from `between` and reads the result of
+on a later call; the host calls `between` as soon as the fetch ends. Each
+fetch has three deadlines (connect, silence, total). The outcomes are the
+same words on both hosts. Metal's fetch is the kernel's own TCP client, on
+the machine's own network only, in a connection slot kept for it
+(`probe/gopher.zig`, `fetchStart`); Linux's is zig-webbox's
+`linux_fetch.zig`. A host with no fetch passes none, and `start` answers
+`NoFetch`.
+
+**Which release has them:** `git tag --contains 42bb498` (the sleep) and
+`git tag --contains d2b9359` (metal's fetch); empty means `master` only.
+No served application fetches yet.
