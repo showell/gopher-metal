@@ -6,7 +6,8 @@ two decisions (below), both now taken. **Built so far:** chunk 1 (the pure
 decisions, `src/sleep.zig`, and webbox's `Wake`) and chunk 2 (the sleep on
 metal, `longest_rest_ms`, the sleeper, metal-vmm's `sleeps.sh`) chunk 3
 (the real-timer check, `droplet/sleeps.py`; rests classified by handler) and
-chunk 4 (Linux's between thread on a doorbell). An idle
+chunk 4 (Linux's between thread on a doorbell) and chunks 5 and 6 (the
+host's fetch, metal and Linux). An idle
 gopher.elf's 60 s went from 307,564 exits to 6,781, and from 37,605 halts to
 8.
 
@@ -160,19 +161,27 @@ clock.
 - **The console's turn comes first**, so a large backlog can delay a due
   wake. That is allowed: `.at` is a lower bound.
 
-## The host's fetch
+## The host's fetch (chunks 5 and 6, done)
 
 An application cannot reach the kernel's client: `between` gets no table and
-no wire, and gopher.zig never builds a `fetch.Client`. On Linux the TCP stack
-is the operating system's, and a fetch inside `between` would hold the turn.
-So **the host offers one fetch at a time**, the same shape on both:
+no wire. On Linux the TCP stack is the operating system's, and a fetch inside
+`between` would hold the turn. So **the host offers one fetch at a time**, the
+same shape on both (zig-webbox `host_fetch.zig`):
 
-    host.fetch.start(target, deadlines) → error{Busy}!void
-    host.fetch.result() → ?Result   // handed over once; the body lives until the next start
+    host_fetch.start(target, deadlines) → error{Busy, PathTooLong, NoFetch}!void
+    host_fetch.result() → ?Result   // handed over once; the body lives until the next start
 
-`Result` carries the outcome, the status, and a body the host bounds
-(`body_max`, past which the outcome is `too_long`). The outcomes are
-`fetch.Outcome`'s words. Each host says which it can produce:
+- **`Busy`** while one runs or its end is unread; **`PathTooLong`** past
+  `path_most` (256), never a shorter path asked; **`NoFetch`** on a host that
+  offers none.
+- **`Result`** carries the outcome, the status, and a body the host keeps to
+  `body_most` (64 KiB), past which the outcome is `too_long` and the
+  connection is let go.
+- **Its end is news:** `between` is called at once, on both hosts (metal: the
+  loop's `betweenDue`; Linux: the fetch thread rings the between thread).
+
+The outcomes are the kernel client's words, and each host says which it can
+produce:
 
 | outcome | metal | Linux |
 |---|---|---|
@@ -181,31 +190,45 @@ So **the host offers one fetch at a time**, the same shape on both:
 | reset | RST when established | ECONNRESET, EPIPE |
 | no_arp | no ARP reply | EHOSTUNREACH |
 | given_up | the retransmit timer ran out | no twin: the deadlines end a Linux fetch, never its own retries |
-| no_route | no twin: on-link only | ENETUNREACH, EADDRNOTAVAIL |
+| no_route | off the lease's network, or a lease with no mask | ENETUNREACH, EADDRNOTAVAIL |
 
-**Metal:**
-- One `fetch.Client`, split from the table: pump routes ARP replies to it
-  (today pump answers only ARP requests, stream.zig:168). Its step, from
-  the main loop after pump, queues, consumes and finishes; it never calls
-  `transmit` or `handle` itself.
-- **Why a connection ended is kept on its slot.** `Client.ended` reads the
-  table's counters today (fetch.zig:225-233). On gopher's shared table,
-  another connection given up during the fetch would make a reset fetch
-  say `given_up`.
-- It checks its slot's `serial` every turn, so a reset followed by a SYN in
-  one batch cannot hand it a stranger's slot.
-- `reserved_for_initiated = 1`, so a SYN flood cannot starve it.
-- `quiet()` skips initiated connections, as `nextReady` does; otherwise a
-  slow server is let go behind the client's back.
-- `ephemeral_next` is seeded as probe/fetch.zig seeds it.
-- On-link targets only: Dog Park is on the private network. Every poll
-  re-ARPs, so `no_arp` is the first symptom of any trouble there.
+**Metal (zig-metal-unikernel `2f7ccfa`, `d2b9359`, `0e1b2dc`):**
+- **One `fetch.Client` in the serving table**, stepped on every turn of the
+  network (`streamTurn`), the turns inside a serve included, so a long serve
+  never runs a fetch's deadlines out unstepped. ARP replies reach it through
+  `stream.on_arp`; the network's turn transmits.
+- **How it ended is its own connection's.** Each slot keeps its last
+  connection's end (`Conn.ended`: closed, reset by the peer, or abandoned
+  and why), past its reset. The client knows its connection by role and its
+  own port, and **holds its slot** (`claim`) until it has read that end: the
+  first free slot is the next SYN's, and a stranger's could otherwise take
+  it, end too, and write its end over ours. The table's counters, which
+  every connection moves, are never read.
+- **A whole answer is the outcome**, however the connection closes after
+  (our FIN never acknowledged, a reset after a whole response): pair.sh's
+  eat0-25 once said `idle_deadline` for a whole page.
+- `reserved_for_initiated = 1`, so a SYN flood cannot starve it; its ports
+  start from a draw; `quiet()` never lets go of an initiated connection.
+- On-link only, by the lease's mask: Dog Park is on the private network.
+  Every poll re-ARPs, so `no_arp` is the first symptom of trouble there.
 
-**Linux:** one thread a fetch, never taking the turn. It uses a blocking
-socket with `SO_SNDTIMEO` (which bounds connect) and `SO_RCVTIMEO`, and
-checks the total deadline between reads. Its result is published atomically,
-`result()` reads it under the turn, and its end kicks `between`. A host that
-stops waits for at most one fetch's total deadline.
+**Linux (zig-webbox `1b72ab4`, `linux_fetch.zig`):** one thread a fetch,
+never taking the turn: a blocking socket whose send timeout bounds the
+connect and whose receive timeout bounds each silence (never past what is
+left of the total), the total checked between reads. Its own answer reader,
+tested against the same shapes of answer as the kernel's. A host that stops
+waits for at most one fetch's total deadline.
+
+**Tested:**
+- tier 0: the client against the kernel's own server in one table (a
+  stranger's SYN taking the slot, another connection given up meanwhile, a
+  whole answer then a deadline or a reset);
+- webbox: Linux against servers on 127.0.0.1 (ok, short, not a 200, too
+  long, idle, total, refused, the end said once and its ring);
+- metal-vmm's `sleeps.sh`, two kernels: the sleeper fetching from gopher.elf
+  every 60 s for ten minutes (`PAIR_DISK`), each poll `ok` and the page's
+  size from a single-guest run; and the server silent from 180 s to 300 s
+  (`WIRE_SILENT_S`, by its own time), polls 4 and 5 `no_arp`, the rest `ok`.
 
 ## Linux's between thread (chunk 4, done)
 
@@ -411,3 +434,17 @@ All taken; the rest's classification in chunk 3.
 - stale wording in docs/admin-for-agents.md.
 
 All taken.
+
+**Round 6** (a cold review of chunk 5's code) found:
+- a stranger's connection writing its end over the client's (the slot is
+  held now);
+- the client unstepped during a serve while its deadlines ran;
+- a lease with no mask letting every target through;
+- a long path truncated to a different URL;
+- an unread result dropped by the next start;
+- `too_long` reading on to the total deadline;
+- the silent case tuned to frame counts (now by time: `WIRE_SILENT_S`);
+- stale text on 256 connections.
+
+All taken. pair.sh's eat0-25, red in tier 3 the same day, was this chunk's
+own: a whole answer reported by how the connection closed.
