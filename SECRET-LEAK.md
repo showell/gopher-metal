@@ -1,7 +1,7 @@
 # If the session secret leaks
 
-QUEUE.md item 66. One page, for the day it is needed. CUTOVER.md is where
-the cutover's papers start, and how a backup is taken safely; the options
+Old QUEUE.md item 66. One page, for the day it is needed. How a backup is
+taken safely is DEPLOY.md, "Backups"; the options
 behind this page are in docs/designs/DESIGN-sessions.md. It holds whatever is decided
 about session lifetimes.
 
@@ -32,9 +32,8 @@ So:
   in that time notice nothing. Until then, whoever has the old secret can
   still make players' cookies, but not members' sessions.
 
-**2. Change it,** on prod, against the host serving the site: metal's
-private address after the cutover, `http://127.0.0.1:9001` before. Never
-through Caddy from a home connection.
+**2. Change it,** on prod, against metal's private address. Never through
+Caddy from a home connection.
 
     droplet/rotate_secret.py http://<host> --days N
 

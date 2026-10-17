@@ -1,7 +1,7 @@
 # If the admin password is lost
 
-QUEUE.md item 89, found by fire drill 1. One page, for the day it is
-needed. CUTOVER.md is where the cutover's papers start.
+Old QUEUE.md item 89, found by fire drill 1. One page, for the day it is
+needed. Releases are DEPLOY.md.
 
 ## What is locked
 
@@ -15,25 +15,10 @@ The password is stored only as a bcrypt hash, so it cannot be read back.
 Metal has no shell to log in to. **A browser still signed in as the admin
 is not a way back:** the pages above ask for the password again.
 
-**Neither way back can be started by a request to the site.** Each needs
-ssh to prod, or a new boot image for metal.
+**The way back cannot be started by a request to the site.** It needs a
+new boot image.
 
-## Before the cutover: lynrummy.com on prod's Linux
-
-From a machine with ssh to prod and an angry-gopher checkout:
-
-    ops/reset_admin_password
-
-It does four things:
-- shows uid 1's name, and asks before changing anything;
-- asks for the new password twice;
-- hashes the password on your machine, so only the hash goes to prod;
-- stops the server, puts the new hash in place, and starts it again.
-
-The site is down for a few seconds. The old hash is kept as
-`auth/1/password.before-reset`.
-
-## After the cutover: metal
+## The reset, by a boot image
 
 Metal reads the reset from its boot disk, so it takes a deploy. From the
 machine that builds images, with angry-gopher beside this checkout:
@@ -70,11 +55,8 @@ applied once, but nothing needs to carry it.
 ## Undoing it
 
 The hash replaced is kept beside the new one, as
-`auth/1/password.before-reset`.
-- **On prod:** copy it back over `auth/1/password`, with the server
-  stopped.
-- **On metal:** from a backup, or the volume on the box, as any file of
-  the data.
+`auth/1/password.before-reset`. Putting it back is a change to the data:
+from a backup, or the volume, as any file of it.
 
 ## Tested
 
