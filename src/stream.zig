@@ -145,6 +145,11 @@ pub const Wire = struct {
 /// writes — rather than only between requests.
 pub var after_arrivals: ?*const fn () void = null;
 
+/// Every ARP packet a turn takes, before it is answered or passed on: the
+/// host's own client learns its server's address from the replies
+/// (fetch.zig's `learned`).
+pub var on_arp: ?*const fn (arp.Packet) void = null;
+
 /// The most frames one turn takes before the timers run regardless: many
 /// ringfuls, far more than arrive between two turns of a loop that is keeping
 /// up.
@@ -166,6 +171,7 @@ pub fn pump(wire: *Wire, table: *tcp.Table, ip: [4]u8) ?tcp.Result {
         const got = nic.poll() orelse break;
         defer nic.recycle(got.id);
         last = .{ .event = .nothing };
+        if (on_arp) |learn| if (arp.parse(got.frame)) |p| learn(p);
         if (arp.parseRequest(got.frame)) |req| {
             if (eql(&req.target_ip, &ip)) {
                 var out: [64]u8 = undefined;

@@ -18,8 +18,14 @@
 //! kernel. What it does is judged by metal-vmm's sleeps.sh from its lines,
 //! `period_ms = 5000` read from its conf included.
 //!
-//! The period is `period_ms = N` in `sleeper.conf` in its data folder, 60000
-//! when there is none: a test chooses it, the code does not.
+//! Its conf is `sleeper.conf` in its data folder, a setting a line, every one
+//! optional: `period_ms = N` (60000 when absent), and `fetch = <ip>:<port>
+//! <path>`, a GET at each wake through the host (`host_fetch`), whose end is
+//! a line too:
+//!
+//!     fetch 3 ok 200 1185 at 180004000412
+//!
+//! A test chooses them; the code does not.
 
 const std = @import("std");
 const Io = @import("host_io").Io;
@@ -53,14 +59,30 @@ var lost: u64 = 0;
 /// For a line's path and text: a wake holds nothing past its call.
 var scratch: [4096]u8 = undefined;
 
+/// What it fetches at each wake, if `fetch = <ip>:<port> <path>` says.
+var target: ?webbox.host_fetch.Target = null;
+var target_path: [128]u8 = undefined;
+/// Each fetch's bounds: generous for a test's wire, short for a dead one.
+const deadlines: webbox.host_fetch.Deadlines = .{ .connect_ms = 150, .idle_ms = 1000, .total_ms = 3000 };
+
 pub fn setup(io: Io, base: std.mem.Allocator, roots: ?webbox.site.Roots) !StartReport {
     if (roots) |r| data_root = r.data_dir;
     try webbox.store.makeDir(io, base, data_root);
     wakes_path = try std.fmt.allocPrint(base, "{s}/wakes.txt", .{data_root});
     const conf_path = try std.fmt.allocPrint(base, "{s}/sleeper.conf", .{data_root});
     var ms: u64 = default_period_ms;
-    if (webbox.store.read(io, base, conf_path, .limited(256))) |text| {
-        ms = periodOf(text) orelse return error.BadSleeperConf;
+    if (webbox.store.read(io, base, conf_path, .limited(512))) |text| {
+        var lines = std.mem.splitScalar(u8, text, '\n');
+        while (lines.next()) |raw| {
+            const line = std.mem.trim(u8, raw, " \t\r");
+            if (line.len == 0) continue;
+            if (valueOf(line, "period_ms")) |v| {
+                ms = std.fmt.parseInt(u64, v, 10) catch return error.BadSleeperConf;
+                if (ms == 0) return error.BadSleeperConf;
+            } else if (valueOf(line, "fetch")) |v| {
+                target = targetOf(v) orelse return error.BadSleeperConf;
+            } else return error.BadSleeperConf;
+        }
     } else |e| switch (e) {
         error.FileNotFound => {},
         else => return e,
@@ -69,27 +91,48 @@ pub fn setup(io: Io, base: std.mem.Allocator, roots: ?webbox.site.Roots) !StartR
     return .{ .period_ms = ms, .data_dir = data_root };
 }
 
-/// `period_ms = N`, N above zero; null for anything else.
-fn periodOf(text: []const u8) ?u64 {
-    const line = std.mem.trim(u8, text, " \t\r\n");
-    const prefix = "period_ms";
-    if (!std.mem.startsWith(u8, line, prefix)) return null;
-    const rest = std.mem.trim(u8, line[prefix.len..], " \t");
+/// `name = value`'s value, or null for another name.
+fn valueOf(line: []const u8, name: []const u8) ?[]const u8 {
+    if (!std.mem.startsWith(u8, line, name)) return null;
+    const rest = std.mem.trim(u8, line[name.len..], " \t");
     if (rest.len == 0 or rest[0] != '=') return null;
-    const n = std.fmt.parseInt(u64, std.mem.trim(u8, rest[1..], " \t"), 10) catch return null;
-    return if (n == 0) null else n;
+    return std.mem.trim(u8, rest[1..], " \t");
 }
 
-pub fn between(io: Io, now: webbox.site.Now) webbox.site.Wake {
-    const at = due orelse now.awake_ns;
-    if (now.awake_ns < at) return .{ .at = at };
-    count += 1;
+/// `10.0.2.15:80 /path`.
+fn targetOf(v: []const u8) ?webbox.host_fetch.Target {
+    const space = std.mem.indexOfScalar(u8, v, ' ') orelse return null;
+    const where = v[0..space];
+    const path = std.mem.trim(u8, v[space..], " \t");
+    const colon = std.mem.indexOfScalar(u8, where, ':') orelse return null;
+    var ip: [4]u8 = undefined;
+    var parts = std.mem.splitScalar(u8, where[0..colon], '.');
+    for (&ip) |*b| b.* = std.fmt.parseInt(u8, parts.next() orelse return null, 10) catch return null;
+    if (parts.next() != null or path.len == 0 or path.len > target_path.len) return null;
+    @memcpy(target_path[0..path.len], path);
+    return .{ .ip = ip, .port = std.fmt.parseInt(u16, where[colon + 1 ..], 10) catch return null, .path = target_path[0..path.len] };
+}
+
+/// A line on its disk and the host's console.
+fn note(io: Io, comptime fmt: []const u8, args: anytype) void {
     var fba = std.heap.FixedBufferAllocator.init(&scratch);
-    const line = std.fmt.allocPrint(fba.allocator(), "wake {d} due {d} at {d} unix {d} lost {d}\n", .{ count, at, now.awake_ns, now.unix_s, lost }) catch unreachable;
+    const line = std.fmt.allocPrint(fba.allocator(), fmt ++ "\n", args) catch unreachable;
     _ = webbox.store.append(io, fba.allocator(), wakes_path, line) catch {
         lost += 1;
     };
     webbox.host_facts.say(std.mem.trimEnd(u8, line, "\n"));
+}
+
+pub fn between(io: Io, now: webbox.site.Now) webbox.site.Wake {
+    // A fetch that ended since the last call: its line, at once.
+    if (webbox.host_fetch.result()) |r| {
+        note(io, "fetch {d} {t} {d} {d} at {d}", .{ count, r.outcome, r.status, r.body.len, now.awake_ns });
+    }
+    const at = due orelse now.awake_ns;
+    if (now.awake_ns < at) return .{ .at = at };
+    count += 1;
+    note(io, "wake {d} due {d} at {d} unix {d} lost {d}", .{ count, at, now.awake_ns, now.unix_s, lost });
+    if (target) |t| webbox.host_fetch.start(t, deadlines) catch |e| note(io, "fetch {d} not started: {t}", .{ count, e });
     due = webbox.site.periodAfter(at, period_ns, now.awake_ns);
     return .{ .at = due.? };
 }

@@ -606,6 +606,13 @@ pub fn kmain() noreturn {
     };
     var table = tcp.Table.init(lease.address, nic.mac, 80, &conn_slots, &tcp_out, isn);
     serving_table = &table;
+    // **ONE SLOT IS THE MACHINE'S OWN** (the application's fetch, host_fetch):
+    // a flood of SYNs cannot take it. And its ports start where a draw says,
+    // as probe/fetch.zig's do, not at the same port every boot.
+    table.reserved_for_initiated = 1;
+    table.ephemeral_next = @intCast(tcp.ephemeral_first + rng.int(u16) % (0xFFFF - tcp.ephemeral_first));
+    fetching = .{ .our_ip = lease.address, .our_mac = nic.mac, .mask = lease.mask };
+    stream.on_arp = fetchLearned;
     var wire = stream.Wire{ .nic = &nic, .lose_one_sent_in = conf.lose_one_sent_in };
     if (conf.lose_one_sent_in != 0) {
         serial.put("  losing one TCP frame in ");
@@ -635,6 +642,7 @@ pub fn kmain() noreturn {
         .log = metalLog,
         .logs = metalLogs,
         .say = metalSay,
+        .fetch = .{ .start = fetchStart, .result = fetchResult },
     }) catch |e| {
         serial.put("  ");
         serial.put(@errorName(e));
@@ -724,6 +732,7 @@ pub fn kmain() noreturn {
         const arrived = stream.pump(&wire, &table, lease.address);
         sleeps.turned(arrived != null);
         const now = Io.awakeNs() orelse 0;
+        fetchStep(&table, &wire, now);
         if (arrived != null) idle_work.busy(now);
         if (nextReady(io, &wire, &table, now)) |pick| {
             served += 1;
@@ -746,7 +755,7 @@ pub fn kmain() noreturn {
             // come. A request that arrives meanwhile is served first, on the
             // next turn; and the network turns before any rest, for what the
             // call queued.
-            if (Sleep.betweenDue(now, between.wake, false)) {
+            if (Sleep.betweenDue(now, between.wake, fetching.news)) {
                 betweenSlice(io);
                 continue;
             }
@@ -934,6 +943,10 @@ fn quiet(table: *tcp.Table, now: i96, idle_ns: u64) ?usize {
     var best: ?usize = null;
     for (table.conns, 0..) |*c, i| {
         if (c.claimed or !c.open()) continue;
+        // **THE MACHINE'S OWN CONNECTIONS ARE ITS CLIENT'S** (the application's
+        // fetch): bounded by their own deadlines (`tcp.Deadlines`), never let
+        // go as a silent request would be, behind the client's back.
+        if (c.role == .initiated) continue;
         // A body coming after a whole head is the rule's to end, with a 408
         // at its deadline (nextReady), not let go unanswered.
         // A body coming, draining, or waiting for an upload slot is the
@@ -2133,6 +2146,8 @@ const between_target_ns: u64 = 50 * std.time.ns_per_ms;
 fn betweenSlice(io: Io) void {
     const from = awakeNow();
     const unix: i64 = @intCast(@divFloor(Io.Clock.now(.real, io).nanoseconds, std.time.ns_per_s));
+    // The fetch's end is news only until between has been called with it.
+    fetching.news = false;
     between.wake = app.site.between(io, .{ .awake_ns = from, .unix_s = unix });
     const took: u64 = @intCast(@max(0, awakeNow() - from));
     between.calls += 1;
@@ -2141,6 +2156,92 @@ fn betweenSlice(io: Io) void {
 }
 var volume_checks: [2]?metal.idle_check.VolumeCheck = .{ null, null };
 const volume_check_names = [2][]const u8{ "the boot disk's check", "the volume's check" };
+
+/// **THE APPLICATION'S FETCH** (webbox's `host_fetch`, DESIGN-sleep.md chunk
+/// 5): one GET at a time, by the kernel's own client in the serving table.
+/// `start` only records it; each turn of the main loop steps the client after
+/// the network's turn (which hands the table its frames, the client its ARP,
+/// and transmits). Its end is news: `between` is due at once, whatever the
+/// application's wake. On-link only: a target off the lease's network is
+/// `no_route` at once.
+const Fetching = struct {
+    client: ?metal.fetch.Client = null,
+    our_ip: [4]u8 = .{ 0, 0, 0, 0 },
+    our_mac: [6]u8 = .{ 0, 0, 0, 0, 0, 0 },
+    mask: [4]u8 = .{ 0, 0, 0, 0 },
+    /// The target's path, the client's to point at.
+    path: [256]u8 = undefined,
+    kept: [webbox.host_fetch.body_most]u8 = undefined,
+    body_len: usize = 0,
+    too_long: bool = false,
+    ended: ?webbox.host_fetch.Result = null,
+    /// A fetch ended and `between` has not been called since.
+    news: bool = false,
+
+    /// The client's sink: the body kept up to `body_most`, and past it, said.
+    pub fn body(self: *Fetching, bytes: []const u8) void {
+        const room = self.kept.len - self.body_len;
+        if (bytes.len > room) self.too_long = true;
+        const n = @min(room, bytes.len);
+        @memcpy(self.kept[self.body_len..][0..n], bytes[0..n]);
+        self.body_len += n;
+    }
+
+    fn end(self: *Fetching, outcome: webbox.host_fetch.Outcome, status: u16) void {
+        self.client = null;
+        self.ended = .{ .outcome = outcome, .status = status, .body = self.kept[0..self.body_len] };
+        self.news = true;
+    }
+};
+var fetching: Fetching = .{};
+
+fn fetchStart(target: webbox.host_fetch.Target, d: webbox.host_fetch.Deadlines) error{Busy}!void {
+    if (fetching.client != null) return error.Busy;
+    fetching.ended = null;
+    fetching.body_len = 0;
+    fetching.too_long = false;
+    for (target.ip, fetching.our_ip, fetching.mask) |a, b, m| {
+        if (a & m != b & m) return fetching.end(.no_route, 0);
+    }
+    const n = @min(target.path.len, fetching.path.len);
+    @memcpy(fetching.path[0..n], target.path[0..n]);
+    const ms = std.time.ns_per_ms;
+    fetching.client = metal.fetch.Client.init(
+        .{ .ip = target.ip, .port = target.port, .path = fetching.path[0..n] },
+        .{ .connect_ns = @as(u64, d.connect_ms) * ms, .idle_ns = @as(u64, d.idle_ms) * ms, .total_ns = @as(u64, d.total_ms) * ms },
+        fetching.our_ip,
+        fetching.our_mac,
+        awakeNow(),
+    ) catch return fetching.end(.bad_answer, 0); // a path too long for the request
+}
+
+fn fetchResult() ?webbox.host_fetch.Result {
+    const r = fetching.ended orelse return null;
+    fetching.ended = null;
+    return r;
+}
+
+fn fetchLearned(p: metal.arp.Packet) void {
+    if (fetching.client) |*c| c.learned(p);
+}
+
+/// One step of the application's fetch, if one runs.
+fn fetchStep(table: *tcp.Table, wire: *stream.Wire, now: i96) void {
+    const c = if (fetching.client) |*c| c else return;
+    const o = c.step(table, wire, now, &fetching) orelse return;
+    const status = c.answer.status;
+    fetching.end(if (fetching.too_long) .too_long else hostOutcome(o), status);
+}
+
+/// The kernel's client's word, as webbox says it: every one has its twin.
+fn hostOutcome(o: metal.fetch.Outcome) webbox.host_fetch.Outcome {
+    comptime for (std.enums.values(metal.fetch.Outcome)) |k| {
+        if (!@hasField(webbox.host_fetch.Outcome, @tagName(k))) @compileError("webbox's host_fetch has no outcome " ++ @tagName(k));
+    };
+    return switch (o) {
+        inline else => |k| @field(webbox.host_fetch.Outcome, @tagName(k)),
+    };
+}
 
 /// An application's line (webbox's `host_facts.say`), on the console with
 /// the machine's own, so in the kept log and /admin/log too.
@@ -2170,7 +2271,7 @@ fn restOrSleep(table: *const tcp.Table, now: i96, longest_ns: u64) void {
         .draining = draining_now,
         .drains_holding = drainsHolding(),
         .console_pending = serial.pending(),
-        .fetching = false,
+        .fetching = fetching.client != null,
         .wants_more = between.wake == .more,
     };
     const still = metal.sleep.quiescent(facts);
