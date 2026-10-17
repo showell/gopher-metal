@@ -173,9 +173,8 @@ pub fn build(b: *std.Build) void {
     build_opts.addOption([]const u8, "commit", commitOf(b, gopher_root));
     const gm_opts = b.addOptions();
     gm_opts.addOption([]const u8, "commit", commitOf(b, b.pathFromRoot(".")));
-    // **OFF UNTIL A DROPLET HAS BEEN MEASURED** (QUEUE.md item 16's hard
-    // rule): a guest's reset must restart a real droplet, not power it off,
-    // before any deployed image restarts itself. -Drestart=true builds it in.
+    // **ON BY DEFAULT** (RESTART.md): a guest's reset restarts a real
+    // droplet, measured 2026-10-03; -Drestart=false halts instead.
     gm_opts.addOption(bool, "restart", b.option(bool, "restart", "gopher.elf restarts on a failure while serving (RESTART.md; measured on a real droplet 2026-10-03); -Drestart=false halts instead") orelse true);
     // **COVERAGE PROPERTIES ON THE SERIAL PORT** (COVERAGE.md): off in
     // anything deployed, where the declarations alone would fill the log
@@ -952,7 +951,7 @@ fn commitOf(b: *std.Build, dir: []const u8) []const u8 {
 /// build stops and names both. Moving the SDK is moving this line, in the
 /// same commit as whatever needed the move.
 /// `-Dcoverage-sdk-unpinned` builds against any commit, and says so.
-const coverage_sdk_pin = "177e34981a78f62206ef38957d2b40b5472064ad";
+const coverage_sdk_pin = "b40b00c7ef2bd1b16adb8b3f399e9ebc457c38bb";
 
 fn pinnedSdk(b: *std.Build, sdk_path: []const u8) void {
     const unpinned = b.option(bool, "coverage-sdk-unpinned", "build against whatever commit ../zig-coverage-sdk holds, not the one build.zig pins") orelse false;
