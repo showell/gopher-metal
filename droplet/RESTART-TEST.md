@@ -1,7 +1,7 @@
 # Does a reset restart a droplet? A test for Steve, at the console
 
 > **DONE (2026-10-03): a reset restarts a droplet.** The restart has been
-> on by default since (`9a337ca`, served from `v29`). This page is kept as
+> on by default since (`9a337ca`, in every release from `v17` on). This page is kept as
 > the test that decided it, and to run again on another provider.
 
 RESTART.md's open question, and QUEUE.md item 16's condition. zig-metal-unikernel

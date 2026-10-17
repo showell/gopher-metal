@@ -1,64 +1,49 @@
 # Restarting on failure while serving
 
-**ON BY DEFAULT, AND SERVED** (since 2026-10-03, `9a337ca`; served since
-`v29`). A droplet's reset was measured to restart it
-([droplet/RESTART-TEST.md](droplet/RESTART-TEST.md), the test that
-decided it), and gopher.elf restarts on a failure while serving unless
-built with `-Drestart=false`. Since metal-vmm QUEUE 198.3 a disk that
-stops answering restarts it too (see "Two kinds of failure"). What
-follows was written before the switch; where it says "off", read the
-history of how it was turned on.
+**On by default, and served** (`9a337ca`, in every release from v17 on:
+`git tag --contains 9a337ca`). A droplet's reset was measured to restart it
+([droplet/RESTART-TEST.md](droplet/RESTART-TEST.md), the test that decided
+it), and gopher.elf restarts on a failure while serving unless built with
+`-Drestart=false`. A disk that stops answering restarts it too (see "Two
+kinds of failure").
 
-> **Status (QUEUE.md item 16), as it stood before 2026-10-03: built, and
-> off in every deployed image.**
->
-> - **What is built:**
->   - `src/restart.zig` (the record and the back-off, host-tested);
->   - `src/kept_log.zig` (two slots past the kernel, host-tested);
->   - `src/reset.zig` (the three methods);
->   - `src/restarting.zig`, the glue: `serial.on_fatal`, set by
->     `serving()`, routes `serial.fail` and the panic handler to the restart.
-> - **gopher.elf** built it in only with `-Drestart=true`, until the box
->   Claude and Steve measured, on a real droplet, that a guest's reset
->   restarts it rather than powering it off. They did, and it is the
->   default now.
-> - **`probe/backoff.elf`** (`probe/run.sh backoff`) runs it end to end,
->   measured here under TCG on three machines (QEMU's `pc`; the
->   droplet-shaped boot through SeaBIOS and our loader, on dirty RAM; and
->   `microvm`):
->   - four restarts in a row, each next boot finding the record counting
->     them and the boot before's kept log ending with its reason;
->   - then the back-off, and serving again.
->
-> The design below is what was built, with two refinements:
-> - **The 10-minute clause is gone.** A boot after a restart always follows
->   it within seconds, so the back-off depends only on the count of
->   restarts in a row.
-> - **The record lives at CMOS `0x70`–`0x77`.** That is past the last byte
->   SeaBIOS (`0x5F`) or QEMU's `pc_cmos_init` (`0x5D`) uses.
+**What is built:**
+- `src/restart.zig` (the record and the back-off, host-tested);
+- `src/kept_log.zig` (two slots past the kernel, host-tested);
+- `src/reset.zig` (the three methods);
+- `src/restarting.zig`, the glue: `serial.on_fatal`, set by `serving()`,
+  routes `serial.fail` and the panic handler to the restart.
 
-The rest of this page is the design, as written before it was built (QUEUE.md
-item 7). The status above says where the build differs. The measurements
-come from `probe/restart.elf` (below), run on QEMU 8.2 under TCG in the
-cloud container.
+**`probe/backoff.elf`** (`probe/run.sh backoff`) runs it end to end, on
+QEMU's `pc`, on the droplet-shaped boot through SeaBIOS and our loader on
+dirty RAM, and on `microvm`: four restarts in a row, each next boot finding
+the record counting them and the boot before's kept log ending with its
+reason; then the back-off, and serving again.
 
-## What happens today
+The design below is what was built, with two refinements:
+- **There is no 10-minute clause.** A boot after a restart always follows
+  it within seconds, so the back-off depends only on the count of restarts
+  in a row.
+- **The record lives at CMOS `0x70`–`0x77`.** That is past the last byte
+  SeaBIOS (`0x5F`) or QEMU's `pc_cmos_init` (`0x5D`) uses.
 
-Every fatal path ends in `serial.exitQemu`: a write to the exit door at port
-`0xF4`, then `hlt` for ever.
+The rest of this page is the design as written before it was built (old
+QUEUE.md item 7). The measurements come from `probe/restart.elf` (below),
+run on QEMU 8.2 under TCG in the cloud container.
 
-- **The paths:** `serial.fail`, the kernel's `panic` (every `@panic`, and
-  every safety check in ReleaseSafe: an index out of bounds, an overflow, an
-  unwrapped null), and `interrupts.gm_exception` (a page fault, a #GP, a
-  double fault).
-- **Under QEMU** the door ends the run, which is what the judges want.
-- **On a droplet** the door is not there. The write goes nowhere, and the
-  machine sits halted until Steve reboots it by hand. A bug that one request
-  can reach takes the site down until then.
+## The fatal paths
+
+`serial.fail`, the kernel's `panic` (every `@panic`, and every safety check
+in ReleaseSafe: an index out of bounds, an overflow, an unwrapped null), and
+`interrupts.gm_exception` (a page fault, a #GP, a double fault). A path that
+halts ends in `serial.exitQemu`: a write to the exit door at port `0xF4`,
+then `hlt` for ever. Under QEMU the door ends the run, which is what the
+judges want; on a droplet the door is not there, and the machine sits
+halted until someone reboots it.
 
 ## Two kinds of failure
 
-*(Added 2026-10-13, metal-vmm QUEUE 198.3.)* **A disk that stops answering
+*(metal-vmm QUEUE 198.3.)* **A disk that stops answering
 while serving restarts the machine** too (`restart.disk_ended`, one
 constant, `.serve_refusing` to overrule it): it answers nothing again until
 the device is reset, and a boot is what resets it. Its record says "a disk
@@ -76,7 +61,7 @@ meet it again:
 - not enough memory for its connections;
 - a FAT that cannot be held.
 
-`probe/gopher.zig` has about 30 such `serial.fail` calls. Restarting on any
+Every `serial.fail` that `probe/gopher.zig` reaches before `serving` is one. Restarting on any
 of them would turn one clear message into a loop of them, and the console
 shows the screen, which would scroll the reason away. Halting with the
 reason on the screen is the right answer, and it stays.
