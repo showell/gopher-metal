@@ -1,23 +1,19 @@
 # Design: a kernel that sleeps until it is needed
 
 metal-vmm QUEUE 228.1, and the part of 228.3 that shapes it. **Status:
-design after three cold reviews** (the box, 2026-10-17), waiting on Steve's
-two decisions (below), both now taken. **Built so far:** chunk 1 (the pure
-decisions, `src/sleep.zig`, and webbox's `Wake`) and chunk 2 (the sleep on
-metal, `longest_rest_ms`, the sleeper, metal-vmm's `sleeps.sh`) chunk 3
-(the real-timer check, `droplet/sleeps.py`; rests classified by handler) and
-chunk 4 (Linux's between thread on a doorbell) and chunks 5 and 6 (the
-host's fetch, metal and Linux). An idle
+built, every chunk (the table in "The order of work"), on `master`; not in
+a release yet** (`git tag --contains <commit>` says when it is). An idle
 gopher.elf's 60 s went from 307,564 exits to 6,781, and from 37,605 halts to
 8.
 
 ## What it is for
 
 The Observatory wakes every 60 s, fetches Dog Park's `/version`, writes a
-line, and sleeps. Today no application can ask for that: a site's `between`
-answers only "more" or "nothing", and the kernel's idle loop never halts for
-longer than `interrupts.slice_ns` (1 ms), because waking every millisecond is
-how it notices every timer it keeps.
+line, and sleeps. Before this design no application could ask for that: a
+site's `between` answered only "more" or "nothing", and the kernel's idle
+loop never halted for longer than `interrupts.slice_ns` (1 ms), because
+waking every millisecond was how it noticed every timer it keeps. The busy
+machine still works that way (phase 1, below).
 
 **The goal, in Steve's words:** Linux and bare metal function the same; most
 tests simulate time; a few measure real sleep in wall time; and "sleeping

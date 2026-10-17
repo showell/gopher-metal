@@ -2,7 +2,7 @@
 
 Adversarial reviews, each in `REVIEW-interrupts.md`'s shape: what holds up,
 findings by severity with the failure each causes and how likely it is, fix
-shapes, and nothing fixed in the review itself (CLOUD.md's "Limits"). Code
+shapes, and nothing fixed in the review itself (metal-vmm's `CLOUD_WORK.md`, "Limits"). Code
 and scripts cite these by filename and finding number ("REVIEW-restart-fat32.md
 F1").
 

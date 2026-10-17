@@ -1,9 +1,11 @@
 # The Store: one seam for the application's data
 
-*2026-10-07. The unified interface: webbox's `store.zig` (zig-webbox `src/`, until 2026-10-13 angry-gopher's `zig-server/src`)
-is the seam production runs, and the contract below is what every host
-implementation keeps. Essay: notes/where-the-metal-stack-stands.md, "The
-Store". The census of what the application calls: STORE-CENSUS.md.*
+*The unified interface: webbox's `store.zig` (zig-webbox `src/`) is the
+seam production runs, and the contract below is what every host
+implementation keeps. Essay:
+[where the metal stack stands](https://github.com/showell/essay-repl-server/blob/master/notes/where-the-metal-stack-stands.md), "The
+Store". The census of what the application called, at angry-gopher
+`f5d360e`: `git show 63afeb0:STORE-CENSUS.md`.*
 
 ## Where it lives
 
@@ -11,12 +13,12 @@ Store". The census of what the application calls: STORE-CENSUS.md.*
 |---|---|---|
 | **the seam** | the eleven operations below | zig-webbox `src/store.zig` |
 | **on Linux** | that file over `std.Io` | as written |
-| **on metal** | that file over this repo's `io.zig` and `fat16` | the port's copy (`port.sh`), `Io = metal.io` |
+| **on metal** | that file, built from `../zig-webbox`, over this repo's `io.zig` and `disk_fat.zig` | `Io = metal.io` |
 | **the model** | the oracle: plain, in memory | `src/store_model.zig` |
 | **the judge** | all three, the same seeded operations, the same answers | `src/store_judge.zig`, `zig build store-judge`: all eleven operations, 200 seeds; no power cuts or full volumes yet |
 
 zig-metal-unikernel's own `store.zig`, `store_fat.zig` and `store_linux.zig` are
-where this contract was first written and proven against `fat16`
+where this contract was first written and proven against `disk_fat.zig`
 (`store_sim`). They stay until the judge covers what they cover, power cuts
 included; then the model is what remains of them.
 

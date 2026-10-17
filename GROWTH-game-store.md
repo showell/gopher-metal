@@ -1,7 +1,9 @@
 # The game store's disk growth: options for Steve
 
-QUEUE.md item 26, from docs/reviews/REVIEW-request-paths.md finding 6. There is no code
-in this note. It was measured on angry-gopher at CC's branch `4233a319`.
+Old QUEUE.md item 26, from docs/reviews/REVIEW-request-paths.md finding 6. There is no code
+in this note. It was measured on angry-gopher at CC's branch `4233a319`, and
+its line references are that commit's. The bug it ends with (concurrent
+appends lost) is fixed in angry-gopher `ab67e590`, which serializes them.
 
 ## What grows, and what each request costs
 

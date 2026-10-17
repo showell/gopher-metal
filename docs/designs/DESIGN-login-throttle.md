@@ -1,6 +1,8 @@
-# Design: limiting password guesses (options, no code)
+# Design: limiting password guesses (the options)
 
-QUEUE.md item 93. **Nothing limits login attempts today**, on Linux or on
+Old QUEUE.md item 93. **Built** as angry-gopher's `login_throttle.zig`
+(ec49fe1e, its QUEUE item 97). What follows is the problem as it stood and
+the options weighed. **Before the throttle nothing limited login attempts**, on Linux or on
 metal: `/login/full` calls `users.checkUserPassword` (login.zig:127, :148) for
 every try, and that is a bcrypt verify at **cost 10** (auth.zig:26) — tens of
 milliseconds of CPU each. So an unlimited guesser is two problems at once:

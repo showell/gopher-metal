@@ -1,8 +1,7 @@
-# Design: pictures in the page cache (QUEUE.md item 102, picture lever 1)
+# Design: pictures in the page cache (old QUEUE.md item 102, picture lever 1)
 
-**On a branch; it does not merge until after the cutover** (Steve: the picture
-levers wait). The box measures the cap under KVM against prod's real picture
-sizes and sets it before this merges.
+**Merged** (77230af). The cap is the config key `page_cache_largest_kib`
+(`probe/gopher.zig`, its key list and its default).
 
 Item 90 left one stall that matters: a big picture read whole on each request,
 **30-39 MB/s on v14** against Linux's 280-470. The page cache (`page_cache.zig`,
