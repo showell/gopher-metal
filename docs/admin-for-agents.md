@@ -142,11 +142,20 @@ From the top:
      A damaged IP header should stay at zero (damage on the way in);
      fragments mean a sender's MTU is wrong somewhere; growing "not TCP"
      or "for another address or port" is misrouting or a scan.
-   - **Rests**: how often the processor slept between frames, and how
-     many of those sleeps a device ended early (a frame arrived, or a
-     buffer was taken back). Ended early far more often than frames
-     arrive is a device interrupting with nothing to say: an interrupt
-     storm, which looks like a busy processor otherwise.
+   - **Rests**: how often the processor halted, how many of those halts
+     the network card's interrupt ended (a frame arrived, or a buffer was
+     taken back), and how many neither the timer nor the card did (an
+     NMI, a spurious interrupt: should stay near zero). Ended by the card
+     far more often than frames arrive is a device interrupting with
+     nothing to say: an interrupt storm, which looks like a busy
+     processor otherwise. Each is read off the interrupt's own handler.
+   - **Sleeps**: the rests of a machine with nothing in motion, which
+     last until the application's next wake or `longest_rest_ms` (10 s)
+     (docs/designs/DESIGN-sleep.md): how many, how many the card ended,
+     how many ran the whole longest rest, how many neither ended, and
+     **missed wakes**: a sleep the timer ended after which a frame was
+     waiting, one whose interrupt never came. Any missed wake is worth a
+     look: it is a request that waited up to the longest rest.
    - **Restarted**: "no", or what ended the boot before this one ("a
      failure", "a panic", "a disk that stopped answering"), how many
      restarts in a row, and when. The boot before's last lines, the disk's

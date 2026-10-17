@@ -17,14 +17,19 @@ host's own monotonic clock:
   wakes: fewer than 200 rests across them, where the 1 ms slice would be
   about 4,000; a sleep between each two (a machine never armed pauses and
   counts no rest at all); and no missed wake;
-- **a frame wakes a sleep**: five requests, each connected within 50 ms. A
-  card whose interrupt did not wake the machine would answer at the next
-  wake, 250 ms on average;
+- **a frame wakes a sleep**: five requests, each sent 150-350 ms into a
+  sleep (timed from the wake line before it), each answered, its first
+  byte back, within 50 ms, and five more sleeps ended by the card. A card
+  whose interrupt did not wake the machine would answer at the next wake,
+  150-350 ms on. (Not the connect: QEMU's user network finishes the host's
+  handshake itself, before the guest hears a thing);
+- **nothing else ends a rest**: none by neither the timer nor the card,
+  and no missed wake, to the end;
 - **the guest's clock against the host's**: the guest's own times for the
   same wakes, as parts per million of skew. Reported, not judged: it is
   the PIT calibration's error, a droplet's real drift.
 
-About 6 s. Exit 0 when every check holds; 1 otherwise, naming each; 2 when it
+About 10 s. Exit 0 when every check holds; 1 otherwise, naming each; 2 when it
 cannot run.
 """
 import os
@@ -60,12 +65,12 @@ class Unarmed(Exception):
 def facts(port):
     with urllib.request.urlopen(f"http://127.0.0.1:{port}/facts", timeout=5) as r:
         text = r.read().decode()
-    rests = re.search(r"^rests: (\d+),", text, re.M)
-    sleeps = re.search(r"^sleeps: (\d+) while quiescent, (\d+) ended by a device, (\d+) by the longest rest \((\d+) ms\), (\d+) missed wakes", text, re.M)
+    rests = re.search(r"^rests: (\d+), (\d+) of them ended by a device, (\d+) by neither the timer nor the card", text, re.M)
+    sleeps = re.search(r"^sleeps: (\d+) while quiescent, (\d+) ended by a device, (\d+) by the longest rest \((\d+) ms\), (\d+) by neither the timer nor the card, (\d+) missed wakes", text, re.M)
     if not rests or not sleeps:
         # A machine that never armed its interrupts says neither: it never rests.
         raise Unarmed(text)
-    return {"rests": int(rests[1]), "sleeps": int(sleeps[1]), "by_device": int(sleeps[2]), "missed": int(sleeps[5])}
+    return {"rests": int(rests[1]), "other": int(rests[3]), "sleeps": int(sleeps[1]), "by_device": int(sleeps[2]), "missed": int(sleeps[6])}
 
 
 def main():
@@ -162,21 +167,31 @@ def judge(qemu, lines, wakes, port, failed, began):
         print(f"  FAIL asleep: {rests} rests and {slept} sleeps across {WAKES} wakes (want under 200, and at least {WAKES - 1}), {after['missed']} missed wakes (want 0)")
     else:
         print(f"  asleep: {rests} rests across {WAKES} wakes, {after['sleeps'] - before['sleeps']} sleeps, no missed wake")
-    connects = []
+    answers = []
     for k in range(5):
-        time.sleep(0.137 * (k + 1))  # somewhere inside a sleep
+        # Into a sleep at a known depth: 150, 200, ... 350 ms after a wake.
+        seen = len(wakes)
+        while len(wakes) == seen and time.monotonic() < deadline:
+            time.sleep(0.005)
+        woke_ns = wakes[-1][0]
+        time.sleep(max(0.0, (woke_ns + (150 + 50 * k) * 1_000_000 - time.monotonic_ns()) / 1e9))
         t0 = time.monotonic()
         with socket.create_connection(("127.0.0.1", port), timeout=5) as s:
-            connects.append((time.monotonic() - t0) * 1000)
             s.sendall(b"GET / HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n")
-            while s.recv(65536):
+            first = s.recv(1)
+            answers.append((time.monotonic() - t0) * 1000)
+            while first and s.recv(65536):
                 pass
     last = facts(port)
-    if max(connects) >= 50 or last["by_device"] <= after["by_device"]:
+    devices = last["by_device"] - after["by_device"]
+    if max(answers) >= 50 or devices < 5:
         failed.append("woken")
-        print(f"  FAIL woken: connects (ms) {', '.join(f'{c:.1f}' for c in connects)} (want each under 50), sleeps a device ended {after['by_device']} then {last['by_device']}")
+        print(f"  FAIL woken: first bytes back (ms) {', '.join(f'{a:.1f}' for a in answers)} (want each under 50), {devices} sleeps ended by the card (want at least 5)")
     else:
-        print(f"  woken: 5 requests into sleeps, connected in {max(connects):.1f} ms at most; {last['by_device'] - after['by_device']} sleeps ended by a device")
+        print(f"  woken: 5 requests 150-350 ms into sleeps, answered in {max(answers):.1f} ms at most; {devices} sleeps ended by the card")
+    if last["other"] != before["other"] or last["missed"] != 0:
+        failed.append("other")
+        print(f"  FAIL other: {last['other'] - before['other']} rests ended by neither the timer nor the card, {last['missed']} missed wakes (want 0 and 0)")
     print(f"time: {time.monotonic() - began:.1f} s")
     if failed:
         print(f"SLEEPS (QEMU): FAIL ({' '.join(failed)})")

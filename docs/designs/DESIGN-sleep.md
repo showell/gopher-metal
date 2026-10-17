@@ -285,24 +285,38 @@ Builds are their own number; the times are test wall time.
 
 `droplet/sleeps.py` (tier 1, about 10 s): the sleeper waking every 500 ms on
 the droplet-shaped machine under KVM, each wake said on the console
-(webbox's `host_facts.say`) and timed on the host's clock. First runs
-(2026-10-17):
+(webbox's `host_facts.say`) and timed on the host's clock:
+- the gaps between wakes, on the host's clock;
+- the rests and sleeps across them (`/facts`);
+- five requests sent 150-350 ms into a sleep, each timed to its first byte
+  back;
+- nothing ending a rest but the timer and the card, and no missed wake.
+
+First runs (2026-10-17):
 - host gaps 497.7-501.6 ms;
 - 12 rests across 8 wakes, where the slice would be about 4,000;
-- requests into a sleep connected in 0.2-0.3 ms;
 - the guest's clock against the host's -180, -121 and +31 ppm on three
   boots, reported and not judged.
 
-Red against a kernel never armed (it pauses and counts no rest) and one whose
-sleeps all ran to the longest rest.
+It is red against a kernel never armed (which pauses and counts no rest) and
+one whose sleeps all ran to the longest rest. (Round 5's review: the first
+version timed the requests' connects, which QEMU's user network completes on
+the host by itself, so they said nothing about the guest.)
 
 **What ended a rest is read off the handlers now, not the clock.** The timer
 and the card each have a stub that counts before the shared end of interrupt
 (`gm_irq_timer`, `gm_irq_wake`), and a halt compares the counts
-(`rest_count.ended`). A frame raised with the deadline waits behind the
-timer's higher vector, so a timer-ended halt also reads the card's IRR bit.
-Before, a timer KVM delivered a hair early counted as a device's, and the
-missed-wake count went blind.
+(`rest_count.ended`). Before, a timer KVM delivered a hair early counted as a
+device's, and the missed-wake count went blind.
+
+**What is already raised is taken before the halt** (`sti; nop; cli`). That
+covers a slice's deadline that fired during the work after it, and a frame
+since the last turn. The stale timer is no one's; the frame ends the rest
+without a halt, as the card's. After the halt, the handler's `iretq` turns
+interrupts on until the `cli`, so whatever was raised with what ended it is
+taken and counted there. (A first version read the card's bit in the APIC's
+IRR after a timer-ended halt, reasoning that the timer's higher vector held
+the card's back; it does not, past the `iretq`.)
 
 ## Phase 2, for later
 
@@ -378,3 +392,14 @@ All taken, except the two decisions for Steve.
 - the sleeper's swallowed write failures.
 
 All taken; the rest's classification in chunk 3.
+
+**Round 5** (a cold review of chunk 3's code) found:
+- the connects that measured QEMU, not the guest;
+- the IRR reasoning (above);
+- a stale timer ending the next rest at once, counted as its deadline;
+- missed wakes watched only after a longest rest, so never in the real-time
+  check;
+- rests ended by neither handler uncounted;
+- stale wording in docs/admin-for-agents.md.
+
+All taken.

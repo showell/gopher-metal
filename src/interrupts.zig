@@ -4,12 +4,14 @@
 //! frames in and out, need a turn on the processor we never give back. A
 //! guest that halts gives it back, and an interrupt is what wakes it.
 //!
-//! The machine runs with interrupts OFF, as it always has. `rest` turns them on
-//! for exactly one instruction — `sti; hlt` — so an interrupt is only ever
-//! taken while the machine is halted, and no code anywhere else can be
+//! The machine runs with interrupts OFF, as it always has. A rest turns them
+//! on only around its halt: for one instruction before it, to take what was
+//! already raised (`sti; nop; cli`), then for the halt (`sti; hlt`) until the
+//! `cli` after it, which a handler's `iretq` returns to with them on. So an
+//! interrupt is only ever taken inside a rest, and no other code can be
 //! interrupted halfway. An interrupt raised while they are off is held by the
-//! local APIC and taken the moment `rest` halts, so a frame that arrives
-//! between "nothing yet" and the halt wakes it at once rather than being slept
+//! local APIC and taken by the next rest, so a frame that arrives between
+//! "nothing yet" and the halt ends the rest at once rather than being slept
 //! through.
 //!
 //! What wakes it:
@@ -73,7 +75,6 @@ const lapic_id = 0x020;
 const lapic_tpr = 0x080;
 const lapic_eoi = 0x0B0;
 const lapic_svr = 0x0F0;
-const lapic_irr = 0x200;
 const lapic_lvt_timer = 0x320;
 const lapic_lvt_lint0 = 0x350;
 const lvt_masked: u32 = 1 << 16;
@@ -434,14 +435,6 @@ pub fn rest() void {
     _ = halt(tsc.read() +% slice_ticks, .leave);
 }
 
-/// The local APIC's Interrupt Request Register holds `wake_vector`: the
-/// card's interrupt raised and not yet taken (SDM §11.8.4: 256 bits, 32 to a
-/// register at 0x200 + 0x10 each).
-fn wakePending() bool {
-    const reg = lapic_irr + (@as(usize, wake_vector) / 32) * 0x10;
-    return lapicRead(reg) & (@as(u32, 1) << @intCast(wake_vector % 32)) != 0;
-}
-
 /// What ended a rest (rest_count.zig).
 pub const Ended = rest_count.Ended;
 
@@ -466,9 +459,31 @@ const EarlyDeadline = enum { leave, disarm };
 
 /// The halt itself, until `deadline` or a device; what ended it, from the
 /// handlers' counts.
+///
+/// **WHAT IS ALREADY RAISED IS TAKEN FIRST** (a cold review of chunk 3):
+/// interrupts are off between rests, and what is raised meanwhile waits in
+/// the APIC: a slice's deadline left armed that fired during the work after
+/// it, or a frame since the last turn of the network. Halting on it would
+/// end the halt at once and count the stale timer as this rest's deadline.
+/// So the interrupts are opened for one instruction first (`sti; nop; cli`,
+/// the `nop` in `sti`'s shadow): a timer taken there is no one's; a frame
+/// taken there ends this rest without a halt, as the card's, since the loop
+/// rested on a turn that had not seen it. After the halt the handler's
+/// `iretq` turns interrupts back on until the `cli`, so whatever was raised
+/// with what ended the halt is taken there and counted too.
 fn halt(deadline: u64, early_deadline: EarlyDeadline) Ended {
-    const timer_before = @atomicLoad(u64, &gm_timer_irqs, .monotonic);
+    const wake_seen = @atomicLoad(u64, &gm_wake_irqs, .monotonic);
+    asm volatile (
+        \\sti
+        \\nop
+        \\cli
+        ::: .{ .memory = true });
     const wake_before = @atomicLoad(u64, &gm_wake_irqs, .monotonic);
+    if (wake_before != wake_seen) {
+        rests.note(.device);
+        return .device;
+    }
+    const timer_before = @atomicLoad(u64, &gm_timer_irqs, .monotonic);
     wrmsrDeadline(deadline);
     asm volatile (
         \\sti
@@ -476,13 +491,10 @@ fn halt(deadline: u64, early_deadline: EarlyDeadline) Ended {
         \\cli
         ::: .{ .memory = true });
     const timer_after = @atomicLoad(u64, &gm_timer_irqs, .monotonic);
-    var how = rest_count.ended(timer_before, timer_after, wake_before, @atomicLoad(u64, &gm_wake_irqs, .monotonic));
-    // **A FRAME BEHIND THE TIMER IS STILL THE CARD'S**: both raised at
-    // once, the timer's vector (0x41) outranks the card's (0x40), the halt
-    // returns after the timer's handler alone, and the card's waits in the
-    // IRR. That is no missed wake (sleep.zig's `Sleeps`).
-    if (how == .deadline and wakePending()) how = .device;
+    const how = rest_count.ended(timer_before, timer_after, wake_before, @atomicLoad(u64, &gm_wake_irqs, .monotonic));
     rests.note(how);
+    // A deadline that fires after this read waits in the APIC, and the next
+    // halt takes it first (above).
     if (timer_after == timer_before and early_deadline == .disarm) wrmsrDeadline(0);
     return how;
 }

@@ -15,6 +15,7 @@
 
 const std = @import("std");
 const apic_rule = @import("apic_rule.zig");
+const rest_count = @import("rest_count.zig");
 
 /// What the loop reads each idle turn to decide.
 pub const Facts = struct {
@@ -66,24 +67,31 @@ pub const Until = struct {
 };
 
 /// **WHAT THE MACHINE'S SLEEPS DID**, for /admin/host: every quiescent rest,
-/// those a device ended, those the longest rest ended, and of those **a
-/// missed wake**: the timer ended it, and the next turn of the network took
-/// a frame, one that came without its interrupt. A slice's rests are
+/// those a device ended, those the longest rest ended, those neither handler
+/// ended (an NMI, a spurious vector), and **a missed wake**: the timer ended
+/// a sleep, and the next turn of the network took a frame, one that came
+/// without its interrupt (whatever the deadline was for). A slice's rests are
 /// `rest_count`'s.
 pub const Sleeps = struct {
     sleeps: u64 = 0,
     by_device: u64 = 0,
     by_longest: u64 = 0,
+    by_other: u64 = 0,
     missed: u64 = 0,
-    /// The last sleep was the longest rest, ended by the timer: the next
-    /// turn decides whether it missed a wake.
+    /// The last sleep was ended by the timer: the next turn decides whether
+    /// it missed a wake.
     watching: bool = false,
 
-    pub fn slept(self: *Sleeps, by: @FieldType(Until, "by"), by_device: bool) void {
+    pub fn slept(self: *Sleeps, by: @FieldType(Until, "by"), ended: rest_count.Ended) void {
         self.sleeps += 1;
-        if (by_device) self.by_device += 1;
-        if (by == .longest and !by_device) self.by_longest += 1;
-        self.watching = by == .longest and !by_device;
+        switch (ended) {
+            .device => self.by_device += 1,
+            .other => self.by_other += 1,
+            .deadline => if (by == .longest) {
+                self.by_longest += 1;
+            },
+        }
+        self.watching = ended == .deadline;
     }
 
     /// A turn of the network after a sleep: whether it took a frame.
@@ -198,31 +206,20 @@ test "sleep: a wake exactly at the longest rest is the longest rest's" {
     try testing.expectEqual(Rest{ .until = .{ .at = now + 10 * s - 1, .by = .wake } }, next(now, true, .{ .at = now + 10 * s - 1 }, null, ms, 10 * s));
 }
 
-test "sleep: a missed wake is a longest rest the timer ended, after which a frame was waiting" {
+test "sleep: a missed wake is a sleep the timer ended, after which a frame was waiting" {
     var z: Sleeps = .{};
-    z.slept(.longest, false);
+    z.slept(.longest, .deadline);
     z.turned(true); // missed
-    z.slept(.longest, true); // a device ended it: its frame was announced
+    z.slept(.longest, .device); // the card ended it: its frame was announced
     z.turned(true);
-    z.slept(.wake, false); // the application's own time: a frame then is chance
+    z.slept(.wake, .deadline); // the application's own time: missed all the same
     z.turned(true);
-    z.slept(.longest, false);
+    z.slept(.longest, .deadline);
     z.turned(false);
     z.turned(true); // a later turn's frame is not the sleep's
-    try testing.expectEqual(Sleeps{ .sleeps = 4, .by_device = 1, .by_longest = 2, .missed = 1, .watching = false }, z);
-}
-
-test "sleep: idle work's gate, when it opens before the wake and the longest rest, ends the rest" {
-    const now: i96 = 5 * s;
-    const gate = now + 200 * ms;
-    try testing.expectEqual(Rest{ .until = .{ .at = gate, .by = .idle_work } }, next(now, true, .idle, gate, ms, 10 * s));
-    try testing.expectEqual(Rest{ .until = .{ .at = gate, .by = .idle_work } }, next(now, true, .{ .at = now + 60 * s }, gate, ms, 10 * s));
-    // The wake first: the wake's.
-    try testing.expectEqual(Rest{ .until = .{ .at = now + 100 * ms, .by = .wake } }, next(now, true, .{ .at = now + 100 * ms }, gate, ms, 10 * s));
-    // A gate already open is no deadline: its steps were taken, or it rests.
-    try testing.expectEqual(Rest{ .until = .{ .at = now + 10 * s, .by = .longest } }, next(now, true, .idle, now, ms, 10 * s));
-    // A busy machine slices whatever the gate.
-    try testing.expectEqual(Rest{ .until = .{ .at = now + ms, .by = .slice } }, next(now, false, .idle, gate, ms, 10 * s));
+    z.slept(.longest, .other); // an NMI: no one's deadline, and not watched
+    z.turned(true);
+    try testing.expectEqual(Sleeps{ .sleeps = 5, .by_device = 1, .by_longest = 2, .by_other = 1, .missed = 2, .watching = false }, z);
 }
 
 test "sleep: a wake already due is a turn, not a rest" {

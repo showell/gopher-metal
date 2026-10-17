@@ -66,9 +66,13 @@ fi
 # sleeper waking every 500 ms under KVM, timed on the host's clock, asleep
 # between, and woken by a request; about 10 s.
 if ! skip droplet-sleeps; then
-    zig build sleeper > /dev/null 2>&1 || failed+=(droplet-sleeps)
-    z=$(python3 droplet/sleeps.py 2>&1) || failed+=(droplet-sleeps)
-    echo "$z" | grep -E "FAIL|NOT RUN|clock:|^SLEEPS"
+    if zig build sleeper > /dev/null 2>&1; then
+        z=$(python3 droplet/sleeps.py 2>&1) || failed+=(droplet-sleeps)
+        echo "$z" | grep -E "FAIL|NOT RUN|clock:|^SLEEPS"
+    else
+        failed+=(droplet-sleeps)
+        echo "droplet sleeps: NOT RUN: the sleeper does not build (zig build sleeper)"
+    fi
     lap "droplet sleeps"
 fi
 if ! skip screen; then

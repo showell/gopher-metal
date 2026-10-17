@@ -2186,7 +2186,7 @@ fn restOrSleep(table: *const tcp.Table, now: i96, longest_ns: u64) void {
                 metal.coverage.always(@src(), !Io.unflushed(), "sleep: nothing unflushed when the machine sleeps", null);
             }
             const ended = interrupts.restUntil(Io.tscAt(u.at));
-            sleeps.slept(u.by, ended == .device);
+            sleeps.slept(u.by, ended);
         },
     }
 }
@@ -2376,8 +2376,8 @@ fn metalFacts(io: Io, alloc: std.mem.Allocator) anyerror![]const webbox.host_fac
     if (interrupts.armed()) try add(&facts, alloc, "rests", "{d}, {d} of them ended by a device, {d} by neither the timer nor the card", .{ interrupts.rests.rests, interrupts.rests.woken_by_device, interrupts.rests.woken_by_other });
     // **SLEEPS** (sleep.zig): the quiescent machine's long rests, and a wake
     // that came without its interrupt.
-    if (interrupts.armed()) try add(&facts, alloc, "sleeps", "{d} while quiescent, {d} ended by a device, {d} by the longest rest ({d} ms), {d} missed wakes (a frame waiting after the timer ended one)", .{
-        sleeps.sleeps, sleeps.by_device, sleeps.by_longest, longest_rest_ms_now, sleeps.missed,
+    if (interrupts.armed()) try add(&facts, alloc, "sleeps", "{d} while quiescent, {d} ended by a device, {d} by the longest rest ({d} ms), {d} by neither the timer nor the card, {d} missed wakes (a frame waiting after the timer ended one)", .{
+        sleeps.sleeps, sleeps.by_device, sleeps.by_longest, longest_rest_ms_now, sleeps.by_other, sleeps.missed,
     });
     if (turning) |t| try add(&facts, alloc, "frames refused (too long to send)", "{d}", .{t.wire.nic.oversized});
     // **A RESPONSE CUT OFF BEHIND ITS SPILL** (198.1): the connection went
