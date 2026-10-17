@@ -32,6 +32,7 @@ pub const request_heap = @import("request_heap.zig");
 pub const gpt = @import("gpt.zig");
 pub const disk_fat = @import("disk_fat.zig");
 pub const idle = @import("idle.zig");
+pub const sleep = @import("sleep.zig");
 pub const idle_check = @import("idle_check.zig");
 pub const rng = @import("rng.zig");
 pub const io = @import("io.zig");

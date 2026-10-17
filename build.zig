@@ -420,7 +420,7 @@ pub fn build(b: *std.Build) void {
     // QUEUE 142): one compile of the runner, std and the shared imports,
     // and each file's tests run once, not in every binary that imports it.
     // This list is the authority; unit_tests.zig must import exactly it.
-    const unit_files = [_][]const u8{ "src/rtc.zig", "src/pit.zig", "src/gpt.zig", "src/stack.zig", "src/civil.zig", "src/disk_fat.zig", "src/disk_fat_dirent.zig", "src/machine.zig", "src/seq.zig", "src/ring_pieces.zig", "src/pvh.zig", "src/pages.zig", "src/tcp.zig", "src/tcp_check.zig", "src/tcp_sim.zig", "src/tcp_pair_sim.zig", "src/fat_sim.zig", "src/page_sim.zig", "src/pure_sim.zig", "src/ready_sim.zig", "src/durable_sim.zig", "src/durable.zig", "src/scsi_mode.zig", "src/floor_sim.zig", "src/store.zig", "src/store_model.zig", "src/store_test.zig", "src/store_linux.zig", "src/store_sim.zig", "src/scratch_dir.zig", "src/io_test.zig", "src/log_ring.zig", "src/restart.zig", "src/kept_log.zig", "src/ready.zig", "src/drain.zig", "src/drain_sim.zig", "src/request_heap.zig", "src/page_cache.zig", "src/admin_reset.zig", "src/dhcp.zig", "src/screen.zig", "src/serial_gate.zig", "src/net.zig", "src/idle.zig", "src/idle_check.zig", "src/request_line.zig", "src/uploads_seen.zig", "src/device_wait.zig", "src/disk_failures.zig", "src/boot_facts.zig", "src/rest_count.zig", "src/config_text.zig", "src/virtio.zig", "src/serial.zig", "src/after_turn.zig", "src/spill_rule.zig", "src/apic_rule.zig", "src/failed_seeds.zig", "src/tcp_segment.zig", "src/arp.zig", "src/tcp_held.zig", "src/fetch.zig" };
+    const unit_files = [_][]const u8{ "src/rtc.zig", "src/pit.zig", "src/gpt.zig", "src/stack.zig", "src/civil.zig", "src/disk_fat.zig", "src/disk_fat_dirent.zig", "src/machine.zig", "src/seq.zig", "src/ring_pieces.zig", "src/pvh.zig", "src/pages.zig", "src/tcp.zig", "src/tcp_check.zig", "src/tcp_sim.zig", "src/tcp_pair_sim.zig", "src/fat_sim.zig", "src/page_sim.zig", "src/pure_sim.zig", "src/ready_sim.zig", "src/durable_sim.zig", "src/durable.zig", "src/scsi_mode.zig", "src/floor_sim.zig", "src/store.zig", "src/store_model.zig", "src/store_test.zig", "src/store_linux.zig", "src/store_sim.zig", "src/scratch_dir.zig", "src/io_test.zig", "src/log_ring.zig", "src/restart.zig", "src/kept_log.zig", "src/ready.zig", "src/drain.zig", "src/drain_sim.zig", "src/request_heap.zig", "src/page_cache.zig", "src/admin_reset.zig", "src/dhcp.zig", "src/screen.zig", "src/serial_gate.zig", "src/net.zig", "src/idle.zig", "src/idle_check.zig", "src/request_line.zig", "src/uploads_seen.zig", "src/device_wait.zig", "src/disk_failures.zig", "src/boot_facts.zig", "src/rest_count.zig", "src/config_text.zig", "src/virtio.zig", "src/serial.zig", "src/after_turn.zig", "src/spill_rule.zig", "src/apic_rule.zig", "src/failed_seeds.zig", "src/tcp_segment.zig", "src/arp.zig", "src/tcp_held.zig", "src/fetch.zig", "src/sleep.zig" };
     comptime {
         @setEvalBranchQuota(1_000_000);
         const root = @embedFile("src/unit_tests.zig");
@@ -439,11 +439,16 @@ pub fn build(b: *std.Build) void {
     // file byte for byte, so tier 0 needs no zig-webbox checkout (metal-vmm
     // QUEUE 197); `zig build pinned` (tier 3) fails when the two differ.
     const body_rule = b.createModule(.{ .root_source_file = b.path("src/pinned/webbox_body.zig") });
+    // `between`'s answer (zig-webbox's wake.zig, DESIGN-sleep.md): sleep.zig
+    // takes it as a parameter, which the kernel passes as `webbox.site.Wake`;
+    // the unit tests take the pinned copy.
+    const wake_rule = b.createModule(.{ .root_source_file = b.path("src/pinned/webbox_wake.zig") });
     const pinned = b.addSystemCommand(&.{ "python3", "tools/pinned.py", webbox_src });
     pinned.has_side_effects = true;
     b.step("pinned", "src/pinned/ against the zig-webbox checkout it was copied from (tier 3)").dependOn(&pinned.step);
     const unit_imports = [_]std.Build.Module.Import{
         .{ .name = "body_rule", .module = body_rule },
+        .{ .name = "wake_rule", .module = wake_rule },
         .{ .name = "kernel_partition", .module = kernel_partition },
         .{ .name = "coverage", .module = coverage },
         .{ .name = "plant_options", .module = plant_options },

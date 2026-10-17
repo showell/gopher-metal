@@ -16,6 +16,7 @@ import sys
 # The copy here, and its source under zig-webbox's src/.
 PINNED = {
     "src/pinned/webbox_body.zig": "body.zig",
+    "src/pinned/webbox_wake.zig": "wake.zig",
 }
 
 

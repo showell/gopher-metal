@@ -742,7 +742,7 @@ pub fn kmain() noreturn {
             // Then the application's work between requests, a slice a turn
             // while it says there is more: a request that arrives meanwhile
             // is served first, on the next turn.
-            if (between.more) {
+            if (between.wake == .more) {
                 betweenSlice(io);
                 continue;
             }
@@ -2102,8 +2102,9 @@ var idle_work: metal.idle.Idle = .{};
 /// of the idle step's 200 ms budget, so an overrun is a slice gone wrong,
 /// not a slow one.
 const Between = struct {
-    /// What the last call said: whether there is more to do.
-    more: bool = true,
+    /// What the last call said: when the application next needs a turn
+    /// (webbox's `site.Wake`). Before the first call, `.more`.
+    wake: webbox.site.Wake = .more,
     calls: u64 = 0,
     overruns: u64 = 0,
     longest_ns: u64 = 0,
@@ -2115,7 +2116,7 @@ const between_target_ns: u64 = 50 * std.time.ns_per_ms;
 fn betweenSlice(io: Io) void {
     const from = awakeNow();
     const unix: i64 = @intCast(@divFloor(Io.Clock.now(.real, io).nanoseconds, std.time.ns_per_s));
-    between.more = app.site.between(io, unix);
+    between.wake = app.site.between(io, .{ .awake_ns = from, .unix_s = unix });
     const took: u64 = @intCast(@max(0, awakeNow() - from));
     between.calls += 1;
     between.longest_ns = @max(between.longest_ns, took);
