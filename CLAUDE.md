@@ -3,16 +3,17 @@
 The README is the orientation. Work happens on the dev box, with Steve.
 
 If you are a Claude Code **cloud** session ("CC"): you work here on the
-**simulators and properties only** (since 2026-10-05), plus, since
-2026-10-06, **the Store** (QUEUE items 76-81: its interface, model, FAT and
+**simulators and properties only**, plus **the Store** (old QUEUE.md
+items 76-81: its interface, model, FAT and
 strict Linux implementations, and `store_sim`, all new files, none of them
 in the image). Your charter, the
 branch map and the one shared queue live in metal-vmm, not here: read
 metal-vmm's `CLOUD_WORK.md` ("zig-metal-unikernel: the simulators") and its
 `QUEUE.md` on `master` (github.com/showell/metal-vmm). Branch from
 `master`, push only `claude/*` branches, and never push to `master` or a
-`vN` tag: the box merges. What serves lynrummy.com is a tag (`v18` today),
-not a branch.
+`vN` tag: the box merges. What serves lynrummy.com is a tag, never a
+branch (README, "Where it stands"). Releases and operations are the box's:
+[`DEPLOY.md`](DEPLOY.md).
 
 **THE SIMULATORS ARE THERE TO KEEP THE LAYERS HONEST.** A simulator can only
 drive code that is pure logic: no `io.zig`, no driver, no device, no clock but
