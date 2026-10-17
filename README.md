@@ -103,16 +103,16 @@ the kernel is wrong.
 
 ### The repos
 
-Six repos, kept separate, checked out side by side:
+Seven repos, kept separate, checked out side by side:
 
 ```
-                    zig-webbox  (the library)
-                    /          \
-       angry-gopher              dog-park
-     (lynrummy.com)        (dogpark.lynrummy.com)
-           |                         |
-           |                         | (builds its own image,
-           |                         |  through addAppKernel)
+                       zig-webbox  (the library)
+                  /         |          \
+     angry-gopher        dog-park        observatory
+   (lynrummy.com)  (dogpark.lynrummy.com) (watches Dog Park)
+         |                  |               |
+         |                  (each builds its own image,
+         |                   through addAppKernel)
               zig-metal-unikernel  (this repo: the machine)
                     /          \
             metal-vmm            zig-coverage-sdk
@@ -129,6 +129,12 @@ Six repos, kept separate, checked out side by side:
   is; nothing is copied in. **[dog-park](https://github.com/showell/dog-park)**:
   an application this repo does not build; it builds itself into a kernel
   through `addAppKernel`, and its image through `droplet/app_image.py`.
+- **[observatory](https://github.com/showell/observatory)**: a small
+  application that wakes on a period, fetches another server's `/version`
+  through its host's fetch, writes a line, and sleeps; built through
+  `addAppKernel` like dog-park, and the reason for the sleep
+  ([`docs/designs/DESIGN-sleep.md`](docs/designs/DESIGN-sleep.md)). Not
+  deployed.
 - **[metal-vmm](https://github.com/showell/metal-vmm)**: a deterministic
   hypervisor of our own, on Linux's KVM, used only for testing. It runs the
   real kernel with time, the network and the disks under the test's control,
@@ -275,18 +281,20 @@ cheapest first, and stops at the first one that fails.
 
 | tier | install | what it proves | about |
 |---|---|---|---|
-| `./tier0.sh` | zig 0.16, Python 3, and the SDK beside this checkout | the unit tests and short simulator runs; this repo's kernels and host programs type-check; `zig fmt` and the lints; tcp_sim's golden traces. No QEMU, no other repo, no network, no root. Run it on every change | ~2-3 min (91 s of tests and 56 s of traces, measured 2026-10-16) |
-| `./tier1.sh` | + QEMU, dosfstools, gdisk, mtools, curl, binutils, `sudo -n` for loop mounts and the TAP device; KVM for the droplet boots (or `ACCEL=tcg`) | tcp.zig against Linux's own TCP, as server and as client (the native judge, quick, ~25 s, first); each test kernel ("probe") boots and works on virtual hardware; the judges' own tests; the droplet's boot loader and image | ~25 s native, ~45 s of probes, then the droplet boots |
+| `./tier0.sh` | zig 0.16, Python 3, and the SDK beside this checkout | the unit tests and short simulator runs; this repo's kernels and host programs type-check; `zig fmt` and the lints; tcp_sim's golden traces. No QEMU, no other repo, no network, no root. Run it on every change | ~2-3 min |
+| `./tier1.sh` | + QEMU, dosfstools, gdisk, mtools, curl, binutils, `sudo -n` for loop mounts and the TAP device; KVM for the droplet boots (or `ACCEL=tcg`) | tcp.zig against Linux's own TCP, as server and as client (the native judge, quick, ~25 s, first); each test kernel ("probe") boots and works on virtual hardware; the judges' own tests; the droplet's boot loader and image; the sleeper sleeping on a real timer, woken by its timer and by a request (`droplet/sleeps.py`, KVM) | ~25 s native, ~45 s of probes, then the droplet boots, ~10 s of sleeps |
 | `./tier2.sh` | + metal-vmm beside this checkout, and /dev/kvm | metal-vmm runs this checkout's probe kernels the same as QEMU does, and the same twice | minutes |
-| `./tier3.sh` | + zig-webbox and angry-gopher beside this checkout | the library's tests and the limits it copies; the unit tests' pinned body rule is still the library's; gopher.elf type-checks, builds and is judged against its Linux build on QEMU's microvm and the droplet-shaped machine; the PC-shaped machine's rests and the timeouts on metal-vmm | ~20 min |
-| `zig build properties` | as tier 0 | the simulators over many seeds, judged by their coverage properties: zig alone, but not in tier 0 for its time (20 min in Debug, 5 with `-Dsweep-optimize=ReleaseSafe`); long.sh runs it at 1,000 TCP seeds, 500 of them crowded (the smallest count that reaches its floor, metal-vmm QUEUE 224) | 5-20 min |
-| `zig build tcp-traces` | as tier 0 (it runs it) | tcp_sim's golden traces: the hash of every frame for 803 worlds (seeds 1-200 of each peer, and the regressions), against `coverage/tcp-traces.txt`, so reshaping tcp.zig leaves the wire as it was; `-Dtcp-traces-write` writes them again, and the commit says why (metal-vmm QUEUE 225) | ~25 s, built |
+| `./tier3.sh` | + zig-webbox and angry-gopher beside this checkout | the library's tests and the limits it copies; the unit tests' pinned body rule is still the library's; gopher.elf type-checks, builds and is judged against its Linux build on QEMU's microvm and the droplet-shaped machine; the PC-shaped machine's rests and the timeouts on metal-vmm; a sleeping kernel in the machine's own time (metal-vmm `sleeps.sh`: an idle gopher.elf's cost, the sleeper's hour of wakes, the longest rest) | ~20 min |
+| `zig build properties` | as tier 0 | the simulators over many seeds, judged by their coverage properties: zig alone, but not in tier 0 for its time (20 min in Debug, 5 with `-Dsweep-optimize=ReleaseSafe`); long.sh runs it at its `SEEDS`, `CROWD_SEEDS` and `FAT_SEEDS` (the top of `long.sh` says how each was chosen) | 5-20 min |
+| `zig build tcp-traces` | as tier 0 (it runs it) | tcp_sim's golden traces: the hash of every frame for every world (seeds 1-200 of each peer, and the regressions; a line each in `coverage/tcp-traces.txt`), against that file, so reshaping tcp.zig leaves the wire as it was; `-Dtcp-traces-write` writes them again, and the commit says why (metal-vmm QUEUE 225) | ~25 s, built |
 | `./gates.sh quick` | as tier 3 | tiers 0 and 1, then gopher.elf and one chat-judge story | |
 | `./gates.sh` | as tier 3 | tiers 0 to 3, for a batch | |
-| `./long.sh` | as tier 3 | before every release: the simulators at 1,000 seeds; the FAT16 judge; the native judge whole, its loss check included; the real kernel on metal-vmm losing a sample of the packets it sends in turn, facing a misbehaving client, and under 100 seeded fault schedules over the network and disks, every run still serving the right page | longest |
+| `./long.sh` | as tier 3 | before every release: the simulators at `long.sh`'s `SEEDS`; the FAT16 judge; the native judge whole, its loss check included; the real kernel on metal-vmm losing a sample of the packets it sends in turn, facing a misbehaving client, and under 100 seeded fault schedules over the network and disks, every run still serving the right page | longest |
 
-A developer can defer every test against angry-gopher (tier 3)
-and still have reasonable confidence in a change that tier 0 passes.
+**Starting cold:** `./tier0.sh` on every change; `./gates.sh quick`
+where QEMU, KVM and the siblings are. A developer can defer every test
+against angry-gopher (tier 3) and still have reasonable confidence in a
+change that tier 0 passes.
 
 **Skipping a slow step:** `SKIP="tcp-traces probes" ./gates.sh` (any tier,
 `gates.sh` or `long.sh`; the words are in `tools/skip_lib.sh`). It is built
@@ -316,8 +324,8 @@ where the secrets live, a release step by step (the checks, the image, the
 owner's steps, the tag), the way back, Shale scripts and a new site's key,
 prod's Caddy, Dog Park, and running your own copies.
 
-[`CUTOVER.md`](CUTOVER.md) is the record of the move from Linux on 2026-10-04,
-with the tools it used, backups, and the way back.
+[`CUTOVER.md`](CUTOVER.md) is the dated record of the move from Linux on
+2026-10-04, and the tools it used.
 `droplet/new_volume.py` builds a new, empty data volume.
 
 ## Where it stands
@@ -347,8 +355,10 @@ To find it:
 | the screen | served | everything the log says also goes to VGA text, which DigitalOcean's console shows |
 | interrupts, and resting when idle | served | on the PCI machine a droplet is, the card wakes it (MSI-X), else a 1 ms timer. On the MMIO test machines it polls instead |
 | virtio network, disk and SCSI volume drivers | served | over PCI on the droplet; over MMIO in tests |
-| DHCP, ARP, TCP | served | up to 256 connections, one kept for the machine's own fetch; the peer's window and segment size respected, lost segments resent (the oldest first, RFC 6298 5.4), silent peers given up on; segments that arrive ahead of a gap are held (up to four pieces a connection). Each place it departs from the RFCs says why, in `DEPARTS (reason):` lines |
-| a TCP client: connect, ARP requests, one HTTP fetch | test only | an application's fetch through webbox's `host_fetch` (one at a time, on-link only; the sleeper's, probe/sleeper/), called by no served application yet; `probe/fetch.elf` is the client kernel, judged against Linux (`native/judge_native.py`) and against this kernel's server on metal-vmm's pair mode (metal-vmm `pair.sh`, tier 3) |
+| DHCP, ARP, TCP | served | up to 256 connections; the peer's window and segment size respected, lost segments resent (the oldest first, RFC 6298 5.4), silent peers given up on; segments that arrive ahead of a gap are held (up to four pieces a connection). Each place it departs from the RFCs says why, in `DEPARTS (reason):` lines |
+| sleeping until the application's wake | master | a machine with nothing in motion halts until its application's `between` asks for a turn, or at most `longest_rest_ms` (10 s by default); a busy one keeps the 1 ms slice. Judged by `droplet/sleeps.py` (tier 1, a real timer) and metal-vmm's `sleeps.sh` (tier 3) on the sleeper (`probe/sleeper/`). [HOST.md](HOST.md), "Between handlers"; [DESIGN-sleep.md](docs/designs/DESIGN-sleep.md) |
+| an application's fetch | master | one GET at a time through webbox's `host_fetch`, on the machine's own network only, in a connection slot kept for it; called by no served application yet ([HOST.md](HOST.md), "the host's fetch") |
+| a TCP client: connect, ARP requests, one HTTP fetch | test only | `probe/fetch.elf` is the client kernel, judged against Linux (`native/judge_native.py`) and against this kernel's server on metal-vmm's pair mode (metal-vmm `pair.sh`, tier 3) |
 | HTTP | served | `std.http.Server`, unmodified |
 | FAT16 and FAT32, read and write | served | long names, folders, append, replace, delete; checked by `fsck` and by Linux reading what it wrote. Production's volume is FAT32 |
 | clocks and entropy | served | the CMOS real-time clock; the TSC's rate measured against the PIT; random bytes from virtio-rng where the machine has one, and RDRAND |
@@ -356,17 +366,16 @@ To find it:
 | another repository's application as a kernel | served | Dog Park, on dogpark.lynrummy.com since 2026-10-16, built through `addAppKernel` and `droplet/app_image.py` (dog-park's DEPLOY.md says which image serves); one disk, no volume. This repo neither builds nor judges any application but angry-gopher (an application is not this repo's test of itself); Dog Park's own QEMU gate and droplet rehearsal check its image |
 | file contents kept in memory | served | after their first read, write-through (`page_cache_mib`, 64 MiB by default) |
 | large disk requests | served | a run of contiguous clusters is one request of up to 1 MiB (the least of the disk's, the controller's and our own limit) |
-| the FAT written a sector at a time | served | v29's measured disk requests for a 1.8 MB, 10 MB and 100 MB upload: 59, 26 and 115 (v28: 93, 218 and 2,017) |
+| the FAT written a sector at a time | served | disk requests for a 1.8 MB, 10 MB and 100 MB upload: 59, 26 and 115, from 93, 218 and 2,017 before it (measured once, when it shipped) |
 | the FAT's two copies weighed at mount | served | if they differ, the cleaner copy wins and the other is rewritten from it |
 | a mount whose FAT copies cannot be weighed | served | refuses writes until a weighing succeeds (a 503 with Retry-After) |
 | an overwrite read back before the old copy is freed | served | |
 | a disk check at every boot | served | both disks; a damaged disk is reported and still served |
 | a disk check in idle time | served | after 200 ms with nothing arriving, the kernel checks the volume a slice at a time ([HOST.md](HOST.md), "Idle time"). Its cost on production's full volume: unmeasured here |
 | exact accounting of what a failed write leaves | served | leaked clusters, orphaned name entries and long chains, counted on `/admin/host` |
-| restarting after a crash | served | on by default since a droplet's reset was measured to restart it (2026-10-03); the last boot's log is kept across the restart, and a disk that stops answering restarts it too ([RESTART.md](RESTART.md)) |
+| restarting after a crash | served | on by default, a droplet's reset having been measured to restart it; the last boot's log is kept across the restart, and a disk that stops answering restarts it too ([RESTART.md](RESTART.md)) |
 | the log, on `/admin/host` and `/admin/log` | served | a 1.25 MiB ring, secrets removed as they are written; every request line with its time, status and duration; `/admin/host` shows the newest lines, `/admin/log` all of it as plain text for scripts; recent uploads and request counts ([docs/admin-for-agents.md](docs/admin-for-agents.md)) |
-| the new name, and zig-webbox as its own checkout | served | `zig-metal-unikernel.conf`; the library built from `../zig-webbox` |
-| `/admin/backup` | served | the whole data set as one tar, checked by `droplet/check_backup.py`; taken by hand with `droplet/backup.sh`. Routine backups were not yet scheduled as of 2026-10-08 ([CUTOVER.md](CUTOVER.md), "Backups") |
+| `/admin/backup` | served | the whole data set as one tar, checked by `droplet/check_backup.py`; taken by hand with `droplet/backup.sh`; no routine schedule ([DEPLOY.md](DEPLOY.md), "Backups") |
 | speed against Linux | unmeasured | last measured 2026-10-01 on v4, before the caches ([docs/port.md](docs/port.md)) |
 
 ## Where things are
@@ -377,11 +386,14 @@ To find it:
 | `src/host_io_metal.zig` | the one file that hands the application this kernel's `Io` |
 | `probe/gopher.zig` | the kernel around an application: one loop, the disks, `/admin/host`'s kernel half |
 | `probe/*.zig` | small test kernels, one subsystem each |
+| `probe/sleeper/` | the sleeper, a tiny application that only wakes: the test of a sleeping kernel |
 | `probe/run.sh`, `probe/judge_*.py` | booting them under QEMU, and the judges |
+| `native/` | tcp.zig as a Linux program, judged against Linux's own TCP (`judge_native.py`) |
 | `droplet/` | the boot loader, the image builder, the droplet-shaped QEMU, and the release, backup and cutover tools |
-| `tools/verdicts.py` | which code a gate judged, and the release rule |
-| `coverage/` | the coverage floors `long.sh` holds runs to |
-| `gates.sh`, `long.sh` | the gates |
+| `tools/` | `verdicts.py` (which code a gate judged, and the release rule), `skip_lib.sh` and `tier_lib.sh` (the tiers' shared parts), the lints, the mutation runners (`mutate_*.py`), `fat16_read.py` (a FAT reader that is not ours) |
+| `coverage/` | the coverage floors `long.sh` holds runs to, and tcp_sim's golden traces |
+| `docs/rfc/` | the RFCs tcp.zig quotes, verbatim ([its README](docs/rfc/README.md)) |
+| `tier0.sh` … `tier3.sh`, `gates.sh`, `long.sh`, `release-check.sh` | the checks, each header saying what it runs |
 
 ## Documents
 
@@ -400,16 +412,22 @@ To find it:
 - [`docs/probes.md`](docs/probes.md): the test kernels, and QEMU's traps.
 - [`docs/admin-for-agents.md`](docs/admin-for-agents.md): reading
   `/admin/host` and `/admin/log`.
+- [`docs/rfc/`](docs/rfc/README.md): the RFCs tcp.zig follows.
 - [`docs/designs/`](docs/designs/README.md) and
   [`docs/reviews/`](docs/reviews/README.md): notes and adversarial reviews
   of particular changes.
 - [`FAT32.md`](FAT32.md), [`RESTART.md`](RESTART.md),
   [`TCP_TESTING.md`](TCP_TESTING.md), [`COVERAGE.md`](COVERAGE.md),
   [`MUTATION.md`](MUTATION.md) (which deliberately planted bugs the tests
-  catch).
+  catch), [`HEAD-PARSER-BUG.md`](HEAD-PARSER-BUG.md) (zig's head parser and
+  a bare-LF head end), [`GROWTH-game-store.md`](GROWTH-game-store.md) (the
+  game store's disk growth).
 
-**Operations:** [`CUTOVER.md`](CUTOVER.md) (the move from Linux, backups,
-the way back), [`MIGRATION.md`](MIGRATION.md),
+**Operations:** [`DEPLOY.md`](DEPLOY.md) (releases, backups, the way
+back), [`CUTOVER.md`](CUTOVER.md) (the dated record of the move from
+Linux), [`MIGRATION.md`](MIGRATION.md),
+[`droplet/RESTART-TEST.md`](droplet/RESTART-TEST.md) (the console test that
+turned the restart on),
 [`SECRET-LEAK.md`](SECRET-LEAK.md),
 [`ADMIN-PASSWORD-LOST.md`](ADMIN-PASSWORD-LOST.md).
 
