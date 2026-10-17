@@ -67,14 +67,14 @@ rest: quiescence recomputed from the arrays (every `conns[i]`, `held[]`,
 `draining[]`, `drains.waits`) instead of the counters, and required to agree.
 Two computations of one fact, gated against each other.
 
-**A write is flushed before the machine sleeps.** A response's send flushes
-(`Io.durable`), but a line written in `between` has no response behind it,
-and on a volume with a write cache it would wait for the next request. So
-`restOrSleep` flushes a quiescent machine's unflushed writes, then sleeps. A
-flush that fails is counted on /admin/host and the machine sleeps anyway: a
-retry every slice would not make it hold. (Round 4's review: it was in the
-predicate, so one wake's line on prod's volume kept the machine on its slice
-until a request.)
+**Nothing unflushed sleeps, and nothing new makes it so.** A line written in
+`between` has no response behind it, but every turn of the network flushes
+(`streamTurn`'s `serviceStreams` calls `Io.durable`), and the loop turns after
+every `between` call before it rests. Coverage kernels assert it at every
+sleep. (Round 4's review thought one wake's line on prod's volume would keep
+the machine on its slice; a flush added for it changed nothing a gate could
+see, a plant showed, so it came out again. sleeps.sh's volume run holds the
+behaviour: a flush a wake, and the machine asleep.)
 
 **Idle work's quiet gate is in the minimum; its tasks' own times are not.**
 `idle.turn` steps a task only once nothing has been busy for `quiet_ns`
@@ -352,7 +352,7 @@ It found:
 All taken, except the two decisions for Steve.
 
 **Round 4** (a cold review of chunk 2's code) found:
-- the flush (above);
+- a flush it thought missing (above: it was not; asserted instead);
 - sleeps.sh passing on unchecked runs: exits unread, an empty number
   read as no failure, and no halt bound, so a kernel that never slept but
   woke on time passed;

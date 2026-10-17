@@ -5,8 +5,9 @@
 //!
 //! **Quiescent** is nothing in motion: no connection open, no stream held,
 //! nothing draining or being read, no console backlog, no fetch running,
-//! and the application not asking for more. (A write left unflushed is the
-//! loop's to flush before it sleeps, probe/gopher.zig's `restOrSleep`.)
+//! and the application not asking for more. (A write left unflushed never
+//! waits for a sleep: every turn of the network flushes, and the loop turns
+//! before it rests; probe/gopher.zig's `restOrSleep`.)
 //! Then only the application's wake can be due, and the machine rests until
 //! it, never longer than `longest_rest`. Otherwise it rests a slice, as it
 //! always has: TCP's, the streams' and the drains' clocks are looked at
@@ -74,8 +75,6 @@ pub const Sleeps = struct {
     by_device: u64 = 0,
     by_longest: u64 = 0,
     missed: u64 = 0,
-    /// Flushes before a sleep that failed (the machine slept anyway).
-    flush_failed: u64 = 0,
     /// The last sleep was the longest rest, ended by the timer: the next
     /// turn decides whether it missed a wake.
     watching: bool = false,

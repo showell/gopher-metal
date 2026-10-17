@@ -2155,7 +2155,7 @@ fn restOrSleep(table: *const tcp.Table, now: i96, longest_ns: u64) void {
     // always has, and nothing it does is a sleep.
     if (!interrupts.armed()) return interrupts.rest();
     longest_rest_ms_now = longest_ns / std.time.ns_per_ms;
-    var facts: metal.sleep.Facts = .{
+    const facts: metal.sleep.Facts = .{
         .conns_in_use = table.inUse(),
         .held = held_now,
         .draining = draining_now,
@@ -2165,18 +2165,17 @@ fn restOrSleep(table: *const tcp.Table, now: i96, longest_ns: u64) void {
         .wants_more = between.wake == .more,
     };
     const still = metal.sleep.quiescent(facts);
-    // **NO SLEEP ON AN UNFLUSHED WRITE** (a cold review): a response's send
-    // flushes (`Io.durable`), but what `between` wrote (a wake's line, a
-    // background run's) has no response behind it, and on a volume with a
-    // write cache it would wait unflushed for the next request. So the
-    // machine flushes before it sleeps. A flush that fails is counted and
-    // the machine sleeps anyway: retrying every slice would not make it
-    // hold, and the next response tries again.
-    if (still and Io.unflushed() and !Io.durableChecked()) sleeps.flush_failed += 1;
     switch (Sleep.next(now, still, between.wake, idle_work.gateAt(), interrupts.slice_ns, longest_ns)) {
         .turn => {},
         .until => |u| if (u.by == .slice) interrupts.rest() else {
-            if (coverage_checks) checkQuiescence();
+            // **NOTHING UNFLUSHED SLEEPS**: what `between` wrote has no
+            // response behind it, but every turn of the network flushes
+            // (`streamTurn`'s `serviceStreams`, `Io.durable`), and the loop
+            // turns after every `between` before it rests.
+            if (coverage_checks) {
+                checkQuiescence();
+                metal.coverage.always(@src(), !Io.unflushed(), "sleep: nothing unflushed when the machine sleeps", null);
+            }
             const ended = interrupts.restUntil(Io.tscAt(u.at));
             sleeps.slept(u.by, ended == .device);
         },
@@ -2368,8 +2367,8 @@ fn metalFacts(io: Io, alloc: std.mem.Allocator) anyerror![]const webbox.host_fac
     if (interrupts.armed()) try add(&facts, alloc, "rests", "{d}, {d} of them ended early by a device", .{ interrupts.rests.rests, interrupts.rests.woken_by_device });
     // **SLEEPS** (sleep.zig): the quiescent machine's long rests, and a wake
     // that came without its interrupt.
-    if (interrupts.armed()) try add(&facts, alloc, "sleeps", "{d} while quiescent, {d} ended by a device, {d} by the longest rest ({d} ms), {d} missed wakes (a frame waiting after the timer ended one), {d} flushes before a sleep failed", .{
-        sleeps.sleeps, sleeps.by_device, sleeps.by_longest, longest_rest_ms_now, sleeps.missed, sleeps.flush_failed,
+    if (interrupts.armed()) try add(&facts, alloc, "sleeps", "{d} while quiescent, {d} ended by a device, {d} by the longest rest ({d} ms), {d} missed wakes (a frame waiting after the timer ended one)", .{
+        sleeps.sleeps, sleeps.by_device, sleeps.by_longest, longest_rest_ms_now, sleeps.missed,
     });
     if (turning) |t| try add(&facts, alloc, "frames refused (too long to send)", "{d}", .{t.wire.nic.oversized});
     // **A RESPONSE CUT OFF BEHIND ITS SPILL** (198.1): the connection went
