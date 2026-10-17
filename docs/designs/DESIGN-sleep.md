@@ -16,6 +16,11 @@ second, and a quiet minute under metal-vmm costs millions of exits.
 tests simulate time; a few measure real sleep in wall time; and "sleeping
 60 ms is essentially the same problem as sleeping 60 seconds or 60 hours".
 
+**Measured before (2026-10-17, gopher.elf at `69aa02b`, metal-vmm
+`TRANSPORT=pci PATIENCE_S=60`, one `GET /` then idle):** 60 s of guest time
+cost **307,564 exits** (halt 37,605, clock 189,302, mmio 38,441, msr 37,607)
+and 5.3 s of wall time; the longest halt 0.8 ms.
+
 ## The one idea: the loop asks "when is the next thing due?"
 
 The kernel halts until **the earliest of every deadline it keeps**, or an
