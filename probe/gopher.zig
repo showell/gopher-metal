@@ -621,7 +621,7 @@ pub fn kmain() noreturn {
     }
     serial.put("  holding up to ");
     serial.putDec(max_connections);
-    serial.put(" connections at once\n");
+    serial.put(" connections at once, one of them kept for the machine's own fetch\n");
 
     var request_heap = RequestHeap.init(pages.allocator, request_heap_bytes);
     if (!request_heap.preheat())
@@ -732,7 +732,6 @@ pub fn kmain() noreturn {
         const arrived = stream.pump(&wire, &table, lease.address);
         sleeps.turned(arrived != null);
         const now = Io.awakeNs() orelse 0;
-        fetchStep(&table, &wire, now);
         if (arrived != null) idle_work.busy(now);
         if (nextReady(io, &wire, &table, now)) |pick| {
             served += 1;
@@ -1273,6 +1272,7 @@ fn streamTurn() void {
     in_turn = true;
     defer in_turn = false;
     const now = Io.awakeNs() orelse 0;
+    fetchStep(t.table, t.wire, now);
     serviceStreams(t.wire, t.table, t.hub, t.scratch.allocator(), now, t.conf);
     t.scratch.reset();
     serviceDraining(t.wire, t.table, now, t.conf.idle_ns);
@@ -1961,7 +1961,8 @@ const Config = struct {
 const Card = enum(u1) { public = 0, private = 1 };
 
 /// Connection slots no stream may take: room for a burst of page loads while
-/// every stream slot is held.
+/// every stream slot is held. One of them is the machine's own fetch's
+/// (`table.reserved_for_initiated`), so 63 are for requests.
 const reserved_for_requests = 64;
 
 fn readConfig(io: Io, alloc: std.mem.Allocator) Config {
@@ -2170,7 +2171,7 @@ const Fetching = struct {
     our_mac: [6]u8 = .{ 0, 0, 0, 0, 0, 0 },
     mask: [4]u8 = .{ 0, 0, 0, 0 },
     /// The target's path, the client's to point at.
-    path: [256]u8 = undefined,
+    path: [webbox.host_fetch.path_most]u8 = undefined,
     kept: [webbox.host_fetch.body_most]u8 = undefined,
     body_len: usize = 0,
     too_long: bool = false,
@@ -2195,16 +2196,21 @@ const Fetching = struct {
 };
 var fetching: Fetching = .{};
 
-fn fetchStart(target: webbox.host_fetch.Target, d: webbox.host_fetch.Deadlines) error{Busy}!void {
-    if (fetching.client != null) return error.Busy;
-    fetching.ended = null;
+fn fetchStart(target: webbox.host_fetch.Target, d: webbox.host_fetch.Deadlines) webbox.host_fetch.StartError!void {
+    // One at a time, and an end is handed over before the next begins.
+    if (fetching.client != null or fetching.ended != null) return error.Busy;
+    if (target.path.len > fetching.path.len) return error.PathTooLong;
     fetching.body_len = 0;
     fetching.too_long = false;
+    // **ON-LINK ONLY**, by the lease's mask. A lease that named no network
+    // (no mask) says nothing is on-link: everything is no_route, never a
+    // fetch that ARPs for an address off the network until its deadline.
+    if (std.mem.allEqual(u8, &fetching.mask, 0)) return fetching.end(.no_route, 0);
     for (target.ip, fetching.our_ip, fetching.mask) |a, b, m| {
         if (a & m != b & m) return fetching.end(.no_route, 0);
     }
-    const n = @min(target.path.len, fetching.path.len);
-    @memcpy(fetching.path[0..n], target.path[0..n]);
+    const n = target.path.len;
+    @memcpy(fetching.path[0..n], target.path);
     const ms = std.time.ns_per_ms;
     fetching.client = metal.fetch.Client.init(
         .{ .ip = target.ip, .port = target.port, .path = fetching.path[0..n] },
@@ -2212,7 +2218,7 @@ fn fetchStart(target: webbox.host_fetch.Target, d: webbox.host_fetch.Deadlines) 
         fetching.our_ip,
         fetching.our_mac,
         awakeNow(),
-    ) catch return fetching.end(.bad_answer, 0); // a path too long for the request
+    ) catch unreachable; // the request fits: a path of at most path_most in 512 bytes
 }
 
 fn fetchResult() ?webbox.host_fetch.Result {
@@ -2225,9 +2231,15 @@ fn fetchLearned(p: metal.arp.Packet) void {
     if (fetching.client) |*c| c.learned(p);
 }
 
-/// One step of the application's fetch, if one runs.
+/// One step of the application's fetch, if one runs: on every turn of the
+/// network (`streamTurn`), the turns inside a serve included, so a long serve
+/// holds up its request and its reading no more than any connection's, and
+/// its deadlines never run out on a fetch nobody stepped.
 fn fetchStep(table: *tcp.Table, wire: *stream.Wire, now: i96) void {
     const c = if (fetching.client) |*c| c else return;
+    // Past what is kept, the rest is not read: the connection is let go,
+    // and the next step says how it ended (too_long, below).
+    if (fetching.too_long) if (c.slot) |i| if (table.conns[i].state != .closed) table.abandon(wire, i, .unfinished);
     const o = c.step(table, wire, now, &fetching) orelse return;
     const status = c.answer.status;
     fetching.end(if (fetching.too_long) .too_long else hostOutcome(o), status);

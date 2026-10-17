@@ -739,6 +739,7 @@ pub const Table = struct {
         }
         const i = oldest orelse return null;
         self.keepRevivable(&self.conns[i]);
+        self.conns[i].noteEnd(.{ .abandoned = .gave_way });
         self.conns[i].state = .closed;
         self.half_open_given_way += 1;
         props.reachable(@src(), "tcp: a stuck half-open connection gives way to a new SYN", .{ .conn = i });
@@ -1030,13 +1031,13 @@ pub const Table = struct {
     /// our own past one of its `Deadlines`. One still SYN-SENT is let go
     /// with no reset (RFC 9293 §3.10.5, ABORT: "SYN-SENT STATE ... delete
     /// the TCB"); one past it is reset, as any ABORT is.
-    pub const Abandon = enum { silent_peer, fin_wait, slow_client, stream_behind, unfinished, refused, connect_deadline, idle_deadline, total_deadline };
+    pub const Abandon = enum { silent_peer, fin_wait, slow_client, stream_behind, unfinished, refused, connect_deadline, idle_deadline, total_deadline, gave_way };
 
     /// Gives up on connection `i` with a reset, so a peer waiting for the
     /// rest of an answer, or for its handshake, does not wait out its timer.
     pub fn abandon(self: *Table, wire: anytype, i: usize, why: Abandon) void {
         switch (why) {
-            .silent_peer, .fin_wait => {}, // `given_up`, `fin_waits_expired`
+            .silent_peer, .fin_wait, .gave_way => {}, // `given_up`, `fin_waits_expired`, `half_open_given_way`
             .slow_client => self.abandoned_slow_client +%= 1,
             .stream_behind => self.abandoned_stream_behind +%= 1,
             .unfinished => self.abandoned_unfinished +%= 1,

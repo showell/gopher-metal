@@ -71,7 +71,8 @@ table:
 
 — with the site on a GPT disk whose first partition is FAT16 or FAT32, and
 clocks from its own hardware. Then it calls `app.site.route`: the application's
-real dispatch, every page — a table of up to 256 connections, one request
+real dispatch, every page — a table of up to 256 connections (one kept for
+the machine's own fetch), one request
 served at a time, each request with its own heap that is reset afterwards.
 `zig-metal-unikernel.conf` on the boot disk says how many requests to serve
 (`requests = N`); without it, forever. A request that fails is logged and

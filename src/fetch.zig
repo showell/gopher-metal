@@ -209,6 +209,11 @@ pub const Client = struct {
                     return self.outcome;
                 };
                 self.local_port = table.conns[self.slot.?].local_port;
+                // **THE SLOT IS HELD UNTIL ITS END IS READ** (a cold review):
+                // the first free slot is the next SYN's, so a stranger could
+                // take this one once it closed, end too, and write its own end
+                // over ours before this step read it.
+                table.claim(self.slot.?);
             } else if (now - self.began >= @as(i96, @intCast(self.deadlines.connect_ns))) {
                 self.outcome = .no_arp;
                 return self.outcome;
@@ -222,6 +227,7 @@ pub const Client = struct {
         const c = &table.conns[i];
         if (!self.mine(c)) {
             self.outcome = self.ended(c);
+            table.release(i);
             return self.outcome;
         }
         const request = self.request_buf[0..self.request_len];
@@ -243,14 +249,20 @@ pub const Client = struct {
         return c.state != .closed and c.role == .initiated and c.local_port == self.local_port;
     }
 
-    /// **HOW THE CONNECTION ENDED**, from the slot's record of it. A record
-    /// that is not ours (the slot taken and ended again before this step) is
-    /// a connection lost without a word: a reset.
+    /// **HOW THE CONNECTION ENDED**: once the answer was whole (the server's
+    /// FIN taken, or its body by its length), the answer's; however the
+    /// connection closed after (our FIN never acknowledged and a deadline,
+    /// a server's reset after a whole response; metal-vmm pair.sh's eat0-25
+    /// once said idle_deadline for a whole page). Else the slot's record of
+    /// it, which is ours: the slot was held (`claim`) until now.
     fn ended(self: *const Client, c: *const tcp.Conn) Outcome {
-        const e = c.ended orelse return .reset;
-        if (e.role != .initiated or e.local_port != self.local_port) return .reset;
+        if (self.finished or self.answer.complete()) return self.answer.outcome();
+        const e = c.ended.?;
+        std.debug.assert(e.role == .initiated and e.local_port == self.local_port);
         return switch (e.how) {
-            .closed => if (self.finished) self.answer.outcome() else .reset,
+            // Both close only after our FIN, which follows the server's: the
+            // answer was over, above.
+            .closed => unreachable,
             .reset_by_peer => .reset,
             .abandoned => |why| switch (why) {
                 .refused => .refused,
@@ -258,10 +270,11 @@ pub const Client = struct {
                 .idle_deadline => .idle_deadline,
                 .total_deadline => .total_deadline,
                 .silent_peer => .given_up,
-                // Our FIN sent and the peer's FIN-WAIT-2 timer ran out: the
-                // answer was whole, or it was not.
-                .fin_wait => if (self.finished) self.answer.outcome() else .reset,
+                .fin_wait => unreachable,
+                // The host's own reasons, for a connection it accepted, or one
+                // it abandoned for its client (a body past its bound).
                 .slow_client, .stream_behind, .unfinished => .reset,
+                .gave_way => unreachable, // an accepted half-open's
             },
         };
     }
@@ -416,6 +429,12 @@ const Server = enum {
     /// A reset, while another of the client's table's connections is given
     /// up on (its `given_up` count moves).
     resets_beside_a_give_up,
+    /// The answer whole and its FIN, then deaf to everything the client
+    /// sends: our FIN is never acknowledged, and a deadline ends it.
+    answers_then_deaf,
+    /// The answer whole by its length, then a reset once it is all
+    /// acknowledged, never a FIN.
+    answers_then_resets,
 };
 
 fn testIsn() u32 {
@@ -477,17 +496,26 @@ fn against(how: Server, sink: *Sink) !Outcome {
                     continue;
                 }
                 if (how == .deaf) continue;
+                if (how == .answers_then_deaf and answered) continue;
                 _ = server.handle(&to_c, frame, now);
             } else f.arrived(&client, &to_s, frame, now);
         }
         // The server's program: the request whole, then its answer.
         for (server.conns, 0..) |*c, i| {
+            if (how == .answers_then_resets and answered and c.state == .established and c.highest() == c.una) {
+                server.abandon(&to_c, i, .unfinished);
+                continue;
+            }
             if (c.state != .established or answered) continue;
             if (std.mem.indexOf(u8, c.pending(), "\r\n\r\n") == null) continue;
             answered = true;
             c.consume(c.pending().len);
             switch (how) {
-                .answers => _ = server.queue(i, "HTTP/1.1 200 OK\r\ncontent-length: 5\r\n\r\nhello"),
+                .answers, .answers_then_deaf => _ = server.queue(i, "HTTP/1.1 200 OK\r\ncontent-length: 5\r\n\r\nhello"),
+                .answers_then_resets => {
+                    _ = server.queue(i, "HTTP/1.1 200 OK\r\ncontent-length: 5\r\n\r\nhello");
+                    continue;
+                },
                 .short => _ = server.queue(i, "HTTP/1.1 200 OK\r\ncontent-length: 9\r\n\r\nhello"),
                 .mute => continue,
                 .resets, .resets_then_stranger, .resets_beside_a_give_up => {
@@ -530,6 +558,15 @@ test "a fetch reset by its server is a reset, though a stranger takes its slot i
 test "a fetch's end is its own connection's, not the table's: another given up meanwhile does not make a reset a give-up (DESIGN-sleep.md chunk 5)" {
     var sink: Sink = .{};
     try testing.expectEqual(Outcome.reset, try against(.resets_beside_a_give_up, &sink));
+}
+
+test "a fetch whose answer is whole is ok, however the connection ends after: our FIN unacknowledged, or a reset (DESIGN-sleep.md chunk 5; pair.sh's eat0-25)" {
+    var sink: Sink = .{};
+    try testing.expectEqual(Outcome.ok, try against(.answers_then_deaf, &sink));
+    try testing.expectEqualStrings("hello", sink.got[0..sink.len]);
+    sink = .{};
+    try testing.expectEqual(Outcome.ok, try against(.answers_then_resets, &sink));
+    try testing.expectEqualStrings("hello", sink.got[0..sink.len]);
 }
 
 test "a command line: target and deadlines, the leading word optional, no default deadline" {
