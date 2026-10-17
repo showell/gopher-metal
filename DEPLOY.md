@@ -13,7 +13,7 @@ Dog Park's own. **Running your own copies?** Start at the last section.
 | | role | address | how it is reached |
 |---|---|---|---|
 | **the dev box** | every build, gate and image; nothing serves from it publicly except a port the owner opens for an image download | its public address: `curl -s https://ifconfig.me` on it | ssh, as the owner |
-| **prod** | Caddy only: HTTPS for every site, proxying over the private network; the watchdog script | public `162.243.1.123`, private `10.100.0.2` | `ssh 162.243.1.123` from the dev box; passwordless sudo |
+| **prod** | Caddy: HTTPS for every site, proxying over the private network; the watchdog script; the Observatory, as a Linux program watching Dog Park (observatory's README, "Where it runs") | public `162.243.1.123`, private `10.100.0.2` | `ssh 162.243.1.123` from the dev box; passwordless sudo |
 | **metal** (the droplet named `gopher-metal`) | lynrummy.com: this kernel, chat's data on a DigitalOcean volume (FAT32, serial in `droplet/volume-serial`) | private `10.100.0.4` only | through Caddy, or from prod over the private network; DigitalOcean's recovery console |
 | **dogpark** | dogpark.lynrummy.com: this kernel with Dog Park built in, one disk | private `10.100.0.3` only | the same |
 
