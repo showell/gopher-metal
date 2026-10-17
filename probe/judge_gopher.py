@@ -90,6 +90,11 @@ CASES = [
     case("resume (markdown from the volume)", "GET", "/steve-resume"),
     case("resume pdf (27 KB from the volume)", "GET", "/steve-resume.pdf"),
     case("safari download page", "GET", "/safari_download"),
+    # The two native builds, from the site disk's downloads/ (angry-gopher's
+    # ops/build_downloads): megabytes, each read whole into a request's heap.
+    case("download, Windows (1 MB from the volume)", "GET", "/downloads/safari-windows.scr"),
+    case("download, Linux (4.5 MB from the volume)", "GET", "/downloads/safari-linux"),
+    case("download, not there", "GET", "/downloads/nope"),
     case("unknown path", "GET", "/nope"),
     case("prefix boundary", "GET", "/drivingX"),
     case("old login door", "GET", "/login"),

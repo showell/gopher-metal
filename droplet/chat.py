@@ -2,7 +2,8 @@
 """**CHAT'S BOOT DISK, FOR A DROPLET.** The real server (gopher.elf) in
 partition 1, and in partition 2 the site's own files, which come with every
 image: what angry-gopher's routes read at request time (its assets.zon's
-`.site`: pages/, gallery/) and zig-metal-unikernel.conf. Chat's data is not here: it is on a DigitalOcean volume,
+`.site`: pages/, gallery/, downloads/, the last built by angry-gopher's
+ops/build_downloads) and zig-metal-unikernel.conf. Chat's data is not here: it is on a DigitalOcean volume,
 built once by `droplet/new_volume.py` and never touched by a new boot image.
 
 zig-metal-unikernel.conf says nothing about `requests`, so the server serves until
