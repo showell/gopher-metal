@@ -310,7 +310,7 @@ Builds are their own number; the times are test wall time.
 | 5 | The metal fetch: ARP routed, end reasons kept on the slot, `serial`, the reserved slot, `quiet()` skipping initiated connections, the fetch in the predicate | kernel | tier 0; one pair run | ~2 s |
 | 6 | The Linux fetch: thread, deadlines, the handover, the kick | zig-webbox | refused port, a silent listener, 100 ms deadlines | ~0.5 s |
 | 7 | Dog Park's `/version` (228.2). **Done** (dog-park `fb3253d`): unit, the scratch server, the QEMU gate after each boot; rides the next Dog Park release | dog-park | unit + its gates | <1 s new |
-| 8 | The Observatory (228.3): schedule, Linux against a stalling server, pair mode against dogpark.elf | observatory | tier 0, Linux, metal-vmm | ~5 s |
+| 8 | The Observatory (228.3): schedule, Linux against a stalling server, pair mode against dogpark.elf. **Done** (observatory `0025a23`): `zig build test` about 2 s, `tools/pair.sh` about 5 s | observatory | tier 0, Linux, metal-vmm | ~5 s |
 
 ## Chunk 3: on a real timer
 
