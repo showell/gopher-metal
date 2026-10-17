@@ -191,9 +191,11 @@ this repo does not build.
   it, in this repo and in metal-vmm; an environment variable names another
   place (`GOPHER_ROOT`, `WEBBOX_ROOT`, `METAL_VMM`,
   `COVERAGE_SDK`, and metal-vmm's `GUESTS`, this repo's `probe/`).
-- **The pinned zig-coverage-sdk commit.** `build.zig` names the SDK commit it
-  was written against and refuses another, printing the `git checkout` that
-  fixes it. `-Dcoverage-sdk-unpinned` builds anyway.
+- **The pinned zig-coverage-sdk content.** `build.zig` names a hash of the
+  SDK's code (`coverage_sdk_pin`: its tracked `build.zig`, `build.zig.zon`,
+  `src/` and `tools/`) and refuses any other, printing the hash the checkout
+  has; a doc commit there leaves it standing. `-Dcoverage-sdk-unpinned`
+  builds anyway.
 
 Without QEMU, KVM or any sibling but the SDK (a laptop, a cloud container)
 you can still run `./tier0.sh`, which is most of what catches a bug.

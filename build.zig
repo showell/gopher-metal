@@ -943,30 +943,60 @@ fn commitOf(b: *std.Build, dir: []const u8) []const u8 {
     return if (std.mem.trim(u8, status, " \n").len == 0) short else b.fmt("{s}+dirty", .{short});
 }
 
-/// **THE COVERAGE SDK IS PINNED** (Steve, 2026-10-10): build.zig.zon names
-/// it by path, a sibling checkout, so a build used whatever commit that
-/// checkout held. A cloud session ran a day of tests against one from
-/// before `on_broken`, which fails a unit test at a property it breaks,
-/// and nothing said so. The checkout's HEAD must be this commit, or the
-/// build stops and names both. Moving the SDK is moving this line, in the
-/// same commit as whatever needed the move.
-/// `-Dcoverage-sdk-unpinned` builds against any commit, and says so.
-const coverage_sdk_pin = "b40b00c7ef2bd1b16adb8b3f399e9ebc457c38bb";
+/// **THE COVERAGE SDK IS PINNED, BY ITS CONTENT** (Steve, 2026-10-10; by
+/// content, Steve, 2026-10-17): build.zig.zon names it by path, a sibling
+/// checkout, so a build used whatever that checkout held. A cloud session ran
+/// a day of tests against one from before `on_broken`, which fails a unit
+/// test at a property it breaks, and nothing said so. The pin is a SHA-256 of
+/// what a build takes from the SDK: every file git tracks in its `build.zig`,
+/// `build.zig.zon`, `src/` and `tools/` (the scanner the catalog runs), each
+/// path and its bytes as the checkout holds them. A commit there that changes
+/// none of them (a README) leaves the pin standing; a change to one, committed
+/// or not, stops the build and says the hash the checkout now has. Moving the
+/// SDK is moving this line, in the same commit as whatever needed the move.
+/// `-Dcoverage-sdk-unpinned` builds against anything, and says so.
+const coverage_sdk_pin = "d3ffd08ff15a350364108ae231b22aff85557e7363a435870283f41a5bcc33bc";
+
+/// The SDK's content hash, as the pin is made (above), in hex.
+fn sdkContent(b: *std.Build, sdk_path: []const u8) ![64]u8 {
+    var code: u8 = undefined;
+    const listed = try b.runAllowFail(&.{ "git", "-C", sdk_path, "ls-files", "--", "build.zig", "build.zig.zon", "src", "tools" }, &code, .ignore);
+    var names: std.ArrayList([]const u8) = .empty;
+    var it = std.mem.tokenizeScalar(u8, listed, '\n');
+    while (it.next()) |n| try names.append(b.allocator, n);
+    if (names.items.len == 0) return error.NothingTracked;
+    std.mem.sort([]const u8, names.items, {}, struct {
+        fn lt(_: void, x: []const u8, y: []const u8) bool {
+            return std.mem.lessThan(u8, x, y);
+        }
+    }.lt);
+    const io = b.graph.io;
+    var dir = try std.Io.Dir.cwd().openDir(io, sdk_path, .{});
+    defer dir.close(io);
+    var h = std.crypto.hash.sha2.Sha256.init(.{});
+    for (names.items) |n| {
+        const bytes = try dir.readFileAlloc(io, n, b.allocator, .limited(64 << 20));
+        var each: [32]u8 = undefined;
+        std.crypto.hash.sha2.Sha256.hash(bytes, &each, .{});
+        h.update(n);
+        h.update(&.{0});
+        h.update(&each);
+    }
+    return std.fmt.bytesToHex(h.finalResult(), .lower);
+}
 
 fn pinnedSdk(b: *std.Build, sdk_path: []const u8) void {
-    const unpinned = b.option(bool, "coverage-sdk-unpinned", "build against whatever commit ../zig-coverage-sdk holds, not the one build.zig pins") orelse false;
-    var code: u8 = undefined;
-    const out = b.runAllowFail(&.{ "git", "-C", sdk_path, "rev-parse", "HEAD" }, &code, .ignore) catch |e| {
+    const unpinned = b.option(bool, "coverage-sdk-unpinned", "build against whatever ../zig-coverage-sdk holds, not the content build.zig pins") orelse false;
+    const got = sdkContent(b, sdk_path) catch |e| {
         if (unpinned) return;
-        std.process.fatal("the coverage SDK at {s}: its commit cannot be read ({t}); build.zig pins {s} (-Dcoverage-sdk-unpinned builds without the check)", .{ sdk_path, e, coverage_sdk_pin });
+        std.process.fatal("the coverage SDK at {s}: its content cannot be read ({t}); build.zig pins {s} (-Dcoverage-sdk-unpinned builds without the check)", .{ sdk_path, e, coverage_sdk_pin });
     };
-    const head = std.mem.trim(u8, out, " \t\r\n");
-    if (std.mem.eql(u8, head, coverage_sdk_pin)) return;
+    if (std.mem.eql(u8, &got, coverage_sdk_pin)) return;
     if (unpinned) {
-        std.debug.print("the coverage SDK at {s} is at {s}, not the pinned {s}: building anyway (-Dcoverage-sdk-unpinned)\n", .{ sdk_path, head, coverage_sdk_pin });
+        std.debug.print("the coverage SDK at {s} holds {s}, not the pinned {s}: building anyway (-Dcoverage-sdk-unpinned)\n", .{ sdk_path, &got, coverage_sdk_pin });
         return;
     }
-    std.process.fatal("the coverage SDK at {s} is at {s}, but build.zig pins {s}: `git -C {s} fetch && git -C {s} checkout {s}`, or move the pin with the change that needs it (-Dcoverage-sdk-unpinned builds anyway)", .{ sdk_path, head, coverage_sdk_pin, sdk_path, sdk_path, coverage_sdk_pin });
+    std.process.fatal("the coverage SDK at {s} holds content {s}, but build.zig pins {s}: check out the SDK this kernel was verified with, or move the pin (paste the first hash into coverage_sdk_pin) with the change that needs it (-Dcoverage-sdk-unpinned builds anyway)", .{ sdk_path, &got, coverage_sdk_pin });
 }
 
 /// **THE CATALOG IS EVERY FILE IN src/ THAT DECLARES PROPERTIES** (the
