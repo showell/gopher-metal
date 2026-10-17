@@ -634,6 +634,7 @@ pub fn kmain() noreturn {
         .facts = metalFacts,
         .log = metalLog,
         .logs = metalLogs,
+        .say = metalSay,
     }) catch |e| {
         serial.put("  ");
         serial.put(@errorName(e));
@@ -2141,6 +2142,14 @@ fn betweenSlice(io: Io) void {
 var volume_checks: [2]?metal.idle_check.VolumeCheck = .{ null, null };
 const volume_check_names = [2][]const u8{ "the boot disk's check", "the volume's check" };
 
+/// An application's line (webbox's `host_facts.say`), on the console with
+/// the machine's own, so in the kept log and /admin/log too.
+fn metalSay(line: []const u8) void {
+    serial.put("  ");
+    serial.put(line);
+    serial.put("\n");
+}
+
 fn awakeNow() i96 {
     return Io.awakeNs() orelse 0;
 }
@@ -2364,7 +2373,7 @@ fn metalFacts(io: Io, alloc: std.mem.Allocator) anyerror![]const webbox.host_fac
     try add(&facts, alloc, "NMIs", "{d}", .{interrupts.nmis});
     // **WAKES** (193, gap 11): a device that interrupts endlessly shows as
     // wakes by a device far past the frames that came.
-    if (interrupts.armed()) try add(&facts, alloc, "rests", "{d}, {d} of them ended early by a device", .{ interrupts.rests.rests, interrupts.rests.woken_by_device });
+    if (interrupts.armed()) try add(&facts, alloc, "rests", "{d}, {d} of them ended by a device, {d} by neither the timer nor the card", .{ interrupts.rests.rests, interrupts.rests.woken_by_device, interrupts.rests.woken_by_other });
     // **SLEEPS** (sleep.zig): the quiescent machine's long rests, and a wake
     // that came without its interrupt.
     if (interrupts.armed()) try add(&facts, alloc, "sleeps", "{d} while quiescent, {d} ended by a device, {d} by the longest rest ({d} ms), {d} missed wakes (a frame waiting after the timer ended one)", .{

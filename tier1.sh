@@ -8,7 +8,7 @@
 # which fails). The droplet's boots use KVM; ACCEL=tcg runs them without.
 #
 # **SKIP="word …"** leaves slow steps out (tools/skip_lib.sh): native,
-# probes, droplet-boot, droplet-hello, screen. A run with a skip ends NOT A
+# probes, droplet-boot, droplet-hello, droplet-sleeps, screen. A run with a skip ends NOT A
 # PASS, exit 3, and keeps no verdict.
 TIER="tier 1"
 source "$(dirname "${BASH_SOURCE[0]}")/tools/tier_lib.sh"
@@ -61,6 +61,15 @@ if ! skip droplet-hello; then
     echo "droplet hello: $(echo "$h" | grep -c PASS) PASS"
     echo "$h" | grep "^FAIL"
     lap "droplet hello"
+fi
+# **A KERNEL THAT SLEEPS, ON A REAL TIMER** (droplet/sleeps.py): the
+# sleeper waking every 500 ms under KVM, timed on the host's clock, asleep
+# between, and woken by a request; about 10 s.
+if ! skip droplet-sleeps; then
+    zig build sleeper > /dev/null 2>&1 || failed+=(droplet-sleeps)
+    z=$(python3 droplet/sleeps.py 2>&1) || failed+=(droplet-sleeps)
+    echo "$z" | grep -E "FAIL|NOT RUN|clock:|^SLEEPS"
+    lap "droplet sleeps"
 fi
 if ! skip screen; then
     droplet/screen.sh 2>&1 | tail -1

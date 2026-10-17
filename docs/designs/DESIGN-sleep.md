@@ -4,7 +4,8 @@ metal-vmm QUEUE 228.1, and the part of 228.3 that shapes it. **Status:
 design after three cold reviews** (the box, 2026-10-17), waiting on Steve's
 two decisions (below), both now taken. **Built so far:** chunk 1 (the pure
 decisions, `src/sleep.zig`, and webbox's `Wake`) and chunk 2 (the sleep on
-metal, `longest_rest_ms`, the sleeper, metal-vmm's `sleeps.sh`). An idle
+metal, `longest_rest_ms`, the sleeper, metal-vmm's `sleeps.sh`) and chunk 3
+(the real-timer check, `droplet/sleeps.py`; rests classified by handler). An idle
 gopher.elf's 60 s went from 307,564 exits to 6,781, and from 37,605 halts to
 8.
 
@@ -280,15 +281,28 @@ Builds are their own number; the times are test wall time.
 | 7 | Dog Park's `/version` (228.2) | dog-park | unit + its gates | <1 s new |
 | 8 | The Observatory (228.3): schedule, Linux against a stalling server, pair mode against dogpark.elf | observatory | tier 0, Linux, metal-vmm | ~5 s |
 
-## Open after chunk 2
+## Chunk 3: on a real timer
 
-- **What ended a rest is read off the clock, not the handler.** `halt`
-  compares the time it woke with its deadline. On KVM a timer delivered a
-  hair early reads as a device's wake, and the missed-wake count goes blind;
-  and a timer that fires between the halt and the read is mis-sorted the
-  other way. The fix is a counter in the timer's and the card's handlers
-  (they share one stub today), read before and after. Chunk 3, where QEMU
-  shows a real timer, is where it is measured.
+`droplet/sleeps.py` (tier 1, about 10 s): the sleeper waking every 500 ms on
+the droplet-shaped machine under KVM, each wake said on the console
+(webbox's `host_facts.say`) and timed on the host's clock. First runs
+(2026-10-17):
+- host gaps 497.7-501.6 ms;
+- 12 rests across 8 wakes, where the slice would be about 4,000;
+- requests into a sleep connected in 0.2-0.3 ms;
+- the guest's clock against the host's -180, -121 and +31 ppm on three
+  boots, reported and not judged.
+
+Red against a kernel never armed (it pauses and counts no rest) and one whose
+sleeps all ran to the longest rest.
+
+**What ended a rest is read off the handlers now, not the clock.** The timer
+and the card each have a stub that counts before the shared end of interrupt
+(`gm_irq_timer`, `gm_irq_wake`), and a halt compares the counts
+(`rest_count.ended`). A frame raised with the deadline waits behind the
+timer's higher vector, so a timer-ended halt also reads the card's IRR bit.
+Before, a timer KVM delivered a hair early counted as a device's, and the
+missed-wake count went blind.
 
 ## Phase 2, for later
 
@@ -363,4 +377,4 @@ All taken, except the two decisions for Steve.
 - a disarm write on every slice;
 - the sleeper's swallowed write failures.
 
-All taken but the rest's classification (open, above).
+All taken; the rest's classification in chunk 3.

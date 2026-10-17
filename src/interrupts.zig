@@ -73,6 +73,7 @@ const lapic_id = 0x020;
 const lapic_tpr = 0x080;
 const lapic_eoi = 0x0B0;
 const lapic_svr = 0x0F0;
+const lapic_irr = 0x200;
 const lapic_lvt_timer = 0x320;
 const lapic_lvt_lint0 = 0x350;
 const lvt_masked: u32 = 1 << 16;
@@ -112,6 +113,14 @@ comptime {
         \\  movl $0, (%rax)
         \\  popq %rax
         \\  iretq
+        \\.global gm_irq_timer
+        \\gm_irq_timer:
+        \\  incq gm_timer_irqs(%rip)
+        \\  jmp gm_irq
+        \\.global gm_irq_wake
+        \\gm_irq_wake:
+        \\  incq gm_wake_irqs(%rip)
+        \\  jmp gm_irq
         \\.global gm_spurious
         \\gm_spurious:
         \\  iretq
@@ -158,6 +167,14 @@ comptime {
 }
 
 extern fn gm_irq() callconv(.naked) void;
+extern fn gm_irq_timer() callconv(.naked) void;
+extern fn gm_irq_wake() callconv(.naked) void;
+
+/// **EACH WAKER COUNTS ITSELF** (rest_count.zig): the timer's handler and the
+/// network card's each add one before the shared end of interrupt, so a rest
+/// says which ended it from the counts, not from the clock.
+export var gm_timer_irqs: u64 = 0;
+export var gm_wake_irqs: u64 = 0;
 extern fn gm_spurious() callconv(.naked) void;
 extern fn gm_nmi() callconv(.naked) void;
 
@@ -264,6 +281,8 @@ pub fn install() void {
     inline for (0..32) |v| idt[v] = gate(exceptionStub(v));
     for (32..256) |v| idt[v] = gate(@intFromPtr(&gm_irq));
     idt[spurious_vector] = gate(@intFromPtr(&gm_spurious));
+    idt[timer_vector] = gate(@intFromPtr(&gm_irq_timer));
+    idt[wake_vector] = gate(@intFromPtr(&gm_irq_wake));
     idt[2] = gate(@intFromPtr(&gm_nmi));
     idt[2].ist = ist_nmi;
     idt[8].ist = ist_double_fault;
@@ -415,13 +434,16 @@ pub fn rest() void {
     _ = halt(tsc.read() +% slice_ticks, .leave);
 }
 
-/// What ended a rest.
-pub const Ended = enum {
-    /// Its deadline: the timer.
-    deadline,
-    /// A device's interrupt, before the deadline.
-    device,
-};
+/// The local APIC's Interrupt Request Register holds `wake_vector`: the
+/// card's interrupt raised and not yet taken (SDM §11.8.4: 256 bits, 32 to a
+/// register at 0x200 + 0x10 each).
+fn wakePending() bool {
+    const reg = lapic_irr + (@as(usize, wake_vector) / 32) * 0x10;
+    return lapicRead(reg) & (@as(u32, 1) << @intCast(wake_vector % 32)) != 0;
+}
+
+/// What ended a rest (rest_count.zig).
+pub const Ended = rest_count.Ended;
 
 /// **REST UNTIL A DEADLINE THE CALLER CHOSE** (sleep.zig): `deadline` is a
 /// TSC value (io.zig's `tscAt`), never 0. Only the main loop's quiescent
@@ -435,27 +457,35 @@ pub fn restUntil(deadline: u64) Ended {
     return halt(deadline, .disarm);
 }
 
-/// What a halt a device ended early does with its deadline. A slice's is at
-/// most 1 ms off, and the next rest writes its own over it: left, which
+/// What a halt the timer did not end does with its deadline. A slice's is
+/// at most 1 ms off, and the next rest writes its own over it: left, which
 /// saves a busy server an MSR write a frame. A sleep's can be 10 s off, and
-/// firing during later work it would end the next rest at once, counted as
-/// a device's: disarmed (0, SDM §11.5.4.1).
+/// firing during later work it would end the next rest at once: disarmed
+/// (0, SDM §11.5.4.1).
 const EarlyDeadline = enum { leave, disarm };
 
-/// The halt itself, until `deadline` or a device.
+/// The halt itself, until `deadline` or a device; what ended it, from the
+/// handlers' counts.
 fn halt(deadline: u64, early_deadline: EarlyDeadline) Ended {
+    const timer_before = @atomicLoad(u64, &gm_timer_irqs, .monotonic);
+    const wake_before = @atomicLoad(u64, &gm_wake_irqs, .monotonic);
     wrmsrDeadline(deadline);
     asm volatile (
         \\sti
         \\hlt
         \\cli
         ::: .{ .memory = true });
-    const woke = tsc.read();
-    rests.note(deadline, woke);
-    const early = @as(i64, @bitCast(woke -% deadline)) < 0;
-    if (early and early_deadline == .disarm) wrmsrDeadline(0);
-    return if (early) .device else .deadline;
+    const timer_after = @atomicLoad(u64, &gm_timer_irqs, .monotonic);
+    var how = rest_count.ended(timer_before, timer_after, wake_before, @atomicLoad(u64, &gm_wake_irqs, .monotonic));
+    // **A FRAME BEHIND THE TIMER IS STILL THE CARD'S**: both raised at
+    // once, the timer's vector (0x41) outranks the card's (0x40), the halt
+    // returns after the timer's handler alone, and the card's waits in the
+    // IRR. That is no missed wake (sleep.zig's `Sleeps`).
+    if (how == .deadline and wakePending()) how = .device;
+    rests.note(how);
+    if (timer_after == timer_before and early_deadline == .disarm) wrmsrDeadline(0);
+    return how;
 }
 
-/// Every rest, and those a device ended before the slice did (193, gap 11).
+/// Every rest, and what ended each (193, gap 11).
 pub var rests: rest_count.Rests = .{};

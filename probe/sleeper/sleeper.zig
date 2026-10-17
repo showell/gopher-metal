@@ -10,7 +10,9 @@
 //! lateness never accumulates (webbox's `periodAfter`). `lost` counts the
 //! lines before it that could not be written. Its one page, `/`, is the
 //! lines, while they are under 1 MiB (about nine days at 60 s; a test app's
-//! life is minutes).
+//! life is minutes). Each line is also said on the host's console
+//! (`host_facts.say`), where a test on real time reads when it came, and
+//! `/facts` is the host's facts (its rests and sleeps among them).
 //!
 //! No tier runs a test of this file: it is an application, built only as a
 //! kernel. What it does is judged by metal-vmm's sleeps.sh from its lines,
@@ -87,6 +89,7 @@ pub fn between(io: Io, now: webbox.site.Now) webbox.site.Wake {
     _ = webbox.store.append(io, fba.allocator(), wakes_path, line) catch {
         lost += 1;
     };
+    webbox.host_facts.say(std.mem.trimEnd(u8, line, "\n"));
     due = webbox.site.periodAfter(at, period_ns, now.awake_ns);
     return .{ .at = due.? };
 }
@@ -96,6 +99,11 @@ pub fn bodyLimit(_: []const u8) u64 {
 }
 
 pub fn routes(req: *std.http.Server.Request, io: Io, alloc: std.mem.Allocator, _: *webbox.bus.Bus) !void {
+    if (std.mem.eql(u8, webbox.http.pathOf(try webbox.http.target(req, alloc)), "/facts")) {
+        var text: std.ArrayList(u8) = .empty;
+        for (try webbox.host_facts.facts(io, alloc)) |f| try text.print(alloc, "{s}: {s}\n", .{ f.label, f.value });
+        return req.respond(text.items, .{ .extra_headers = &.{.{ .name = "content-type", .value = "text/plain" }} });
+    }
     const text = webbox.store.read(io, alloc, wakes_path, .limited(1 << 20)) catch |e| switch (e) {
         error.FileNotFound => "",
         else => return e,
