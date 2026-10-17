@@ -20,7 +20,9 @@ not a spin count, and the one that matters is host configuration in
 
 (The kernel knows a few more: `card`, `volume`, `keepalive_ms`,
 `page_cache_mib`, `page_cache_largest_kib`, `trusted_proxy`,
-`admin_password_reset`.)
+`longest_rest_ms`, `admin_password_reset`. The whole list, each with its
+default, is `probe/gopher.zig`'s config comment, and the error for an
+unknown key names every one.)
 
 "No progress" is the same measure in every direction: a read that gets no
 bytes, a write whose peer acknowledges nothing, a close whose FIN is not
@@ -180,8 +182,10 @@ turn of the loop — is a state machine like the receive side:
 - **The segment size.** The SYN-ACK says ours (1460); a peer's SYN says its,
   and a peer that says nothing is sent 536-byte segments.
 - **Retransmission.** Bytes leave the queue only when acknowledged. What is
-  not acknowledged in time is sent again with everything after it, and the
-  wait doubles, up to 5 s. The wait is measured (RFC 6298's `srtt + 4 *
+  not acknowledged in time is resent oldest first: the oldest
+  unacknowledged segment alone, then twice as much for each acknowledgement
+  until the rest is covered (RFC 6298 5.4; `recovery` in `src/tcp.zig`), and
+  the wait doubles, up to 5 s. The wait is measured (RFC 6298's `srtt + 4 *
   rttvar`, the handshake the first sample), with Linux's 200 ms as its floor
   and first value, so a peer's delayed acknowledgement is not taken for a
   loss. Three duplicate acknowledgements resend at once (RFC 5681).
@@ -306,17 +310,12 @@ for its turn (a second is a retransmission timer, not work).
 ## What the TCP does not do
 
 No congestion control, no selective acknowledgement, no window scaling, no
-out-of-order reassembly, no keep-alive. (It does measure round trips: the
+keep-alive. (It does measure round trips: the
 retransmission clock is RFC 6298's, from the path.) `zig-server`'s own comment
 says keep-alive is deliberately off. The rest are allowed because this
-machine sits behind Caddy on a private network, and one of them is a measured
-cost:
+machine sits behind Caddy on a private network. Segments that arrive ahead
+of a hole are held, up to four pieces a connection (`src/tcp_held.zig`), so
+a loss costs the peer one resend, not everything after it.
 
-- **In-order only.** A segment whose sequence is not exactly what we expect is
-  dropped and re-acknowledged, which asks the peer to send it again — and
-  under loss, that makes the peer resend everything after the hole. (Its
-  acknowledgement number is still taken: it is cumulative, so a newer one
-  cannot be wrong, and a peer repeating its FIN with ours acknowledged must
-  not be made to wait on a timer.)
 - **No TIME-WAIT.** A connection is forgotten as soon as both sides have
   finished, and anything that arrives afterwards is answered with a reset.
