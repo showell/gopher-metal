@@ -1,6 +1,11 @@
 # The cutover: lynrummy.com from Linux to zig-metal-unikernel
 
-QUEUE.md item 33. **Steve runs this.** The box Claude helps from the dev
+> **A dated record: the move of 2026-10-04, kept as it was run.** Its
+> defaults, gate switches, backup plan and Linux way back are that day's.
+> How the site is run now (releases, backups, the way back) is
+> [DEPLOY.md](DEPLOY.md).
+
+Old QUEUE.md item 33. **Steve runs this.** The box Claude helps from the dev
 box. Every step ends with a **GO** line: what must be true before the next
 step. Anything else is **NO-GO**: stop, and take the way back (the last
 section).
@@ -19,7 +24,7 @@ The others explain a step, or are for another day:
 |---|---|---|
 | [MIGRATION.md](MIGRATION.md) | what in a Linux folder would not survive a FAT volume, and what the checker in step 3 looks for | if step 3 finds something |
 | [FAT32.md](FAT32.md) | how this machine reads and writes FAT32 | background only |
-| [RESTART.md](RESTART.md) | restarting the machine after a crash: built, and off | why "Before the day" step 4 says off |
+| [RESTART.md](RESTART.md) | restarting the machine after a crash: built, and off on the day (on by default from 2026-10-03's measurement, RESTART.md) | why "Before the day" step 4 says off |
 | [droplet/RESTART-TEST.md](droplet/RESTART-TEST.md) | the console test that would let it be turned on | another day, not the cutover's |
 | [SECRET-LEAK.md](SECRET-LEAK.md) | what to do if a backup or the session secret leaks | if it happens |
 | [ADMIN-PASSWORD-LOST.md](ADMIN-PASSWORD-LOST.md) | the way back in when the admin password is lost, on prod and on metal | if it happens |
@@ -75,7 +80,8 @@ Each of these is done, and checked, at least a day before.
 
 1. **Everything is on `master` and green.** `gates.sh` passes: the two
    gopher judges (FAT32, the default now — item 88), the droplet judge, and
-   the FAT16 judge when it ran (or `GATES_FAT16=1 ./gates.sh`).
+   the FAT16 judge when it ran (then `GATES_FAT16=1 ./gates.sh`; the FAT16
+   judge is in `long.sh` now).
    - GO: `GATES: PASS`.
 2. **prod runs the same angry-gopher commit as metal will.** Deploy it to
    prod first, as usual (angry-gopher's `deploy/README.md`). The two hosts
@@ -356,6 +362,8 @@ not start it** while metal serves: two hosts writing two copies of the
 same data cannot be merged.
 
 ## Backups, after the cutover
+
+*The plan as written on the day. What is done now: DEPLOY.md, "Backups".*
 
 The first-day backup above, taken by hand, becomes a routine. Two kinds, for
 two kinds of loss:
